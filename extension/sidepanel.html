@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Translator</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="title">AI Translator</div>
+      <div id="status" class="status">Idle</div>
+    </header>
+
+    <section class="controls">
+      <div class="row">
+        <button id="btnTranslate" class="btn primary">
+          Translate current tab
+        </button>
+        <button id="btnOpenOptions" class="btn">Options</button>
+      </div>
+
+      <div class="grid">
+        <label>
+          Target language
+          <input id="targetLanguage" type="text" placeholder="Korean" />
+        </label>
+        <label>
+          Tone
+          <select id="tone">
+            <option value="technical">technical</option>
+            <option value="natural">natural</option>
+            <option value="formal">formal</option>
+          </select>
+        </label>
+        <label>
+          Model
+          <input id="model" type="text" placeholder="gpt-5-mini" />
+        </label>
+        <label>
+          View
+          <select id="viewMode">
+            <option value="translation">translation</option>
+            <option value="bilingual">bilingual</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="row">
+        <button id="btnSave" class="btn">Save as default</button>
+        <div id="progress" class="muted"></div>
+      </div>
+
+      <div id="errorBox" class="error" hidden></div>
+    </section>
+
+    <main class="main">
+      <div class="tabs">
+        <button class="tab" data-tab="translated" aria-selected="true">
+          Translated
+        </button>
+        <button class="tab" data-tab="original">Original</button>
+      </div>
+
+      <section id="panel-translated" class="panel">
+        <pre id="translated" class="pre"></pre>
+      </section>
+
+      <section id="panel-original" class="panel" hidden>
+        <pre id="original" class="pre"></pre>
+      </section>
+    </main>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
