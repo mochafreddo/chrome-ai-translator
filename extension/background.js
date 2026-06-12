@@ -497,8 +497,17 @@ function createInlineTranslationLogEntry(startedAtMs) {
   };
 }
 
+function redactSecretText(value) {
+  return String(value || '')
+    .replace(
+      /\bsk-(?:proj|svcacct)-[A-Za-z0-9_-]+|\bsk-[A-Za-z0-9_-]+/g,
+      '[REDACTED_OPENAI_KEY]'
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]');
+}
+
 function sanitizeLogError(error) {
-  return safeError(error).message.slice(0, 300);
+  return redactSecretText(safeError(error).message).slice(0, 300);
 }
 
 async function appendInlineTranslationLog(entry) {
@@ -921,6 +930,7 @@ if (typeof module !== 'undefined' && module.exports) {
     collectInlineTranslationLogsFromStorage,
     getVisibleInlineBatchMaxChars,
     normalizeVisibleTextBatchRecords,
+    sanitizeLogError,
     splitTextRecordsIntoChunks,
     parseAndValidateTextNodeTranslations,
     assertTextRecordBudget,

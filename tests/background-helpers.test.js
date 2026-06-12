@@ -209,6 +209,28 @@ exports.tests = [
     },
   },
   {
+    name: 'redacts secret-shaped values from inline translation log errors',
+    fn() {
+      const sanitized = helpers.sanitizeLogError(
+        new Error(
+          [
+            'OpenAI rejected sk-live123',
+            'sk-proj-service_secret123',
+            'sk-svcacct-team_secret456',
+            'with Bearer live.token_123; retry later',
+          ].join(' ')
+        )
+      );
+
+      assert.equal(sanitized.includes('sk-live123'), false);
+      assert.equal(sanitized.includes('sk-proj-service_secret123'), false);
+      assert.equal(sanitized.includes('sk-svcacct-team_secret456'), false);
+      assert.equal(sanitized.includes('Bearer live.token_123'), false);
+      assert.equal(sanitized.includes('OpenAI rejected'), true);
+      assert.equal(sanitized.includes('retry later'), true);
+    },
+  },
+  {
     name: 'normalizes visible inline batch records with existing validation',
     fn() {
       assert.deepEqual(
@@ -223,6 +245,29 @@ exports.tests = [
             { id: '', text: 'Hello.' },
           ]),
         /Invalid inline translation record id/
+      );
+    },
+  },
+  {
+    name: 'accepts visible inline batch records at the character budget',
+    fn() {
+      assert.deepEqual(
+        helpers.normalizeVisibleTextBatchRecords([
+          { id: 'v1', text: 'x'.repeat(2000) },
+        ]),
+        [{ id: 'v1', text: 'x'.repeat(2000) }]
+      );
+    },
+  },
+  {
+    name: 'rejects visible inline batch records over the character budget',
+    fn() {
+      assert.throws(
+        () =>
+          helpers.normalizeVisibleTextBatchRecords([
+            { id: 'v1', text: 'x'.repeat(2001) },
+          ]),
+        /Visible inline translation batch is too large/
       );
     },
   },
