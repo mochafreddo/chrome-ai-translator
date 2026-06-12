@@ -431,6 +431,97 @@ exports.tests = [
     },
   },
   {
+    name: 'stopping viewport translation invalidates operation without restoring text',
+    fn() {
+      const store = helpers.createInlineViewportStore(4);
+      const node = { isConnected: true, nodeValue: '안녕하세요.' };
+      store.queue.push({ id: 'v2', state: 'queued', operationId: 4 });
+      store.records.push({
+        id: 'v1',
+        node,
+        original: 'Hello world.',
+        translation: '안녕하세요.',
+        state: 'translated',
+        operationId: 4,
+      });
+      const state = {
+        status: 'active',
+        operationId: 4,
+        viewport: store,
+        records: store.records,
+      };
+
+      const nextOperationId = helpers.stopInlineViewportTranslation(state);
+
+      assert.equal(nextOperationId, 5);
+      assert.equal(state.operationId, 5);
+      assert.equal(state.status, 'stopped');
+      assert.equal(store.stopped, true);
+      assert.deepEqual(store.queue, []);
+      assert.equal(node.nodeValue, '안녕하세요.');
+      assert.equal(state.records, store.records);
+    },
+  },
+  {
+    name: 'rejects stale viewport operation after stop or replacement',
+    fn() {
+      const store = helpers.createInlineViewportStore(9);
+      const state = {
+        status: 'active',
+        operationId: 9,
+        viewport: store,
+      };
+
+      assert.equal(
+        helpers.isInlineViewportOperationCurrent(state, store, 9),
+        true
+      );
+
+      store.stopped = true;
+      assert.equal(
+        helpers.isInlineViewportOperationCurrent(state, store, 9),
+        false
+      );
+
+      store.stopped = false;
+      state.viewport = helpers.createInlineViewportStore(10);
+      state.operationId = 10;
+      assert.equal(
+        helpers.isInlineViewportOperationCurrent(state, store, 9),
+        false
+      );
+    },
+  },
+  {
+    name: 'allows restarting from stopped active viewport state',
+    fn() {
+      const stoppedStore = helpers.createInlineViewportStore(2);
+      stoppedStore.stopped = true;
+
+      assert.equal(
+        helpers.canRestartInlineViewportTranslation({
+          status: 'stopped',
+          viewport: stoppedStore,
+        }),
+        true
+      );
+      assert.equal(
+        helpers.canRestartInlineViewportTranslation({
+          status: 'active',
+          viewport: stoppedStore,
+        }),
+        true
+      );
+      assert.equal(
+        helpers.canRestartInlineViewportTranslation({
+          status: 'active',
+          viewport: helpers.createInlineViewportStore(2),
+        }),
+        false
+      );
+    },
+  },
+  {
     name: 'moves queued viewport records into character-budget batches',
     fn() {
       const store = helpers.createInlineViewportStore(3);

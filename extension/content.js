@@ -57,6 +57,40 @@ function createInlineViewportStore(operationId) {
   };
 }
 
+function isInlineViewportOperationCurrent(state, store, operationId) {
+  return Boolean(
+    state &&
+      store &&
+      state.status === 'active' &&
+      state.viewport === store &&
+      state.operationId === operationId &&
+      store.operationId === operationId &&
+      !store.stopped
+  );
+}
+
+function stopInlineViewportTranslation(state = inlineState) {
+  const store = state.viewport;
+  if (!store) return state.operationId;
+
+  store.stopped = true;
+  store.queue = [];
+  if (store.scanTimer) {
+    clearTimeout(store.scanTimer);
+    store.scanTimer = null;
+  }
+  if (state.operationId === store.operationId) {
+    state.operationId = (Number(state.operationId) || 0) + 1;
+  }
+  state.status = 'stopped';
+  state.records = store.records;
+  return state.operationId;
+}
+
+function canRestartInlineViewportTranslation(state = inlineState) {
+  return state.status === 'stopped' || Boolean(state.viewport?.stopped);
+}
+
 var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   status: 'original',
   records: [],
@@ -757,10 +791,7 @@ function ensureInlineTranslatorUi() {
     .querySelector('[data-action="stop"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
-      if (inlineState.viewport) {
-        inlineState.viewport.stopped = true;
-        inlineState.viewport.queue = [];
-      }
+      stopInlineViewportTranslation();
       detachInlineViewportWatchers();
       updateInlineViewportMessage();
     });
@@ -843,10 +874,10 @@ function detachInlineViewportWatchers() {
 async function drainInlineViewportQueue() {
   const store = inlineState.viewport;
   if (!store || store.stopped || inlineState.status !== 'active') return;
+  const operationId = store.operationId;
 
   while (
-    inlineState.status === 'active' &&
-    !store.stopped &&
+    isInlineViewportOperationCurrent(inlineState, store, operationId) &&
     store.inFlight < INLINE_VIEWPORT_MAX_IN_FLIGHT &&
     store.queue.length
   ) {
@@ -857,28 +888,31 @@ async function drainInlineViewportQueue() {
     chrome.runtime
       .sendMessage({
         type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
-        operationId: inlineState.operationId,
+        operationId,
         records: batch.map((record) => ({
           id: record.id,
           text: record.original,
         })),
       })
       .then((resp) => {
-        if (inlineState.operationId !== store.operationId) return;
-        if (!resp?.ok || !Array.isArray(resp.translations)) {
-          markInlineViewportBatchFailed(batch, store.operationId);
+        if (!isInlineViewportOperationCurrent(inlineState, store, operationId)) {
           return;
         }
-        applyInlineViewportBatchTranslations(
-          batch,
-          resp.translations,
-          store.operationId
-        );
+        if (!resp?.ok || !Array.isArray(resp.translations)) {
+          markInlineViewportBatchFailed(batch, operationId);
+          return;
+        }
+        applyInlineViewportBatchTranslations(batch, resp.translations, operationId);
       })
       .catch(() => {
-        markInlineViewportBatchFailed(batch, store.operationId);
+        if (isInlineViewportOperationCurrent(inlineState, store, operationId)) {
+          markInlineViewportBatchFailed(batch, operationId);
+        }
       })
       .finally(() => {
+        if (!isInlineViewportOperationCurrent(inlineState, store, operationId)) {
+          return;
+        }
         store.inFlight = Math.max(0, store.inFlight - 1);
         updateInlineViewportMessage();
         drainInlineViewportQueue().catch((error) =>
@@ -889,7 +923,10 @@ async function drainInlineViewportQueue() {
 }
 
 async function translateInlinePage() {
-  if (inlineState.status === 'active') {
+  if (
+    inlineState.status === 'active' &&
+    !canRestartInlineViewportTranslation(inlineState)
+  ) {
     scheduleInlineViewportScan();
     updateInlineViewportMessage();
     return;
@@ -1011,6 +1048,9 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineTextNodeRect,
     isInlineTextNodeInViewport,
     collectVisibleInlineTextNodes,
+    isInlineViewportOperationCurrent,
+    stopInlineViewportTranslation,
+    canRestartInlineViewportTranslation,
     createInlineViewportStore,
     queueInlineViewportRecord,
     takeInlineViewportBatch,
