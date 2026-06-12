@@ -10,7 +10,13 @@ const DEFAULT_SETTINGS = {
   chunkMaxChars: 12000,
   cacheEnabled: false,
   cacheTtlDays: 7,
+  inlineAutoShow: false,
 };
+
+const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
+const INLINE_ORIGINS = ['http://*/*', 'https://*/*'];
+const INLINE_MAX_RECORDS = 500;
+const INLINE_MAX_TOTAL_CHARS = 60000;
 
 // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
 const stateByTab = new Map();
@@ -86,6 +92,11 @@ async function ensureContentScript(tabId) {
   }
 }
 
+async function showInlineTranslator(tabId) {
+  await ensureContentScript(tabId);
+  await chrome.tabs.sendMessage(tabId, { type: 'SHOW_INLINE_TRANSLATOR' });
+}
+
 async function extractArticle(tabId) {
   const resp = await chrome.tabs.sendMessage(tabId, {
     type: 'EXTRACT_ARTICLE',
@@ -158,6 +169,24 @@ function buildInstructions({ targetLanguage, tone }) {
   ].join('\n');
 }
 
+function buildTextNodeInstructions({ targetLanguage, tone }) {
+  const toneMap = {
+    technical: 'Use a clear, technical tone suitable for docs.',
+    natural: 'Use natural, fluent tone.',
+    formal: 'Use formal and polite tone.',
+  };
+  const toneLine = toneMap[tone] || toneMap.technical;
+
+  return [
+    `Translate each record's text into ${targetLanguage}.`,
+    toneLine,
+    'Return JSON only in this exact shape: {"translations":[{"id":"...","translation":"..."}]}.',
+    'Preserve every id exactly.',
+    'Do not translate code, commands, identifiers, URLs, filenames, product API names, or version strings.',
+    'Do not add commentary or Markdown fences.',
+  ].join('\n');
+}
+
 async function openaiTranslateChunk({ apiKey, model, instructions, input }) {
   const res = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -200,6 +229,157 @@ async function openaiTranslateChunk({ apiKey, model, instructions, input }) {
   } catch {}
 
   throw new Error('Could not extract output_text from OpenAI response');
+}
+
+function splitTextRecordsIntoChunks(records, maxChars) {
+  const chunks = [];
+  let current = [];
+  let currentLen = 0;
+  const limit = Number(maxChars) || DEFAULT_SETTINGS.chunkMaxChars;
+
+  for (const record of records || []) {
+    const size =
+      String(record.id || '').length + String(record.text || '').length + 20;
+    if (current.length && currentLen + size > limit) {
+      chunks.push(current);
+      current = [];
+      currentLen = 0;
+    }
+    current.push(record);
+    currentLen += size;
+  }
+
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+function parseAndValidateTextNodeTranslations(outputText, records) {
+  let parsed;
+  try {
+    parsed = JSON.parse(outputText);
+  } catch {
+    throw new Error('Inline translation response was not valid JSON');
+  }
+
+  const translations = parsed?.translations;
+  if (!Array.isArray(translations)) {
+    throw new Error('Inline translation response did not include translations');
+  }
+
+  const expected = new Set(records.map((record) => record.id));
+  const seen = new Set();
+  const normalized = [];
+
+  for (const item of translations) {
+    const id = item?.id;
+    if (!expected.has(id)) {
+      throw new Error(`Unexpected translation id: ${id}`);
+    }
+    if (seen.has(id)) {
+      throw new Error(`Duplicate translation id: ${id}`);
+    }
+    if (typeof item.translation !== 'string') {
+      throw new Error(`Missing translation for id: ${id}`);
+    }
+    seen.add(id);
+    normalized.push({ id, translation: item.translation });
+  }
+
+  for (const record of records) {
+    if (!seen.has(record.id)) {
+      throw new Error(`Missing translation id: ${record.id}`);
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeTextNodeRecords(records) {
+  if (!Array.isArray(records)) {
+    throw new Error('Inline translation records must be an array');
+  }
+
+  return records.map((record, index) => {
+    const id = record?.id;
+    const text = record?.text;
+    if (typeof id !== 'string' || !id) {
+      throw new Error(`Invalid inline translation record id at index ${index}`);
+    }
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new Error(`Invalid inline translation text for id: ${id}`);
+    }
+    return { id, text };
+  });
+}
+
+function assertTextRecordBudget(records) {
+  if (records.length > INLINE_MAX_RECORDS) {
+    throw new Error(`Too many text nodes for inline translation (${records.length}/${INLINE_MAX_RECORDS})`);
+  }
+
+  const totalChars = records.reduce(
+    (sum, record) => sum + String(record.text || '').length,
+    0
+  );
+  if (totalChars > INLINE_MAX_TOTAL_CHARS) {
+    throw new Error(`Inline translation has too much text (${totalChars}/${INLINE_MAX_TOTAL_CHARS} characters)`);
+  }
+}
+
+async function translateTextNodeRecords(records) {
+  const normalized = normalizeTextNodeRecords(records);
+  assertTextRecordBudget(normalized);
+  if (!normalized.length) return [];
+
+  const settings = await getSettings();
+  if (!settings.apiKey) {
+    throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+  }
+
+  const instructions = buildTextNodeInstructions(settings);
+  const chunks = splitTextRecordsIntoChunks(
+    normalized,
+    settings.chunkMaxChars
+  );
+  const translated = [];
+
+  for (const chunk of chunks) {
+    const output = await openaiTranslateChunk({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      instructions,
+      input: JSON.stringify({ records: chunk }),
+    });
+    translated.push(...parseAndValidateTextNodeTranslations(output, chunk));
+  }
+
+  return translated;
+}
+
+async function hasInlineAutoShowPermission() {
+  if (!chrome.permissions?.contains) return false;
+  return chrome.permissions.contains({ origins: INLINE_ORIGINS });
+}
+
+async function syncInlineAutoShowRegistration(settings = null) {
+  const effective = settings || (await getSettings());
+  try {
+    await chrome.scripting.unregisterContentScripts({
+      ids: [INLINE_CONTENT_SCRIPT_ID],
+    });
+  } catch {}
+
+  if (!effective.inlineAutoShow) return;
+  if (!(await hasInlineAutoShowPermission())) return;
+
+  await chrome.scripting.registerContentScripts([
+    {
+      id: INLINE_CONTENT_SCRIPT_ID,
+      matches: INLINE_ORIGINS,
+      js: ['content.js'],
+      runAt: 'document_idle',
+    },
+  ]);
 }
 
 async function translateTab(tabId, overrideSettings = null) {
@@ -282,63 +462,92 @@ async function translateTab(tabId, overrideSettings = null) {
   }
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
-  const settings = await getSettings();
-  await saveSettings(settings);
-  try {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  } catch {}
-});
-
-chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab?.id) return;
-  await translateTab(tab.id);
-});
-
-chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== 'translate-current-tab') return;
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tabId = tabs?.[0]?.id;
-  if (!tabId) return;
-  await translateTab(tabId);
-});
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  (async () => {
+if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+  chrome.runtime.onInstalled.addListener(async () => {
+    const settings = await getSettings();
+    await saveSettings(settings);
+    await syncInlineAutoShowRegistration(settings);
     try {
-      if (msg?.type === 'GET_STATE') {
-        const tabId = msg.tabId;
-        sendResponse({
-          ok: true,
-          state: stateByTab.get(tabId) || { status: 'idle' },
-        });
-        return;
-      }
-      if (msg?.type === 'TRANSLATE_TAB') {
-        const { tabId, settingsOverride } = msg;
-        await translateTab(tabId, settingsOverride || null);
-        sendResponse({ ok: true });
-        return;
-      }
-      if (msg?.type === 'GET_SETTINGS') {
-        const settings = await getSettings();
-        settings.apiKey = settings.apiKey ? '***' : '';
-        sendResponse({ ok: true, settings });
-        return;
-      }
-      if (msg?.type === 'SAVE_SETTINGS') {
-        const next = mergeSettings(msg.settings || {});
-        await saveSettings(next);
-        sendResponse({ ok: true });
-        return;
-      }
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    } catch {}
+  });
 
-      sendResponse({ ok: false, error: { message: 'Unknown message' } });
-    } catch (e) {
-      sendResponse({ ok: false, error: safeError(e) });
-    }
-  })();
+  chrome.runtime.onStartup.addListener(async () => {
+    await syncInlineAutoShowRegistration();
+  });
 
-  // Keep the message channel open for async response
-  return true;
-});
+  chrome.action.onClicked.addListener(async (tab) => {
+    if (!tab?.id) return;
+    try {
+      await showInlineTranslator(tab.id);
+    } catch {}
+    await translateTab(tab.id);
+  });
+
+  chrome.commands.onCommand.addListener(async (command) => {
+    if (command !== 'translate-current-tab') return;
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabId = tabs?.[0]?.id;
+    if (!tabId) return;
+    try {
+      await showInlineTranslator(tabId);
+    } catch {}
+    await translateTab(tabId);
+  });
+
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    (async () => {
+      try {
+        if (msg?.type === 'GET_STATE') {
+          const tabId = msg.tabId;
+          sendResponse({
+            ok: true,
+            state: stateByTab.get(tabId) || { status: 'idle' },
+          });
+          return;
+        }
+        if (msg?.type === 'TRANSLATE_TAB') {
+          const { tabId, settingsOverride } = msg;
+          await translateTab(tabId, settingsOverride || null);
+          sendResponse({ ok: true });
+          return;
+        }
+        if (msg?.type === 'TRANSLATE_TEXT_NODES') {
+          const translations = await translateTextNodeRecords(
+            msg.records || []
+          );
+          sendResponse({ ok: true, translations });
+          return;
+        }
+        if (msg?.type === 'GET_SETTINGS') {
+          const settings = await getSettings();
+          settings.apiKey = settings.apiKey ? '***' : '';
+          sendResponse({ ok: true, settings });
+          return;
+        }
+        if (msg?.type === 'SAVE_SETTINGS') {
+          const next = mergeSettings(msg.settings || {});
+          await saveSettings(next);
+          await syncInlineAutoShowRegistration(next);
+          sendResponse({ ok: true });
+          return;
+        }
+
+        sendResponse({ ok: false, error: { message: 'Unknown message' } });
+      } catch (e) {
+        sendResponse({ ok: false, error: safeError(e) });
+      }
+    })();
+
+    // Keep the message channel open for async response
+    return true;
+  });
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    splitTextRecordsIntoChunks,
+    parseAndValidateTextNodeTranslations,
+    assertTextRecordBudget,
+  };
+}
