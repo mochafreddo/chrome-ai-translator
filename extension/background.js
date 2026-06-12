@@ -17,6 +17,10 @@ const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
 const INLINE_ORIGINS = ['http://*/*', 'https://*/*'];
 const INLINE_MAX_RECORDS = 500;
 const INLINE_MAX_TOTAL_CHARS = 60000;
+const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
+const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
+const INLINE_LOG_LIMIT = 20;
+const INLINE_TRANSLATION_MAX_CONCURRENCY = 3;
 
 // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
 const stateByTab = new Map();
@@ -190,25 +194,63 @@ function buildTextNodeInstructions({ targetLanguage, tone }) {
   return [
     `Translate each record's text into ${targetLanguage}.`,
     toneLine,
-    'Return JSON only in this exact shape: {"translations":[{"id":"...","translation":"..."}]}.',
+    'Return one translation object for every input record.',
     'Preserve every id exactly.',
     'Do not translate code, commands, identifiers, URLs, filenames, product API names, or version strings.',
-    'Do not add commentary or Markdown fences.',
+    'Do not add commentary.',
   ].join('\n');
 }
 
-async function openaiTranslateChunk({ apiKey, model, instructions, input }) {
+function buildTextNodeResponseFormat() {
+  return {
+    type: 'json_schema',
+    name: 'inline_translations',
+    strict: true,
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        translations: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string' },
+              translation: { type: 'string' },
+            },
+            required: ['id', 'translation'],
+          },
+        },
+      },
+      required: ['translations'],
+    },
+  };
+}
+
+async function openaiTranslateChunk({
+  apiKey,
+  model,
+  instructions,
+  input,
+  textFormat = null,
+}) {
+  const body = {
+    model,
+    instructions,
+    input,
+  };
+  if (textFormat) {
+    body.text = { format: textFormat };
+  }
+
   const res = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      instructions,
-      input,
-    }),
+    body: JSON.stringify(body),
   });
 
   const json = await res.json().catch(() => null);
@@ -239,6 +281,92 @@ async function openaiTranslateChunk({ apiKey, model, instructions, input }) {
   } catch {}
 
   throw new Error('Could not extract output_text from OpenAI response');
+}
+
+function getTextRecordStats(records) {
+  return {
+    recordCount: (records || []).length,
+    totalChars: (records || []).reduce(
+      (sum, record) => sum + String(record.text || '').length,
+      0
+    ),
+  };
+}
+
+function getTextRecordChunkStats(records, index) {
+  return {
+    index,
+    recordCount: (records || []).length,
+    charCount: (records || []).reduce(
+      (sum, record) => sum + String(record.text || '').length,
+      0
+    ),
+  };
+}
+
+function getInlineTranslationConcurrency(chunkCount) {
+  return Math.min(
+    INLINE_TRANSLATION_MAX_CONCURRENCY,
+    Math.max(1, Number(chunkCount) || 1)
+  );
+}
+
+function getInlineTranslationLogStorageKey(logId) {
+  return `${INLINE_LOG_STORAGE_KEY_PREFIX}${logId}`;
+}
+
+function isInlineTranslationLogStorageKey(key) {
+  return String(key || '').startsWith(INLINE_LOG_STORAGE_KEY_PREFIX);
+}
+
+function normalizeInlineTranslationLog(log) {
+  if (!log || typeof log !== 'object' || !log.id) return null;
+  return log;
+}
+
+function collectInlineTranslationLogsFromStorage(
+  stored,
+  limit = INLINE_LOG_LIMIT
+) {
+  const byId = new Map();
+  const legacy = Array.isArray(stored?.[INLINE_LOG_STORAGE_KEY])
+    ? stored[INLINE_LOG_STORAGE_KEY]
+    : [];
+
+  for (const log of legacy) {
+    const normalized = normalizeInlineTranslationLog(log);
+    if (normalized) byId.set(normalized.id, normalized);
+  }
+
+  for (const [key, value] of Object.entries(stored || {})) {
+    if (!isInlineTranslationLogStorageKey(key)) continue;
+    const normalized = normalizeInlineTranslationLog(value);
+    if (normalized) byId.set(normalized.id, normalized);
+  }
+
+  return Array.from(byId.values())
+    .sort(
+      (a, b) =>
+        (Date.parse(b.startedAt || b.finishedAt || '') || 0) -
+        (Date.parse(a.startedAt || a.finishedAt || '') || 0)
+    )
+    .slice(0, limit);
+}
+
+function getInlineTranslationLogRemovalKeys(stored, limit = INLINE_LOG_LIMIT) {
+  return Object.entries(stored || {})
+    .filter(
+      ([key, value]) =>
+        isInlineTranslationLogStorageKey(key) &&
+        normalizeInlineTranslationLog(value)
+    )
+    .sort(
+      ([, a], [, b]) =>
+        (Date.parse(b.startedAt || b.finishedAt || '') || 0) -
+        (Date.parse(a.startedAt || a.finishedAt || '') || 0)
+    )
+    .slice(limit)
+    .map(([key]) => key);
 }
 
 function splitTextRecordsIntoChunks(records, maxChars) {
@@ -336,34 +464,176 @@ function assertTextRecordBudget(records) {
   }
 }
 
-async function translateTextNodeRecords(records) {
-  const normalized = normalizeTextNodeRecords(records);
-  assertTextRecordBudget(normalized);
-  if (!normalized.length) return [];
+function createInlineTranslationLogEntry(startedAtMs) {
+  return {
+    id: `inline-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`,
+    startedAt: new Date(startedAtMs).toISOString(),
+    status: 'started',
+    model: '',
+    recordCount: 0,
+    totalChars: 0,
+    chunkCount: 0,
+    chunkMaxChars: 0,
+    chunks: [],
+  };
+}
 
-  const settings = await getSettings();
-  if (!settings.apiKey) {
-    throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+function sanitizeLogError(error) {
+  return safeError(error).message.slice(0, 300);
+}
+
+async function appendInlineTranslationLog(entry) {
+  if (
+    !entry ||
+    typeof chrome === 'undefined' ||
+    !chrome.storage?.local?.get ||
+    !chrome.storage?.local?.set
+  ) {
+    return;
   }
 
-  const instructions = buildTextNodeInstructions(settings);
-  const chunks = splitTextRecordsIntoChunks(
-    normalized,
-    settings.chunkMaxChars
-  );
-  const translated = [];
-
-  for (const chunk of chunks) {
-    const output = await openaiTranslateChunk({
-      apiKey: settings.apiKey,
-      model: settings.model,
-      instructions,
-      input: JSON.stringify({ records: chunk }),
+  try {
+    await chrome.storage.local.set({
+      [getInlineTranslationLogStorageKey(entry.id)]: entry,
     });
-    translated.push(...parseAndValidateTextNodeTranslations(output, chunk));
+    const stored = await chrome.storage.local.get(null);
+    const keysToRemove = getInlineTranslationLogRemovalKeys(stored);
+    if (keysToRemove.length && chrome.storage.local.remove) {
+      await chrome.storage.local.remove(keysToRemove);
+    }
+  } catch {}
+}
+
+async function sendInlineTranslationProgress(tabId, operationId, progress) {
+  if (
+    !tabId ||
+    operationId == null ||
+    typeof chrome === 'undefined' ||
+    !chrome.tabs?.sendMessage
+  ) {
+    return;
   }
 
-  return translated;
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'INLINE_TRANSLATION_PROGRESS',
+      operationId,
+      progress,
+    });
+  } catch {}
+}
+
+async function translateTextNodeRecords(records, context = {}) {
+  const startedAtMs = Date.now();
+  const logEntry = createInlineTranslationLogEntry(startedAtMs);
+  const { tabId = null, operationId = null } = context;
+  let completed = false;
+
+  try {
+    const normalized = normalizeTextNodeRecords(records);
+    Object.assign(logEntry, getTextRecordStats(normalized));
+    assertTextRecordBudget(normalized);
+    if (!normalized.length) {
+      completed = true;
+      return [];
+    }
+
+    const settings = await getSettings();
+    logEntry.model = settings.model;
+    logEntry.chunkMaxChars = settings.chunkMaxChars;
+    if (!settings.apiKey) {
+      throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+    }
+
+    const instructions = buildTextNodeInstructions(settings);
+    const chunks = splitTextRecordsIntoChunks(
+      normalized,
+      settings.chunkMaxChars
+    );
+    logEntry.chunkCount = chunks.length;
+    logEntry.chunks = chunks.map((chunk, index) =>
+      getTextRecordChunkStats(chunk, index + 1)
+    );
+
+    await sendInlineTranslationProgress(tabId, operationId, {
+      stage: 'queued',
+      recordCount: logEntry.recordCount,
+      totalChars: logEntry.totalChars,
+      chunkCount: logEntry.chunkCount,
+    });
+
+    const translatedByChunk = new Array(chunks.length);
+    const concurrency = getInlineTranslationConcurrency(chunks.length);
+    let nextChunkIndex = 0;
+    let completedChunks = 0;
+    let firstError = null;
+
+    async function processNextChunk() {
+      while (!firstError) {
+        const chunkIndex = nextChunkIndex;
+        nextChunkIndex += 1;
+        if (chunkIndex >= chunks.length) return;
+
+        const chunk = chunks[chunkIndex];
+        const chunkLog = logEntry.chunks[chunkIndex];
+        await sendInlineTranslationProgress(tabId, operationId, {
+          stage: 'chunk',
+          current: chunkIndex + 1,
+          total: chunks.length,
+          recordCount: chunkLog.recordCount,
+          charCount: chunkLog.charCount,
+        });
+
+        const chunkStartedAtMs = Date.now();
+        try {
+          const output = await openaiTranslateChunk({
+            apiKey: settings.apiKey,
+            model: settings.model,
+            instructions,
+            input: JSON.stringify({ records: chunk }),
+            textFormat: buildTextNodeResponseFormat(),
+          });
+          translatedByChunk[chunkIndex] =
+            parseAndValidateTextNodeTranslations(output, chunk);
+          chunkLog.durationMs = Date.now() - chunkStartedAtMs;
+          chunkLog.ok = true;
+          completedChunks += 1;
+          await sendInlineTranslationProgress(tabId, operationId, {
+            stage: 'chunk_done',
+            current: completedChunks,
+            total: chunks.length,
+          });
+        } catch (error) {
+          chunkLog.durationMs = Date.now() - chunkStartedAtMs;
+          chunkLog.ok = false;
+          chunkLog.error = sanitizeLogError(error);
+          firstError = firstError || error;
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: concurrency }, () => processNextChunk())
+    );
+    if (firstError) throw firstError;
+
+    const translated = translatedByChunk.flat();
+
+    await sendInlineTranslationProgress(tabId, operationId, {
+      stage: 'applying',
+    });
+    completed = true;
+    return translated;
+  } catch (error) {
+    logEntry.error = sanitizeLogError(error);
+    throw error;
+  } finally {
+    const finishedAtMs = Date.now();
+    logEntry.status = completed ? 'done' : 'error';
+    logEntry.finishedAt = new Date(finishedAtMs).toISOString();
+    logEntry.durationMs = finishedAtMs - startedAtMs;
+    await appendInlineTranslationLog(logEntry);
+  }
 }
 
 async function hasInlineAutoShowPermission() {
@@ -524,7 +794,11 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         }
         if (msg?.type === 'TRANSLATE_TEXT_NODES') {
           const translations = await translateTextNodeRecords(
-            msg.records || []
+            msg.records || [],
+            {
+              tabId: sender.tab?.id,
+              operationId: msg.operationId,
+            }
           );
           sendResponse({ ok: true, translations });
           return;
@@ -558,6 +832,12 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     mergeSettingsWithExisting,
+    buildTextNodeResponseFormat,
+    getTextRecordStats,
+    getTextRecordChunkStats,
+    getInlineTranslationConcurrency,
+    getInlineTranslationLogStorageKey,
+    collectInlineTranslationLogsFromStorage,
     splitTextRecordsIntoChunks,
     parseAndValidateTextNodeTranslations,
     assertTextRecordBudget,

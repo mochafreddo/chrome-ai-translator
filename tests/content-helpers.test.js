@@ -7,7 +7,75 @@ exports.tests = [
     name: 'detects excluded inline code tags',
     fn() {
       assert.equal(helpers.isInlineTranslationExcludedTag('CODE'), true);
+      assert.equal(helpers.isInlineTranslationExcludedTag('nav'), true);
+      assert.equal(helpers.isInlineTranslationExcludedTag('footer'), true);
+      assert.equal(helpers.isInlineTranslationExcludedTag('button'), true);
+      assert.equal(helpers.isInlineTranslationExcludedTag('header'), false);
+      assert.equal(helpers.isInlineTranslationExcludedTag('aside'), false);
       assert.equal(helpers.isInlineTranslationExcludedTag('p'), false);
+    },
+  },
+  {
+    name: 'detects excluded inline page chrome roles',
+    fn() {
+      const elementWithRole = (role) => ({
+        tagName: 'DIV',
+        getAttribute(name) {
+          return name === 'role' ? role : null;
+        },
+      });
+
+      assert.equal(
+        helpers.isInlineTranslationExcludedElement(
+          elementWithRole('navigation')
+        ),
+        true
+      );
+      assert.equal(
+        helpers.isInlineTranslationExcludedElement(
+          elementWithRole('complementary')
+        ),
+        true
+      );
+      assert.equal(
+        helpers.isInlineTranslationExcludedElement(elementWithRole('main')),
+        false
+      );
+    },
+  },
+  {
+    name: 'formats inline translation progress messages',
+    fn() {
+      assert.equal(
+        helpers.formatInlineProgressMessage({
+          stage: 'queued',
+          recordCount: 80,
+          chunkCount: 5,
+        }),
+        'Preparing 80 text nodes across 5 chunks...'
+      );
+      assert.equal(
+        helpers.formatInlineProgressMessage({
+          stage: 'chunk',
+          current: 2,
+          total: 5,
+          recordCount: 16,
+          charCount: 2400,
+        }),
+        'Chunk 2/5: 16 text nodes, 2400 chars'
+      );
+      assert.equal(
+        helpers.formatInlineProgressMessage({
+          stage: 'chunk_done',
+          current: 3,
+          total: 5,
+        }),
+        'Completed 3/5 chunks...'
+      );
+      assert.equal(
+        helpers.formatInlineProgressMessage({ stage: 'applying' }),
+        'Applying translated text...'
+      );
     },
   },
   {

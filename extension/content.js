@@ -11,10 +11,31 @@ var INLINE_EXCLUDED_TAGS = new Set([
   'SVG',
   'CANVAS',
   'IFRAME',
+  'NAV',
+  'FOOTER',
+  'FORM',
+  'BUTTON',
+  'INPUT',
+  'TEXTAREA',
+  'SELECT',
+  'OPTION',
   'PRE',
   'CODE',
   'KBD',
   'SAMP',
+]);
+var INLINE_EXCLUDED_ROLES = new Set([
+  'navigation',
+  'banner',
+  'contentinfo',
+  'complementary',
+  'search',
+  'form',
+  'button',
+  'menu',
+  'menubar',
+  'tablist',
+  'toolbar',
 ]);
 var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   status: 'original',
@@ -29,6 +50,13 @@ var inlineUiRoot = globalThis.__chromeAiTranslatorInlineUiRoot || null;
 
 function isInlineTranslationExcludedTag(tagName) {
   return INLINE_EXCLUDED_TAGS.has(String(tagName || '').toUpperCase());
+}
+
+function isInlineTranslationExcludedElement(el) {
+  if (!el) return false;
+  if (isInlineTranslationExcludedTag(el.tagName)) return true;
+  const role = String(el.getAttribute?.('role') || '').toLowerCase();
+  return INLINE_EXCLUDED_ROLES.has(role);
 }
 
 function isCodeLikeInlineText(text) {
@@ -134,6 +162,41 @@ function getInlineTextRecordBudgetError(records) {
   }
 
   return '';
+}
+
+function pluralizeInline(count, singular, plural = `${singular}s`) {
+  return count === 1 ? singular : plural;
+}
+
+function formatInlineProgressMessage(progress) {
+  if (!progress) return '';
+  if (progress.stage === 'queued') {
+    const recordCount = Number(progress.recordCount) || 0;
+    const chunkCount = Number(progress.chunkCount) || 0;
+    return `Preparing ${recordCount} ${pluralizeInline(
+      recordCount,
+      'text node'
+    )} across ${chunkCount} ${pluralizeInline(chunkCount, 'chunk')}...`;
+  }
+  if (progress.stage === 'chunk') {
+    const current = Number(progress.current) || 0;
+    const total = Number(progress.total) || 0;
+    const recordCount = Number(progress.recordCount) || 0;
+    const charCount = Number(progress.charCount) || 0;
+    return `Chunk ${current}/${total}: ${recordCount} ${pluralizeInline(
+      recordCount,
+      'text node'
+    )}, ${charCount} ${pluralizeInline(charCount, 'char')}`;
+  }
+  if (progress.stage === 'chunk_done') {
+    const current = Number(progress.current) || 0;
+    const total = Number(progress.total) || 0;
+    return `Completed ${current}/${total} ${pluralizeInline(total, 'chunk')}...`;
+  }
+  if (progress.stage === 'applying') {
+    return 'Applying translated text...';
+  }
+  return String(progress.message || '');
 }
 
 function authorizeInlineTranslation(state = inlineState, now = Date.now()) {
@@ -336,7 +399,7 @@ function shouldSkipInlineTextNode(textNode) {
   if (!parent) return true;
   if (parent.closest(`#${INLINE_TRANSLATOR_ID}`)) return true;
   for (let el = parent; el; el = el.parentElement) {
-    if (isInlineTranslationExcludedTag(el.tagName)) return true;
+    if (isInlineTranslationExcludedElement(el)) return true;
     if (isElementHidden(el)) return true;
   }
   return !isTranslatableInlineText(textNode.nodeValue);
@@ -489,12 +552,19 @@ async function translateInlinePage() {
   if (budgetError) throw new Error(budgetError);
 
   const operation = beginInlineTranslationOperation(inlineState, records);
-  setInlineMessage('');
+  setInlineMessage(
+    formatInlineProgressMessage({
+      stage: 'queued',
+      recordCount: records.length,
+      chunkCount: 1,
+    })
+  );
   updateInlineTranslatorUi();
 
   try {
     const resp = await chrome.runtime.sendMessage({
       type: 'TRANSLATE_TEXT_NODES',
+      operationId: operation.operationId,
       records: records.map(({ id, text }) => ({ id, text })),
     });
     if (!resp?.ok) {
@@ -504,6 +574,7 @@ async function translateInlinePage() {
       throw new Error('Inline translation response was incomplete.');
     }
     if (!isCurrentInlineOperation(inlineState, operation.operationId)) return;
+    setInlineMessage(formatInlineProgressMessage({ stage: 'applying' }));
 
     const byId = new Map(
       resp.translations.map((item) => [item.id, item.translation])
@@ -606,6 +677,13 @@ if (
       }
       return true;
     }
+
+    if (msg?.type === 'INLINE_TRANSLATION_PROGRESS') {
+      if (isCurrentInlineOperation(inlineState, msg.operationId)) {
+        setInlineMessage(formatInlineProgressMessage(msg.progress));
+      }
+      return false;
+    }
   });
 
   initInlineTranslator();
@@ -614,11 +692,13 @@ if (
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     isInlineTranslationExcludedTag,
+    isInlineTranslationExcludedElement,
     isCodeLikeInlineText,
     isTranslatableInlineText,
     isTrustedInlineUiEvent,
     resetInlineTranslationAfterFailure,
     getInlineTextRecordBudgetError,
+    formatInlineProgressMessage,
     authorizeInlineTranslation,
     hasInlineTranslationAuthorization,
     applyInlineTranslationRecords,

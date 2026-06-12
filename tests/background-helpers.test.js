@@ -53,6 +53,91 @@ exports.tests = [
     },
   },
   {
+    name: 'builds strict structured output format for text-node translations',
+    fn() {
+      const format = helpers.buildTextNodeResponseFormat();
+
+      assert.equal(format.type, 'json_schema');
+      assert.equal(format.name, 'inline_translations');
+      assert.equal(format.strict, true);
+      assert.deepEqual(format.schema.required, ['translations']);
+      assert.equal(
+        format.schema.properties.translations.items.additionalProperties,
+        false
+      );
+      assert.deepEqual(
+        format.schema.properties.translations.items.required,
+        ['id', 'translation']
+      );
+    },
+  },
+  {
+    name: 'summarizes text record chunks without retaining raw text',
+    fn() {
+      const records = [
+        { id: 'n1', text: 'alpha' },
+        { id: 'n2', text: 'beta gamma' },
+      ];
+
+      assert.deepEqual(helpers.getTextRecordStats(records), {
+        recordCount: 2,
+        totalChars: 15,
+      });
+      assert.deepEqual(helpers.getTextRecordChunkStats(records, 3), {
+        index: 3,
+        recordCount: 2,
+        charCount: 15,
+      });
+      assert.equal(
+        JSON.stringify(helpers.getTextRecordChunkStats(records, 3)).includes(
+          'alpha'
+        ),
+        false
+      );
+    },
+  },
+  {
+    name: 'caps inline translation chunk concurrency',
+    fn() {
+      assert.equal(helpers.getInlineTranslationConcurrency(1), 1);
+      assert.equal(helpers.getInlineTranslationConcurrency(2), 2);
+      assert.equal(helpers.getInlineTranslationConcurrency(9), 3);
+    },
+  },
+  {
+    name: 'collects inline logs from per-run storage keys',
+    fn() {
+      const logs = helpers.collectInlineTranslationLogsFromStorage({
+        inlineTranslationLogs: [
+          {
+            id: 'legacy',
+            startedAt: '2026-06-12T00:00:00.000Z',
+            status: 'done',
+          },
+        ],
+        'inlineTranslationLogs:current-a': {
+          id: 'current-a',
+          startedAt: '2026-06-12T00:02:00.000Z',
+          status: 'done',
+        },
+        'inlineTranslationLogs:current-b': {
+          id: 'current-b',
+          startedAt: '2026-06-12T00:01:00.000Z',
+          status: 'error',
+        },
+      });
+
+      assert.deepEqual(
+        logs.map((log) => log.id),
+        ['current-a', 'current-b', 'legacy']
+      );
+      assert.equal(
+        helpers.getInlineTranslationLogStorageKey('current-a'),
+        'inlineTranslationLogs:current-a'
+      );
+    },
+  },
+  {
     name: 'validates exact JSON translation IDs',
     fn() {
       const records = [

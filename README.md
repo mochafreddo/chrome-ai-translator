@@ -45,3 +45,5 @@ or shortcut action before page text is sent for translation.
 - It won't work on restricted pages like `chrome://`.
 - Inline translation skips code-like text, links, filenames, commands, and pages
   with too many text nodes or characters.
+- Inline translation uses structured JSON output and records recent run
+  diagnostics in Options without storing source text, translations, or API keys.
