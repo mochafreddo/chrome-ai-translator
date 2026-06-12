@@ -593,6 +593,31 @@ function isElementHidden(el) {
   );
 }
 
+function getInlineViewportInfo() {
+  return {
+    width: window.innerWidth || document.documentElement.clientWidth || 0,
+    height: window.innerHeight || document.documentElement.clientHeight || 0,
+  };
+}
+
+function getInlineTextNodeRect(textNode) {
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(textNode);
+    const rect = range.getBoundingClientRect();
+    range.detach?.();
+    if (rect && (rect.width || rect.height)) return rect;
+  } catch {}
+  return textNode.parentElement?.getBoundingClientRect?.() || null;
+}
+
+function isInlineTextNodeInViewport(textNode) {
+  return isInlineRectInViewport(
+    getInlineTextNodeRect(textNode),
+    getInlineViewportInfo()
+  );
+}
+
 function shouldSkipInlineTextNode(textNode) {
   const parent = textNode.parentElement;
   if (!parent) return true;
@@ -626,8 +651,32 @@ function collectInlineTextNodes(root) {
   return records;
 }
 
+function collectVisibleInlineTextNodes(root, store) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (shouldSkipInlineTextNode(node)) return NodeFilter.FILTER_REJECT;
+      if (!isInlineTextNodeInViewport(node)) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  const queued = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const record = queueInlineViewportRecord(store, node, node.nodeValue);
+    if (record) queued.push(record);
+  }
+  return queued;
+}
+
 function setInlineMessage(message) {
   inlineState.message = message || '';
+  updateInlineTranslatorUi();
+}
+
+function updateInlineViewportMessage() {
+  const counts = getInlineViewportStatusCounts(inlineState.viewport?.records || []);
+  inlineState.message = formatInlineViewportStatusMessage(counts);
   updateInlineTranslatorUi();
 }
 
@@ -684,6 +733,7 @@ function ensureInlineTranslatorUi() {
       <button type="button" data-role="toggle">Translate</button>
       <div data-role="menu" hidden>
         <button type="button" data-action="translate">Page in Korean</button>
+        <button type="button" data-action="stop">Stop</button>
         <button type="button" data-action="restore">Original text</button>
         <div data-role="message"></div>
       </div>
@@ -704,6 +754,17 @@ function ensureInlineTranslatorUi() {
       );
     });
   inlineUiRoot
+    .querySelector('[data-action="stop"]')
+    .addEventListener('click', (event) => {
+      if (!isTrustedInlineUiEvent(event)) return;
+      if (inlineState.viewport) {
+        inlineState.viewport.stopped = true;
+        inlineState.viewport.queue = [];
+      }
+      detachInlineViewportWatchers();
+      updateInlineViewportMessage();
+    });
+  inlineUiRoot
     .querySelector('[data-action="restore"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
@@ -720,7 +781,9 @@ function updateInlineTranslatorUi() {
   const menu = inlineUiRoot.querySelector('[data-role="menu"]');
   const message = inlineUiRoot.querySelector('[data-role="message"]');
   toggle.textContent =
-    inlineState.status === 'translating'
+    inlineState.status === 'active'
+      ? 'Translated'
+      : inlineState.status === 'translating'
       ? 'Translating...'
       : inlineState.status === 'translated'
       ? 'Translated'
@@ -729,10 +792,106 @@ function updateInlineTranslatorUi() {
   message.textContent = inlineState.message;
 }
 
+function runInlineViewportScan() {
+  const store = inlineState.viewport;
+  if (!store || store.stopped || inlineState.status !== 'active') return;
+  const root = store.root || pickArticleRoot();
+  if (!root) {
+    setInlineMessage('No article content found.');
+    return;
+  }
+  store.root = root;
+  collectVisibleInlineTextNodes(root, store);
+  updateInlineViewportMessage();
+  drainInlineViewportQueue().catch((error) =>
+    setInlineMessage(error?.message || String(error))
+  );
+}
+
+function scheduleInlineViewportScan() {
+  const store = inlineState.viewport;
+  if (!store || store.stopped || inlineState.status !== 'active') return;
+  if (store.scanTimer) clearTimeout(store.scanTimer);
+  store.scanTimer = setTimeout(() => {
+    store.scanTimer = null;
+    runInlineViewportScan();
+  }, INLINE_VIEWPORT_SCAN_DEBOUNCE_MS);
+}
+
+function attachInlineViewportWatchers(root) {
+  window.addEventListener('scroll', scheduleInlineViewportScan, { passive: true });
+  window.addEventListener('resize', scheduleInlineViewportScan);
+
+  const observer = new MutationObserver(scheduleInlineViewportScan);
+  observer.observe(root, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  });
+  inlineState.viewport.observer = observer;
+}
+
+function detachInlineViewportWatchers() {
+  window.removeEventListener('scroll', scheduleInlineViewportScan);
+  window.removeEventListener('resize', scheduleInlineViewportScan);
+  if (inlineState.viewport?.observer) {
+    inlineState.viewport.observer.disconnect();
+    inlineState.viewport.observer = null;
+  }
+}
+
+async function drainInlineViewportQueue() {
+  const store = inlineState.viewport;
+  if (!store || store.stopped || inlineState.status !== 'active') return;
+
+  while (
+    inlineState.status === 'active' &&
+    !store.stopped &&
+    store.inFlight < INLINE_VIEWPORT_MAX_IN_FLIGHT &&
+    store.queue.length
+  ) {
+    const batch = takeInlineViewportBatch(store);
+    if (!batch.length) return;
+    updateInlineViewportMessage();
+
+    chrome.runtime
+      .sendMessage({
+        type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
+        operationId: inlineState.operationId,
+        records: batch.map((record) => ({
+          id: record.id,
+          text: record.original,
+        })),
+      })
+      .then((resp) => {
+        if (inlineState.operationId !== store.operationId) return;
+        if (!resp?.ok || !Array.isArray(resp.translations)) {
+          markInlineViewportBatchFailed(batch, store.operationId);
+          return;
+        }
+        applyInlineViewportBatchTranslations(
+          batch,
+          resp.translations,
+          store.operationId
+        );
+      })
+      .catch(() => {
+        markInlineViewportBatchFailed(batch, store.operationId);
+      })
+      .finally(() => {
+        store.inFlight = Math.max(0, store.inFlight - 1);
+        updateInlineViewportMessage();
+        drainInlineViewportQueue().catch((error) =>
+          setInlineMessage(error?.message || String(error))
+        );
+      });
+  }
+}
+
 async function translateInlinePage() {
-  if (inlineState.status === 'translating') return;
-  if (inlineState.status === 'translated') {
-    setInlineMessage('');
+  if (inlineState.status === 'active') {
+    scheduleInlineViewportScan();
+    updateInlineViewportMessage();
     return;
   }
   if (!hasInlineTranslationAuthorization()) {
@@ -745,79 +904,20 @@ async function translateInlinePage() {
   const root = pickArticleRoot();
   if (!root) throw new Error('No article content found.');
 
-  const records = collectInlineTextNodes(root);
-  if (!records.length) throw new Error('No translatable article text found.');
-  const budgetError = getInlineTextRecordBudgetError(records);
-  if (budgetError) throw new Error(budgetError);
+  detachInlineViewportWatchers();
+  inlineState.operationId = (Number(inlineState.operationId) || 0) + 1;
+  inlineState.status = 'active';
+  inlineState.viewport = createInlineViewportStore(inlineState.operationId);
+  inlineState.viewport.root = root;
+  inlineState.records = inlineState.viewport.records;
 
-  const operation = beginInlineTranslationOperation(inlineState, records);
-  setInlineMessage(
-    formatInlineProgressMessage({
-      stage: 'queued',
-      recordCount: records.length,
-      chunkCount: 1,
-    })
-  );
-  updateInlineTranslatorUi();
-
-  try {
-    const resp = await chrome.runtime.sendMessage({
-      type: 'TRANSLATE_TEXT_NODES',
-      operationId: operation.operationId,
-      records: records.map(({ id, text }) => ({ id, text })),
-    });
-    if (!resp?.ok) {
-      throw new Error(resp?.error?.message || 'Inline translation failed.');
-    }
-    if (!Array.isArray(resp.translations)) {
-      throw new Error('Inline translation response was incomplete.');
-    }
-    if (!isCurrentInlineOperation(inlineState, operation.operationId)) return;
-    setInlineMessage(formatInlineProgressMessage({ stage: 'applying' }));
-
-    const byId = new Map(
-      resp.translations.map((item) => [item.id, item.translation])
-    );
-    for (const record of operation.records) {
-      const translation = byId.get(record.id);
-      if (typeof translation !== 'string') {
-        throw new Error('Inline translation response was incomplete.');
-      }
-      record.translation = translation;
-    }
-  } catch (error) {
-    if (isCurrentInlineOperation(inlineState, operation.operationId)) {
-      resetInlineTranslationAfterFailure();
-      updateInlineTranslatorUi();
-    }
-    throw error;
-  }
-
-  if (!isCurrentInlineOperation(inlineState, operation.operationId)) return;
-
-  const result = applyInlineTranslationRecords(operation.records);
-  if (!result.applied.length) {
-    inlineState.records = [];
-    inlineState.status = 'original';
-    inlineState.message = 'Page text changed before translation could be applied.';
-    updateInlineTranslatorUi();
-    return;
-  }
-  inlineState.records = result.applied;
-  inlineState.status = 'translated';
-  inlineState.message = result.skipped
-    ? `Skipped ${result.skipped} changed text node(s).`
-    : '';
-  updateInlineTranslatorUi();
+  attachInlineViewportWatchers(root);
+  runInlineViewportScan();
 }
 
 function restoreInlineOriginal() {
-  for (const record of inlineState.records) {
-    if (record.node?.isConnected) {
-      record.node.nodeValue = record.original;
-    }
-  }
-  cancelInlineTranslationOperation(inlineState);
+  detachInlineViewportWatchers();
+  restoreInlineViewportRecords(inlineState);
   setInlineMessage('');
   updateInlineTranslatorUi();
 }
@@ -907,6 +1007,10 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineShadowMode,
     getInlineHostStyleText,
     isInlineRectInViewport,
+    getInlineViewportInfo,
+    getInlineTextNodeRect,
+    isInlineTextNodeInViewport,
+    collectVisibleInlineTextNodes,
     createInlineViewportStore,
     queueInlineViewportRecord,
     takeInlineViewportBatch,

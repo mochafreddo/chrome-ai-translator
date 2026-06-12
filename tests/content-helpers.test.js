@@ -288,6 +288,122 @@ exports.tests = [
     },
   },
   {
+    name: 'collects visible inline text nodes into viewport queue',
+    fn() {
+      const previous = {
+        document: global.document,
+        HTMLElement: global.HTMLElement,
+        NodeFilter: global.NodeFilter,
+        window: global.window,
+      };
+
+      class FakeElement {
+        constructor(rect) {
+          this.rect = rect;
+          this.tagName = 'P';
+          this.hidden = false;
+          this.parentElement = null;
+        }
+
+        closest() {
+          return null;
+        }
+
+        getAttribute() {
+          return null;
+        }
+
+        getBoundingClientRect() {
+          return this.rect;
+        }
+      }
+
+      const visibleNode = {
+        nodeValue: 'Visible article text.',
+        parentElement: new FakeElement({
+          top: 20,
+          bottom: 44,
+          left: 10,
+          right: 300,
+          width: 290,
+          height: 24,
+        }),
+      };
+      const belowViewportNode = {
+        nodeValue: 'Below article text.',
+        parentElement: new FakeElement({
+          top: 1000,
+          bottom: 1024,
+          left: 10,
+          right: 300,
+          width: 290,
+          height: 24,
+        }),
+      };
+
+      global.HTMLElement = FakeElement;
+      global.NodeFilter = {
+        SHOW_TEXT: 4,
+        FILTER_ACCEPT: 1,
+        FILTER_REJECT: 2,
+      };
+      global.window = {
+        innerWidth: 500,
+        innerHeight: 300,
+        getComputedStyle() {
+          return {
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+      global.document = {
+        documentElement: {
+          clientWidth: 0,
+          clientHeight: 0,
+        },
+        createRange() {
+          throw new Error('range unavailable');
+        },
+        createTreeWalker(root, _show, filter) {
+          const accepted = root.nodes.filter(
+            (node) => filter.acceptNode(node) === global.NodeFilter.FILTER_ACCEPT
+          );
+          let index = -1;
+          return {
+            currentNode: null,
+            nextNode() {
+              index += 1;
+              this.currentNode = accepted[index] || null;
+              return Boolean(this.currentNode);
+            },
+          };
+        },
+      };
+
+      try {
+        const store = helpers.createInlineViewportStore(17);
+        const queued = helpers.collectVisibleInlineTextNodes(
+          { nodes: [visibleNode, belowViewportNode] },
+          store
+        );
+
+        assert.deepEqual(
+          queued.map((record) => record.id),
+          ['v1']
+        );
+        assert.equal(queued[0].original, 'Visible article text.');
+        assert.equal(store.queue.length, 1);
+      } finally {
+        global.document = previous.document;
+        global.HTMLElement = previous.HTMLElement;
+        global.NodeFilter = previous.NodeFilter;
+        global.window = previous.window;
+      }
+    },
+  },
+  {
     name: 'queues each visible text node once per active operation',
     fn() {
       const store = helpers.createInlineViewportStore(7);
