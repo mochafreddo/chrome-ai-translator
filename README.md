@@ -33,8 +33,11 @@ For inline page translation:
 
 1. Click the extension toolbar icon or press the shortcut on the target page.
 2. Open the floating **Translate** button.
-3. Choose **Page in Korean** to replace article text in place.
-4. Choose **Original text** to restore the page text that was replaced.
+3. Choose **Page in Korean** to start viewport-first inline translation.
+4. As you scroll, newly visible article text is translated and kept in place.
+5. Choose **Stop** to stop translating newly visible text while keeping current
+   translations.
+6. Choose **Original text** to restore the page text that was replaced.
 
 If automatic inline display is enabled, the floating button can appear without
 the toolbar click. Starting inline translation still requires a recent toolbar
@@ -43,7 +46,7 @@ or shortcut action before page text is sent for translation.
 ## Notes
 - This stores your API key in `chrome.storage.local` (client-side). Use a dedicated key/project and rotate if needed.
 - It won't work on restricted pages like `chrome://`.
-- Inline translation skips code-like text, links, filenames, commands, and pages
-  with too many text nodes or characters.
+- Inline translation skips code-like text, links, filenames, commands, and page
+  chrome. It translates visible article text in small batches while active.
 - Inline translation uses structured JSON output and records recent run
   diagnostics in Options without storing source text, translations, or API keys.
