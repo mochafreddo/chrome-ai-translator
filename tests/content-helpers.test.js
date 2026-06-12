@@ -252,4 +252,206 @@ exports.tests = [
       assert.equal(helpers.isCurrentInlineOperation(state, second.operationId), false);
     },
   },
+  {
+    name: 'detects text rects inside viewport with prefetch margin',
+    fn() {
+      const viewport = { width: 1000, height: 800 };
+
+      assert.equal(
+        helpers.isInlineRectInViewport(
+          { top: 100, bottom: 140, left: 10, right: 700 },
+          viewport
+        ),
+        true
+      );
+      assert.equal(
+        helpers.isInlineRectInViewport(
+          { top: 1000, bottom: 1040, left: 10, right: 700 },
+          viewport
+        ),
+        true
+      );
+      assert.equal(
+        helpers.isInlineRectInViewport(
+          { top: 1300, bottom: 1340, left: 10, right: 700 },
+          viewport
+        ),
+        false
+      );
+      assert.equal(
+        helpers.isInlineRectInViewport(
+          { top: 100, bottom: 140, left: 1100, right: 1200 },
+          viewport
+        ),
+        false
+      );
+    },
+  },
+  {
+    name: 'queues each visible text node once per active operation',
+    fn() {
+      const store = helpers.createInlineViewportStore(7);
+      const node = { isConnected: true, nodeValue: 'Visible article text.' };
+
+      const first = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Visible article text.'
+      );
+      const second = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Visible article text.'
+      );
+
+      assert.equal(first.id, 'v1');
+      assert.equal(first.state, 'queued');
+      assert.equal(first.operationId, 7);
+      assert.equal(second, null);
+      assert.deepEqual(
+        store.queue.map((record) => record.id),
+        ['v1']
+      );
+    },
+  },
+  {
+    name: 'moves queued viewport records into character-budget batches',
+    fn() {
+      const store = helpers.createInlineViewportStore(3);
+      const records = [
+        helpers.queueInlineViewportRecord(store, { nodeValue: 'a', isConnected: true }, 'alpha beta gamma'),
+        helpers.queueInlineViewportRecord(store, { nodeValue: 'b', isConnected: true }, 'delta epsilon zeta'),
+        helpers.queueInlineViewportRecord(store, { nodeValue: 'c', isConnected: true }, 'eta theta iota'),
+      ];
+
+      const batch = helpers.takeInlineViewportBatch(store, 36);
+
+      assert.deepEqual(
+        batch.map((record) => record.id),
+        ['v1']
+      );
+      assert.equal(records[0].state, 'translating');
+      assert.equal(store.queue.length, 2);
+    },
+  },
+  {
+    name: 'applies successful viewport translations and marks stale nodes',
+    fn() {
+      const stableNode = { isConnected: true, nodeValue: 'Hello world.' };
+      const changedNode = { isConnected: true, nodeValue: 'Updated text.' };
+      const detachedNode = { isConnected: false, nodeValue: 'Detached text.' };
+      const records = [
+        {
+          id: 'v1',
+          node: stableNode,
+          original: 'Hello world.',
+          translation: null,
+          state: 'translating',
+          operationId: 11,
+        },
+        {
+          id: 'v2',
+          node: changedNode,
+          original: 'Original text.',
+          translation: null,
+          state: 'translating',
+          operationId: 11,
+        },
+        {
+          id: 'v3',
+          node: detachedNode,
+          original: 'Detached text.',
+          translation: null,
+          state: 'translating',
+          operationId: 11,
+        },
+      ];
+
+      const result = helpers.applyInlineViewportBatchTranslations(
+        records,
+        [
+          { id: 'v1', translation: '안녕하세요.' },
+          { id: 'v2', translation: '원문입니다.' },
+          { id: 'v3', translation: '분리됨.' },
+        ],
+        11
+      );
+
+      assert.equal(stableNode.nodeValue, '안녕하세요.');
+      assert.equal(changedNode.nodeValue, 'Updated text.');
+      assert.equal(detachedNode.nodeValue, 'Detached text.');
+      assert.deepEqual(result, { applied: 1, stale: 2, ignored: 0 });
+      assert.equal(records[0].state, 'translated');
+      assert.equal(records[1].state, 'stale');
+      assert.equal(records[2].state, 'stale');
+    },
+  },
+  {
+    name: 'ignores late viewport translations from stale operations',
+    fn() {
+      const node = { isConnected: true, nodeValue: 'Hello world.' };
+      const records = [
+        {
+          id: 'v1',
+          node,
+          original: 'Hello world.',
+          translation: null,
+          state: 'translating',
+          operationId: 4,
+        },
+      ];
+
+      const result = helpers.applyInlineViewportBatchTranslations(
+        records,
+        [{ id: 'v1', translation: '안녕하세요.' }],
+        5
+      );
+
+      assert.deepEqual(result, { applied: 0, stale: 0, ignored: 1 });
+      assert.equal(node.nodeValue, 'Hello world.');
+      assert.equal(records[0].state, 'translating');
+    },
+  },
+  {
+    name: 'formats viewport active status counts',
+    fn() {
+      const message = helpers.formatInlineViewportStatusMessage({
+        translated: 18,
+        pending: 4,
+        failed: 1,
+      });
+
+      assert.equal(
+        message,
+        'Visible translation on\nTranslated 18 · Pending 4 · Failed 1'
+      );
+    },
+  },
+  {
+    name: 'restores translated viewport records and invalidates operation',
+    fn() {
+      const state = {
+        status: 'active',
+        operationId: 8,
+        viewport: helpers.createInlineViewportStore(8),
+      };
+      const node = { isConnected: true, nodeValue: '안녕하세요.' };
+      const record = {
+        id: 'v1',
+        node,
+        original: 'Hello world.',
+        translation: '안녕하세요.',
+        state: 'translated',
+        operationId: 8,
+      };
+      state.viewport.records.push(record);
+
+      helpers.restoreInlineViewportRecords(state);
+
+      assert.equal(node.nodeValue, 'Hello world.');
+      assert.equal(state.status, 'original');
+      assert.equal(state.operationId, 9);
+      assert.equal(record.state, 'original');
+    },
+  },
 ];

@@ -4,6 +4,10 @@ var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
 var INLINE_MAX_TOTAL_CHARS = 60000;
 var INLINE_TRANSLATION_AUTH_MS = 5 * 60 * 1000;
+var INLINE_VIEWPORT_BATCH_MAX_CHARS = 2000;
+var INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;
+var INLINE_VIEWPORT_SCAN_DEBOUNCE_MS = 250;
+var INLINE_VIEWPORT_PREFETCH_RATIO = 0.5;
 var INLINE_EXCLUDED_TAGS = new Set([
   'SCRIPT',
   'STYLE',
@@ -37,6 +41,22 @@ var INLINE_EXCLUDED_ROLES = new Set([
   'tablist',
   'toolbar',
 ]);
+
+function createInlineViewportStore(operationId) {
+  return {
+    operationId,
+    byNode: new WeakMap(),
+    records: [],
+    queue: [],
+    inFlight: 0,
+    nextId: 0,
+    scanTimer: null,
+    observer: null,
+    root: null,
+    stopped: false,
+  };
+}
+
 var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   status: 'original',
   records: [],
@@ -46,6 +66,9 @@ var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   authorizedUntil: 0,
 };
 globalThis.__chromeAiTranslatorInlineState = inlineState;
+if (!inlineState.viewport) {
+  inlineState.viewport = createInlineViewportStore(inlineState.operationId);
+}
 var inlineUiRoot = globalThis.__chromeAiTranslatorInlineUiRoot || null;
 
 function isInlineTranslationExcludedTag(tagName) {
@@ -146,6 +169,182 @@ function getInlineHostStyleText() {
     'background: transparent !important',
     'pointer-events: auto !important',
   ].join('; ');
+}
+
+function isInlineRectInViewport(
+  rect,
+  viewport,
+  prefetchRatio = INLINE_VIEWPORT_PREFETCH_RATIO
+) {
+  if (!rect || !viewport) return false;
+  const width = Number(viewport.width) || 0;
+  const height = Number(viewport.height) || 0;
+  if (width <= 0 || height <= 0) return false;
+
+  const margin = height * prefetchRatio;
+  const top = Number(rect.top);
+  const bottom = Number(rect.bottom);
+  const left = Number(rect.left);
+  const right = Number(rect.right);
+
+  if (![top, bottom, left, right].every(Number.isFinite)) return false;
+  if (bottom < -margin) return false;
+  if (top > height + margin) return false;
+  if (right < 0) return false;
+  if (left > width) return false;
+  return true;
+}
+
+function getInlineRecordPayloadSize(record) {
+  return String(record.id || '').length + String(record.original || record.text || '').length + 20;
+}
+
+function queueInlineViewportRecord(store, node, text) {
+  if (!store || !node) return null;
+  const existing = store.byNode.get(node);
+  if (
+    existing &&
+    ['queued', 'translating', 'translated', 'failed', 'stale'].includes(
+      existing.state
+    )
+  ) {
+    return null;
+  }
+
+  const record =
+    existing || {
+      id: `v${store.nextId + 1}`,
+      node,
+      original: text,
+      translation: null,
+      state: 'original',
+      operationId: store.operationId,
+    };
+
+  if (!existing) {
+    store.nextId += 1;
+    store.byNode.set(node, record);
+    store.records.push(record);
+  }
+
+  record.original = text;
+  record.translation = null;
+  record.state = 'queued';
+  record.operationId = store.operationId;
+  store.queue.push(record);
+  return record;
+}
+
+function takeInlineViewportBatch(
+  store,
+  maxChars = INLINE_VIEWPORT_BATCH_MAX_CHARS
+) {
+  if (!store || store.stopped || store.inFlight >= INLINE_VIEWPORT_MAX_IN_FLIGHT) {
+    return [];
+  }
+
+  const limit = Number(maxChars) || INLINE_VIEWPORT_BATCH_MAX_CHARS;
+  const batch = [];
+  let total = 0;
+
+  while (store.queue.length) {
+    const record = store.queue[0];
+    const size = getInlineRecordPayloadSize(record);
+    if (batch.length && total + size > limit) break;
+
+    store.queue.shift();
+    record.state = 'translating';
+    batch.push(record);
+    total += size;
+
+    if (total >= limit) break;
+  }
+
+  if (batch.length) {
+    store.inFlight += 1;
+  }
+  return batch;
+}
+
+function applyInlineViewportBatchTranslations(records, translations, operationId) {
+  const byId = new Map((translations || []).map((item) => [item.id, item.translation]));
+  const result = { applied: 0, stale: 0, ignored: 0 };
+
+  for (const record of records || []) {
+    if (record.operationId !== operationId) {
+      result.ignored += 1;
+      continue;
+    }
+
+    const translation = byId.get(record.id);
+    if (typeof translation !== 'string') {
+      record.state = 'failed';
+      continue;
+    }
+
+    if (!record.node?.isConnected || record.node.nodeValue !== record.original) {
+      record.state = 'stale';
+      result.stale += 1;
+      continue;
+    }
+
+    record.node.nodeValue = translation;
+    record.translation = translation;
+    record.state = 'translated';
+    result.applied += 1;
+  }
+
+  return result;
+}
+
+function markInlineViewportBatchFailed(records, operationId) {
+  for (const record of records || []) {
+    if (record.operationId === operationId && record.state === 'translating') {
+      record.state = 'failed';
+    }
+  }
+}
+
+function getInlineViewportStatusCounts(records) {
+  const counts = { translated: 0, pending: 0, failed: 0 };
+  for (const record of records || []) {
+    if (record.state === 'translated') counts.translated += 1;
+    if (record.state === 'queued' || record.state === 'translating') {
+      counts.pending += 1;
+    }
+    if (record.state === 'failed' || record.state === 'stale') counts.failed += 1;
+  }
+  return counts;
+}
+
+function formatInlineViewportStatusMessage(counts) {
+  const safe = counts || {};
+  return [
+    'Visible translation on',
+    `Translated ${Number(safe.translated) || 0} · Pending ${Number(safe.pending) || 0} · Failed ${Number(safe.failed) || 0}`,
+  ].join('\n');
+}
+
+function restoreInlineViewportRecords(state = inlineState) {
+  const viewport = state.viewport;
+  if (viewport?.observer) {
+    viewport.observer.disconnect();
+  }
+  if (viewport?.scanTimer) {
+    clearTimeout(viewport.scanTimer);
+  }
+
+  for (const record of viewport?.records || []) {
+    if (record.state === 'translated' && record.node?.isConnected) {
+      record.node.nodeValue = record.original;
+    }
+    record.state = 'original';
+  }
+
+  state.status = 'original';
+  state.records = [];
+  state.operationId = (Number(state.operationId) || 0) + 1;
+  state.viewport = createInlineViewportStore(state.operationId);
 }
 
 function getInlineTextRecordBudgetError(records) {
@@ -707,5 +906,14 @@ if (typeof module !== 'undefined' && module.exports) {
     cancelInlineTranslationOperation,
     getInlineShadowMode,
     getInlineHostStyleText,
+    isInlineRectInViewport,
+    createInlineViewportStore,
+    queueInlineViewportRecord,
+    takeInlineViewportBatch,
+    applyInlineViewportBatchTranslations,
+    markInlineViewportBatchFailed,
+    getInlineViewportStatusCounts,
+    formatInlineViewportStatusMessage,
+    restoreInlineViewportRecords,
   };
 }
