@@ -202,4 +202,28 @@ exports.tests = [
       );
     },
   },
+  {
+    name: 'uses a small visible inline batch character budget',
+    fn() {
+      assert.equal(helpers.getVisibleInlineBatchMaxChars(), 2000);
+    },
+  },
+  {
+    name: 'normalizes visible inline batch records with existing validation',
+    fn() {
+      assert.deepEqual(
+        helpers.normalizeVisibleTextBatchRecords([
+          { id: 'v1', text: 'Hello world.' },
+        ]),
+        [{ id: 'v1', text: 'Hello world.' }]
+      );
+      assert.throws(
+        () =>
+          helpers.normalizeVisibleTextBatchRecords([
+            { id: '', text: 'Hello.' },
+          ]),
+        /Invalid inline translation record id/
+      );
+    },
+  },
 ];

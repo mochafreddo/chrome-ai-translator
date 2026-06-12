@@ -17,6 +17,7 @@ const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
 const INLINE_ORIGINS = ['http://*/*', 'https://*/*'];
 const INLINE_MAX_RECORDS = 500;
 const INLINE_MAX_TOTAL_CHARS = 60000;
+const INLINE_VISIBLE_BATCH_MAX_CHARS = 2000;
 const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
 const INLINE_LOG_LIMIT = 20;
@@ -450,6 +451,24 @@ function normalizeTextNodeRecords(records) {
   });
 }
 
+function getVisibleInlineBatchMaxChars() {
+  return INLINE_VISIBLE_BATCH_MAX_CHARS;
+}
+
+function normalizeVisibleTextBatchRecords(records) {
+  const normalized = normalizeTextNodeRecords(records);
+  const totalChars = normalized.reduce(
+    (sum, record) => sum + String(record.text || '').length,
+    0
+  );
+  if (totalChars > INLINE_VISIBLE_BATCH_MAX_CHARS) {
+    throw new Error(
+      `Visible inline translation batch is too large (${totalChars}/${INLINE_VISIBLE_BATCH_MAX_CHARS} characters)`
+    );
+  }
+  return normalized;
+}
+
 function assertTextRecordBudget(records) {
   if (records.length > INLINE_MAX_RECORDS) {
     throw new Error(`Too many text nodes for inline translation (${records.length}/${INLINE_MAX_RECORDS})`);
@@ -636,6 +655,63 @@ async function translateTextNodeRecords(records, context = {}) {
   }
 }
 
+async function translateVisibleTextBatch(records) {
+  const startedAtMs = Date.now();
+  const logEntry = createInlineTranslationLogEntry(startedAtMs);
+  let completed = false;
+
+  try {
+    const normalized = normalizeVisibleTextBatchRecords(records);
+    Object.assign(logEntry, getTextRecordStats(normalized));
+    logEntry.chunkCount = normalized.length ? 1 : 0;
+    logEntry.chunkMaxChars = INLINE_VISIBLE_BATCH_MAX_CHARS;
+    logEntry.chunks = normalized.length
+      ? [getTextRecordChunkStats(normalized, 1)]
+      : [];
+
+    if (!normalized.length) {
+      completed = true;
+      return [];
+    }
+
+    const settings = await getSettings();
+    logEntry.model = settings.model;
+    if (!settings.apiKey) {
+      throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+    }
+
+    const chunkStartedAtMs = Date.now();
+    const output = await openaiTranslateChunk({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      instructions: buildTextNodeInstructions(settings),
+      input: JSON.stringify({ records: normalized }),
+      textFormat: buildTextNodeResponseFormat(),
+    });
+
+    const translations = parseAndValidateTextNodeTranslations(output, normalized);
+    if (logEntry.chunks[0]) {
+      logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;
+      logEntry.chunks[0].ok = true;
+    }
+    completed = true;
+    return translations;
+  } catch (error) {
+    logEntry.error = sanitizeLogError(error);
+    if (logEntry.chunks[0]) {
+      logEntry.chunks[0].ok = false;
+      logEntry.chunks[0].error = sanitizeLogError(error);
+    }
+    throw error;
+  } finally {
+    const finishedAtMs = Date.now();
+    logEntry.status = completed ? 'done' : 'error';
+    logEntry.finishedAt = new Date(finishedAtMs).toISOString();
+    logEntry.durationMs = finishedAtMs - startedAtMs;
+    await appendInlineTranslationLog(logEntry);
+  }
+}
+
 async function hasInlineAutoShowPermission() {
   if (!chrome.permissions?.contains) return false;
   return chrome.permissions.contains({ origins: INLINE_ORIGINS });
@@ -803,6 +879,11 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           sendResponse({ ok: true, translations });
           return;
         }
+        if (msg?.type === 'TRANSLATE_VISIBLE_TEXT_BATCH') {
+          const translations = await translateVisibleTextBatch(msg.records || []);
+          sendResponse({ ok: true, translations });
+          return;
+        }
         if (msg?.type === 'GET_SETTINGS') {
           const settings = await getSettings();
           settings.apiKey = settings.apiKey ? '***' : '';
@@ -838,6 +919,8 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineTranslationConcurrency,
     getInlineTranslationLogStorageKey,
     collectInlineTranslationLogsFromStorage,
+    getVisibleInlineBatchMaxChars,
+    normalizeVisibleTextBatchRecords,
     splitTextRecordsIntoChunks,
     parseAndValidateTextNodeTranslations,
     assertTextRecordBudget,
