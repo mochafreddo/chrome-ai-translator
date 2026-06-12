@@ -84,4 +84,45 @@ exports.tests = [
       );
     },
   },
+  {
+    name: 'requires closed shadow UI isolation',
+    fn() {
+      assert.equal(helpers.getInlineShadowMode(), 'closed');
+      assert.match(helpers.getInlineHostStyleText(), /all: initial !important/);
+      assert.match(
+        helpers.getInlineHostStyleText(),
+        /position: fixed !important/
+      );
+      assert.match(
+        helpers.getInlineHostStyleText(),
+        /pointer-events: auto !important/
+      );
+    },
+  },
+  {
+    name: 'invalidates stale inline translation operations',
+    fn() {
+      const state = {
+        status: 'original',
+        records: [],
+        operationId: 0,
+      };
+
+      const first = helpers.beginInlineTranslationOperation(state, [
+        { id: 'n1', node: null, text: 'First text.' },
+      ]);
+      const second = helpers.beginInlineTranslationOperation(state, [
+        { id: 'n1', node: null, text: 'Second text.' },
+      ]);
+
+      assert.equal(helpers.isCurrentInlineOperation(state, first.operationId), false);
+      assert.equal(helpers.isCurrentInlineOperation(state, second.operationId), true);
+
+      helpers.cancelInlineTranslationOperation(state, second.operationId);
+
+      assert.equal(state.status, 'original');
+      assert.deepEqual(state.records, []);
+      assert.equal(helpers.isCurrentInlineOperation(state, second.operationId), false);
+    },
+  },
 ];

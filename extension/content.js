@@ -20,8 +20,10 @@ var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   records: [],
   menuOpen: false,
   message: '',
+  operationId: 0,
 };
 globalThis.__chromeAiTranslatorInlineState = inlineState;
+var inlineUiRoot = globalThis.__chromeAiTranslatorInlineUiRoot || null;
 
 function isInlineTranslationExcludedTag(tagName) {
   return INLINE_EXCLUDED_TAGS.has(String(tagName || '').toUpperCase());
@@ -68,6 +70,52 @@ function isTrustedInlineUiEvent(event) {
 function resetInlineTranslationAfterFailure(state = inlineState) {
   state.status = 'original';
   state.records = [];
+}
+
+function beginInlineTranslationOperation(state, records) {
+  const operationId = (Number(state.operationId) || 0) + 1;
+  state.operationId = operationId;
+  state.status = 'translating';
+  state.records = records.map((record) => ({
+    id: record.id,
+    node: record.node,
+    original: record.text,
+    translation: null,
+  }));
+  return { operationId, records: state.records };
+}
+
+function isCurrentInlineOperation(state, operationId) {
+  return state.status === 'translating' && state.operationId === operationId;
+}
+
+function cancelInlineTranslationOperation(state = inlineState, operationId = state.operationId) {
+  if (state.operationId !== operationId) return false;
+  state.status = 'original';
+  state.records = [];
+  return true;
+}
+
+function getInlineShadowMode() {
+  return 'closed';
+}
+
+function getInlineHostStyleText() {
+  return [
+    'all: initial !important',
+    'position: fixed !important',
+    'right: 18px !important',
+    'bottom: 18px !important',
+    'z-index: 2147483647 !important',
+    'display: block !important',
+    'width: auto !important',
+    'height: auto !important',
+    'margin: 0 !important',
+    'padding: 0 !important',
+    'border: 0 !important',
+    'background: transparent !important',
+    'pointer-events: auto !important',
+  ].join('; ');
 }
 
 function getInlineTextRecordBudgetError(records) {
@@ -296,31 +344,26 @@ function setInlineMessage(message) {
 
 function ensureInlineTranslatorUi() {
   let host = document.getElementById(INLINE_TRANSLATOR_ID);
-  if (host) return host;
+  if (host && inlineUiRoot) return host;
+  if (host) host.remove();
 
   host = document.createElement('div');
   host.id = INLINE_TRANSLATOR_ID;
-  host.innerHTML = `
-    <button type="button" data-role="toggle">Translate</button>
-    <div data-role="menu" hidden>
-      <button type="button" data-action="translate">Page in Korean</button>
-      <button type="button" data-action="restore">Original text</button>
-      <div data-role="message"></div>
-    </div>
-  `;
+  host.style.cssText = getInlineHostStyleText();
   (document.body || document.documentElement).appendChild(host);
 
-  const style = document.createElement('style');
-  style.textContent = `
-    #${INLINE_TRANSLATOR_ID} {
-      position: fixed;
-      right: 18px;
-      bottom: 18px;
-      z-index: 2147483647;
+  inlineUiRoot = host.attachShadow({ mode: getInlineShadowMode() });
+  globalThis.__chromeAiTranslatorInlineUiRoot = inlineUiRoot;
+  inlineUiRoot.innerHTML = `
+    <style>
+    :host {
+      all: initial;
+    }
+    [data-role="container"] {
       font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: #111827;
     }
-    #${INLINE_TRANSLATOR_ID} button {
+    button {
       border: 1px solid #d1d5db;
       border-radius: 6px;
       background: #fff;
@@ -329,7 +372,7 @@ function ensureInlineTranslatorUi() {
       padding: 7px 10px;
       box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16);
     }
-    #${INLINE_TRANSLATOR_ID} [data-role="menu"] {
+    [data-role="menu"] {
       display: grid;
       gap: 6px;
       margin-bottom: 8px;
@@ -339,23 +382,31 @@ function ensureInlineTranslatorUi() {
       background: #fff;
       box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
     }
-    #${INLINE_TRANSLATOR_ID} [hidden] {
+    [hidden] {
       display: none !important;
     }
-    #${INLINE_TRANSLATOR_ID} [data-role="message"] {
+    [data-role="message"] {
       max-width: 220px;
       color: #b91c1c;
       font-size: 12px;
     }
+    </style>
+    <div data-role="container">
+      <button type="button" data-role="toggle">Translate</button>
+      <div data-role="menu" hidden>
+        <button type="button" data-action="translate">Page in Korean</button>
+        <button type="button" data-action="restore">Original text</button>
+        <div data-role="message"></div>
+      </div>
+    </div>
   `;
-  host.appendChild(style);
 
-  host.querySelector('[data-role="toggle"]').addEventListener('click', (event) => {
+  inlineUiRoot.querySelector('[data-role="toggle"]').addEventListener('click', (event) => {
     if (!isTrustedInlineUiEvent(event)) return;
     inlineState.menuOpen = !inlineState.menuOpen;
     updateInlineTranslatorUi();
   });
-  host
+  inlineUiRoot
     .querySelector('[data-action="translate"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
@@ -363,7 +414,7 @@ function ensureInlineTranslatorUi() {
         setInlineMessage(error?.message || String(error))
       );
     });
-  host
+  inlineUiRoot
     .querySelector('[data-action="restore"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
@@ -375,11 +426,10 @@ function ensureInlineTranslatorUi() {
 }
 
 function updateInlineTranslatorUi() {
-  const host = document.getElementById(INLINE_TRANSLATOR_ID);
-  if (!host) return;
-  const toggle = host.querySelector('[data-role="toggle"]');
-  const menu = host.querySelector('[data-role="menu"]');
-  const message = host.querySelector('[data-role="message"]');
+  if (!inlineUiRoot) return;
+  const toggle = inlineUiRoot.querySelector('[data-role="toggle"]');
+  const menu = inlineUiRoot.querySelector('[data-role="menu"]');
+  const message = inlineUiRoot.querySelector('[data-role="message"]');
   toggle.textContent =
     inlineState.status === 'translating'
       ? 'Translating...'
@@ -405,13 +455,7 @@ async function translateInlinePage() {
   const budgetError = getInlineTextRecordBudgetError(records);
   if (budgetError) throw new Error(budgetError);
 
-  inlineState.status = 'translating';
-  inlineState.records = records.map((record) => ({
-    id: record.id,
-    node: record.node,
-    original: record.text,
-    translation: null,
-  }));
+  const operation = beginInlineTranslationOperation(inlineState, records);
   setInlineMessage('');
   updateInlineTranslatorUi();
 
@@ -426,11 +470,12 @@ async function translateInlinePage() {
     if (!Array.isArray(resp.translations)) {
       throw new Error('Inline translation response was incomplete.');
     }
+    if (!isCurrentInlineOperation(inlineState, operation.operationId)) return;
 
     const byId = new Map(
       resp.translations.map((item) => [item.id, item.translation])
     );
-    for (const record of inlineState.records) {
+    for (const record of operation.records) {
       const translation = byId.get(record.id);
       if (typeof translation !== 'string') {
         throw new Error('Inline translation response was incomplete.');
@@ -438,16 +483,21 @@ async function translateInlinePage() {
       record.translation = translation;
     }
   } catch (error) {
-    resetInlineTranslationAfterFailure();
-    updateInlineTranslatorUi();
+    if (isCurrentInlineOperation(inlineState, operation.operationId)) {
+      resetInlineTranslationAfterFailure();
+      updateInlineTranslatorUi();
+    }
     throw error;
   }
 
-  for (const record of inlineState.records) {
+  if (!isCurrentInlineOperation(inlineState, operation.operationId)) return;
+
+  for (const record of operation.records) {
     if (record.node?.isConnected) {
       record.node.nodeValue = record.translation;
     }
   }
+  inlineState.records = operation.records;
   inlineState.status = 'translated';
   updateInlineTranslatorUi();
 }
@@ -458,7 +508,7 @@ function restoreInlineOriginal() {
       record.node.nodeValue = record.original;
     }
   }
-  inlineState.status = 'original';
+  cancelInlineTranslationOperation(inlineState);
   setInlineMessage('');
   updateInlineTranslatorUi();
 }
@@ -527,5 +577,10 @@ if (typeof module !== 'undefined' && module.exports) {
     isTrustedInlineUiEvent,
     resetInlineTranslationAfterFailure,
     getInlineTextRecordBudgetError,
+    beginInlineTranslationOperation,
+    isCurrentInlineOperation,
+    cancelInlineTranslationOperation,
+    getInlineShadowMode,
+    getInlineHostStyleText,
   };
 }
