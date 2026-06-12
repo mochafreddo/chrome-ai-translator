@@ -413,6 +413,45 @@ exports.tests = [
     },
   },
   {
+    name: 'marks only current translating viewport records as failed',
+    fn() {
+      const records = [
+        { id: 'v1', state: 'translating', operationId: 12 },
+        { id: 'v2', state: 'queued', operationId: 12 },
+        { id: 'v3', state: 'translated', operationId: 12 },
+        { id: 'v4', state: 'translating', operationId: 11 },
+        { id: 'v5', state: 'failed', operationId: 12 },
+        { id: 'v6', state: 'stale', operationId: 12 },
+      ];
+
+      helpers.markInlineViewportBatchFailed(records, 12);
+
+      assert.deepEqual(
+        records.map((record) => record.state),
+        ['failed', 'queued', 'translated', 'translating', 'failed', 'stale']
+      );
+    },
+  },
+  {
+    name: 'counts translated pending and failed viewport records',
+    fn() {
+      const counts = helpers.getInlineViewportStatusCounts([
+        { state: 'translated' },
+        { state: 'queued' },
+        { state: 'translating' },
+        { state: 'failed' },
+        { state: 'stale' },
+        { state: 'original' },
+      ]);
+
+      assert.deepEqual(counts, {
+        translated: 1,
+        pending: 2,
+        failed: 2,
+      });
+    },
+  },
+  {
     name: 'formats viewport active status counts',
     fn() {
       const message = helpers.formatInlineViewportStatusMessage({
