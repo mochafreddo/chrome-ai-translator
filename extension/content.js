@@ -73,6 +73,7 @@ function stopInlineViewportTranslation(state = inlineState) {
   const store = state.viewport;
   if (!store) return state.operationId;
 
+  addInlineRestorableRecords(state, store.records);
   store.stopped = true;
   store.queue = [];
   if (store.scanTimer) {
@@ -91,6 +92,47 @@ function canRestartInlineViewportTranslation(state = inlineState) {
   return state.status === 'stopped' || Boolean(state.viewport?.stopped);
 }
 
+function hasInlineSettingsApiKey(settings) {
+  return Boolean(settings?.apiKey);
+}
+
+function ensureInlineRestorableRecords(state = inlineState) {
+  if (!Array.isArray(state.restorableRecords)) {
+    state.restorableRecords = [];
+  }
+  return state.restorableRecords;
+}
+
+function addInlineRestorableRecords(state = inlineState, records = []) {
+  const restorableRecords = ensureInlineRestorableRecords(state);
+  const seen = new Set(restorableRecords);
+  for (const record of records || []) {
+    if (record?.state === 'translated' && !seen.has(record)) {
+      restorableRecords.push(record);
+      seen.add(record);
+    }
+  }
+  return restorableRecords;
+}
+
+function getInlineViewportRestoreRecords(state = inlineState) {
+  const records = [];
+  const seen = new Set();
+  for (const record of state.restorableRecords || []) {
+    if (record && !seen.has(record)) {
+      records.push(record);
+      seen.add(record);
+    }
+  }
+  for (const record of state.viewport?.records || []) {
+    if (record && !seen.has(record)) {
+      records.push(record);
+      seen.add(record);
+    }
+  }
+  return records;
+}
+
 var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   status: 'original',
   records: [],
@@ -98,11 +140,13 @@ var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   message: '',
   operationId: 0,
   authorizedUntil: 0,
+  restorableRecords: [],
 };
 globalThis.__chromeAiTranslatorInlineState = inlineState;
 if (!inlineState.viewport) {
   inlineState.viewport = createInlineViewportStore(inlineState.operationId);
 }
+ensureInlineRestorableRecords(inlineState);
 var inlineUiRoot = globalThis.__chromeAiTranslatorInlineUiRoot || null;
 
 function isInlineTranslationExcludedTag(tagName) {
@@ -351,11 +395,14 @@ function getInlineViewportStatusCounts(records) {
   return counts;
 }
 
-function formatInlineViewportStatusMessage(counts) {
+function formatInlineViewportStatusMessage(counts, status = 'active') {
   const safe = counts || {};
+  const stopped = status === 'stopped';
   return [
-    'Visible translation on',
-    `Translated ${Number(safe.translated) || 0} · Pending ${Number(safe.pending) || 0} · Failed ${Number(safe.failed) || 0}`,
+    stopped ? 'Visible translation stopped' : 'Visible translation on',
+    `Translated ${Number(safe.translated) || 0} · Pending ${
+      stopped ? 0 : Number(safe.pending) || 0
+    } · Failed ${Number(safe.failed) || 0}`,
   ].join('\n');
 }
 
@@ -368,15 +415,22 @@ function restoreInlineViewportRecords(state = inlineState) {
     clearTimeout(viewport.scanTimer);
   }
 
-  for (const record of viewport?.records || []) {
-    if (record.state === 'translated' && record.node?.isConnected) {
+  const restoredNodes = new Set();
+  for (const record of getInlineViewportRestoreRecords(state)) {
+    if (
+      record.state === 'translated' &&
+      record.node?.isConnected &&
+      !restoredNodes.has(record.node)
+    ) {
       record.node.nodeValue = record.original;
+      restoredNodes.add(record.node);
     }
     record.state = 'original';
   }
 
   state.status = 'original';
   state.records = [];
+  state.restorableRecords = [];
   state.operationId = (Number(state.operationId) || 0) + 1;
   state.viewport = createInlineViewportStore(state.operationId);
 }
@@ -710,7 +764,10 @@ function setInlineMessage(message) {
 
 function updateInlineViewportMessage() {
   const counts = getInlineViewportStatusCounts(inlineState.viewport?.records || []);
-  inlineState.message = formatInlineViewportStatusMessage(counts);
+  inlineState.message = formatInlineViewportStatusMessage(
+    counts,
+    inlineState.status
+  );
   updateInlineTranslatorUi();
 }
 
@@ -903,6 +960,7 @@ async function drainInlineViewportQueue() {
           return;
         }
         applyInlineViewportBatchTranslations(batch, resp.translations, operationId);
+        addInlineRestorableRecords(inlineState, batch);
       })
       .catch(() => {
         if (isInlineViewportOperationCurrent(inlineState, store, operationId)) {
@@ -937,11 +995,24 @@ async function translateInlinePage() {
     );
     return;
   }
+  const settingsResponse = await chrome.runtime.sendMessage({
+    type: 'GET_SETTINGS',
+  });
+  if (!settingsResponse?.ok) {
+    throw new Error(
+      settingsResponse?.error?.message || 'Unable to load extension settings.'
+    );
+  }
+  if (!hasInlineSettingsApiKey(settingsResponse.settings)) {
+    setInlineMessage('Open Options and paste your OpenAI API key.');
+    return;
+  }
 
   const root = pickArticleRoot();
   if (!root) throw new Error('No article content found.');
 
   detachInlineViewportWatchers();
+  addInlineRestorableRecords(inlineState, inlineState.viewport?.records || []);
   inlineState.operationId = (Number(inlineState.operationId) || 0) + 1;
   inlineState.status = 'active';
   inlineState.viewport = createInlineViewportStore(inlineState.operationId);
@@ -1051,6 +1122,7 @@ if (typeof module !== 'undefined' && module.exports) {
     isInlineViewportOperationCurrent,
     stopInlineViewportTranslation,
     canRestartInlineViewportTranslation,
+    hasInlineSettingsApiKey,
     createInlineViewportStore,
     queueInlineViewportRecord,
     takeInlineViewportBatch,

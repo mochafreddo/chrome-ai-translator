@@ -175,6 +175,15 @@ exports.tests = [
     },
   },
   {
+    name: 'detects masked settings API key for inline preflight',
+    fn() {
+      assert.equal(helpers.hasInlineSettingsApiKey({ apiKey: '***' }), true);
+      assert.equal(helpers.hasInlineSettingsApiKey({ apiKey: '' }), false);
+      assert.equal(helpers.hasInlineSettingsApiKey({}), false);
+      assert.equal(helpers.hasInlineSettingsApiKey(null), false);
+    },
+  },
+  {
     name: 'does not overwrite text nodes changed during translation',
     fn() {
       const stableNode = { isConnected: true, nodeValue: 'Hello world.' };
@@ -463,6 +472,52 @@ exports.tests = [
     },
   },
   {
+    name: 'restores stopped-session translations after viewport restart',
+    fn() {
+      const firstStore = helpers.createInlineViewportStore(4);
+      const firstNode = { isConnected: true, nodeValue: '안녕하세요.' };
+      firstStore.records.push({
+        id: 'v1',
+        node: firstNode,
+        original: 'Hello world.',
+        translation: '안녕하세요.',
+        state: 'translated',
+        operationId: 4,
+      });
+      const state = {
+        status: 'active',
+        operationId: 4,
+        viewport: firstStore,
+        records: firstStore.records,
+        restorableRecords: [],
+      };
+
+      helpers.stopInlineViewportTranslation(state);
+
+      const secondStore = helpers.createInlineViewportStore(6);
+      const secondNode = { isConnected: true, nodeValue: '두 번째입니다.' };
+      secondStore.records.push({
+        id: 'v1',
+        node: secondNode,
+        original: 'Second visible text.',
+        translation: '두 번째입니다.',
+        state: 'translated',
+        operationId: 6,
+      });
+      state.status = 'active';
+      state.operationId = 6;
+      state.viewport = secondStore;
+      state.records = secondStore.records;
+
+      helpers.restoreInlineViewportRecords(state);
+
+      assert.equal(firstNode.nodeValue, 'Hello world.');
+      assert.equal(secondNode.nodeValue, 'Second visible text.');
+      assert.deepEqual(state.restorableRecords, []);
+      assert.equal(state.status, 'original');
+    },
+  },
+  {
     name: 'rejects stale viewport operation after stop or replacement',
     fn() {
       const store = helpers.createInlineViewportStore(9);
@@ -670,6 +725,24 @@ exports.tests = [
       assert.equal(
         message,
         'Visible translation on\nTranslated 18 · Pending 4 · Failed 1'
+      );
+    },
+  },
+  {
+    name: 'formats stopped viewport status without pending work',
+    fn() {
+      const message = helpers.formatInlineViewportStatusMessage(
+        {
+          translated: 3,
+          pending: 2,
+          failed: 1,
+        },
+        'stopped'
+      );
+
+      assert.equal(
+        message,
+        'Visible translation stopped\nTranslated 3 · Pending 0 · Failed 1'
       );
     },
   },
