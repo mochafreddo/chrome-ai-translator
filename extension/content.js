@@ -115,6 +115,28 @@ function addInlineRestorableRecords(state = inlineState, records = []) {
   return restorableRecords;
 }
 
+function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
+  if (!store?.byNode) return store;
+  const seenRecords = new Set(store.records);
+  for (const record of records || []) {
+    if (record?.state !== 'translated' || !record.node?.isConnected) continue;
+    if (
+      typeof record.translation === 'string' &&
+      record.node.nodeValue !== record.translation
+    ) {
+      continue;
+    }
+    if (!store.byNode.get(record.node)) {
+      store.byNode.set(record.node, record);
+    }
+    if (!seenRecords.has(record)) {
+      store.records.push(record);
+      seenRecords.add(record);
+    }
+  }
+  return store;
+}
+
 function getInlineViewportRestoreRecords(state = inlineState) {
   const records = [];
   const seen = new Set();
@@ -422,6 +444,13 @@ function restoreInlineViewportRecords(state = inlineState) {
       record.node?.isConnected &&
       !restoredNodes.has(record.node)
     ) {
+      if (
+        typeof record.translation !== 'string' ||
+        record.node.nodeValue !== record.translation
+      ) {
+        record.state = 'stale';
+        continue;
+      }
       record.node.nodeValue = record.original;
       restoredNodes.add(record.node);
     }
@@ -1017,6 +1046,10 @@ async function translateInlinePage() {
   inlineState.status = 'active';
   inlineState.viewport = createInlineViewportStore(inlineState.operationId);
   inlineState.viewport.root = root;
+  seedInlineViewportStoreWithRestorableRecords(
+    inlineState.viewport,
+    inlineState.restorableRecords
+  );
   inlineState.records = inlineState.viewport.records;
 
   attachInlineViewportWatchers(root);
@@ -1123,6 +1156,7 @@ if (typeof module !== 'undefined' && module.exports) {
     stopInlineViewportTranslation,
     canRestartInlineViewportTranslation,
     hasInlineSettingsApiKey,
+    seedInlineViewportStoreWithRestorableRecords,
     createInlineViewportStore,
     queueInlineViewportRecord,
     takeInlineViewportBatch,

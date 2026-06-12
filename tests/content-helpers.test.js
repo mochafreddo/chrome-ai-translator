@@ -518,6 +518,52 @@ exports.tests = [
     },
   },
   {
+    name: 'does not requeue stopped-session translated nodes after restart',
+    fn() {
+      const firstStore = helpers.createInlineViewportStore(4);
+      const node = {
+        isConnected: true,
+        nodeValue: '번역된 OpenAI API 문장입니다.',
+      };
+      firstStore.records.push({
+        id: 'v1',
+        node,
+        original: 'This is an OpenAI API sentence.',
+        translation: '번역된 OpenAI API 문장입니다.',
+        state: 'translated',
+        operationId: 4,
+      });
+      const state = {
+        status: 'active',
+        operationId: 4,
+        viewport: firstStore,
+        records: firstStore.records,
+        restorableRecords: [],
+      };
+
+      helpers.stopInlineViewportTranslation(state);
+      const secondStore = helpers.createInlineViewportStore(6);
+      helpers.seedInlineViewportStoreWithRestorableRecords(
+        secondStore,
+        state.restorableRecords
+      );
+
+      const queued = helpers.queueInlineViewportRecord(
+        secondStore,
+        node,
+        node.nodeValue
+      );
+
+      assert.equal(queued, null);
+      assert.equal(secondStore.queue.length, 0);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
+        translated: 1,
+        pending: 0,
+        failed: 0,
+      });
+    },
+  },
+  {
     name: 'rejects stale viewport operation after stop or replacement',
     fn() {
       const store = helpers.createInlineViewportStore(9);
@@ -771,6 +817,33 @@ exports.tests = [
       assert.equal(state.status, 'original');
       assert.equal(state.operationId, 9);
       assert.equal(record.state, 'original');
+    },
+  },
+  {
+    name: 'does not restore viewport records changed after translation',
+    fn() {
+      const state = {
+        status: 'active',
+        operationId: 8,
+        viewport: helpers.createInlineViewportStore(8),
+      };
+      const node = { isConnected: true, nodeValue: 'Live site update.' };
+      const record = {
+        id: 'v1',
+        node,
+        original: 'Hello world.',
+        translation: '안녕하세요.',
+        state: 'translated',
+        operationId: 8,
+      };
+      state.viewport.records.push(record);
+
+      helpers.restoreInlineViewportRecords(state);
+
+      assert.equal(node.nodeValue, 'Live site update.');
+      assert.equal(record.state, 'stale');
+      assert.equal(state.status, 'original');
+      assert.equal(state.operationId, 9);
     },
   },
 ];
