@@ -85,6 +85,65 @@ exports.tests = [
     },
   },
   {
+    name: 'requires extension authorization for inline translation',
+    fn() {
+      const state = { authorizedUntil: 0 };
+
+      assert.equal(
+        helpers.hasInlineTranslationAuthorization(state, 1000),
+        false
+      );
+
+      helpers.authorizeInlineTranslation(state, 1000);
+
+      assert.equal(
+        helpers.hasInlineTranslationAuthorization(state, 1000),
+        true
+      );
+      assert.equal(
+        helpers.hasInlineTranslationAuthorization(state, 1000 + 5 * 60 * 1000),
+        false
+      );
+    },
+  },
+  {
+    name: 'does not overwrite text nodes changed during translation',
+    fn() {
+      const stableNode = { isConnected: true, nodeValue: 'Hello world.' };
+      const changedNode = { isConnected: true, nodeValue: 'Updated article.' };
+      const disconnectedNode = { isConnected: false, nodeValue: 'Detached.' };
+      const result = helpers.applyInlineTranslationRecords([
+        {
+          id: 'n1',
+          node: stableNode,
+          original: 'Hello world.',
+          translation: 'Hello translated.',
+        },
+        {
+          id: 'n2',
+          node: changedNode,
+          original: 'Read the article.',
+          translation: 'Read translated.',
+        },
+        {
+          id: 'n3',
+          node: disconnectedNode,
+          original: 'Detached.',
+          translation: 'Detached translated.',
+        },
+      ]);
+
+      assert.equal(stableNode.nodeValue, 'Hello translated.');
+      assert.equal(changedNode.nodeValue, 'Updated article.');
+      assert.equal(disconnectedNode.nodeValue, 'Detached.');
+      assert.deepEqual(
+        result.applied.map((record) => record.id),
+        ['n1']
+      );
+      assert.equal(result.skipped, 1);
+    },
+  },
+  {
     name: 'requires closed shadow UI isolation',
     fn() {
       assert.equal(helpers.getInlineShadowMode(), 'closed');

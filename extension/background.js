@@ -29,6 +29,13 @@ function mergeSettings(partial) {
   return { ...DEFAULT_SETTINGS, ...(partial || {}) };
 }
 
+function mergeSettingsWithExisting(existing, partial) {
+  return mergeSettings({
+    ...(existing || {}),
+    ...(partial || {}),
+  });
+}
+
 async function getSettings() {
   const stored = await chrome.storage.local.get(['settings', 'openai_api_key']);
   // Backward/compat: allow apiKey in openai_api_key
@@ -92,9 +99,12 @@ async function ensureContentScript(tabId) {
   }
 }
 
-async function showInlineTranslator(tabId) {
+async function showInlineTranslator(tabId, options = {}) {
   await ensureContentScript(tabId);
-  await chrome.tabs.sendMessage(tabId, { type: 'SHOW_INLINE_TRANSLATOR' });
+  await chrome.tabs.sendMessage(tabId, {
+    type: 'SHOW_INLINE_TRANSLATOR',
+    allowInlineTranslation: Boolean(options.allowInlineTranslation),
+  });
 }
 
 async function extractArticle(tabId) {
@@ -479,7 +489,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.action.onClicked.addListener(async (tab) => {
     if (!tab?.id) return;
     try {
-      await showInlineTranslator(tab.id);
+      await showInlineTranslator(tab.id, { allowInlineTranslation: true });
     } catch {}
     await translateTab(tab.id);
   });
@@ -490,7 +500,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
     const tabId = tabs?.[0]?.id;
     if (!tabId) return;
     try {
-      await showInlineTranslator(tabId);
+      await showInlineTranslator(tabId, { allowInlineTranslation: true });
     } catch {}
     await translateTab(tabId);
   });
@@ -526,7 +536,8 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           return;
         }
         if (msg?.type === 'SAVE_SETTINGS') {
-          const next = mergeSettings(msg.settings || {});
+          const current = await getSettings();
+          const next = mergeSettingsWithExisting(current, msg.settings || {});
           await saveSettings(next);
           await syncInlineAutoShowRegistration(next);
           sendResponse({ ok: true });
@@ -546,6 +557,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    mergeSettingsWithExisting,
     splitTextRecordsIntoChunks,
     parseAndValidateTextNodeTranslations,
     assertTextRecordBudget,

@@ -91,7 +91,14 @@ async function clearKey() {
   setTimeout(() => setStatus(''), 1200);
 }
 
-document.getElementById('btnSave').addEventListener('click', save);
+function handleSaveClick() {
+  save().catch((error) => {
+    setError(error?.message || String(error));
+    setStatus('');
+  });
+}
+
+document.getElementById('btnSave').addEventListener('click', handleSaveClick);
 document.getElementById('btnClear').addEventListener('click', clearKey);
 
 load().catch((e) => setError(e?.message || String(e)));

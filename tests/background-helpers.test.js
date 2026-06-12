@@ -4,6 +4,36 @@ const helpers = require('../extension/background.js');
 exports.name = 'background helpers';
 exports.tests = [
   {
+    name: 'merges partial settings without dropping existing values',
+    fn() {
+      const next = helpers.mergeSettingsWithExisting(
+        {
+          apiKey: 'sk-existing',
+          chunkMaxChars: 9000,
+          inlineAutoShow: true,
+          targetLanguage: 'Korean',
+          tone: 'technical',
+          model: 'gpt-5-mini',
+          viewMode: 'translation',
+        },
+        {
+          targetLanguage: 'Japanese',
+          tone: 'formal',
+          model: 'gpt-5',
+          viewMode: 'bilingual',
+        }
+      );
+
+      assert.equal(next.apiKey, 'sk-existing');
+      assert.equal(next.chunkMaxChars, 9000);
+      assert.equal(next.inlineAutoShow, true);
+      assert.equal(next.targetLanguage, 'Japanese');
+      assert.equal(next.tone, 'formal');
+      assert.equal(next.model, 'gpt-5');
+      assert.equal(next.viewMode, 'bilingual');
+    },
+  },
+  {
     name: 'splits text records without losing IDs',
     fn() {
       const chunks = helpers.splitTextRecordsIntoChunks(

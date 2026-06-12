@@ -3,6 +3,7 @@
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
 var INLINE_MAX_TOTAL_CHARS = 60000;
+var INLINE_TRANSLATION_AUTH_MS = 5 * 60 * 1000;
 var INLINE_EXCLUDED_TAGS = new Set([
   'SCRIPT',
   'STYLE',
@@ -21,6 +22,7 @@ var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   menuOpen: false,
   message: '',
   operationId: 0,
+  authorizedUntil: 0,
 };
 globalThis.__chromeAiTranslatorInlineState = inlineState;
 var inlineUiRoot = globalThis.__chromeAiTranslatorInlineUiRoot || null;
@@ -132,6 +134,31 @@ function getInlineTextRecordBudgetError(records) {
   }
 
   return '';
+}
+
+function authorizeInlineTranslation(state = inlineState, now = Date.now()) {
+  state.authorizedUntil = now + INLINE_TRANSLATION_AUTH_MS;
+}
+
+function hasInlineTranslationAuthorization(state = inlineState, now = Date.now()) {
+  return Number(state.authorizedUntil) > now;
+}
+
+function applyInlineTranslationRecords(records) {
+  const applied = [];
+  let skipped = 0;
+
+  for (const record of records) {
+    if (!record.node?.isConnected) continue;
+    if (record.node.nodeValue !== record.original) {
+      skipped += 1;
+      continue;
+    }
+    record.node.nodeValue = record.translation;
+    applied.push(record);
+  }
+
+  return { applied, skipped };
 }
 
 function cleanupRoot(root) {
@@ -446,6 +473,12 @@ async function translateInlinePage() {
     setInlineMessage('');
     return;
   }
+  if (!hasInlineTranslationAuthorization()) {
+    setInlineMessage(
+      'Use the extension toolbar or shortcut first to authorize inline translation.'
+    );
+    return;
+  }
 
   const root = pickArticleRoot();
   if (!root) throw new Error('No article content found.');
@@ -492,13 +525,19 @@ async function translateInlinePage() {
 
   if (!isCurrentInlineOperation(inlineState, operation.operationId)) return;
 
-  for (const record of operation.records) {
-    if (record.node?.isConnected) {
-      record.node.nodeValue = record.translation;
-    }
+  const result = applyInlineTranslationRecords(operation.records);
+  if (!result.applied.length) {
+    inlineState.records = [];
+    inlineState.status = 'original';
+    inlineState.message = 'Page text changed before translation could be applied.';
+    updateInlineTranslatorUi();
+    return;
   }
-  inlineState.records = operation.records;
+  inlineState.records = result.applied;
   inlineState.status = 'translated';
+  inlineState.message = result.skipped
+    ? `Skipped ${result.skipped} changed text node(s).`
+    : '';
   updateInlineTranslatorUi();
 }
 
@@ -554,6 +593,9 @@ if (
 
     if (msg?.type === 'SHOW_INLINE_TRANSLATOR') {
       try {
+        if (msg.allowInlineTranslation) {
+          authorizeInlineTranslation();
+        }
         ensureInlineTranslatorUi();
         sendResponse({ ok: true });
       } catch (e) {
@@ -577,6 +619,9 @@ if (typeof module !== 'undefined' && module.exports) {
     isTrustedInlineUiEvent,
     resetInlineTranslationAfterFailure,
     getInlineTextRecordBudgetError,
+    authorizeInlineTranslation,
+    hasInlineTranslationAuthorization,
+    applyInlineTranslationRecords,
     beginInlineTranslationOperation,
     isCurrentInlineOperation,
     cancelInlineTranslationOperation,
