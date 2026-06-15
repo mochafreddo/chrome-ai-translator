@@ -42,7 +42,7 @@ async function loadSettings() {
 
   elTargetLanguage.value = s.targetLanguage || 'Korean';
   elTone.value = s.tone || 'technical';
-  elModel.value = s.model || 'gpt-5-mini';
+  elModel.value = s.model || 'gpt-5.4-mini';
   elViewMode.value = s.viewMode || 'translation';
 }
 
@@ -50,7 +50,7 @@ async function saveSettings() {
   const settings = {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || 'gpt-5-mini',
+    model: elModel.value.trim() || 'gpt-5.4-mini',
     viewMode: elViewMode.value,
   };
   const resp = await chrome.runtime.sendMessage({
@@ -115,7 +115,7 @@ async function translateNow() {
   const settingsOverride = {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || 'gpt-5-mini',
+    model: elModel.value.trim() || 'gpt-5.4-mini',
     viewMode: elViewMode.value,
   };
   await chrome.runtime.sendMessage({

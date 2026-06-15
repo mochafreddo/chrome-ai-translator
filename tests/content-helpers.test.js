@@ -175,6 +175,38 @@ exports.tests = [
     },
   },
   {
+    name: 'authorizes inline translation from trusted inline UI events',
+    fn() {
+      const state = { authorizedUntil: 0 };
+
+      assert.equal(
+        helpers.authorizeInlineTranslationFromUiEvent(
+          { isTrusted: false },
+          state,
+          1000
+        ),
+        false
+      );
+      assert.equal(
+        helpers.hasInlineTranslationAuthorization(state, 1000),
+        false
+      );
+
+      assert.equal(
+        helpers.authorizeInlineTranslationFromUiEvent(
+          { isTrusted: true },
+          state,
+          1000
+        ),
+        true
+      );
+      assert.equal(
+        helpers.hasInlineTranslationAuthorization(state, 1000),
+        true
+      );
+    },
+  },
+  {
     name: 'detects masked settings API key for inline preflight',
     fn() {
       assert.equal(helpers.hasInlineSettingsApiKey({ apiKey: '***' }), true);

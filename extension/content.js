@@ -519,6 +519,16 @@ function authorizeInlineTranslation(state = inlineState, now = Date.now()) {
   state.authorizedUntil = now + INLINE_TRANSLATION_AUTH_MS;
 }
 
+function authorizeInlineTranslationFromUiEvent(
+  event,
+  state = inlineState,
+  now = Date.now()
+) {
+  if (!isTrustedInlineUiEvent(event)) return false;
+  authorizeInlineTranslation(state, now);
+  return true;
+}
+
 function hasInlineTranslationAuthorization(state = inlineState, now = Date.now()) {
   return Number(state.authorizedUntil) > now;
 }
@@ -868,7 +878,7 @@ function ensureInlineTranslatorUi() {
   inlineUiRoot
     .querySelector('[data-action="translate"]')
     .addEventListener('click', (event) => {
-      if (!isTrustedInlineUiEvent(event)) return;
+      if (!authorizeInlineTranslationFromUiEvent(event)) return;
       translateInlinePage().catch((error) =>
         setInlineMessage(error?.message || String(error))
       );
@@ -1140,6 +1150,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineTextRecordBudgetError,
     formatInlineProgressMessage,
     authorizeInlineTranslation,
+    authorizeInlineTranslationFromUiEvent,
     hasInlineTranslationAuthorization,
     applyInlineTranslationRecords,
     beginInlineTranslationOperation,

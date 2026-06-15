@@ -4,6 +4,15 @@ const helpers = require('../extension/background.js');
 exports.name = 'background helpers';
 exports.tests = [
   {
+    name: 'defaults to GPT-5.4 mini with no reasoning effort',
+    fn() {
+      const settings = helpers.mergeSettingsWithExisting({}, {});
+
+      assert.equal(settings.model, 'gpt-5.4-mini');
+      assert.equal(settings.reasoningEffort, 'none');
+    },
+  },
+  {
     name: 'merges partial settings without dropping existing values',
     fn() {
       const next = helpers.mergeSettingsWithExisting(
@@ -31,6 +40,37 @@ exports.tests = [
       assert.equal(next.tone, 'formal');
       assert.equal(next.model, 'gpt-5');
       assert.equal(next.viewMode, 'bilingual');
+    },
+  },
+  {
+    name: 'sends reasoning none in Responses API requests',
+    async fn() {
+      const previousFetch = global.fetch;
+      let requestBody = null;
+
+      global.fetch = async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return {
+          ok: true,
+          async json() {
+            return { output_text: '번역 결과' };
+          },
+        };
+      };
+
+      try {
+        const output = await helpers.openaiTranslateChunk({
+          apiKey: 'sk-test',
+          model: 'gpt-5.4-mini',
+          instructions: 'Translate.',
+          input: 'Hello.',
+        });
+
+        assert.equal(output, '번역 결과');
+        assert.deepEqual(requestBody.reasoning, { effort: 'none' });
+      } finally {
+        global.fetch = previousFetch;
+      }
     },
   },
   {
@@ -135,6 +175,246 @@ exports.tests = [
         helpers.getInlineTranslationLogStorageKey('current-a'),
         'inlineTranslationLogs:current-a'
       );
+    },
+  },
+  {
+    name: 'serializes concurrent inline auto-show content script registration',
+    async fn() {
+      const previousChrome = global.chrome;
+      const registered = new Map();
+
+      global.chrome = {
+        permissions: {
+          async contains() {
+            return true;
+          },
+        },
+        scripting: {
+          async unregisterContentScripts({ ids }) {
+            for (const id of ids || []) {
+              registered.delete(id);
+            }
+          },
+          async registerContentScripts(scripts) {
+            await Promise.resolve();
+            for (const script of scripts || []) {
+              if (registered.has(script.id)) {
+                throw new Error(`Duplicate script ID '${script.id}'`);
+              }
+            }
+            for (const script of scripts || []) {
+              registered.set(script.id, { ...script });
+            }
+          },
+        },
+      };
+
+      try {
+        await Promise.all([
+          helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true }),
+          helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true }),
+        ]);
+
+        assert.equal(registered.size, 1);
+        assert.deepEqual(
+          registered.get('inline-translator-auto-show')?.matches,
+          ['http://*/*', 'https://*/*']
+        );
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'updates existing inline auto-show content script after duplicate registration',
+    async fn() {
+      const previousChrome = global.chrome;
+      const registered = new Map([
+        [
+          'inline-translator-auto-show',
+          {
+            id: 'inline-translator-auto-show',
+            matches: ['https://old.example/*'],
+            js: ['old-content.js'],
+            runAt: 'document_start',
+          },
+        ],
+      ]);
+
+      global.chrome = {
+        permissions: {
+          async contains() {
+            return true;
+          },
+        },
+        scripting: {
+          async unregisterContentScripts() {
+            throw new Error('temporary unregister failure');
+          },
+          async registerContentScripts(scripts) {
+            for (const script of scripts || []) {
+              if (registered.has(script.id)) {
+                throw new Error(`Duplicate script ID '${script.id}'`);
+              }
+            }
+          },
+          async updateContentScripts(scripts) {
+            for (const script of scripts || []) {
+              registered.set(script.id, {
+                ...(registered.get(script.id) || {}),
+                ...script,
+              });
+            }
+          },
+        },
+      };
+
+      try {
+        await helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true });
+
+        assert.deepEqual(
+          registered.get('inline-translator-auto-show'),
+          {
+            id: 'inline-translator-auto-show',
+            matches: ['http://*/*', 'https://*/*'],
+            js: ['content.js'],
+            runAt: 'document_idle',
+          }
+        );
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'updates registered inline auto-show content script without duplicate registration',
+    async fn() {
+      const previousChrome = global.chrome;
+      const registered = new Map([
+        [
+          'inline-translator-auto-show',
+          {
+            id: 'inline-translator-auto-show',
+            matches: ['https://old.example/*'],
+            js: ['old-content.js'],
+            runAt: 'document_start',
+          },
+        ],
+      ]);
+
+      global.chrome = {
+        permissions: {
+          async contains() {
+            return true;
+          },
+        },
+        scripting: {
+          async getRegisteredContentScripts({ ids }) {
+            return (ids || [])
+              .map((id) => registered.get(id))
+              .filter(Boolean);
+          },
+          async unregisterContentScripts({ ids }) {
+            for (const id of ids || []) {
+              registered.delete(id);
+            }
+          },
+          async registerContentScripts() {
+            throw new Error('register should not be called for existing script');
+          },
+          async updateContentScripts(scripts) {
+            for (const script of scripts || []) {
+              registered.set(script.id, {
+                ...(registered.get(script.id) || {}),
+                ...script,
+              });
+            }
+          },
+        },
+      };
+
+      try {
+        await helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true });
+
+        assert.deepEqual(
+          registered.get('inline-translator-auto-show'),
+          {
+            id: 'inline-translator-auto-show',
+            matches: ['http://*/*', 'https://*/*'],
+            js: ['content.js'],
+            runAt: 'document_idle',
+          }
+        );
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'does not throw when inline auto-show duplicate recovery fails',
+    async fn() {
+      const previousChrome = global.chrome;
+
+      global.chrome = {
+        permissions: {
+          async contains() {
+            return true;
+          },
+        },
+        scripting: {
+          async getRegisteredContentScripts() {
+            throw new Error('temporary lookup failure');
+          },
+          async unregisterContentScripts() {
+            throw new Error('temporary unregister failure');
+          },
+          async registerContentScripts() {
+            throw new Error("Duplicate script ID 'inline-translator-auto-show'");
+          },
+          async updateContentScripts() {
+            throw new Error("Duplicate script ID 'inline-translator-auto-show'");
+          },
+        },
+      };
+
+      try {
+        await helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true });
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'safely ignores inline auto-show registration failures from runtime events',
+    async fn() {
+      const previousChrome = global.chrome;
+
+      global.chrome = {
+        permissions: {
+          async contains() {
+            return true;
+          },
+        },
+        scripting: {
+          async getRegisteredContentScripts() {
+            return [];
+          },
+          async registerContentScripts() {
+            throw new Error('Unexpected scripting API failure');
+          },
+        },
+      };
+
+      try {
+        assert.equal(
+          await helpers.syncInlineAutoShowRegistrationSafely({
+            inlineAutoShow: true,
+          }),
+          false
+        );
+      } finally {
+        global.chrome = previousChrome;
+      }
     },
   },
   {

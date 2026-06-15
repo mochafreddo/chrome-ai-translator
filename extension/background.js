@@ -3,7 +3,8 @@
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
-  model: 'gpt-5-mini',
+  model: 'gpt-5.4-mini',
+  reasoningEffort: 'none',
   targetLanguage: 'Korean',
   tone: 'technical',
   viewMode: 'translation', // translation | bilingual
@@ -25,6 +26,7 @@ const INLINE_TRANSLATION_MAX_CONCURRENCY = 3;
 
 // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
 const stateByTab = new Map();
+let inlineAutoShowRegistrationSync = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -232,6 +234,7 @@ function buildTextNodeResponseFormat() {
 async function openaiTranslateChunk({
   apiKey,
   model,
+  reasoningEffort = DEFAULT_SETTINGS.reasoningEffort,
   instructions,
   input,
   textFormat = null,
@@ -241,6 +244,9 @@ async function openaiTranslateChunk({
     instructions,
     input,
   };
+  if (reasoningEffort) {
+    body.reasoning = { effort: reasoningEffort };
+  }
   if (textFormat) {
     body.text = { format: textFormat };
   }
@@ -617,6 +623,7 @@ async function translateTextNodeRecords(records, context = {}) {
           const output = await openaiTranslateChunk({
             apiKey: settings.apiKey,
             model: settings.model,
+            reasoningEffort: settings.reasoningEffort,
             instructions,
             input: JSON.stringify({ records: chunk }),
             textFormat: buildTextNodeResponseFormat(),
@@ -693,6 +700,7 @@ async function translateVisibleTextBatch(records) {
     const output = await openaiTranslateChunk({
       apiKey: settings.apiKey,
       model: settings.model,
+      reasoningEffort: settings.reasoningEffort,
       instructions: buildTextNodeInstructions(settings),
       input: JSON.stringify({ records: normalized }),
       textFormat: buildTextNodeResponseFormat(),
@@ -726,25 +734,97 @@ async function hasInlineAutoShowPermission() {
   return chrome.permissions.contains({ origins: INLINE_ORIGINS });
 }
 
-async function syncInlineAutoShowRegistration(settings = null) {
-  const effective = settings || (await getSettings());
+function getInlineAutoShowContentScript() {
+  return {
+    id: INLINE_CONTENT_SCRIPT_ID,
+    matches: INLINE_ORIGINS,
+    js: ['content.js'],
+    runAt: 'document_idle',
+  };
+}
+
+function isDuplicateInlineContentScriptError(error) {
+  return String(error?.message || error).includes(
+    `Duplicate script ID '${INLINE_CONTENT_SCRIPT_ID}'`
+  );
+}
+
+async function getRegisteredInlineAutoShowContentScript() {
+  if (!chrome.scripting.getRegisteredContentScripts) return null;
+  const scripts = await chrome.scripting.getRegisteredContentScripts({
+    ids: [INLINE_CONTENT_SCRIPT_ID],
+  });
+  return (scripts || []).find((script) => script?.id === INLINE_CONTENT_SCRIPT_ID);
+}
+
+async function updateInlineAutoShowContentScript(script) {
+  if (!chrome.scripting.updateContentScripts) return false;
   try {
-    await chrome.scripting.unregisterContentScripts({
-      ids: [INLINE_CONTENT_SCRIPT_ID],
-    });
+    await chrome.scripting.updateContentScripts([script]);
+    return true;
+  } catch (error) {
+    if (isDuplicateInlineContentScriptError(error)) return false;
+    throw error;
+  }
+}
+
+async function syncInlineAutoShowRegistration(settings = null) {
+  const previousSync = inlineAutoShowRegistrationSync.catch(() => {});
+  const nextSync = previousSync.then(() =>
+    syncInlineAutoShowRegistrationNow(settings)
+  );
+  inlineAutoShowRegistrationSync = nextSync;
+  return nextSync;
+}
+
+async function syncInlineAutoShowRegistrationSafely(settings = null) {
+  try {
+    await syncInlineAutoShowRegistration(settings);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function syncInlineAutoShowRegistrationNow(settings = null) {
+  const effective = settings || (await getSettings());
+  const canAutoShow =
+    effective.inlineAutoShow && (await hasInlineAutoShowPermission());
+
+  if (!canAutoShow) {
+    try {
+      await chrome.scripting.unregisterContentScripts({
+        ids: [INLINE_CONTENT_SCRIPT_ID],
+      });
+    } catch {}
+    return;
+  }
+
+  const inlineContentScript = getInlineAutoShowContentScript();
+  try {
+    if (
+      chrome.scripting.updateContentScripts &&
+      (await getRegisteredInlineAutoShowContentScript())
+    ) {
+      if (await updateInlineAutoShowContentScript(inlineContentScript)) return;
+    }
   } catch {}
 
-  if (!effective.inlineAutoShow) return;
-  if (!(await hasInlineAutoShowPermission())) return;
-
-  await chrome.scripting.registerContentScripts([
-    {
-      id: INLINE_CONTENT_SCRIPT_ID,
-      matches: INLINE_ORIGINS,
-      js: ['content.js'],
-      runAt: 'document_idle',
-    },
-  ]);
+  try {
+    await chrome.scripting.registerContentScripts([inlineContentScript]);
+  } catch (error) {
+    if (isDuplicateInlineContentScriptError(error)) {
+      if (await updateInlineAutoShowContentScript(inlineContentScript)) return;
+      try {
+        await chrome.scripting.unregisterContentScripts({
+          ids: [INLINE_CONTENT_SCRIPT_ID],
+        });
+        await chrome.scripting.registerContentScripts([inlineContentScript]);
+      } catch {}
+      return;
+    }
+    throw error;
+  }
 }
 
 async function translateTab(tabId, overrideSettings = null) {
@@ -810,6 +890,7 @@ async function translateTab(tabId, overrideSettings = null) {
       const out = await openaiTranslateChunk({
         apiKey: settings.apiKey,
         model: settings.model,
+        reasoningEffort: settings.reasoningEffort,
         instructions,
         input: chunks[i],
       });
@@ -831,14 +912,14 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onInstalled.addListener(async () => {
     const settings = await getSettings();
     await saveSettings(settings);
-    await syncInlineAutoShowRegistration(settings);
+    await syncInlineAutoShowRegistrationSafely(settings);
     try {
       await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
     } catch {}
   });
 
   chrome.runtime.onStartup.addListener(async () => {
-    await syncInlineAutoShowRegistration();
+    await syncInlineAutoShowRegistrationSafely();
   });
 
   chrome.action.onClicked.addListener(async (tab) => {
@@ -903,7 +984,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           const current = await getSettings();
           const next = mergeSettingsWithExisting(current, msg.settings || {});
           await saveSettings(next);
-          await syncInlineAutoShowRegistration(next);
+          await syncInlineAutoShowRegistrationSafely(next);
           sendResponse({ ok: true });
           return;
         }
@@ -934,5 +1015,8 @@ if (typeof module !== 'undefined' && module.exports) {
     splitTextRecordsIntoChunks,
     parseAndValidateTextNodeTranslations,
     assertTextRecordBudget,
+    openaiTranslateChunk,
+    syncInlineAutoShowRegistration,
+    syncInlineAutoShowRegistrationSafely,
   };
 }

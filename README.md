@@ -31,17 +31,16 @@ shows a floating **Translate** button on the page.
 
 For inline page translation:
 
-1. Click the extension toolbar icon or press the shortcut on the target page.
-2. Open the floating **Translate** button.
-3. Choose **Page in Korean** to start viewport-first inline translation.
-4. As you scroll, newly visible article text is translated and kept in place.
-5. Choose **Stop** to stop translating newly visible text while keeping current
+1. Open the floating **Translate** button.
+2. Choose **Page in Korean** to start viewport-first inline translation.
+3. As you scroll, newly visible article text is translated and kept in place.
+4. Choose **Stop** to stop translating newly visible text while keeping current
    translations.
-6. Choose **Original text** to restore the page text that was replaced.
+5. Choose **Original text** to restore the page text that was replaced.
 
 If automatic inline display is enabled, the floating button can appear without
-the toolbar click. Starting inline translation still requires a recent toolbar
-or shortcut action before page text is sent for translation.
+the toolbar click. Starting inline translation still requires choosing
+**Page in Korean** before page text is sent for translation.
 
 ## Notes
 - This stores your API key in `chrome.storage.local` (client-side). Use a dedicated key/project and rotate if needed.
