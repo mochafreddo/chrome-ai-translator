@@ -11,9 +11,9 @@ The cache is intentionally page-scoped. It survives the inline original/translat
 toggle flow within the current content script instance, but it does not persist
 across page reloads, tab navigations, browser restarts, or extension storage.
 
-## Current Behavior
+## Behavior Before This Change
 
-`extension/content.js` already caches translations inside each viewport store in
+`extension/content.js` cached translations inside each viewport store in
 `translationByOriginal`. That supports two active-session cases:
 
 - a rerendered text node with the same original text can receive the cached
@@ -21,17 +21,17 @@ across page reloads, tab navigations, browser restarts, or extension storage.
 - the same text node can revert to its original value and receive the cached
   translation again.
 
-`restoreInlineViewportRecords()` currently restores translated DOM nodes to their
-original text, clears restorable records, increments the operation, and creates a
-new viewport store. Because the cache belongs to the old viewport store, clicking
-**Page in Korean** after **Original text** starts with an empty cache.
+`restoreInlineViewportRecords()` restored translated DOM nodes to their
+original text, cleared restorable records, incremented the operation, and created
+a new viewport store. Because the cache belonged to the old viewport store,
+clicking **Page in Korean** after **Original text** started with an empty cache.
 
 ## Chosen Approach
 
-Add a page-lifetime translation cache to `inlineState`, separate from
-restorable records and from the current viewport store.
+The implementation adds a page-lifetime translation cache to `inlineState`,
+separate from restorable records and from the current viewport store.
 
-The top-level cache should be bucketed by an inline translation settings
+The top-level cache is bucketed by an inline translation settings
 signature. The signature includes the translation-affecting settings that are
 available in the content script before an inline run starts:
 
@@ -40,7 +40,7 @@ available in the content script before an inline run starts:
 - `model`;
 - `reasoningEffort`.
 
-Each bucket should then be keyed by exact original text, using the existing
+Each bucket is keyed by exact original text, using the existing
 `getInlineOriginalTextCacheKey()` behavior. Each entry stores:
 
 - `original`: the original text;
@@ -79,24 +79,46 @@ On the next **Page in Korean** click on the same page:
 1. The content script reads settings as it already does before starting inline
    translation.
 2. A settings signature is derived from those settings.
-3. A new viewport store is created.
-4. The new store receives the page cache bucket for the current settings
-   signature, either by sharing the same `Map` instance or by copying its
-   entries.
-5. If the settings signature is different from the previous run, the new bucket
+3. `activateInlineTranslationCacheBucket()` selects the current settings bucket
+   and stores it as the active `inlineState.translationCache`.
+4. A new viewport store is created.
+5. The new store receives the shared page cache `Map` for the current settings
+   signature.
+6. If the settings signature is different from the previous run, the new bucket
    starts empty and text is translated normally.
-6. Visible text collection calls `queueInlineViewportRecord()`.
-7. If a text node exactly matches a cached original string, the cached
+7. Visible text collection calls `queueInlineViewportRecord()`.
+8. If a text node exactly matches a cached original string, the cached
    translation is applied immediately and no batch request is queued for that
    node.
 
-The preferred implementation is to share the page cache `Map` with each new
-viewport store. That avoids copy drift and keeps the existing helper API small.
+The implementation shares the page cache `Map` with each new viewport store.
+That avoids copy drift and keeps the helper API small:
+`getInlineTranslationCacheBucket()` only returns a bucket, while
+`activateInlineTranslationCacheBucket()` makes that bucket the active cache for
+restore/retranslate flows.
+
+## Settings Snapshot
+
+The content script sends a non-secret `settingsSnapshot` with each
+`TRANSLATE_VISIBLE_TEXT_BATCH` request. The snapshot contains only:
+
+- `targetLanguage`;
+- `tone`;
+- `model`;
+- `reasoningEffort`.
+
+`extension/background.js` merges that snapshot into the current settings for the
+visible inline batch, but preserves the current stored `apiKey` and ignores other
+settings such as `chunkMaxChars`, `inlineAutoShow`, and `viewMode`.
+
+This keeps a run consistent with the settings used to choose the cache bucket,
+without allowing the content script to provide or override secrets.
 
 ## Boundaries
 
-The cache must not be written to `chrome.storage`, local files, or background
-state. It must remain local to the content script page instance.
+The cache must not be written to `chrome.storage`, local files, background
+state, diagnostics, or logs. It must remain local to the content script page
+instance.
 
 The cache must not apply fuzzy matches. It should only apply when:
 
@@ -119,14 +141,23 @@ updates with stale translated text.
 
 ## Testing
 
-Add focused unit coverage in `tests/content-helpers.test.js`:
+Focused unit coverage in `tests/content-helpers.test.js` covers:
 
 - A translated viewport record is cached in a page-level cache.
 - After `restoreInlineViewportRecords()` restores the DOM and creates a fresh
   viewport store, the same original text can be translated from the preserved
   cache without queueing an API request.
+- Cache buckets are separated by target language, tone, model, and reasoning
+  effort, but not by `apiKey`.
+- Stopped-session translated nodes are reused only when settings match.
+- Stopped-session translated nodes are restored to original text when settings
+  change so they can be queued under the new settings.
 - Existing tests for rerendered original text, same-node reversion, stopped
   sessions, and restore ownership continue to pass.
+
+Focused unit coverage in `tests/background-helpers.test.js` verifies that
+visible batch settings snapshots can update translation-affecting settings
+without accepting an `apiKey` from the content script.
 
 Run:
 

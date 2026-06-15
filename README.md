@@ -61,6 +61,8 @@ For inline page translation:
 4. Choose **Stop** to stop translating newly visible text while keeping current
    translations.
 5. Choose **Original text** to restore the page text that was replaced.
+6. Choose **Page in Korean** again on the same page to reuse matching in-memory
+   translations instead of sending the same visible text again.
 
 If automatic inline display is enabled, the floating button can appear without
 the toolbar click. Starting inline translation still requires choosing
@@ -76,6 +78,10 @@ the toolbar click. Starting inline translation still requires choosing
 - Inline viewport batches are capped at 2,000 characters. Long scrolling
   sessions can continue sending new visible batches while inline translation is
   active.
+- Inline translations restored with **Original text** are cached only in the
+  current page instance. The cache is reused only when target language, tone,
+  model, and reasoning effort still match, and it is cleared by reloads,
+  navigations, or browser restarts.
 - Options shows the 20 most recent inline translation runs with status, model,
   node/character/chunk counts, timings, and redacted errors.
 
