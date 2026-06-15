@@ -1,4 +1,5 @@
 let activeTabId = null;
+let panelErrorMessage = '';
 
 const hasDocument = typeof document !== 'undefined';
 
@@ -33,6 +34,11 @@ function setError(message) {
 
 function setProgress(p) {
   elProgress.textContent = p || '';
+}
+
+function setPanelError(message) {
+  panelErrorMessage = message || '';
+  setError(panelErrorMessage);
 }
 
 function trimPanelText(value) {
@@ -120,6 +126,12 @@ async function saveSettings() {
   }
 }
 
+function renderTranslateFailure(error) {
+  const message = error?.message || String(error);
+  setPanelError(message);
+  renderState({ status: 'idle', error: { message } });
+}
+
 function renderState(state) {
   const displayState = getSidepanelDisplayState(
     state || { status: 'idle' },
@@ -130,6 +142,7 @@ function renderState(state) {
   btnTranslate.disabled = displayState.translateDisabled;
 
   if (state?.error?.message) setError(state.error.message);
+  else if (panelErrorMessage) setError(panelErrorMessage);
   else setError(null);
 
   setProgress(displayState.progressText);
@@ -154,7 +167,7 @@ async function refreshState() {
 async function translateNow() {
   activeTabId = await getActiveTabId();
   if (!activeTabId) return;
-  setError(null);
+  setPanelError('');
   renderState({ status: 'translating' });
   const settingsOverride = {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
@@ -162,11 +175,21 @@ async function translateNow() {
     model: elModel.value.trim() || 'gpt-5.4-mini',
     viewMode: elViewMode.value,
   };
-  await chrome.runtime.sendMessage({
+  const resp = await chrome.runtime.sendMessage({
     type: 'TRANSLATE_TAB',
     tabId: activeTabId,
     settingsOverride,
   });
+  if (!resp?.ok) {
+    throw new Error(resp?.error?.message || 'Failed to start translation');
+  }
+  if (resp.skipped) {
+    await refreshState();
+  }
+}
+
+function handleTranslateClick() {
+  translateNow().catch(renderTranslateFailure);
 }
 
 function setupTabs() {
@@ -191,7 +214,9 @@ function setupTabs() {
 }
 
 if (hasDocument) {
-  document.getElementById('btnTranslate').addEventListener('click', translateNow);
+  document
+    .getElementById('btnTranslate')
+    .addEventListener('click', handleTranslateClick);
   document.getElementById('btnSave').addEventListener('click', saveSettings);
   document
     .getElementById('btnOpenOptions')

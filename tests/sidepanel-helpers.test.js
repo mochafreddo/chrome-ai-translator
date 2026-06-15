@@ -74,4 +74,115 @@ exports.tests = [
       assert.match(state.translatedText, /Translating current tab/);
     },
   },
+  {
+    name: 'shows translation request failures from the click handler',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousDocument = global.document;
+      const previousSetInterval = global.setInterval;
+      const modulePath = require.resolve('../extension/sidepanel.js');
+      const originalModule = require.cache[modulePath];
+      const elements = new Map();
+
+      function getElement(id) {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id,
+            value: '',
+            textContent: '',
+            hidden: false,
+            disabled: false,
+            dataset: {},
+            listeners: {},
+            addEventListener(event, listener) {
+              this.listeners[event] = listener;
+            },
+            setAttribute(name, value) {
+              this[name] = value;
+            },
+          });
+        }
+        return elements.get(id);
+      }
+
+      global.setInterval = () => 0;
+      global.document = {
+        getElementById: getElement,
+        querySelectorAll(selector) {
+          if (selector !== '.tab') return [];
+          return [
+            {
+              dataset: { tab: 'translated' },
+              setAttribute() {},
+              addEventListener() {},
+            },
+            {
+              dataset: { tab: 'original' },
+              setAttribute() {},
+              addEventListener() {},
+            },
+          ];
+        },
+      };
+      global.chrome = {
+        tabs: {
+          async query() {
+            return [{ id: 77 }];
+          },
+        },
+        runtime: {
+          onMessage: { addListener() {} },
+          openOptionsPage() {},
+          async sendMessage(message) {
+            if (message.type === 'GET_SETTINGS') {
+              return {
+                ok: true,
+                settings: {
+                  targetLanguage: 'Korean',
+                  tone: 'technical',
+                  model: 'gpt-5.4-mini',
+                  viewMode: 'translation',
+                },
+              };
+            }
+            if (message.type === 'GET_STATE') {
+              return { ok: true, state: { status: 'idle' } };
+            }
+            if (message.type === 'TRANSLATE_TAB') {
+              return {
+                ok: false,
+                error: { message: 'Cannot run on this page.' },
+              };
+            }
+            return { ok: true };
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/sidepanel.js');
+        for (let i = 0; i < 4; i += 1) {
+          await Promise.resolve();
+        }
+        const click = getElement('btnTranslate').listeners.click;
+        assert.equal(typeof click, 'function');
+
+        await Promise.resolve(click());
+        for (let i = 0; i < 4; i += 1) {
+          await Promise.resolve();
+        }
+
+        assert.equal(getElement('errorBox').hidden, false);
+        assert.equal(getElement('errorBox').textContent, 'Cannot run on this page.');
+        assert.equal(getElement('btnTranslate').disabled, false);
+      } finally {
+        global.chrome = previousChrome;
+        global.document = previousDocument;
+        global.setInterval = previousSetInterval;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
 ];

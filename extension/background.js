@@ -29,6 +29,7 @@ const INLINE_TRANSLATION_MAX_CONCURRENCY = 3;
 
 // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
 const stateByTab = new Map();
+const activeTranslationsByTab = new Map();
 let inlineAutoShowRegistrationSync = Promise.resolve();
 
 function nowIso() {
@@ -875,84 +876,99 @@ async function syncInlineAutoShowRegistrationNow(settings = null) {
 }
 
 async function translateTab(tabId, overrideSettings = null) {
-  const settings = mergeSettings({
-    ...(await getSettings()),
-    ...(overrideSettings || {}),
-  });
+  if (activeTranslationsByTab.has(tabId)) {
+    return { skipped: true, reason: 'already_running' };
+  }
 
-  if (!settings.apiKey) {
-    setTabState(tabId, {
-      status: 'error',
-      error: {
-        message: 'OpenAI API key is not set. Open Options and paste your key.',
-      },
+  const operationToken = Symbol(`translate-tab-${tabId}`);
+  activeTranslationsByTab.set(tabId, operationToken);
+
+  try {
+    const settings = mergeSettings({
+      ...(await getSettings()),
+      ...(overrideSettings || {}),
     });
-    return;
-  }
 
-  setTabState(tabId, { status: 'extracting', error: null });
-  await ensureSidePanel(tabId);
-
-  try {
-    await ensureContentScript(tabId);
-  } catch (e) {
-    setTabState(tabId, {
-      status: 'error',
-      error: {
-        message:
-          'Cannot run on this page (e.g., chrome:// pages). Open a normal website tab.',
-      },
-    });
-    return;
-  }
-
-  let extracted;
-  try {
-    extracted = await extractArticle(tabId);
-  } catch (e) {
-    setTabState(tabId, { status: 'error', error: safeError(e) });
-    return;
-  }
-
-  setTabState(tabId, {
-    status: 'translating',
-    extracted,
-    translated: null,
-    settingsUsed: { ...settings, apiKey: '***' },
-  });
-
-  try {
-    const instructions = buildInstructions(settings);
-    assertFullPageTranslationBudget(extracted.contentMarkdown);
-    const chunks = splitMarkdownIntoChunks(
-      extracted.contentMarkdown,
-      settings.chunkMaxChars
-    );
-    const translatedChunks = [];
-
-    for (let i = 0; i < chunks.length; i++) {
+    if (!settings.apiKey) {
       setTabState(tabId, {
-        status: 'translating',
-        progress: { current: i + 1, total: chunks.length },
+        status: 'error',
+        error: {
+          message: 'OpenAI API key is not set. Open Options and paste your key.',
+        },
       });
-      const out = await openaiTranslateChunk({
-        apiKey: settings.apiKey,
-        model: settings.model,
-        reasoningEffort: settings.reasoningEffort,
-        instructions,
-        input: chunks[i],
-      });
-      translatedChunks.push(out.trim());
+      return { skipped: true, reason: 'missing_api_key' };
     }
 
-    const translated = translatedChunks.join('\n\n');
+    setTabState(tabId, { status: 'extracting', error: null });
+    await ensureSidePanel(tabId);
+
+    try {
+      await ensureContentScript(tabId);
+    } catch (e) {
+      setTabState(tabId, {
+        status: 'error',
+        error: {
+          message:
+            'Cannot run on this page (e.g., chrome:// pages). Open a normal website tab.',
+        },
+      });
+      return { skipped: true, reason: 'content_script_unavailable' };
+    }
+
+    let extracted;
+    try {
+      extracted = await extractArticle(tabId);
+    } catch (e) {
+      setTabState(tabId, { status: 'error', error: safeError(e) });
+      return { skipped: true, reason: 'extract_failed' };
+    }
+
     setTabState(tabId, {
-      status: 'done',
-      translated,
-      progress: null,
+      status: 'translating',
+      extracted,
+      translated: null,
+      settingsUsed: { ...settings, apiKey: '***' },
     });
-  } catch (e) {
-    setTabState(tabId, { status: 'error', error: safeError(e) });
+
+    try {
+      const instructions = buildInstructions(settings);
+      assertFullPageTranslationBudget(extracted.contentMarkdown);
+      const chunks = splitMarkdownIntoChunks(
+        extracted.contentMarkdown,
+        settings.chunkMaxChars
+      );
+      const translatedChunks = [];
+
+      for (let i = 0; i < chunks.length; i++) {
+        setTabState(tabId, {
+          status: 'translating',
+          progress: { current: i + 1, total: chunks.length },
+        });
+        const out = await openaiTranslateChunk({
+          apiKey: settings.apiKey,
+          model: settings.model,
+          reasoningEffort: settings.reasoningEffort,
+          instructions,
+          input: chunks[i],
+        });
+        translatedChunks.push(out.trim());
+      }
+
+      const translated = translatedChunks.join('\n\n');
+      setTabState(tabId, {
+        status: 'done',
+        translated,
+        progress: null,
+      });
+      return { skipped: false };
+    } catch (e) {
+      setTabState(tabId, { status: 'error', error: safeError(e) });
+      return { skipped: true, reason: 'translate_failed' };
+    }
+  } finally {
+    if (activeTranslationsByTab.get(tabId) === operationToken) {
+      activeTranslationsByTab.delete(tabId);
+    }
   }
 }
 
@@ -1002,8 +1018,13 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         }
         if (msg?.type === 'TRANSLATE_TAB') {
           const { tabId, settingsOverride } = msg;
-          await translateTab(tabId, settingsOverride || null);
-          sendResponse({ ok: true });
+          const result = await translateTab(tabId, settingsOverride || null);
+          sendResponse({
+            ok: true,
+            ...(result?.skipped
+              ? { skipped: true, reason: result.reason }
+              : {}),
+          });
           return;
         }
         if (msg?.type === 'TRANSLATE_TEXT_NODES') {

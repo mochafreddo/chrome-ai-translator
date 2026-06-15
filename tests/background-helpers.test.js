@@ -618,4 +618,117 @@ exports.tests = [
       );
     },
   },
+  {
+    name: 'skips duplicate full-tab translations while one is running',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const modulePath = require.resolve('../extension/background.js');
+      const originalModule = require.cache[modulePath];
+      let messageListener = null;
+      let fetchCount = 0;
+
+      global.fetch = async () => {
+        fetchCount += 1;
+        await Promise.resolve();
+        return {
+          ok: true,
+          async json() {
+            return { output_text: '번역 결과' };
+          },
+        };
+      };
+
+      global.chrome = {
+        runtime: {
+          onInstalled: { addListener() {} },
+          onStartup: { addListener() {} },
+          onMessage: {
+            addListener(listener) {
+              messageListener = listener;
+            },
+          },
+          sendMessage() {
+            return Promise.resolve();
+          },
+        },
+        action: { onClicked: { addListener() {} } },
+        commands: { onCommand: { addListener() {} } },
+        sidePanel: {
+          async setPanelBehavior() {},
+          async setOptions() {},
+          async open() {},
+        },
+        scripting: {
+          async executeScript() {},
+        },
+        storage: {
+          local: {
+            async get() {
+              return {
+                settings: {
+                  apiKey: 'sk-test',
+                  model: 'gpt-5.4-mini',
+                  targetLanguage: 'Korean',
+                  tone: 'technical',
+                  chunkMaxChars: 12000,
+                },
+              };
+            },
+            async set() {},
+          },
+        },
+        tabs: {
+          async sendMessage(_tabId, message) {
+            if (message.type === 'EXTRACT_ARTICLE') {
+              return {
+                ok: true,
+                data: {
+                  title: 'Article',
+                  url: 'https://example.test',
+                  contentMarkdown: 'Hello world.',
+                },
+              };
+            }
+            return { ok: true };
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/background.js');
+        assert.equal(typeof messageListener, 'function');
+
+        const responses = [];
+        messageListener(
+          { type: 'TRANSLATE_TAB', tabId: 10 },
+          {},
+          (response) => responses.push(response)
+        );
+        messageListener(
+          { type: 'TRANSLATE_TAB', tabId: 10 },
+          {},
+          (response) => responses.push(response)
+        );
+
+        for (let i = 0; i < 10 && responses.length < 2; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        assert.equal(fetchCount, 1);
+        assert.equal(responses.length, 2);
+        assert.deepEqual(responses.find((response) => response.skipped), {
+          ok: true,
+          skipped: true,
+          reason: 'already_running',
+        });
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
 ];
