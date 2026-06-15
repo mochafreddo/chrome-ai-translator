@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -65,6 +66,31 @@ exports.tests = [
         css,
         /\.checkbox-label input\[type="checkbox"\]\s*\{[^}]*width:\s*44px/s
       );
+    },
+  },
+  {
+    name: 'keeps tracked files outside ignored paths',
+    fn() {
+      const repoRoot = path.join(__dirname, '..');
+      const trackedFiles = execFileSync('git', ['ls-files'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      })
+        .trim()
+        .split('\n')
+        .filter((file) => file && fs.existsSync(path.join(repoRoot, file)));
+      const ignoredTrackedFiles = trackedFiles.filter((file) => {
+        try {
+          execFileSync('git', ['check-ignore', '--no-index', '-q', file], {
+            cwd: repoRoot,
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      });
+
+      assert.deepEqual(ignoredTrackedFiles, []);
     },
   },
 ];
