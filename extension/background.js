@@ -57,6 +57,24 @@ function mergeSettingsWithExisting(existing, partial) {
   });
 }
 
+function mergeVisibleBatchSettingsSnapshot(currentSettings, settingsSnapshot = null) {
+  const merged = mergeSettings(currentSettings || {});
+  if (!settingsSnapshot || typeof settingsSnapshot !== 'object') return merged;
+
+  for (const key of [
+    'targetLanguage',
+    'tone',
+    'model',
+    'reasoningEffort',
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(settingsSnapshot, key)) {
+      merged[key] = String(settingsSnapshot[key] || DEFAULT_SETTINGS[key]);
+    }
+  }
+
+  return merged;
+}
+
 async function getSettings() {
   const stored = await chrome.storage.local.get(['settings', 'openai_api_key']);
   // Backward/compat: allow apiKey in openai_api_key
@@ -697,7 +715,7 @@ async function translateTextNodeRecords(records, context = {}) {
   }
 }
 
-async function translateVisibleTextBatch(records) {
+async function translateVisibleTextBatch(records, settingsSnapshot = null) {
   const startedAtMs = Date.now();
   const logEntry = createInlineTranslationLogEntry(startedAtMs);
   let completed = false;
@@ -716,7 +734,10 @@ async function translateVisibleTextBatch(records) {
       return [];
     }
 
-    const settings = await getSettings();
+    const settings = mergeVisibleBatchSettingsSnapshot(
+      await getSettings(),
+      settingsSnapshot
+    );
     logEntry.model = settings.model;
     if (!settings.apiKey) {
       throw new Error('OpenAI API key is not set. Open Options and paste your key.');
@@ -997,7 +1018,10 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           return;
         }
         if (msg?.type === 'TRANSLATE_VISIBLE_TEXT_BATCH') {
-          const translations = await translateVisibleTextBatch(msg.records || []);
+          const translations = await translateVisibleTextBatch(
+            msg.records || [],
+            msg.settingsSnapshot || null
+          );
           sendResponse({ ok: true, translations });
           return;
         }
@@ -1030,6 +1054,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     mergeSettingsWithExisting,
+    mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,
     assertFullPageTranslationBudget,
     buildTextNodeResponseFormat,

@@ -8,6 +8,12 @@ var INLINE_VIEWPORT_BATCH_MAX_CHARS = 2000;
 var INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;
 var INLINE_VIEWPORT_SCAN_DEBOUNCE_MS = 250;
 var INLINE_VIEWPORT_PREFETCH_RATIO = 0.5;
+var INLINE_TRANSLATION_SETTINGS_DEFAULTS = {
+  targetLanguage: 'Korean',
+  tone: 'technical',
+  model: 'gpt-5.4-mini',
+  reasoningEffort: 'none',
+};
 var INLINE_EXCLUDED_TAGS = new Set([
   'SCRIPT',
   'STYLE',
@@ -42,7 +48,17 @@ var INLINE_EXCLUDED_ROLES = new Set([
   'toolbar',
 ]);
 
-function createInlineViewportStore(operationId) {
+function createInlineViewportStore(
+  operationId,
+  translationByOriginal = null,
+  translationSettings = null
+) {
+  const translationSettingsSnapshot = translationSettings
+    ? createInlineTranslationSettingsSnapshot(translationSettings)
+    : null;
+  const translationSettingsSignature = translationSettingsSnapshot
+    ? getInlineTranslationCacheSignature(translationSettingsSnapshot)
+    : null;
   return {
     operationId,
     byNode: new WeakMap(),
@@ -50,11 +66,14 @@ function createInlineViewportStore(operationId) {
     queue: [],
     inFlight: 0,
     nextId: 0,
-    translationByOriginal: new Map(),
+    translationByOriginal:
+      translationByOriginal instanceof Map ? translationByOriginal : new Map(),
     scanTimer: null,
     observer: null,
     root: null,
     stopped: false,
+    translationSettings: translationSettingsSnapshot,
+    translationSettingsSignature,
   };
 }
 
@@ -103,6 +122,44 @@ async function getInlineAutoShowEnabled(chromeApi = globalThis.chrome) {
   return Boolean(response?.ok && response.settings?.inlineAutoShow);
 }
 
+function getInlineTranslationCacheSignature(settings = {}) {
+  return JSON.stringify(createInlineTranslationSettingsSnapshot(settings));
+}
+
+function createInlineTranslationSettingsSnapshot(settings = {}) {
+  const safe = settings || {};
+  return {
+    targetLanguage: String(
+      safe.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage
+    ),
+    tone: String(safe.tone || INLINE_TRANSLATION_SETTINGS_DEFAULTS.tone),
+    model: String(safe.model || INLINE_TRANSLATION_SETTINGS_DEFAULTS.model),
+    reasoningEffort: String(
+      safe.reasoningEffort ||
+        INLINE_TRANSLATION_SETTINGS_DEFAULTS.reasoningEffort
+    ),
+  };
+}
+
+function ensureInlineTranslationCacheBySettings(state = inlineState) {
+  if (!(state.translationCacheBySettings instanceof Map)) {
+    state.translationCacheBySettings = new Map();
+  }
+  return state.translationCacheBySettings;
+}
+
+function getInlineTranslationCacheBucket(state = inlineState, settings = {}) {
+  const caches = ensureInlineTranslationCacheBySettings(state);
+  const signature = getInlineTranslationCacheSignature(settings);
+  let cache = caches.get(signature);
+  if (!cache) {
+    cache = new Map();
+    caches.set(signature, cache);
+  }
+  state.translationCache = cache;
+  return cache;
+}
+
 function ensureInlineRestorableRecords(state = inlineState) {
   if (!Array.isArray(state.restorableRecords)) {
     state.restorableRecords = [];
@@ -127,6 +184,16 @@ function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
   const seenRecords = new Set(store.records);
   for (const record of records || []) {
     if (record?.state !== 'translated' || !record.node?.isConnected) continue;
+    if (hasInlineViewportSettingsSignatureMismatch(store, record)) {
+      if (
+        typeof record.translation === 'string' &&
+        record.node.nodeValue === record.translation
+      ) {
+        record.node.nodeValue = record.original;
+        record.state = 'original';
+      }
+      continue;
+    }
     if (
       typeof record.translation === 'string' &&
       record.node.nodeValue !== record.translation
@@ -177,6 +244,7 @@ if (!inlineState.viewport) {
   inlineState.viewport = createInlineViewportStore(inlineState.operationId);
 }
 ensureInlineRestorableRecords(inlineState);
+ensureInlineTranslationCacheBySettings(inlineState);
 var inlineUiRoot = globalThis.__chromeAiTranslatorInlineUiRoot || null;
 
 function isInlineTranslationExcludedTag(tagName) {
@@ -315,10 +383,25 @@ function getInlineOriginalTextCacheKey(text) {
   return typeof text === 'string' ? text : '';
 }
 
+function hasInlineViewportSettingsSignatureMismatch(store, record) {
+  const storeSignature = store?.translationSettingsSignature || '';
+  const recordSignature = record?.translationSettingsSignature || '';
+  if (!storeSignature && !recordSignature) return false;
+  return storeSignature !== recordSignature;
+}
+
+function stampInlineViewportRecordSettings(store, record) {
+  if (store?.translationSettingsSignature && record) {
+    record.translationSettingsSignature = store.translationSettingsSignature;
+  }
+  return record;
+}
+
 function cacheInlineViewportRecordTranslation(store, record) {
   if (!store?.translationByOriginal || record?.state !== 'translated') {
     return false;
   }
+  if (hasInlineViewportSettingsSignatureMismatch(store, record)) return false;
   const key = getInlineOriginalTextCacheKey(record.original);
   if (!key || typeof record.translation !== 'string') return false;
   store.translationByOriginal.set(key, {
@@ -342,6 +425,7 @@ function applyCachedInlineViewportTranslation(store, node, text) {
     state: 'translated',
     operationId: store.operationId,
   };
+  stampInlineViewportRecordSettings(store, record);
 
   store.nextId += 1;
   store.byNode.set(node, record);
@@ -386,6 +470,7 @@ function queueInlineViewportRecord(store, node, text) {
       state: 'original',
       operationId: store.operationId,
     };
+  stampInlineViewportRecordSettings(store, record);
 
   if (!existing) {
     store.nextId += 1;
@@ -397,6 +482,7 @@ function queueInlineViewportRecord(store, node, text) {
   record.translation = null;
   record.state = 'queued';
   record.operationId = store.operationId;
+  stampInlineViewportRecordSettings(store, record);
   store.queue.push(record);
   return record;
 }
@@ -462,6 +548,7 @@ function applyInlineViewportBatchTranslations(records, translations, operationId
     record.node.nodeValue = translation;
     record.translation = translation;
     record.state = 'translated';
+    stampInlineViewportRecordSettings(store, record);
     cacheInlineViewportRecordTranslation(store, record);
     result.applied += 1;
   }
@@ -533,7 +620,10 @@ function restoreInlineViewportRecords(state = inlineState) {
   state.records = [];
   state.restorableRecords = [];
   state.operationId = (Number(state.operationId) || 0) + 1;
-  state.viewport = createInlineViewportStore(state.operationId);
+  state.viewport = createInlineViewportStore(
+    state.operationId,
+    state.translationCache
+  );
 }
 
 function getInlineTextRecordBudgetError(records) {
@@ -1060,6 +1150,7 @@ async function drainInlineViewportQueue() {
       .sendMessage({
         type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
         operationId,
+        settingsSnapshot: store.translationSettings,
         records: batch.map((record) => ({
           id: record.id,
           text: record.original,
@@ -1132,9 +1223,21 @@ async function translateInlinePage() {
 
   detachInlineViewportWatchers();
   addInlineRestorableRecords(inlineState, inlineState.viewport?.records || []);
+  const settingsSnapshot = createInlineTranslationSettingsSnapshot(
+    settingsResponse.settings
+  );
+  const translationCache = getInlineTranslationCacheBucket(
+    inlineState,
+    settingsSnapshot
+  );
+  inlineState.translationCache = translationCache;
   inlineState.operationId = (Number(inlineState.operationId) || 0) + 1;
   inlineState.status = 'active';
-  inlineState.viewport = createInlineViewportStore(inlineState.operationId);
+  inlineState.viewport = createInlineViewportStore(
+    inlineState.operationId,
+    translationCache,
+    settingsSnapshot
+  );
   inlineState.viewport.root = root;
   seedInlineViewportStoreWithRestorableRecords(
     inlineState.viewport,
@@ -1247,6 +1350,9 @@ if (typeof module !== 'undefined' && module.exports) {
     canRestartInlineViewportTranslation,
     hasInlineSettingsApiKey,
     getInlineAutoShowEnabled,
+    createInlineTranslationSettingsSnapshot,
+    getInlineTranslationCacheSignature,
+    getInlineTranslationCacheBucket,
     seedInlineViewportStoreWithRestorableRecords,
     createInlineViewportStore,
     queueInlineViewportRecord,

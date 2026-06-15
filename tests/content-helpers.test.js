@@ -529,6 +529,146 @@ exports.tests = [
     },
   },
   {
+    name: 'separates page translation cache by inline settings',
+    fn() {
+      const state = { translationCacheBySettings: new Map() };
+      const baseSettings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+        apiKey: 'secret-one',
+      };
+      const sameTranslationSettings = {
+        ...baseSettings,
+        apiKey: 'secret-two',
+      };
+      const noApiKeySettings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+      };
+      const differentTargetLanguageSettings = {
+        ...baseSettings,
+        targetLanguage: 'Japanese',
+      };
+      const differentToneSettings = {
+        ...baseSettings,
+        tone: 'natural',
+      };
+      const differentModelSettings = {
+        ...baseSettings,
+        model: 'gpt-5.4',
+      };
+      const differentReasoningEffortSettings = {
+        ...baseSettings,
+        reasoningEffort: 'low',
+      };
+
+      const firstCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        baseSettings
+      );
+      firstCache.set('Hello world.', {
+        original: 'Hello world.',
+        translation: '안녕하세요.',
+      });
+
+      assert.equal(
+        helpers.getInlineTranslationCacheBucket(state, sameTranslationSettings),
+        firstCache
+      );
+      assert.equal(
+        helpers.getInlineTranslationCacheBucket(state, noApiKeySettings),
+        firstCache
+      );
+      const japaneseCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        differentTargetLanguageSettings
+      );
+      assert.notEqual(japaneseCache, firstCache);
+      assert.equal(
+        helpers.getInlineTranslationCacheBucket(
+          state,
+          differentTargetLanguageSettings
+        ),
+        japaneseCache
+      );
+
+      const naturalCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        differentToneSettings
+      );
+      assert.notEqual(naturalCache, firstCache);
+      assert.equal(
+        helpers.getInlineTranslationCacheBucket(state, differentToneSettings),
+        naturalCache
+      );
+
+      const gpt54Cache = helpers.getInlineTranslationCacheBucket(
+        state,
+        differentModelSettings
+      );
+      assert.notEqual(gpt54Cache, firstCache);
+      assert.equal(
+        helpers.getInlineTranslationCacheBucket(state, differentModelSettings),
+        gpt54Cache
+      );
+
+      const lowReasoningCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        differentReasoningEffortSettings
+      );
+      assert.notEqual(lowReasoningCache, firstCache);
+      assert.equal(
+        helpers.getInlineTranslationCacheBucket(
+          state,
+          differentReasoningEffortSettings
+        ),
+        lowReasoningCache
+      );
+      assert.equal(
+        new Set([
+          firstCache,
+          japaneseCache,
+          naturalCache,
+          gpt54Cache,
+          lowReasoningCache,
+        ]).size,
+        5
+      );
+    },
+  },
+  {
+    name: 'builds inline translation settings snapshot without api key',
+    fn() {
+      assert.deepEqual(
+        helpers.createInlineTranslationSettingsSnapshot({
+          targetLanguage: 'Japanese',
+          tone: 'natural',
+          model: 'gpt-5.4',
+          reasoningEffort: 'low',
+          apiKey: 'sk-secret',
+          viewMode: 'bilingual',
+          chunkMaxChars: 24000,
+        }),
+        {
+          targetLanguage: 'Japanese',
+          tone: 'natural',
+          model: 'gpt-5.4',
+          reasoningEffort: 'low',
+        }
+      );
+      assert.deepEqual(helpers.createInlineTranslationSettingsSnapshot({}), {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+      });
+    },
+  },
+  {
     name: 'reapplies cached translation when same text node reverts to original',
     fn() {
       const store = helpers.createInlineViewportStore(7);
@@ -683,6 +823,193 @@ exports.tests = [
         pending: 0,
         failed: 0,
       });
+    },
+  },
+  {
+    name: 'does not requeue stopped-session translated nodes after matching settings restart',
+    fn() {
+      const settings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+        apiKey: 'sk-korean',
+      };
+      const signature = helpers.getInlineTranslationCacheSignature(settings);
+      const state = {
+        status: 'active',
+        operationId: 4,
+        records: [],
+        restorableRecords: [],
+        translationCacheBySettings: new Map(),
+      };
+      const firstCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        settings
+      );
+      const firstStore = helpers.createInlineViewportStore(
+        4,
+        firstCache,
+        settings
+      );
+      const node = {
+        isConnected: true,
+        nodeValue: 'This is an OpenAI API sentence.',
+      };
+
+      assert.equal(firstStore.translationSettingsSignature, signature);
+
+      const firstRecord = helpers.queueInlineViewportRecord(
+        firstStore,
+        node,
+        node.nodeValue
+      );
+      const batch = helpers.takeInlineViewportBatch(firstStore);
+      helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: firstRecord.id, translation: '번역된 OpenAI API 문장입니다.' }],
+        4,
+        firstStore
+      );
+      state.viewport = firstStore;
+      state.records = firstStore.records;
+
+      assert.equal(firstRecord.translationSettingsSignature, signature);
+
+      helpers.stopInlineViewportTranslation(state);
+      const secondCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        settings
+      );
+      const secondStore = helpers.createInlineViewportStore(
+        6,
+        secondCache,
+        settings
+      );
+      helpers.seedInlineViewportStoreWithRestorableRecords(
+        secondStore,
+        state.restorableRecords
+      );
+
+      const queued = helpers.queueInlineViewportRecord(
+        secondStore,
+        node,
+        node.nodeValue
+      );
+
+      assert.equal(queued, null);
+      assert.equal(secondCache, firstCache);
+      assert.equal(secondCache.has('This is an OpenAI API sentence.'), true);
+      assert.equal(secondStore.queue.length, 0);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
+        translated: 1,
+        pending: 0,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'restores stopped-session translated nodes when settings change',
+    fn() {
+      const original = 'This is an OpenAI API sentence.';
+      const koreanTranslation = '번역된 OpenAI API 문장입니다.';
+      const koreanSettings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+        apiKey: 'sk-korean',
+      };
+      const japaneseSettings = {
+        ...koreanSettings,
+        targetLanguage: 'Japanese',
+        apiKey: 'sk-japanese',
+      };
+      const koreanSignature =
+        helpers.getInlineTranslationCacheSignature(koreanSettings);
+      const japaneseSignature =
+        helpers.getInlineTranslationCacheSignature(japaneseSettings);
+      const state = {
+        status: 'active',
+        operationId: 4,
+        records: [],
+        restorableRecords: [],
+        translationCacheBySettings: new Map(),
+      };
+      const koreanCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        koreanSettings
+      );
+      const japaneseCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        japaneseSettings
+      );
+      const firstStore = helpers.createInlineViewportStore(
+        4,
+        koreanCache,
+        koreanSettings
+      );
+      const node = { isConnected: true, nodeValue: original };
+
+      assert.notEqual(koreanSignature, japaneseSignature);
+      assert.notEqual(koreanCache, japaneseCache);
+      assert.equal(firstStore.translationSettingsSignature, koreanSignature);
+
+      const firstRecord = helpers.queueInlineViewportRecord(
+        firstStore,
+        node,
+        original
+      );
+      const batch = helpers.takeInlineViewportBatch(firstStore);
+      helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: firstRecord.id, translation: koreanTranslation }],
+        4,
+        firstStore
+      );
+      assert.equal(firstRecord.translationSettingsSignature, koreanSignature);
+      state.viewport = firstStore;
+      state.records = firstStore.records;
+
+      helpers.stopInlineViewportTranslation(state);
+      assert.equal(
+        state.restorableRecords[0]?.translationSettingsSignature,
+        koreanSignature
+      );
+      const secondStore = helpers.createInlineViewportStore(
+        6,
+        japaneseCache,
+        japaneseSettings
+      );
+      assert.equal(secondStore.translationSettingsSignature, japaneseSignature);
+      helpers.seedInlineViewportStoreWithRestorableRecords(
+        secondStore,
+        state.restorableRecords
+      );
+
+      assert.equal(node.nodeValue, original);
+      assert.equal(firstRecord.state, 'original');
+      assert.equal(secondStore.records.length, 0);
+      assert.deepEqual(
+        helpers.getInlineViewportStatusCounts(secondStore.records),
+        {
+          translated: 0,
+          pending: 0,
+          failed: 0,
+        }
+      );
+      assert.equal(japaneseCache.has(original), false);
+
+      const queued = helpers.queueInlineViewportRecord(
+        secondStore,
+        node,
+        original
+      );
+
+      assert.equal(queued?.state, 'queued');
+      assert.equal(queued?.translation, null);
+      assert.equal(secondStore.queue.length, 1);
+      assert.equal(node.nodeValue, original);
     },
   },
   {
@@ -1016,6 +1343,71 @@ exports.tests = [
       assert.equal(state.operationId, 9);
       assert.equal(firstRecord.state, 'original');
       assert.equal(rerenderedRecord.state, 'original');
+    },
+  },
+  {
+    name: 'reuses cached viewport translations after restoring original text',
+    fn() {
+      const settings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+      };
+      const state = {
+        status: 'active',
+        operationId: 8,
+        translationCacheBySettings: new Map(),
+        restorableRecords: [],
+      };
+      const firstCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        settings
+      );
+      const firstStore = helpers.createInlineViewportStore(
+        state.operationId,
+        firstCache
+      );
+      const node = { isConnected: true, nodeValue: 'Hello world.' };
+
+      helpers.queueInlineViewportRecord(firstStore, node, 'Hello world.');
+      const batch = helpers.takeInlineViewportBatch(firstStore);
+      helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: batch[0].id, translation: '안녕하세요.' }],
+        8,
+        firstStore
+      );
+
+      state.viewport = firstStore;
+      state.records = firstStore.records;
+
+      helpers.restoreInlineViewportRecords(state);
+      assert.equal(node.nodeValue, 'Hello world.');
+
+      const secondCache = helpers.getInlineTranslationCacheBucket(
+        state,
+        settings
+      );
+      assert.equal(secondCache, firstCache);
+      assert.equal(state.viewport.translationByOriginal, firstCache);
+      const queued = helpers.queueInlineViewportRecord(
+        state.viewport,
+        node,
+        'Hello world.'
+      );
+
+      assert.equal(queued, null);
+      assert.equal(node.nodeValue, '안녕하세요.');
+      assert.equal(state.viewport.queue.length, 0);
+      assert.deepEqual(
+        helpers.getInlineViewportStatusCounts(state.viewport.records),
+        {
+          translated: 1,
+          pending: 0,
+          failed: 0,
+        }
+      );
     },
   },
   {

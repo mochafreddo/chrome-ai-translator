@@ -74,6 +74,42 @@ exports.tests = [
     },
   },
   {
+    name: 'merges visible batch settings snapshot without accepting api key',
+    fn() {
+      const settings = helpers.mergeVisibleBatchSettingsSnapshot(
+        {
+          apiKey: 'sk-current',
+          chunkMaxChars: 9000,
+          inlineAutoShow: true,
+          targetLanguage: 'Korean',
+          tone: 'technical',
+          model: 'gpt-5.4-mini',
+          reasoningEffort: 'none',
+          viewMode: 'translation',
+        },
+        {
+          apiKey: 'sk-from-content',
+          chunkMaxChars: 24000,
+          inlineAutoShow: false,
+          targetLanguage: 'Japanese',
+          tone: 'natural',
+          model: 'gpt-5.4',
+          reasoningEffort: 'low',
+          viewMode: 'bilingual',
+        }
+      );
+
+      assert.equal(settings.apiKey, 'sk-current');
+      assert.equal(settings.chunkMaxChars, 9000);
+      assert.equal(settings.inlineAutoShow, true);
+      assert.equal(settings.viewMode, 'translation');
+      assert.equal(settings.targetLanguage, 'Japanese');
+      assert.equal(settings.tone, 'natural');
+      assert.equal(settings.model, 'gpt-5.4');
+      assert.equal(settings.reasoningEffort, 'low');
+    },
+  },
+  {
     name: 'sends reasoning none in Responses API requests',
     async fn() {
       const previousFetch = global.fetch;
