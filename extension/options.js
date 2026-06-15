@@ -1,14 +1,24 @@
-const elApiKey = document.getElementById('apiKey');
-const elTargetLanguage = document.getElementById('targetLanguage');
-const elTone = document.getElementById('tone');
-const elModel = document.getElementById('model');
-const elChunkMaxChars = document.getElementById('chunkMaxChars');
-const elInlineAutoShow = document.getElementById('inlineAutoShow');
+const hasDocument = typeof document !== 'undefined';
 
-const elStatus = document.getElementById('status');
-const elError = document.getElementById('errorBox');
-const elInlineLogs = document.getElementById('inlineLogs');
-const btnRefreshInlineLogs = document.getElementById('btnRefreshInlineLogs');
+const elApiKey = hasDocument ? document.getElementById('apiKey') : null;
+const elTargetLanguage = hasDocument
+  ? document.getElementById('targetLanguage')
+  : null;
+const elTone = hasDocument ? document.getElementById('tone') : null;
+const elModel = hasDocument ? document.getElementById('model') : null;
+const elChunkMaxChars = hasDocument
+  ? document.getElementById('chunkMaxChars')
+  : null;
+const elInlineAutoShow = hasDocument
+  ? document.getElementById('inlineAutoShow')
+  : null;
+
+const elStatus = hasDocument ? document.getElementById('status') : null;
+const elError = hasDocument ? document.getElementById('errorBox') : null;
+const elInlineLogs = hasDocument ? document.getElementById('inlineLogs') : null;
+const btnRefreshInlineLogs = hasDocument
+  ? document.getElementById('btnRefreshInlineLogs')
+  : null;
 
 const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
@@ -156,13 +166,20 @@ async function save() {
 }
 
 async function clearKey() {
-  const stored = await chrome.storage.local.get(['settings']);
-  const next = { ...(stored.settings || {}) };
-  delete next.apiKey;
-  await chrome.storage.local.set({ settings: next });
+  await clearStoredApiKey(chrome);
   elApiKey.value = '';
   setStatus('Key cleared.');
   setTimeout(() => setStatus(''), 1200);
+}
+
+async function clearStoredApiKey(chromeApi) {
+  const stored = await chromeApi.storage.local.get(['settings']);
+  const next = { ...(stored.settings || {}) };
+  delete next.apiKey;
+  await chromeApi.storage.local.set({ settings: next });
+  if (chromeApi.storage.local.remove) {
+    await chromeApi.storage.local.remove('openai_api_key');
+  }
 }
 
 function handleSaveClick() {
@@ -172,12 +189,22 @@ function handleSaveClick() {
   });
 }
 
-document.getElementById('btnSave').addEventListener('click', handleSaveClick);
-document.getElementById('btnClear').addEventListener('click', clearKey);
-btnRefreshInlineLogs.addEventListener('click', () => {
-  loadInlineLogs().catch((error) => setError(error?.message || String(error)));
-});
+if (hasDocument) {
+  document.getElementById('btnSave').addEventListener('click', handleSaveClick);
+  document.getElementById('btnClear').addEventListener('click', clearKey);
+  btnRefreshInlineLogs.addEventListener('click', () => {
+    loadInlineLogs().catch((error) => setError(error?.message || String(error)));
+  });
 
-load()
-  .then(loadInlineLogs)
-  .catch((e) => setError(e?.message || String(e)));
+  load()
+    .then(loadInlineLogs)
+    .catch((e) => setError(e?.message || String(e)));
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    clearStoredApiKey,
+    collectInlineTranslationLogsFromStorage,
+    formatInlineLog,
+  };
+}

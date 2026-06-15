@@ -14,6 +14,9 @@ const DEFAULT_SETTINGS = {
   inlineAutoShow: false,
 };
 
+const MIN_CHUNK_MAX_CHARS = 2000;
+const MAX_CHUNK_MAX_CHARS = 60000;
+const FULL_PAGE_TRANSLATION_MAX_TOTAL_CHARS = 60000;
 const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
 const INLINE_ORIGINS = ['http://*/*', 'https://*/*'];
 const INLINE_MAX_RECORDS = 500;
@@ -32,8 +35,19 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeChunkMaxChars(value, fallback = DEFAULT_SETTINGS.chunkMaxChars) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(
+    MAX_CHUNK_MAX_CHARS,
+    Math.max(MIN_CHUNK_MAX_CHARS, Math.floor(parsed))
+  );
+}
+
 function mergeSettings(partial) {
-  return { ...DEFAULT_SETTINGS, ...(partial || {}) };
+  const merged = { ...DEFAULT_SETTINGS, ...(partial || {}) };
+  merged.chunkMaxChars = normalizeChunkMaxChars(merged.chunkMaxChars);
+  return merged;
 }
 
 function mergeSettingsWithExisting(existing, partial) {
@@ -167,6 +181,18 @@ function splitMarkdownIntoChunks(md, maxChars) {
     }
   }
   return hard;
+}
+
+function assertFullPageTranslationBudget(
+  markdown,
+  maxChars = FULL_PAGE_TRANSLATION_MAX_TOTAL_CHARS
+) {
+  const totalChars = String(markdown || '').length;
+  if (totalChars > maxChars) {
+    throw new Error(
+      `Full-page translation has too much text (${totalChars}/${maxChars} characters)`
+    );
+  }
 }
 
 function buildInstructions({ targetLanguage, tone }) {
@@ -876,6 +902,7 @@ async function translateTab(tabId, overrideSettings = null) {
 
   try {
     const instructions = buildInstructions(settings);
+    assertFullPageTranslationBudget(extracted.contentMarkdown);
     const chunks = splitMarkdownIntoChunks(
       extracted.contentMarkdown,
       settings.chunkMaxChars
@@ -1003,6 +1030,8 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     mergeSettingsWithExisting,
+    normalizeChunkMaxChars,
+    assertFullPageTranslationBudget,
     buildTextNodeResponseFormat,
     getTextRecordStats,
     getTextRecordChunkStats,

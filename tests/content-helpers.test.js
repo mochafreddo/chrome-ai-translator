@@ -216,6 +216,30 @@ exports.tests = [
     },
   },
   {
+    name: 'loads inline auto-show through masked runtime settings',
+    async fn() {
+      let message = null;
+      const fakeChrome = {
+        runtime: {
+          async sendMessage(value) {
+            message = value;
+            return { ok: true, settings: { inlineAutoShow: true, apiKey: '***' } };
+          },
+        },
+        storage: {
+          local: {
+            async get() {
+              throw new Error('content script must not read raw settings');
+            },
+          },
+        },
+      };
+
+      assert.equal(await helpers.getInlineAutoShowEnabled(fakeChrome), true);
+      assert.deepEqual(message, { type: 'GET_SETTINGS' });
+    },
+  },
+  {
     name: 'does not overwrite text nodes changed during translation',
     fn() {
       const stableNode = { isConnected: true, nodeValue: 'Hello world.' };

@@ -1,16 +1,20 @@
 let activeTabId = null;
 
-const elStatus = document.getElementById('status');
-const elError = document.getElementById('errorBox');
-const elProgress = document.getElementById('progress');
+const hasDocument = typeof document !== 'undefined';
 
-const elTargetLanguage = document.getElementById('targetLanguage');
-const elTone = document.getElementById('tone');
-const elModel = document.getElementById('model');
-const elViewMode = document.getElementById('viewMode');
+const elStatus = hasDocument ? document.getElementById('status') : null;
+const elError = hasDocument ? document.getElementById('errorBox') : null;
+const elProgress = hasDocument ? document.getElementById('progress') : null;
 
-const elOriginal = document.getElementById('original');
-const elTranslated = document.getElementById('translated');
+const elTargetLanguage = hasDocument
+  ? document.getElementById('targetLanguage')
+  : null;
+const elTone = hasDocument ? document.getElementById('tone') : null;
+const elModel = hasDocument ? document.getElementById('model') : null;
+const elViewMode = hasDocument ? document.getElementById('viewMode') : null;
+
+const elOriginal = hasDocument ? document.getElementById('original') : null;
+const elTranslated = hasDocument ? document.getElementById('translated') : null;
 
 function setStatus(text) {
   elStatus.textContent = text;
@@ -28,6 +32,22 @@ function setError(message) {
 
 function setProgress(p) {
   elProgress.textContent = p || '';
+}
+
+function trimPanelText(value) {
+  return String(value || '').trim();
+}
+
+function formatTranslatedPanelText(state, viewMode = 'translation') {
+  const translated = trimPanelText(state?.translated);
+  if (!translated) return '';
+
+  const original = trimPanelText(state?.extracted?.contentMarkdown);
+  if (viewMode === 'bilingual' && original) {
+    return `Original\n\n${original}\n\nTranslation\n\n${translated}`;
+  }
+
+  return translated;
 }
 
 async function getActiveTabId() {
@@ -88,11 +108,10 @@ function renderState(state) {
     elOriginal.textContent = extracted.contentMarkdown;
   }
 
-  if (state.translated) {
-    elTranslated.textContent = state.translated;
-  } else {
-    elTranslated.textContent = '';
-  }
+  elTranslated.textContent = formatTranslatedPanelText(
+    state,
+    elViewMode.value || state.settingsUsed?.viewMode || 'translation'
+  );
 }
 
 async function refreshState() {
@@ -146,25 +165,34 @@ function setupTabs() {
   });
 }
 
-document.getElementById('btnTranslate').addEventListener('click', translateNow);
-document.getElementById('btnSave').addEventListener('click', saveSettings);
-document
-  .getElementById('btnOpenOptions')
-  .addEventListener('click', () => chrome.runtime.openOptionsPage());
+if (hasDocument) {
+  document.getElementById('btnTranslate').addEventListener('click', translateNow);
+  document.getElementById('btnSave').addEventListener('click', saveSettings);
+  document
+    .getElementById('btnOpenOptions')
+    .addEventListener('click', () => chrome.runtime.openOptionsPage());
+  elViewMode.addEventListener('change', () => refreshState().catch(() => {}));
 
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type !== 'STATE_UPDATED') return;
-  if (msg.tabId !== activeTabId) return;
-  renderState(msg.state);
-});
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type !== 'STATE_UPDATED') return;
+    if (msg.tabId !== activeTabId) return;
+    renderState(msg.state);
+  });
 
-(async function init() {
-  setupTabs();
-  await loadSettings();
-  await refreshState();
+  (async function init() {
+    setupTabs();
+    await loadSettings();
+    await refreshState();
 
-  // Keep UI in sync when user switches tabs while the panel is open.
-  setInterval(() => {
-    refreshState().catch(() => {});
-  }, 1000);
-})();
+    // Keep UI in sync when user switches tabs while the panel is open.
+    setInterval(() => {
+      refreshState().catch(() => {});
+    }, 1000);
+  })();
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    formatTranslatedPanelText,
+  };
+}

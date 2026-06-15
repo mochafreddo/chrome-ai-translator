@@ -1,6 +1,9 @@
 const suites = [
   require('./content-helpers.test'),
   require('./background-helpers.test'),
+  require('./options-helpers.test'),
+  require('./sidepanel-helpers.test'),
+  require('./static-assets.test'),
 ];
 
 (async function run() {

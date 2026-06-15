@@ -96,6 +96,12 @@ function hasInlineSettingsApiKey(settings) {
   return Boolean(settings?.apiKey);
 }
 
+async function getInlineAutoShowEnabled(chromeApi = globalThis.chrome) {
+  if (!chromeApi?.runtime?.sendMessage) return false;
+  const response = await chromeApi.runtime.sendMessage({ type: 'GET_SETTINGS' });
+  return Boolean(response?.ok && response.settings?.inlineAutoShow);
+}
+
 function ensureInlineRestorableRecords(state = inlineState) {
   if (!Array.isArray(state.restorableRecords)) {
     state.restorableRecords = [];
@@ -1075,8 +1081,7 @@ function restoreInlineOriginal() {
 
 async function initInlineTranslator() {
   try {
-    const stored = await chrome.storage.local.get(['settings']);
-    if (stored.settings?.inlineAutoShow) {
+    if (await getInlineAutoShowEnabled()) {
       ensureInlineTranslatorUi();
     }
   } catch {}
@@ -1167,6 +1172,7 @@ if (typeof module !== 'undefined' && module.exports) {
     stopInlineViewportTranslation,
     canRestartInlineViewportTranslation,
     hasInlineSettingsApiKey,
+    getInlineAutoShowEnabled,
     seedInlineViewportStoreWithRestorableRecords,
     createInlineViewportStore,
     queueInlineViewportRecord,

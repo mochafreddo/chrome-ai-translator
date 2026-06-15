@@ -13,6 +13,37 @@ exports.tests = [
     },
   },
   {
+    name: 'clamps unsafe chunk sizes from saved settings',
+    fn() {
+      assert.equal(
+        helpers.mergeSettingsWithExisting({}, { chunkMaxChars: -1 }).chunkMaxChars,
+        2000
+      );
+      assert.equal(
+        helpers.mergeSettingsWithExisting({}, { chunkMaxChars: Infinity })
+          .chunkMaxChars,
+        12000
+      );
+      assert.equal(
+        helpers.mergeSettingsWithExisting({}, { chunkMaxChars: 900000 })
+          .chunkMaxChars,
+        60000
+      );
+    },
+  },
+  {
+    name: 'rejects full-page translations over the total character budget',
+    fn() {
+      assert.throws(
+        () => helpers.assertFullPageTranslationBudget('x'.repeat(60001)),
+        /Full-page translation has too much text/
+      );
+      assert.doesNotThrow(() =>
+        helpers.assertFullPageTranslationBudget('x'.repeat(60000))
+      );
+    },
+  },
+  {
     name: 'merges partial settings without dropping existing values',
     fn() {
       const next = helpers.mergeSettingsWithExisting(
