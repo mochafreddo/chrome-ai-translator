@@ -63,6 +63,48 @@ automated regression test.
 - `npm run check:syntax` passed
 - `git diff --check` passed
 
+## Follow-up QA: Full-Tab Concurrency And Sidepanel Failure Handling
+
+Date: 2026-06-15 23:18 KST
+Status: passed
+Health score: 100 -> 100
+
+Scope:
+
+- Duplicate full-tab translation guard in `extension/background.js`
+- Sidepanel translation failure rendering in `extension/sidepanel.js`
+- Moved inline restore cache design document out of ignored
+  `docs/superpowers/`
+
+Automated verification:
+
+- `npm test` passed, including the duplicate full-tab translation regression,
+  sidepanel click failure regression, and ignored tracked file guard.
+- `npm run check:syntax` passed.
+- `git diff --check` passed.
+- `git check-ignore --no-index -v docs/design/inline-restore-cache-design.md`
+  returned no match.
+- `git check-ignore --no-index -v
+  docs/superpowers/specs/2026-06-15-inline-restore-cache-design.md` confirmed
+  the old location is ignored by `.gitignore:3`.
+
+Browser verification:
+
+- Served `extension/` through a temporary localhost server on
+  `127.0.0.1:8765`.
+- Options page rendered at 1280px and 375px without horizontal overflow.
+- Sidepanel rendered at 375px without horizontal overflow; primary controls
+  stayed at touch-sized height.
+- Clicking "Translate current tab" outside an extension context showed a local
+  failure message and re-enabled the button. The exact error was expected for
+  HTTP QA because `chrome.tabs` is unavailable there; the UI recovery path was
+  still verified.
+- The sidepanel's `chrome.runtime.onMessage` console error was also expected in
+  the HTTP context and was not counted as an extension runtime defect.
+
+Issues found in this follow-up: 0
+Fixes applied in this follow-up: 0
+
 ## Notes
 
 The local HTTP render showed `chrome.storage` / `chrome.runtime` errors because
