@@ -4,6 +4,11 @@ A **personal-only** Chrome extension that translates article pages with OpenAI
 Responses API. It keeps the translated Markdown in a **Side Panel** and can also
 translate page text inline with a floating page button.
 
+## Requirements
+- Chrome 116 or newer.
+- An OpenAI API key. Use a dedicated key/project because the key is stored
+  client-side in Chrome extension storage.
+
 ## Load the extension
 1. Open Chrome → `chrome://extensions`
 2. Enable **Developer mode**
@@ -13,7 +18,7 @@ translate page text inline with a floating page button.
 ## Setup
 1. Open extension **Options**
 2. Paste your **OpenAI API Key**
-3. (Optional) change model / target language
+3. (Optional) change default target language, tone, model, and chunk size
 4. (Optional) enable **Show inline translation button automatically on normal
    web pages**
 
@@ -21,13 +26,32 @@ The automatic inline button option requests access to normal `http://` and
 `https://` pages so Chrome can inject the floating button without first clicking
 the extension. It is off by default.
 
+The saved key is never shown back in the Options input. Leaving the key field
+blank preserves the current key; **Clear key** removes the saved key and the
+legacy `openai_api_key` value.
+
 ## Use
-- Click the extension toolbar icon, or press:
+- Click the extension toolbar icon, or use the Chrome extension shortcut if it
+  is assigned:
   - macOS: `Cmd+Shift+Y`
   - Windows/Linux: `Ctrl+Shift+Y`
 
+If the shortcut does not work, check `chrome://extensions/shortcuts`. Chrome can
+leave a suggested shortcut unassigned when it conflicts with another shortcut or
+has been changed locally.
+
 The Side Panel should open and show the translated Markdown. The same action also
 shows a floating **Translate** button on the page.
+
+In the Side Panel:
+
+- **Translate current tab** extracts the current article, translates it, and
+  updates progress by chunk.
+- Target language, tone, model, and view can be changed for the current run.
+- **Save as default** stores the visible settings for future runs.
+- **View** can show only the translation or a bilingual original/translation
+  output.
+- The **Original** tab shows the extracted Markdown source.
 
 For inline page translation:
 
@@ -42,8 +66,25 @@ If automatic inline display is enabled, the floating button can appear without
 the toolbar click. Starting inline translation still requires choosing
 **Page in Korean** before page text is sent for translation.
 
+## Limits and diagnostics
+- Full-page Side Panel translation stops before sending more than 60,000
+  extracted characters.
+- `Chunk max chars` defaults to `12000` and is clamped between `2000` and
+  `60000`.
+- Inline translation translates only visible article text while active and
+  scans again on scroll, resize, and page mutations.
+- Inline viewport batches are capped at 2,000 characters. Long scrolling
+  sessions can continue sending new visible batches while inline translation is
+  active.
+- Options shows the 20 most recent inline translation runs with status, model,
+  node/character/chunk counts, timings, and redacted errors.
+
+## Development
+- Run tests: `npm test`
+- Check extension script syntax: `npm run check:syntax`
+
 ## Notes
-- This stores your API key in `chrome.storage.local` (client-side). Use a dedicated key/project and rotate if needed.
+- Settings are stored in `chrome.storage.local` under `settings`.
 - It won't work on restricted pages like `chrome://`.
 - Inline translation skips code-like text, links, filenames, commands, and page
   chrome. It translates visible article text in small batches while active.
