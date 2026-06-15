@@ -35,4 +35,16 @@ exports.tests = [
       );
     },
   },
+  {
+    name: 'clears original panel text for idle tab state',
+    fn() {
+      assert.equal(helpers.formatOriginalPanelText({ status: 'idle' }), '');
+      assert.equal(
+        helpers.formatOriginalPanelText({
+          extracted: { contentMarkdown: '# Original\n\nHello world.\n' },
+        }),
+        '# Original\n\nHello world.\n'
+      );
+    },
+  },
 ];

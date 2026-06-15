@@ -307,6 +307,10 @@ function getInlineRecordPayloadSize(record) {
   return String(record.id || '').length + String(record.original || record.text || '').length + 20;
 }
 
+function getInlineRecordTextSize(record) {
+  return String(record.original || record.text || '').length;
+}
+
 function getInlineOriginalTextCacheKey(text) {
   return typeof text === 'string' ? text : '';
 }
@@ -412,6 +416,11 @@ function takeInlineViewportBatch(
   while (store.queue.length) {
     const record = store.queue[0];
     const size = getInlineRecordPayloadSize(record);
+    if (getInlineRecordTextSize(record) > limit) {
+      store.queue.shift();
+      record.state = 'failed';
+      continue;
+    }
     if (batch.length && total + size > limit) break;
 
     store.queue.shift();
@@ -1041,7 +1050,10 @@ async function drainInlineViewportQueue() {
     store.queue.length
   ) {
     const batch = takeInlineViewportBatch(store);
-    if (!batch.length) return;
+    if (!batch.length) {
+      updateInlineViewportMessage();
+      return;
+    }
     updateInlineViewportMessage();
 
     chrome.runtime

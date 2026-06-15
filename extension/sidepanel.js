@@ -50,6 +50,10 @@ function formatTranslatedPanelText(state, viewMode = 'translation') {
   return translated;
 }
 
+function formatOriginalPanelText(state) {
+  return state?.extracted?.contentMarkdown || '';
+}
+
 async function getActiveTabId() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   return tabs?.[0]?.id ?? null;
@@ -88,6 +92,8 @@ function renderState(state) {
     setStatus('Idle');
     setError(null);
     setProgress(null);
+    elOriginal.textContent = '';
+    elTranslated.textContent = '';
     return;
   }
 
@@ -103,10 +109,7 @@ function renderState(state) {
     setProgress(null);
   }
 
-  const extracted = state.extracted;
-  if (extracted?.contentMarkdown) {
-    elOriginal.textContent = extracted.contentMarkdown;
-  }
+  elOriginal.textContent = formatOriginalPanelText(state);
 
   elTranslated.textContent = formatTranslatedPanelText(
     state,
@@ -193,6 +196,7 @@ if (hasDocument) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    formatOriginalPanelText,
     formatTranslatedPanelText,
   };
 }

@@ -765,6 +765,38 @@ exports.tests = [
     },
   },
   {
+    name: 'does not send oversized viewport records rejected by background',
+    fn() {
+      const store = helpers.createInlineViewportStore(3);
+      const oversized = helpers.queueInlineViewportRecord(
+        store,
+        { nodeValue: 'x'.repeat(2001), isConnected: true },
+        'x'.repeat(2001)
+      );
+      const small = helpers.queueInlineViewportRecord(
+        store,
+        { nodeValue: 'Hello world.', isConnected: true },
+        'Hello world.'
+      );
+
+      const batch = helpers.takeInlineViewportBatch(store, 2000);
+
+      assert.deepEqual(
+        batch.map((record) => record.id),
+        [small.id]
+      );
+      assert.equal(oversized.state, 'failed');
+      assert.equal(small.state, 'translating');
+      assert.equal(store.queue.length, 0);
+      assert.equal(store.inFlight, 1);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 1,
+        failed: 1,
+      });
+    },
+  },
+  {
     name: 'applies successful viewport translations and marks stale nodes',
     fn() {
       const stableNode = { isConnected: true, nodeValue: 'Hello world.' };
