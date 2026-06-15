@@ -496,6 +496,72 @@ exports.tests = [
     },
   },
   {
+    name: 'reapplies cached viewport translation to rerendered original text',
+    fn() {
+      const store = helpers.createInlineViewportStore(7);
+      const firstNode = { isConnected: true, nodeValue: 'Hello world.' };
+
+      helpers.queueInlineViewportRecord(store, firstNode, 'Hello world.');
+      const batch = helpers.takeInlineViewportBatch(store);
+      helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: batch[0].id, translation: '안녕하세요.' }],
+        7,
+        store
+      );
+
+      const rerenderedNode = { isConnected: true, nodeValue: 'Hello world.' };
+      const queued = helpers.queueInlineViewportRecord(
+        store,
+        rerenderedNode,
+        'Hello world.'
+      );
+
+      assert.equal(queued, null);
+      assert.equal(rerenderedNode.nodeValue, '안녕하세요.');
+      assert.equal(store.queue.length, 0);
+      assert.equal(store.records.length, 2);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 2,
+        pending: 0,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'reapplies cached translation when same text node reverts to original',
+    fn() {
+      const store = helpers.createInlineViewportStore(7);
+      const node = { isConnected: true, nodeValue: 'Hello world.' };
+
+      helpers.queueInlineViewportRecord(store, node, 'Hello world.');
+      const batch = helpers.takeInlineViewportBatch(store);
+      helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: batch[0].id, translation: '안녕하세요.' }],
+        7,
+        store
+      );
+
+      node.nodeValue = 'Hello world.';
+      const queued = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Hello world.'
+      );
+
+      assert.equal(queued, null);
+      assert.equal(node.nodeValue, '안녕하세요.');
+      assert.equal(store.queue.length, 0);
+      assert.equal(store.records.length, 1);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 1,
+        pending: 0,
+        failed: 0,
+      });
+    },
+  },
+  {
     name: 'stopping viewport translation invalidates operation without restoring text',
     fn() {
       const store = helpers.createInlineViewportStore(4);
@@ -873,6 +939,51 @@ exports.tests = [
       assert.equal(state.status, 'original');
       assert.equal(state.operationId, 9);
       assert.equal(record.state, 'original');
+    },
+  },
+  {
+    name: 'restores cached viewport translations applied to rerendered nodes',
+    fn() {
+      const store = helpers.createInlineViewportStore(8);
+      const firstNode = { isConnected: true, nodeValue: 'Hello world.' };
+
+      helpers.queueInlineViewportRecord(store, firstNode, 'Hello world.');
+      const batch = helpers.takeInlineViewportBatch(store);
+      helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: batch[0].id, translation: '안녕하세요.' }],
+        8,
+        store
+      );
+
+      const rerenderedNode = { isConnected: true, nodeValue: 'Hello world.' };
+      const queued = helpers.queueInlineViewportRecord(
+        store,
+        rerenderedNode,
+        'Hello world.'
+      );
+
+      assert.equal(queued, null);
+      assert.equal(rerenderedNode.nodeValue, '안녕하세요.');
+      assert.equal(store.records.length, 2);
+
+      const state = {
+        status: 'active',
+        operationId: 8,
+        viewport: store,
+        records: store.records,
+        restorableRecords: [],
+      };
+      const [firstRecord, rerenderedRecord] = store.records;
+
+      helpers.restoreInlineViewportRecords(state);
+
+      assert.equal(firstNode.nodeValue, 'Hello world.');
+      assert.equal(rerenderedNode.nodeValue, 'Hello world.');
+      assert.equal(state.status, 'original');
+      assert.equal(state.operationId, 9);
+      assert.equal(firstRecord.state, 'original');
+      assert.equal(rerenderedRecord.state, 'original');
     },
   },
   {

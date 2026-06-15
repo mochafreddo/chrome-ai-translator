@@ -50,6 +50,7 @@ function createInlineViewportStore(operationId) {
     queue: [],
     inFlight: 0,
     nextId: 0,
+    translationByOriginal: new Map(),
     scanTimer: null,
     observer: null,
     root: null,
@@ -139,6 +140,7 @@ function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
       store.records.push(record);
       seenRecords.add(record);
     }
+    cacheInlineViewportRecordTranslation(store, record);
   }
   return store;
 }
@@ -305,9 +307,58 @@ function getInlineRecordPayloadSize(record) {
   return String(record.id || '').length + String(record.original || record.text || '').length + 20;
 }
 
+function getInlineOriginalTextCacheKey(text) {
+  return typeof text === 'string' ? text : '';
+}
+
+function cacheInlineViewportRecordTranslation(store, record) {
+  if (!store?.translationByOriginal || record?.state !== 'translated') {
+    return false;
+  }
+  const key = getInlineOriginalTextCacheKey(record.original);
+  if (!key || typeof record.translation !== 'string') return false;
+  store.translationByOriginal.set(key, {
+    original: record.original,
+    translation: record.translation,
+  });
+  return true;
+}
+
+function applyCachedInlineViewportTranslation(store, node, text) {
+  const key = getInlineOriginalTextCacheKey(text);
+  const cached = key ? store?.translationByOriginal?.get(key) : null;
+  if (!cached || typeof cached.translation !== 'string') return null;
+  if (!node?.isConnected || node.nodeValue !== cached.original) return null;
+
+  const record = {
+    id: `v${store.nextId + 1}`,
+    node,
+    original: cached.original,
+    translation: cached.translation,
+    state: 'translated',
+    operationId: store.operationId,
+  };
+
+  store.nextId += 1;
+  store.byNode.set(node, record);
+  store.records.push(record);
+  node.nodeValue = cached.translation;
+  return record;
+}
+
 function queueInlineViewportRecord(store, node, text) {
   if (!store || !node) return null;
   const existing = store.byNode.get(node);
+  if (
+    existing?.state === 'translated' &&
+    typeof existing.translation === 'string' &&
+    node.isConnected &&
+    node.nodeValue === existing.original
+  ) {
+    node.nodeValue = existing.translation;
+    cacheInlineViewportRecordTranslation(store, existing);
+    return null;
+  }
   if (
     existing &&
     ['queued', 'translating', 'translated', 'failed', 'stale'].includes(
@@ -315,6 +366,11 @@ function queueInlineViewportRecord(store, node, text) {
     )
   ) {
     return null;
+  }
+
+  if (!existing) {
+    const cached = applyCachedInlineViewportTranslation(store, node, text);
+    if (cached) return null;
   }
 
   const record =
@@ -372,7 +428,7 @@ function takeInlineViewportBatch(
   return batch;
 }
 
-function applyInlineViewportBatchTranslations(records, translations, operationId) {
+function applyInlineViewportBatchTranslations(records, translations, operationId, store = null) {
   const byId = new Map((translations || []).map((item) => [item.id, item.translation]));
   const result = { applied: 0, stale: 0, ignored: 0 };
 
@@ -397,6 +453,7 @@ function applyInlineViewportBatchTranslations(records, translations, operationId
     record.node.nodeValue = translation;
     record.translation = translation;
     record.state = 'translated';
+    cacheInlineViewportRecordTranslation(store, record);
     result.applied += 1;
   }
 
@@ -1004,7 +1061,12 @@ async function drainInlineViewportQueue() {
           markInlineViewportBatchFailed(batch, operationId);
           return;
         }
-        applyInlineViewportBatchTranslations(batch, resp.translations, operationId);
+        applyInlineViewportBatchTranslations(
+          batch,
+          resp.translations,
+          operationId,
+          store
+        );
         addInlineRestorableRecords(inlineState, batch);
       })
       .catch(() => {
