@@ -252,6 +252,18 @@ ensureInlineRestorableRecords(inlineState);
 ensureInlineTranslationCacheBySettings(inlineState);
 var inlineUiRoot = globalThis.__chromeAiTranslatorInlineUiRoot || null;
 
+async function refreshInlineTranslatorSettings(
+  chromeApi = globalThis.chrome,
+  state = inlineState
+) {
+  if (!chromeApi?.runtime?.sendMessage) return null;
+  const response = await chromeApi.runtime.sendMessage({ type: 'GET_SETTINGS' });
+  if (!response?.ok) return null;
+  const snapshot = createInlineTranslationSettingsSnapshot(response.settings);
+  state.translationSettings = snapshot;
+  return snapshot;
+}
+
 function isInlineTranslationExcludedTag(tagName) {
   return INLINE_EXCLUDED_TAGS.has(String(tagName || '').toUpperCase());
 }
@@ -590,6 +602,51 @@ function formatInlineViewportStatusMessage(counts, status = 'active') {
       stopped ? 0 : Number(safe.pending) || 0
     } · Failed ${Number(safe.failed) || 0}`,
   ].join('\n');
+}
+
+function getInlineTranslatorUiModel(
+  state = inlineState,
+  settings = state?.translationSettings || INLINE_TRANSLATION_SETTINGS_DEFAULTS
+) {
+  const status = state?.status || 'original';
+  const targetLanguage =
+    settings?.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage;
+  const menuOpen = Boolean(state?.menuOpen);
+  const isActive = status === 'active';
+  const isTranslating = status === 'translating';
+  const canRestore = isActive || status === 'translated' || status === 'stopped';
+
+  return {
+    toggleText: isActive
+      ? 'Translated'
+      : isTranslating
+      ? 'Translating...'
+      : status === 'stopped'
+      ? 'Stopped'
+      : 'Translate',
+    menuOpen,
+    message: state?.message || '',
+    translateText: isActive ? 'Scan visible text' : `Page in ${targetLanguage}`,
+    stopDisabled: !isActive,
+    restoreDisabled: !canRestore,
+    translateDisabled: isTranslating,
+    expanded: String(menuOpen),
+  };
+}
+
+async function toggleInlineTranslatorMenu(
+  chromeApi = globalThis.chrome,
+  state = inlineState,
+  renderUi = state === inlineState ? updateInlineTranslatorUi : null
+) {
+  state.menuOpen = !Boolean(state.menuOpen);
+  renderUi?.();
+  if (!state.menuOpen) return state.menuOpen;
+  try {
+    await refreshInlineTranslatorSettings(chromeApi, state);
+  } catch {}
+  renderUi?.();
+  return state.menuOpen;
 }
 
 function restoreInlineViewportRecords(state = inlineState) {
@@ -979,7 +1036,12 @@ function updateInlineViewportMessage() {
 
 function ensureInlineTranslatorUi() {
   let host = document.getElementById(INLINE_TRANSLATOR_ID);
-  if (host && inlineUiRoot) return host;
+  if (host && inlineUiRoot) {
+    refreshInlineTranslatorSettings()
+      .then(() => updateInlineTranslatorUi())
+      .catch(() => {});
+    return host;
+  }
   if (host) host.remove();
 
   host = document.createElement('div');
@@ -1004,8 +1066,13 @@ function ensureInlineTranslatorUi() {
       background: #fff;
       color: #111827;
       cursor: pointer;
+      min-height: 44px;
       padding: 7px 10px;
       box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16);
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
     }
     [data-role="menu"] {
       display: grid;
@@ -1027,7 +1094,7 @@ function ensureInlineTranslatorUi() {
     }
     </style>
     <div data-role="container">
-      <button type="button" data-role="toggle">Translate</button>
+      <button type="button" data-role="toggle" aria-expanded="false">Translate</button>
       <div data-role="menu" hidden>
         <button type="button" data-action="translate">Page in Korean</button>
         <button type="button" data-action="stop">Stop</button>
@@ -1039,8 +1106,7 @@ function ensureInlineTranslatorUi() {
 
   inlineUiRoot.querySelector('[data-role="toggle"]').addEventListener('click', (event) => {
     if (!isTrustedInlineUiEvent(event)) return;
-    inlineState.menuOpen = !inlineState.menuOpen;
-    updateInlineTranslatorUi();
+    toggleInlineTranslatorMenu().catch(() => updateInlineTranslatorUi());
   });
   inlineUiRoot
     .querySelector('[data-action="translate"]')
@@ -1066,6 +1132,9 @@ function ensureInlineTranslatorUi() {
     });
 
   updateInlineTranslatorUi();
+  refreshInlineTranslatorSettings()
+    .then(() => updateInlineTranslatorUi())
+    .catch(() => {});
   return host;
 }
 
@@ -1074,16 +1143,19 @@ function updateInlineTranslatorUi() {
   const toggle = inlineUiRoot.querySelector('[data-role="toggle"]');
   const menu = inlineUiRoot.querySelector('[data-role="menu"]');
   const message = inlineUiRoot.querySelector('[data-role="message"]');
-  toggle.textContent =
-    inlineState.status === 'active'
-      ? 'Translated'
-      : inlineState.status === 'translating'
-      ? 'Translating...'
-      : inlineState.status === 'translated'
-      ? 'Translated'
-      : 'Translate';
-  menu.hidden = !inlineState.menuOpen;
-  message.textContent = inlineState.message;
+  const translate = inlineUiRoot.querySelector('[data-action="translate"]');
+  const stop = inlineUiRoot.querySelector('[data-action="stop"]');
+  const restore = inlineUiRoot.querySelector('[data-action="restore"]');
+  const model = getInlineTranslatorUiModel(inlineState);
+
+  toggle.textContent = model.toggleText;
+  toggle.setAttribute('aria-expanded', model.expanded);
+  menu.hidden = !model.menuOpen;
+  message.textContent = model.message;
+  translate.textContent = model.translateText;
+  translate.disabled = model.translateDisabled;
+  stop.disabled = model.stopDisabled;
+  restore.disabled = model.restoreDisabled;
 }
 
 function runInlineViewportScan() {
@@ -1231,6 +1303,7 @@ async function translateInlinePage() {
   const settingsSnapshot = createInlineTranslationSettingsSnapshot(
     settingsResponse.settings
   );
+  inlineState.translationSettings = settingsSnapshot;
   const translationCache = activateInlineTranslationCacheBucket(
     inlineState,
     settingsSnapshot
@@ -1354,6 +1427,7 @@ if (typeof module !== 'undefined' && module.exports) {
     canRestartInlineViewportTranslation,
     hasInlineSettingsApiKey,
     getInlineAutoShowEnabled,
+    refreshInlineTranslatorSettings,
     createInlineTranslationSettingsSnapshot,
     getInlineTranslationCacheSignature,
     getInlineTranslationCacheBucket,
@@ -1366,6 +1440,9 @@ if (typeof module !== 'undefined' && module.exports) {
     markInlineViewportBatchFailed,
     getInlineViewportStatusCounts,
     formatInlineViewportStatusMessage,
+    getInlineTranslatorUiModel,
+    toggleInlineTranslatorMenu,
     restoreInlineViewportRecords,
+    restoreInlineOriginal,
   };
 }

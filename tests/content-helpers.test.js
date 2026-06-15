@@ -240,6 +240,41 @@ exports.tests = [
     },
   },
   {
+    name: 'loads inline menu target language through masked runtime settings',
+    async fn() {
+      const messages = [];
+      const state = { status: 'original', menuOpen: true, message: '' };
+      const fakeChrome = {
+        runtime: {
+          async sendMessage(value) {
+            messages.push(value);
+            return {
+              ok: true,
+              settings: {
+                targetLanguage: 'Japanese',
+                tone: 'technical',
+                model: 'gpt-5.4-mini',
+                apiKey: '***',
+              },
+            };
+          },
+        },
+      };
+
+      const snapshot = await helpers.refreshInlineTranslatorSettings(
+        fakeChrome,
+        state
+      );
+
+      assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }]);
+      assert.equal(snapshot.targetLanguage, 'Japanese');
+      assert.equal(
+        helpers.getInlineTranslatorUiModel(state).translateText,
+        'Page in Japanese'
+      );
+    },
+  },
+  {
     name: 'does not overwrite text nodes changed during translation',
     fn() {
       const stableNode = { isConnected: true, nodeValue: 'Hello world.' };
@@ -1253,6 +1288,175 @@ exports.tests = [
         message,
         'Visible translation on\nTranslated 18 · Pending 4 · Failed 1'
       );
+    },
+  },
+  {
+    name: 'builds inline menu model from status and target language',
+    fn() {
+      assert.deepEqual(
+        helpers.getInlineTranslatorUiModel(
+          { status: 'original', menuOpen: true, message: '' },
+          { targetLanguage: 'Japanese' }
+        ),
+        {
+          toggleText: 'Translate',
+          menuOpen: true,
+          message: '',
+          translateText: 'Page in Japanese',
+          stopDisabled: true,
+          restoreDisabled: true,
+          translateDisabled: false,
+          expanded: 'true',
+        }
+      );
+
+      assert.deepEqual(
+        helpers.getInlineTranslatorUiModel(
+          { status: 'active', menuOpen: false, message: 'Visible translation on' },
+          { targetLanguage: 'Korean' }
+        ),
+        {
+          toggleText: 'Translated',
+          menuOpen: false,
+          message: 'Visible translation on',
+          translateText: 'Scan visible text',
+          stopDisabled: false,
+          restoreDisabled: false,
+          translateDisabled: false,
+          expanded: 'false',
+        }
+      );
+    },
+  },
+  {
+    name: 'keeps inline menu target language after restoring original text',
+    fn() {
+      const previousWindow = global.window;
+      global.window = { removeEventListener() {} };
+
+      try {
+        const state = globalThis.__chromeAiTranslatorInlineState;
+        Object.assign(state, {
+          status: 'active',
+          records: [],
+          restorableRecords: [],
+          message: 'Visible translation on',
+          operationId: 7,
+          translationSettings: {
+            targetLanguage: 'Japanese',
+            tone: 'technical',
+            model: 'gpt-5.4-mini',
+            reasoningEffort: 'none',
+          },
+          translationCache: new Map(),
+          viewport: helpers.createInlineViewportStore(7),
+        });
+
+        helpers.restoreInlineOriginal();
+
+        assert.equal(state.status, 'original');
+        assert.equal(
+          helpers.getInlineTranslatorUiModel(state).translateText,
+          'Page in Japanese'
+        );
+      } finally {
+        if (previousWindow === undefined) delete global.window;
+        else global.window = previousWindow;
+      }
+    },
+  },
+  {
+    name: 'refreshes inline menu target language when opening menu',
+    async fn() {
+      const messages = [];
+      const state = {
+        status: 'original',
+        menuOpen: false,
+        message: '',
+        translationSettings: {
+          targetLanguage: 'Korean',
+          tone: 'technical',
+          model: 'gpt-5.4-mini',
+          reasoningEffort: 'none',
+        },
+      };
+      const fakeChrome = {
+        runtime: {
+          async sendMessage(value) {
+            messages.push(value);
+            return {
+              ok: true,
+              settings: {
+                targetLanguage: 'Japanese',
+                tone: 'technical',
+                model: 'gpt-5.4-mini',
+                apiKey: '***',
+              },
+            };
+          },
+        },
+      };
+
+      await helpers.toggleInlineTranslatorMenu(fakeChrome, state);
+
+      assert.equal(state.menuOpen, true);
+      assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }]);
+      assert.equal(
+        helpers.getInlineTranslatorUiModel(state).translateText,
+        'Page in Japanese'
+      );
+    },
+  },
+  {
+    name: 'opens inline menu before target language refresh completes',
+    async fn() {
+      let resolveSettings;
+      const state = {
+        status: 'original',
+        menuOpen: false,
+        message: '',
+        translationSettings: {
+          targetLanguage: 'Korean',
+          tone: 'technical',
+          model: 'gpt-5.4-mini',
+          reasoningEffort: 'none',
+        },
+      };
+      const updates = [];
+      const fakeChrome = {
+        runtime: {
+          async sendMessage() {
+            return new Promise((resolve) => {
+              resolveSettings = resolve;
+            });
+          },
+        },
+      };
+
+      const toggle = helpers.toggleInlineTranslatorMenu(
+        fakeChrome,
+        state,
+        () => updates.push(helpers.getInlineTranslatorUiModel(state))
+      );
+
+      assert.equal(state.menuOpen, true);
+      assert.equal(updates.length, 1);
+      assert.equal(updates[0].menuOpen, true);
+      assert.equal(updates[0].translateText, 'Page in Korean');
+
+      resolveSettings({
+        ok: true,
+        settings: {
+          targetLanguage: 'Japanese',
+          tone: 'technical',
+          model: 'gpt-5.4-mini',
+          apiKey: '***',
+        },
+      });
+      await toggle;
+
+      assert.equal(updates.length, 2);
+      assert.equal(updates[1].translateText, 'Page in Japanese');
     },
   },
   {

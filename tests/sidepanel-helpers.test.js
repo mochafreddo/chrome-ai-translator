@@ -47,4 +47,31 @@ exports.tests = [
       );
     },
   },
+  {
+    name: 'describes empty sidepanel state with an actionable message',
+    fn() {
+      const state = helpers.getSidepanelDisplayState({ status: 'idle' });
+
+      assert.equal(state.statusText, 'Idle');
+      assert.equal(state.translateDisabled, false);
+      assert.equal(state.translateButtonText, 'Translate current tab');
+      assert.match(state.translatedText, /No translation yet/);
+      assert.match(state.translatedText, /Translate current tab/);
+    },
+  },
+  {
+    name: 'locks translation action and shows progress while busy',
+    fn() {
+      const state = helpers.getSidepanelDisplayState({
+        status: 'translating',
+        progress: { current: 2, total: 5 },
+      });
+
+      assert.equal(state.statusText, 'Translating');
+      assert.equal(state.translateDisabled, true);
+      assert.equal(state.translateButtonText, 'Translating...');
+      assert.equal(state.progressText, 'Chunk 2/5');
+      assert.match(state.translatedText, /Translating current tab/);
+    },
+  },
 ];

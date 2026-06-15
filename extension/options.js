@@ -166,10 +166,23 @@ async function save() {
 }
 
 async function clearKey() {
+  if (
+    !shouldClearStoredApiKey(() =>
+      window.confirm('Clear the stored OpenAI API key? This cannot be undone here.')
+    )
+  ) {
+    setStatus('Key not changed.');
+    setTimeout(() => setStatus(''), 1200);
+    return;
+  }
   await clearStoredApiKey(chrome);
   elApiKey.value = '';
   setStatus('Key cleared.');
   setTimeout(() => setStatus(''), 1200);
+}
+
+function shouldClearStoredApiKey(confirmFn) {
+  return Boolean(confirmFn());
 }
 
 async function clearStoredApiKey(chromeApi) {
@@ -206,5 +219,6 @@ if (typeof module !== 'undefined' && module.exports) {
     clearStoredApiKey,
     collectInlineTranslationLogsFromStorage,
     formatInlineLog,
+    shouldClearStoredApiKey,
   };
 }

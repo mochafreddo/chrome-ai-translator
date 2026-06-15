@@ -5,6 +5,7 @@ const hasDocument = typeof document !== 'undefined';
 const elStatus = hasDocument ? document.getElementById('status') : null;
 const elError = hasDocument ? document.getElementById('errorBox') : null;
 const elProgress = hasDocument ? document.getElementById('progress') : null;
+const btnTranslate = hasDocument ? document.getElementById('btnTranslate') : null;
 
 const elTargetLanguage = hasDocument
   ? document.getElementById('targetLanguage')
@@ -54,6 +55,38 @@ function formatOriginalPanelText(state) {
   return state?.extracted?.contentMarkdown || '';
 }
 
+function formatStatusText(status) {
+  const safe = String(status || 'idle');
+  return safe.charAt(0).toUpperCase() + safe.slice(1);
+}
+
+function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
+  const status = state?.status || 'idle';
+  const busy = status === 'extracting' || status === 'translating';
+  const translatedText = formatTranslatedPanelText(state, viewMode);
+  const originalText = formatOriginalPanelText(state);
+  const progressText = state?.progress?.total
+    ? `Chunk ${state.progress.current}/${state.progress.total}`
+    : '';
+
+  return {
+    statusText: formatStatusText(status),
+    translateButtonText: busy ? 'Translating...' : 'Translate current tab',
+    translateDisabled: busy,
+    progressText,
+    translatedText:
+      translatedText ||
+      (busy
+        ? 'Translating current tab...\n\nProgress will appear here as chunks complete.'
+        : 'No translation yet.\n\nUse Translate current tab to translate the active article.'),
+    originalText:
+      originalText ||
+      (busy
+        ? 'Extracting article text...'
+        : 'No original text yet.\n\nRun Translate current tab to extract the source article.'),
+  };
+}
+
 async function getActiveTabId() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   return tabs?.[0]?.id ?? null;
@@ -88,33 +121,21 @@ async function saveSettings() {
 }
 
 function renderState(state) {
-  if (!state) {
-    setStatus('Idle');
-    setError(null);
-    setProgress(null);
-    elOriginal.textContent = '';
-    elTranslated.textContent = '';
-    return;
-  }
+  const displayState = getSidepanelDisplayState(
+    state || { status: 'idle' },
+    elViewMode.value || state?.settingsUsed?.viewMode || 'translation'
+  );
+  setStatus(displayState.statusText);
+  btnTranslate.textContent = displayState.translateButtonText;
+  btnTranslate.disabled = displayState.translateDisabled;
 
-  const status = state.status || 'idle';
-  setStatus(status);
-
-  if (state.error?.message) setError(state.error.message);
+  if (state?.error?.message) setError(state.error.message);
   else setError(null);
 
-  if (state.progress?.total) {
-    setProgress(`Chunk ${state.progress.current}/${state.progress.total}`);
-  } else {
-    setProgress(null);
-  }
+  setProgress(displayState.progressText);
 
-  elOriginal.textContent = formatOriginalPanelText(state);
-
-  elTranslated.textContent = formatTranslatedPanelText(
-    state,
-    elViewMode.value || state.settingsUsed?.viewMode || 'translation'
-  );
+  elOriginal.textContent = displayState.originalText;
+  elTranslated.textContent = displayState.translatedText;
 }
 
 async function refreshState() {
@@ -134,6 +155,7 @@ async function translateNow() {
   activeTabId = await getActiveTabId();
   if (!activeTabId) return;
   setError(null);
+  renderState({ status: 'translating' });
   const settingsOverride = {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
@@ -198,5 +220,6 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     formatOriginalPanelText,
     formatTranslatedPanelText,
+    getSidepanelDisplayState,
   };
 }

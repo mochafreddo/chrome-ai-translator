@@ -4,10 +4,10 @@
 
 body {
   margin: 0;
-  min-width: 360px;
+  min-width: 320px;
   color: #111827;
   background: #f9fafb;
-  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .header {
@@ -44,6 +44,7 @@ body {
 .row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin: 12px 0;
 }
@@ -52,6 +53,19 @@ label {
   display: grid;
   gap: 5px;
   margin: 10px 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.checkbox-label input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 44px;
+  min-width: 44px;
+  margin: 0;
 }
 
 input,
@@ -63,6 +77,7 @@ button {
 input,
 select {
   width: 100%;
+  min-height: 44px;
   padding: 8px 9px;
   border: 1px solid #d1d5db;
   border-radius: 6px;
@@ -76,6 +91,7 @@ select {
   background: #fff;
   color: #111827;
   cursor: pointer;
+  min-height: 44px;
   padding: 8px 10px;
 }
 
@@ -83,6 +99,35 @@ select {
   border-color: #2563eb;
   background: #2563eb;
   color: #fff;
+}
+
+.btn.danger {
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+.btn:disabled,
+.tab:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.btn:hover:not(:disabled),
+.tab:hover:not(:disabled) {
+  border-color: #9ca3af;
+  background: #f9fafb;
+}
+
+.btn.primary:hover:not(:disabled) {
+  border-color: #1d4ed8;
+  background: #1d4ed8;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
 }
 
 .error {
@@ -106,6 +151,7 @@ select {
   background: #fff;
   color: #111827;
   cursor: pointer;
+  min-height: 44px;
   padding: 7px 10px;
 }
 
@@ -130,4 +176,15 @@ select {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+@media (max-width: 460px) {
+  .header,
+  .row {
+    align-items: flex-start;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
 }

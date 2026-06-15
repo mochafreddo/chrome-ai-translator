@@ -13,4 +13,58 @@ exports.tests = [
       );
     },
   },
+  {
+    name: 'keeps extension controls usable on narrow panels',
+    fn() {
+      const css = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'styles.css'),
+        'utf8'
+      );
+
+      assert.match(css, /min-height:\s*4[04]px/);
+      assert.match(css, /@media\s*\(max-width:\s*460px\)/);
+      assert.match(css, /grid-template-columns:\s*1fr/);
+    },
+  },
+  {
+    name: 'sets each interactive control family to touch-sized height',
+    fn() {
+      const css = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'styles.css'),
+        'utf8'
+      );
+      const contentJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'content.js'),
+        'utf8'
+      );
+
+      assert.match(css, /input,\nselect\s*\{[^}]*min-height:\s*44px/s);
+      assert.match(css, /\.btn\s*\{[^}]*min-height:\s*44px/s);
+      assert.match(css, /\.tab\s*\{[^}]*min-height:\s*44px/s);
+      assert.match(contentJs, /button\s*\{[^}]*min-height:\s*44px/s);
+    },
+  },
+  {
+    name: 'keeps checkbox labels visually attached to their control',
+    fn() {
+      const optionsHtml = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'options.html'),
+        'utf8'
+      );
+      const css = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'styles.css'),
+        'utf8'
+      );
+
+      assert.match(
+        optionsHtml,
+        /<label class="checkbox-label">\s*<input id="inlineAutoShow"/
+      );
+      assert.match(css, /\.checkbox-label\s*\{[^}]*display:\s*flex/s);
+      assert.match(
+        css,
+        /\.checkbox-label input\[type="checkbox"\]\s*\{[^}]*width:\s*44px/s
+      );
+    },
+  },
 ];
