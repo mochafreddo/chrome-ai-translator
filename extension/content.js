@@ -156,6 +156,11 @@ function getInlineTranslationCacheBucket(state = inlineState, settings = {}) {
     cache = new Map();
     caches.set(signature, cache);
   }
+  return cache;
+}
+
+function activateInlineTranslationCacheBucket(state = inlineState, settings = {}) {
+  const cache = getInlineTranslationCacheBucket(state, settings);
   state.translationCache = cache;
   return cache;
 }
@@ -1226,11 +1231,10 @@ async function translateInlinePage() {
   const settingsSnapshot = createInlineTranslationSettingsSnapshot(
     settingsResponse.settings
   );
-  const translationCache = getInlineTranslationCacheBucket(
+  const translationCache = activateInlineTranslationCacheBucket(
     inlineState,
     settingsSnapshot
   );
-  inlineState.translationCache = translationCache;
   inlineState.operationId = (Number(inlineState.operationId) || 0) + 1;
   inlineState.status = 'active';
   inlineState.viewport = createInlineViewportStore(
@@ -1353,6 +1357,7 @@ if (typeof module !== 'undefined' && module.exports) {
     createInlineTranslationSettingsSnapshot,
     getInlineTranslationCacheSignature,
     getInlineTranslationCacheBucket,
+    activateInlineTranslationCacheBucket,
     seedInlineViewportStoreWithRestorableRecords,
     createInlineViewportStore,
     queueInlineViewportRecord,

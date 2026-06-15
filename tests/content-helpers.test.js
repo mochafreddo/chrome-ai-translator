@@ -843,7 +843,7 @@ exports.tests = [
         restorableRecords: [],
         translationCacheBySettings: new Map(),
       };
-      const firstCache = helpers.getInlineTranslationCacheBucket(
+      const firstCache = helpers.activateInlineTranslationCacheBucket(
         state,
         settings
       );
@@ -1360,7 +1360,7 @@ exports.tests = [
         translationCacheBySettings: new Map(),
         restorableRecords: [],
       };
-      const firstCache = helpers.getInlineTranslationCacheBucket(
+      const firstCache = helpers.activateInlineTranslationCacheBucket(
         state,
         settings
       );
