@@ -48,11 +48,18 @@ Each bucket is keyed by exact original text, using the existing
 
 This keeps the responsibilities distinct:
 
-- viewport store records track the current active scan, queue, in-flight work,
-  and DOM ownership;
+- viewport store records track the current active scan position, queue,
+  in-flight work, and DOM ownership;
 - restorable records track translated DOM nodes that may need to be restored;
 - the page cache tracks known original-to-translation pairs for the current page
   instance.
+
+Viewport scanning is intentionally bounded. Each scan inspects a limited window
+of text nodes, skips offscreen element subtrees, and schedules a continuation
+when more text nodes remain. Internal continuations resume from the stored scan
+position. External viewport changes such as scroll, resize, or page mutation
+reset that position and drop unsent queued records so the next scan prioritizes
+currently visible text instead of old viewport work.
 
 ## Data Flow
 
@@ -90,6 +97,10 @@ On the next **Page in Korean** click on the same page:
 8. If a text node exactly matches a cached original string, the cached
    translation is applied immediately and no batch request is queued for that
    node.
+9. If the scan budget is exhausted, the next internal scan continues from the
+   stored text-node position. If the viewport changes before that continuation
+   runs, queued-but-unsent records are returned to `original` state and the scan
+   restarts from the top of the current viewport.
 
 The implementation shares the page cache `Map` with each new viewport store.
 That avoids copy drift and keeps the helper API small:
@@ -114,6 +125,12 @@ settings such as `chunkMaxChars`, `inlineAutoShow`, and `viewMode`.
 This keeps a run consistent with the settings used to choose the cache bucket,
 without allowing the content script to provide or override secrets.
 
+Visible inline batches also use a fixed output-token cap in the background
+request. After the model returns structured JSON, the background validates every
+expected id and rejects translations that expand far beyond their original
+record. Rejected, malformed, or missing translations fail the affected batch
+instead of being applied or cached.
+
 ## Boundaries
 
 The cache must not be written to `chrome.storage`, local files, background
@@ -135,6 +152,11 @@ Failed, stale, ignored, queued, and in-flight records are not inserted into the
 page cache. Late responses from stale operations remain ignored by the existing
 operation checks.
 
+Queued records that have not been sent may be reset when the viewport changes.
+Those records remain in `records` for status/restoration bookkeeping, but they
+are removed from the active queue and can be queued again if their text is still
+visible in a later scan.
+
 If the page changes after restoration and the text no longer equals the cached
 original, the cached entry is not applied. That prevents replacing live site
 updates with stale translated text.
@@ -154,10 +176,16 @@ Focused unit coverage in `tests/content-helpers.test.js` covers:
   change so they can be queued under the new settings.
 - Existing tests for rerendered original text, same-node reversion, stopped
   sessions, and restore ownership continue to pass.
+- Viewport scans skip offscreen text, continue through large pages using a
+  bounded text-node budget, and reset unsent queued work when the viewport
+  changes.
 
 Focused unit coverage in `tests/background-helpers.test.js` verifies that
 visible batch settings snapshots can update translation-affecting settings
 without accepting an `apiKey` from the content script.
+It also verifies the visible-batch output cap, full-page output cap scaling,
+structured inline translation id validation, over-expanded inline translation
+rejection, and removal of the legacy text-node translation message endpoint.
 
 Run:
 

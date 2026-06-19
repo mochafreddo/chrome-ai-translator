@@ -52,6 +52,9 @@ In the Side Panel:
 - **View** can show only the translation or a bilingual original/translation
   output.
 - The **Original** tab shows the extracted Markdown source.
+- Inline code in paragraphs and list items is marked as Markdown code before
+  translation, so the model can keep snippets like API names and commands
+  unchanged.
 
 For inline page translation:
 
@@ -71,19 +74,27 @@ the toolbar click. Starting inline translation still requires choosing
 ## Limits and diagnostics
 - Full-page Side Panel translation stops before sending more than 60,000
   extracted characters.
+- Full-page translation reserves at least 8,192 output tokens for each request
+  and scales that cap up for larger chunks to reduce truncation.
 - `Chunk max chars` defaults to `12000` and is clamped between `2000` and
   `60000`.
 - Inline translation translates only visible article text while active and
-  scans again on scroll, resize, and page mutations.
-- Inline viewport batches are capped at 2,000 characters. Long scrolling
-  sessions can continue sending new visible batches while inline translation is
-  active.
+  scans again on scroll, resize, and page mutations. Large pages are scanned in
+  bounded windows and viewport changes reset pending scan work so the current
+  visible text is prioritized.
+- Inline viewport batches are capped at 2,000 input characters and 2,048 output
+  tokens. Over-expanded inline responses are rejected before they can be applied
+  to the page.
 - Inline translations restored with **Original text** are cached only in the
   current page instance. The cache is reused only when target language, tone,
   model, and reasoning effort still match, and it is cleared by reloads,
   navigations, or browser restarts.
 - Options shows the 20 most recent inline translation runs with status, model,
   node/character/chunk counts, timings, and redacted errors.
+
+## Related docs
+- [Inline restore cache design](docs/design/inline-restore-cache-design.md)
+- [Local extension QA report](docs/qa/qa-report-local-extension-2026-06-15.md)
 
 ## Development
 - Run tests: `npm test`

@@ -2,6 +2,98 @@ const assert = require('node:assert/strict');
 const helpers = require('../extension/content.js');
 
 exports.name = 'content helpers';
+
+function withFakeViewportDom(fn, options = {}) {
+  const previous = {
+    chrome: global.chrome,
+    clearTimeout: global.clearTimeout,
+    document: global.document,
+    HTMLElement: global.HTMLElement,
+    setTimeout: global.setTimeout,
+    window: global.window,
+  };
+  const defaultRect = {
+    top: 20,
+    bottom: 44,
+    left: 10,
+    right: 300,
+    width: 290,
+    height: 24,
+    ...(options.defaultRect || {}),
+  };
+
+  class FakeElement {
+    constructor(children = [], rect = {}) {
+      this.nodeType = 1;
+      this.tagName = 'P';
+      this.childNodes = children;
+      this.hidden = false;
+      this.parentElement = null;
+      this.rect = { ...defaultRect, ...rect };
+      for (const child of children) {
+        child.parentElement = this;
+      }
+    }
+
+    closest() {
+      return null;
+    }
+
+    getAttribute() {
+      return null;
+    }
+
+    getBoundingClientRect() {
+      return this.rect;
+    }
+  }
+
+  function text(value) {
+    return {
+      nodeType: 3,
+      nodeValue: value,
+      isConnected: true,
+      parentElement: null,
+    };
+  }
+
+  global.HTMLElement = FakeElement;
+  global.window = {
+    innerWidth: 500,
+    innerHeight: 300,
+    getComputedStyle() {
+      return {
+        display: 'block',
+        visibility: 'visible',
+        opacity: '1',
+      };
+    },
+  };
+  global.document = {
+    documentElement: {
+      clientWidth: 0,
+      clientHeight: 0,
+    },
+    createRange() {
+      throw new Error('range unavailable');
+    },
+  };
+  if ('chrome' in options) global.chrome = options.chrome;
+  if ('clearTimeout' in options) global.clearTimeout = options.clearTimeout;
+  if ('setTimeout' in options) global.setTimeout = options.setTimeout;
+
+  try {
+    return fn({ FakeElement, text });
+  } finally {
+    global.chrome = previous.chrome;
+    global.clearTimeout = previous.clearTimeout;
+    global.document = previous.document;
+    global.HTMLElement = previous.HTMLElement;
+    global.setTimeout = previous.setTimeout;
+    global.window = previous.window;
+  }
+}
+
 exports.tests = [
   {
     name: 'detects excluded inline code tags',
@@ -103,6 +195,73 @@ exports.tests = [
       );
       assert.equal(helpers.isTranslatableInlineText('API'), false);
       assert.equal(helpers.isTranslatableInlineText('  '), false);
+    },
+  },
+  {
+    name: 'preserves inline code markers when serializing paragraph text',
+    fn() {
+      const paragraph = {
+        nodeType: 1,
+        tagName: 'P',
+        childNodes: [
+          { nodeType: 3, nodeValue: 'Use ' },
+          {
+            nodeType: 1,
+            tagName: 'CODE',
+            textContent: 'chrome.storage.local',
+            childNodes: [{ nodeType: 3, nodeValue: 'chrome.storage.local' }],
+          },
+          { nodeType: 3, nodeValue: ' for settings.' },
+        ],
+      };
+
+      assert.equal(
+        helpers.getMarkdownTextWithInlineCode(paragraph),
+        'Use `chrome.storage.local` for settings.'
+      );
+    },
+  },
+  {
+    name: 'uses longer inline code delimiters for backtick runs',
+    fn() {
+      const paragraph = {
+        nodeType: 1,
+        tagName: 'P',
+        childNodes: [
+          { nodeType: 3, nodeValue: 'Use ' },
+          {
+            nodeType: 1,
+            tagName: 'CODE',
+            textContent: 'a``b',
+            childNodes: [{ nodeType: 3, nodeValue: 'a``b' }],
+          },
+          { nodeType: 3, nodeValue: ' now.' },
+        ],
+      };
+
+      assert.equal(
+        helpers.getMarkdownTextWithInlineCode(paragraph),
+        'Use ``` a``b ``` now.'
+      );
+    },
+  },
+  {
+    name: 'preserves line breaks when serializing paragraph text',
+    fn() {
+      const paragraph = {
+        nodeType: 1,
+        tagName: 'P',
+        childNodes: [
+          { nodeType: 3, nodeValue: 'First line' },
+          { nodeType: 1, tagName: 'BR', childNodes: [], textContent: '' },
+          { nodeType: 3, nodeValue: 'Second line' },
+        ],
+      };
+
+      assert.equal(
+        helpers.getMarkdownTextWithInlineCode(paragraph),
+        'First line Second line'
+      );
     },
   },
   {
@@ -500,6 +659,256 @@ exports.tests = [
         global.HTMLElement = previous.HTMLElement;
         global.NodeFilter = previous.NodeFilter;
         global.window = previous.window;
+      }
+    },
+  },
+  {
+    name: 'does not queue offscreen text nodes in manual DOM scans',
+    fn() {
+      withFakeViewportDom(({ FakeElement, text }) => {
+        const visible = new FakeElement([
+          text('First visible article sentence.'),
+        ]);
+        const belowViewport = new FakeElement(
+          [text('Second below article sentence.')],
+          {
+            top: 700,
+            bottom: 724,
+          }
+        );
+        const laterVisible = new FakeElement(
+          [text('Third visible article sentence.')],
+          {
+            top: 60,
+            bottom: 84,
+          }
+        );
+        const root = new FakeElement([visible, belowViewport, laterVisible]);
+        const store = helpers.createInlineViewportStore(19);
+
+        const queued = helpers.collectVisibleInlineTextNodes(root, store, 10);
+
+        assert.deepEqual(
+          queued.map((record) => record.original),
+          [
+            'First visible article sentence.',
+            'Third visible article sentence.',
+          ]
+        );
+        assert.deepEqual(
+          store.queue.map((record) => record.original),
+          [
+            'First visible article sentence.',
+            'Third visible article sentence.',
+          ]
+        );
+      });
+    },
+  },
+  {
+    name: 'does not let offscreen predecessors exhaust the visible scan budget',
+    fn() {
+      withFakeViewportDom(({ FakeElement, text }) => {
+        const offscreen = Array.from({ length: 1200 }, (_item, index) =>
+          new FakeElement([text(`Offscreen article sentence ${index + 1}.`)])
+        );
+        const visible = new FakeElement(
+          [text('Visible article sentence now.')],
+          {
+            top: 20,
+            bottom: 44,
+          }
+        );
+        const root = new FakeElement([...offscreen, visible], {
+          top: 0,
+          bottom: 800,
+        });
+        const store = helpers.createInlineViewportStore(23);
+
+        const queued = helpers.collectVisibleInlineTextNodes(root, store, 1200);
+
+        assert.deepEqual(
+          queued.map((record) => record.original),
+          ['Visible article sentence now.']
+        );
+      }, { defaultRect: { top: 700, bottom: 724 } });
+    },
+  },
+  {
+    name: 'resets scan continuation and queued work when the viewport changes',
+    fn() {
+      const state = global.__chromeAiTranslatorInlineState;
+      const previousState = {
+        status: state.status,
+        records: state.records,
+        message: state.message,
+        operationId: state.operationId,
+        viewport: state.viewport,
+      };
+
+      try {
+        withFakeViewportDom(({ FakeElement, text }) => {
+          const firstViewport = Array.from({ length: 1300 }, (_item, index) =>
+            new FakeElement([text(`Initial visible sentence ${index + 1}.`)])
+          );
+          const secondViewport = [
+            new FakeElement(
+              [text('Later visible sentence.')],
+              { top: 700, bottom: 724 }
+            ),
+          ];
+          const root = new FakeElement([...firstViewport, ...secondViewport], {
+            top: 0,
+            bottom: 900,
+          });
+          const store = helpers.createInlineViewportStore(24);
+
+          helpers.collectVisibleInlineTextNodes(root, store, 1200);
+          assert.equal(store.scanStartIndex, 1200);
+
+          for (const el of firstViewport) {
+            el.rect = {
+              top: -1000,
+              bottom: -976,
+              left: 10,
+              right: 300,
+              width: 290,
+              height: 24,
+            };
+          }
+          for (const el of secondViewport) {
+            el.rect = {
+              top: 20,
+              bottom: 44,
+              left: 10,
+              right: 300,
+              width: 290,
+              height: 24,
+            };
+          }
+
+          state.status = 'active';
+          state.operationId = 24;
+          state.viewport = store;
+          helpers.scheduleInlineViewportScanFromViewportChange();
+
+          assert.equal(store.scanStartIndex, 0);
+          const queued = helpers.collectVisibleInlineTextNodes(root, store, 1200);
+          assert.deepEqual(
+            queued.map((record) => record.original),
+            ['Later visible sentence.']
+          );
+          const batch = helpers.takeInlineViewportBatch(store, 2000);
+          assert.deepEqual(
+            batch.map((record) => record.original),
+            ['Later visible sentence.']
+          );
+        }, {
+          clearTimeout() {},
+          setTimeout() {
+            return 123;
+          },
+        });
+      } finally {
+        state.status = previousState.status;
+        state.records = previousState.records;
+        state.message = previousState.message;
+        state.operationId = previousState.operationId;
+        state.viewport = previousState.viewport;
+      }
+    },
+  },
+  {
+    name: 'advances viewport scans through large pages with a text-node budget',
+    fn() {
+      withFakeViewportDom(({ FakeElement, text }) => {
+        const nodes = [
+          text('First visible article sentence.'),
+          text('Second visible article sentence.'),
+          text('Third visible article sentence.'),
+          text('Fourth visible article sentence.'),
+        ];
+        const root = new FakeElement(nodes);
+        const store = helpers.createInlineViewportStore(21);
+
+        const first = helpers.collectVisibleInlineTextNodes(root, store, 2);
+        const second = helpers.collectVisibleInlineTextNodes(root, store, 2);
+
+        assert.deepEqual(
+          first.map((record) => record.original),
+          [
+            'First visible article sentence.',
+            'Second visible article sentence.',
+          ]
+        );
+        assert.deepEqual(
+          second.map((record) => record.original),
+          [
+            'Third visible article sentence.',
+            'Fourth visible article sentence.',
+          ]
+        );
+        assert.deepEqual(
+          store.queue.map((record) => record.original),
+          [
+            'First visible article sentence.',
+            'Second visible article sentence.',
+            'Third visible article sentence.',
+            'Fourth visible article sentence.',
+          ]
+        );
+      });
+    },
+  },
+  {
+    name: 'schedules another viewport scan when the scan budget is exhausted',
+    fn() {
+      const state = global.__chromeAiTranslatorInlineState;
+      const previousState = {
+        status: state.status,
+        records: state.records,
+        message: state.message,
+        operationId: state.operationId,
+        viewport: state.viewport,
+      };
+      let timerCalls = 0;
+
+      try {
+        withFakeViewportDom(({ FakeElement, text }) => {
+          const nodes = Array.from({ length: 1201 }, (_item, index) =>
+            text(`Visible article sentence ${index + 1}.`)
+          );
+          const root = new FakeElement(nodes);
+          const store = helpers.createInlineViewportStore(31);
+          store.root = root;
+          state.status = 'active';
+          state.operationId = 31;
+          state.viewport = store;
+
+          helpers.runInlineViewportScan();
+
+          assert.equal(store.scanStartIndex, 1200);
+          assert.equal(timerCalls, 1);
+        }, {
+          chrome: {
+            runtime: {
+              sendMessage() {
+                return new Promise(() => {});
+              },
+            },
+          },
+          clearTimeout() {},
+          setTimeout() {
+            timerCalls += 1;
+            return 123;
+          },
+        });
+      } finally {
+        state.status = previousState.status;
+        state.records = previousState.records;
+        state.message = previousState.message;
+        state.operationId = previousState.operationId;
+        state.viewport = previousState.viewport;
       }
     },
   },

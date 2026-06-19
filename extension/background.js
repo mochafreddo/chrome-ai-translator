@@ -26,6 +26,12 @@ const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
 const INLINE_LOG_LIMIT = 20;
 const INLINE_TRANSLATION_MAX_CONCURRENCY = 3;
+const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+const INLINE_VISIBLE_BATCH_MAX_OUTPUT_TOKENS = 2048;
+const MIN_MAX_OUTPUT_TOKENS = 256;
+const MAX_MAX_OUTPUT_TOKENS = 128000;
+const INLINE_TRANSLATION_MIN_MAX_CHARS = 1000;
+const INLINE_TRANSLATION_EXPANSION_RATIO = 4;
 
 // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
 const stateByTab = new Map();
@@ -42,6 +48,21 @@ function normalizeChunkMaxChars(value, fallback = DEFAULT_SETTINGS.chunkMaxChars
   return Math.min(
     MAX_CHUNK_MAX_CHARS,
     Math.max(MIN_CHUNK_MAX_CHARS, Math.floor(parsed))
+  );
+}
+
+function normalizeMaxOutputTokens(value, fallback = DEFAULT_MAX_OUTPUT_TOKENS) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(
+    MAX_MAX_OUTPUT_TOKENS,
+    Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(parsed))
+  );
+}
+
+function getFullPageMaxOutputTokens(markdownChunk) {
+  return normalizeMaxOutputTokens(
+    Math.max(DEFAULT_MAX_OUTPUT_TOKENS, String(markdownChunk || '').length)
   );
 }
 
@@ -283,11 +304,13 @@ async function openaiTranslateChunk({
   instructions,
   input,
   textFormat = null,
+  maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
 }) {
   const body = {
     model,
     instructions,
     input,
+    max_output_tokens: normalizeMaxOutputTokens(maxOutputTokens),
   };
   if (reasoningEffort) {
     body.reasoning = { effort: reasoningEffort };
@@ -456,13 +479,14 @@ function parseAndValidateTextNodeTranslations(outputText, records) {
     throw new Error('Inline translation response did not include translations');
   }
 
-  const expected = new Set(records.map((record) => record.id));
+  const expected = new Map(records.map((record) => [record.id, record]));
   const seen = new Set();
   const normalized = [];
 
   for (const item of translations) {
     const id = item?.id;
-    if (!expected.has(id)) {
+    const expectedRecord = expected.get(id);
+    if (!expectedRecord) {
       throw new Error(`Unexpected translation id: ${id}`);
     }
     if (seen.has(id)) {
@@ -471,6 +495,7 @@ function parseAndValidateTextNodeTranslations(outputText, records) {
     if (typeof item.translation !== 'string') {
       throw new Error(`Missing translation for id: ${id}`);
     }
+    assertInlineTranslationOutputBudget(item.translation, expectedRecord);
     seen.add(id);
     normalized.push({ id, translation: item.translation });
   }
@@ -482,6 +507,23 @@ function parseAndValidateTextNodeTranslations(outputText, records) {
   }
 
   return normalized;
+}
+
+function getInlineTranslationMaxChars(record) {
+  const originalLength = String(record?.text || '').length;
+  return Math.max(
+    INLINE_TRANSLATION_MIN_MAX_CHARS,
+    originalLength * INLINE_TRANSLATION_EXPANSION_RATIO
+  );
+}
+
+function assertInlineTranslationOutputBudget(translation, record) {
+  const maxChars = getInlineTranslationMaxChars(record);
+  if (String(translation || '').length > maxChars) {
+    throw new Error(
+      `Inline translation for id ${record?.id || '(unknown)'} is too long (${String(translation || '').length}/${maxChars} characters)`
+    );
+  }
 }
 
 function normalizeTextNodeRecords(records) {
@@ -752,6 +794,7 @@ async function translateVisibleTextBatch(records, settingsSnapshot = null) {
       instructions: buildTextNodeInstructions(settings),
       input: JSON.stringify({ records: normalized }),
       textFormat: buildTextNodeResponseFormat(),
+      maxOutputTokens: INLINE_VISIBLE_BATCH_MAX_OUTPUT_TOKENS,
     });
 
     const translations = parseAndValidateTextNodeTranslations(output, normalized);
@@ -950,6 +993,7 @@ async function translateTab(tabId, overrideSettings = null) {
           reasoningEffort: settings.reasoningEffort,
           instructions,
           input: chunks[i],
+          maxOutputTokens: getFullPageMaxOutputTokens(chunks[i]),
         });
         translatedChunks.push(out.trim());
       }
@@ -1027,17 +1071,6 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           });
           return;
         }
-        if (msg?.type === 'TRANSLATE_TEXT_NODES') {
-          const translations = await translateTextNodeRecords(
-            msg.records || [],
-            {
-              tabId: sender.tab?.id,
-              operationId: msg.operationId,
-            }
-          );
-          sendResponse({ ok: true, translations });
-          return;
-        }
         if (msg?.type === 'TRANSLATE_VISIBLE_TEXT_BATCH') {
           const translations = await translateVisibleTextBatch(
             msg.records || [],
@@ -1086,6 +1119,7 @@ if (typeof module !== 'undefined' && module.exports) {
     collectInlineTranslationLogsFromStorage,
     getVisibleInlineBatchMaxChars,
     normalizeVisibleTextBatchRecords,
+    normalizeMaxOutputTokens,
     sanitizeLogError,
     splitTextRecordsIntoChunks,
     parseAndValidateTextNodeTranslations,

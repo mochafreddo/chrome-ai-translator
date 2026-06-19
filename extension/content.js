@@ -8,6 +8,7 @@ var INLINE_VIEWPORT_BATCH_MAX_CHARS = 2000;
 var INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;
 var INLINE_VIEWPORT_SCAN_DEBOUNCE_MS = 250;
 var INLINE_VIEWPORT_PREFETCH_RATIO = 0.5;
+var INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES = 1200;
 var INLINE_TRANSLATION_SETTINGS_DEFAULTS = {
   targetLanguage: 'Korean',
   tone: 'technical',
@@ -72,6 +73,7 @@ function createInlineViewportStore(
     observer: null,
     root: null,
     stopped: false,
+    scanStartIndex: 0,
     translationSettings: translationSettingsSnapshot,
     translationSettingsSignature,
   };
@@ -504,6 +506,21 @@ function queueInlineViewportRecord(store, node, text) {
   return record;
 }
 
+function resetQueuedInlineViewportRecords(store) {
+  if (!store?.queue?.length) return;
+
+  const retained = [];
+  for (const record of store.queue) {
+    if (record?.state === 'queued') {
+      record.state = 'original';
+      record.translation = null;
+      continue;
+    }
+    retained.push(record);
+  }
+  store.queue = retained;
+}
+
 function takeInlineViewportBatch(
   store,
   maxChars = INLINE_VIEWPORT_BATCH_MAX_CHARS
@@ -811,6 +828,57 @@ function detectCodeLang(codeEl) {
   return m ? m[1] : '';
 }
 
+function normalizeMarkdownInlineText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function wrapMarkdownInlineCode(text) {
+  const code = normalizeMarkdownInlineText(text);
+  if (!code) return '';
+  const maxBacktickRun = (code.match(/`+/g) || []).reduce(
+    (max, run) => Math.max(max, run.length),
+    0
+  );
+  const delimiter = '`'.repeat(maxBacktickRun + 1);
+  if (maxBacktickRun > 0) return `${delimiter} ${code} ${delimiter}`;
+  return `${delimiter}${code}${delimiter}`;
+}
+
+function getMarkdownTextWithInlineCode(node) {
+  const parts = [];
+
+  function walk(current) {
+    if (!current) return;
+    if (current.nodeType === 3) {
+      parts.push(current.nodeValue || '');
+      return;
+    }
+
+    const tag = String(current.tagName || '').toLowerCase();
+    if (tag === 'br') {
+      parts.push(' ');
+      return;
+    }
+    if (tag === 'code' || tag === 'kbd' || tag === 'samp') {
+      parts.push(wrapMarkdownInlineCode(current.textContent));
+      return;
+    }
+
+    const children = Array.from(current.childNodes || []);
+    if (children.length) {
+      for (const child of children) walk(child);
+      return;
+    }
+
+    if (typeof current.textContent === 'string') {
+      parts.push(current.textContent);
+    }
+  }
+
+  walk(node);
+  return normalizeMarkdownInlineText(parts.join(''));
+}
+
 function pickArticleRoot() {
   const candidates = [
     document.querySelector('article'),
@@ -902,7 +970,7 @@ function toMarkdown(root) {
 
     // Paragraphs
     if (tag === 'p') {
-      const text = el.innerText;
+      const text = getMarkdownTextWithInlineCode(el);
       pushPara(text);
       out.push('');
       continue;
@@ -910,8 +978,7 @@ function toMarkdown(root) {
 
     // List items (simple)
     if (tag === 'li') {
-      const text = el.innerText;
-      const t = (text || '').replace(/\s+/g, ' ').trim();
+      const t = getMarkdownTextWithInlineCode(el);
       if (t) out.push(`- ${t}`);
       continue;
     }
@@ -962,10 +1029,10 @@ function getInlineTextNodeRect(textNode) {
   return textNode.parentElement?.getBoundingClientRect?.() || null;
 }
 
-function isInlineTextNodeInViewport(textNode) {
+function isInlineTextNodeInViewport(textNode, viewport = getInlineViewportInfo()) {
   return isInlineRectInViewport(
     getInlineTextNodeRect(textNode),
-    getInlineViewportInfo()
+    viewport
   );
 }
 
@@ -978,6 +1045,101 @@ function shouldSkipInlineTextNode(textNode) {
     if (isElementHidden(el)) return true;
   }
   return !isTranslatableInlineText(textNode.nodeValue);
+}
+
+function normalizeInlineViewportScanLimit(maxTextNodes) {
+  const parsed = Number(maxTextNodes);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES;
+  }
+  return Math.floor(parsed);
+}
+
+function isInlineTextNode(node) {
+  return Boolean(node && node.nodeType === 3);
+}
+
+function shouldSkipInlineElementSubtree(node, viewport = getInlineViewportInfo()) {
+  if (!node || !(node instanceof HTMLElement)) return false;
+  if (node.closest?.(`#${INLINE_TRANSLATOR_ID}`)) return true;
+  if (isInlineTranslationExcludedElement(node) || isElementHidden(node)) {
+    return true;
+  }
+  const rect = node.getBoundingClientRect?.();
+  return rect ? !isInlineRectInViewport(rect, viewport) : false;
+}
+
+function getInlineChildNodes(node) {
+  return Array.from(node?.childNodes || []);
+}
+
+function collectVisibleInlineTextNodesFromDom(root, store, maxTextNodes) {
+  const limit = normalizeInlineViewportScanLimit(maxTextNodes);
+  const startIndex = Math.max(0, Number(store?.scanStartIndex) || 0);
+  const viewport = getInlineViewportInfo();
+  const queued = [];
+  const stack = [root];
+  let textIndex = 0;
+  let inspected = 0;
+  let truncated = false;
+
+  while (stack.length) {
+    const node = stack.pop();
+    if (isInlineTextNode(node)) {
+      if (textIndex < startIndex) {
+        textIndex += 1;
+        continue;
+      }
+      if (inspected >= limit) {
+        truncated = true;
+        break;
+      }
+      textIndex += 1;
+      inspected += 1;
+      if (
+        !shouldSkipInlineTextNode(node) &&
+        isInlineTextNodeInViewport(node, viewport)
+      ) {
+        const record = queueInlineViewportRecord(store, node, node.nodeValue);
+        if (record) queued.push(record);
+      }
+      continue;
+    }
+
+    if (shouldSkipInlineElementSubtree(node, viewport)) continue;
+
+    const children = getInlineChildNodes(node);
+    for (let i = children.length - 1; i >= 0; i -= 1) {
+      stack.push(children[i]);
+    }
+  }
+
+  if (store) {
+    store.scanStartIndex = truncated ? textIndex : 0;
+  }
+  return queued;
+}
+
+function collectVisibleInlineTextNodesWithTreeWalker(root, store, maxTextNodes) {
+  const limit = normalizeInlineViewportScanLimit(maxTextNodes);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (shouldSkipInlineTextNode(node)) return NodeFilter.FILTER_REJECT;
+      if (!isInlineTextNodeInViewport(node)) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  const queued = [];
+  let inspected = 0;
+  while (walker.nextNode()) {
+    if (inspected >= limit) break;
+    inspected += 1;
+    const node = walker.currentNode;
+    const record = queueInlineViewportRecord(store, node, node.nodeValue);
+    if (record) queued.push(record);
+  }
+  return queued;
 }
 
 function collectInlineTextNodes(root) {
@@ -1002,22 +1164,15 @@ function collectInlineTextNodes(root) {
   return records;
 }
 
-function collectVisibleInlineTextNodes(root, store) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      if (shouldSkipInlineTextNode(node)) return NodeFilter.FILTER_REJECT;
-      if (!isInlineTextNodeInViewport(node)) return NodeFilter.FILTER_REJECT;
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-
-  const queued = [];
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    const record = queueInlineViewportRecord(store, node, node.nodeValue);
-    if (record) queued.push(record);
+function collectVisibleInlineTextNodes(
+  root,
+  store,
+  maxTextNodes = INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES
+) {
+  if (root?.childNodes) {
+    return collectVisibleInlineTextNodesFromDom(root, store, maxTextNodes);
   }
-  return queued;
+  return collectVisibleInlineTextNodesWithTreeWalker(root, store, maxTextNodes);
 }
 
 function setInlineMessage(message) {
@@ -1168,15 +1323,22 @@ function runInlineViewportScan() {
   }
   store.root = root;
   collectVisibleInlineTextNodes(root, store);
+  if (store.scanStartIndex > 0) {
+    scheduleInlineViewportScan();
+  }
   updateInlineViewportMessage();
   drainInlineViewportQueue().catch((error) =>
     setInlineMessage(error?.message || String(error))
   );
 }
 
-function scheduleInlineViewportScan() {
+function scheduleInlineViewportScan(options = {}) {
   const store = inlineState.viewport;
   if (!store || store.stopped || inlineState.status !== 'active') return;
+  if (options?.resetScanStartIndex) {
+    store.scanStartIndex = 0;
+    resetQueuedInlineViewportRecords(store);
+  }
   if (store.scanTimer) clearTimeout(store.scanTimer);
   store.scanTimer = setTimeout(() => {
     store.scanTimer = null;
@@ -1184,11 +1346,15 @@ function scheduleInlineViewportScan() {
   }, INLINE_VIEWPORT_SCAN_DEBOUNCE_MS);
 }
 
-function attachInlineViewportWatchers(root) {
-  window.addEventListener('scroll', scheduleInlineViewportScan, { passive: true });
-  window.addEventListener('resize', scheduleInlineViewportScan);
+function scheduleInlineViewportScanFromViewportChange() {
+  scheduleInlineViewportScan({ resetScanStartIndex: true });
+}
 
-  const observer = new MutationObserver(scheduleInlineViewportScan);
+function attachInlineViewportWatchers(root) {
+  window.addEventListener('scroll', scheduleInlineViewportScanFromViewportChange, { passive: true });
+  window.addEventListener('resize', scheduleInlineViewportScanFromViewportChange);
+
+  const observer = new MutationObserver(scheduleInlineViewportScanFromViewportChange);
   observer.observe(root, {
     childList: true,
     subtree: true,
@@ -1198,8 +1364,8 @@ function attachInlineViewportWatchers(root) {
 }
 
 function detachInlineViewportWatchers() {
-  window.removeEventListener('scroll', scheduleInlineViewportScan);
-  window.removeEventListener('resize', scheduleInlineViewportScan);
+  window.removeEventListener('scroll', scheduleInlineViewportScanFromViewportChange);
+  window.removeEventListener('resize', scheduleInlineViewportScanFromViewportChange);
   if (inlineState.viewport?.observer) {
     inlineState.viewport.observer.disconnect();
     inlineState.viewport.observer = null;
@@ -1404,6 +1570,7 @@ if (typeof module !== 'undefined' && module.exports) {
     isInlineTranslationExcludedElement,
     isCodeLikeInlineText,
     isTranslatableInlineText,
+    getMarkdownTextWithInlineCode,
     isTrustedInlineUiEvent,
     resetInlineTranslationAfterFailure,
     getInlineTextRecordBudgetError,
@@ -1442,6 +1609,8 @@ if (typeof module !== 'undefined' && module.exports) {
     formatInlineViewportStatusMessage,
     getInlineTranslatorUiModel,
     toggleInlineTranslatorMenu,
+    runInlineViewportScan,
+    scheduleInlineViewportScanFromViewportChange,
     restoreInlineViewportRecords,
     restoreInlineOriginal,
   };

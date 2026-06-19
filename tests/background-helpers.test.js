@@ -135,6 +135,38 @@ exports.tests = [
 
         assert.equal(output, '번역 결과');
         assert.deepEqual(requestBody.reasoning, { effort: 'none' });
+        assert.equal(requestBody.max_output_tokens, 8192);
+      } finally {
+        global.fetch = previousFetch;
+      }
+    },
+  },
+  {
+    name: 'allows a lower output token cap for small translation batches',
+    async fn() {
+      const previousFetch = global.fetch;
+      let requestBody = null;
+
+      global.fetch = async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return {
+          ok: true,
+          async json() {
+            return { output_text: '번역 결과' };
+          },
+        };
+      };
+
+      try {
+        await helpers.openaiTranslateChunk({
+          apiKey: 'sk-test',
+          model: 'gpt-5.4-mini',
+          instructions: 'Translate.',
+          input: 'Hello.',
+          maxOutputTokens: 2048,
+        });
+
+        assert.equal(requestBody.max_output_tokens, 2048);
       } finally {
         global.fetch = previousFetch;
       }
@@ -523,6 +555,23 @@ exports.tests = [
     },
   },
   {
+    name: 'rejects inline translations that expand far beyond the original text',
+    fn() {
+      assert.throws(
+        () =>
+          helpers.parseAndValidateTextNodeTranslations(
+            JSON.stringify({
+              translations: [
+                { id: 'n1', translation: 'x'.repeat(1001) },
+              ],
+            }),
+            [{ id: 'n1', text: 'Hello.' }]
+          ),
+        /too long/
+      );
+    },
+  },
+  {
     name: 'rejects too many text records before API calls',
     fn() {
       assert.throws(
@@ -723,6 +772,206 @@ exports.tests = [
           skipped: true,
           reason: 'already_running',
         });
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
+  {
+    name: 'uses a full-page output token cap scaled to the chunk size',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const modulePath = require.resolve('../extension/background.js');
+      const originalModule = require.cache[modulePath];
+      let messageListener = null;
+      const requestBodies = [];
+      const markdown = 'A'.repeat(20000);
+
+      global.fetch = async (_url, options) => {
+        requestBodies.push(JSON.parse(options.body));
+        return {
+          ok: true,
+          async json() {
+            return { output_text: '번역 결과' };
+          },
+        };
+      };
+
+      global.chrome = {
+        runtime: {
+          onInstalled: { addListener() {} },
+          onStartup: { addListener() {} },
+          onMessage: {
+            addListener(listener) {
+              messageListener = listener;
+            },
+          },
+          sendMessage() {
+            return Promise.resolve();
+          },
+        },
+        action: { onClicked: { addListener() {} } },
+        commands: { onCommand: { addListener() {} } },
+        sidePanel: {
+          async setPanelBehavior() {},
+          async setOptions() {},
+          async open() {},
+        },
+        scripting: {
+          async executeScript() {},
+        },
+        storage: {
+          local: {
+            async get() {
+              return {
+                settings: {
+                  apiKey: 'sk-test',
+                  model: 'gpt-5.4-mini',
+                  targetLanguage: 'Korean',
+                  tone: 'technical',
+                  chunkMaxChars: 60000,
+                },
+              };
+            },
+            async set() {},
+          },
+        },
+        tabs: {
+          async sendMessage(_tabId, message) {
+            if (message.type === 'EXTRACT_ARTICLE') {
+              return {
+                ok: true,
+                data: {
+                  title: 'Article',
+                  url: 'https://example.test',
+                  contentMarkdown: markdown,
+                },
+              };
+            }
+            return { ok: true };
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/background.js');
+        assert.equal(typeof messageListener, 'function');
+
+        const responses = [];
+        messageListener(
+          { type: 'TRANSLATE_TAB', tabId: 11 },
+          {},
+          (response) => responses.push(response)
+        );
+
+        for (let i = 0; i < 10 && responses.length < 1; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        assert.deepEqual(responses, [{ ok: true }]);
+        assert.equal(requestBodies.length, 1);
+        assert.equal(requestBodies[0].max_output_tokens, markdown.length);
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
+  {
+    name: 'does not expose legacy full-page text-node translation endpoint',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const modulePath = require.resolve('../extension/background.js');
+      const originalModule = require.cache[modulePath];
+      let messageListener = null;
+      let fetchCount = 0;
+
+      global.fetch = async () => {
+        fetchCount += 1;
+        return {
+          ok: true,
+          async json() {
+            return {
+              output_text: JSON.stringify({
+                translations: [{ id: 'n1', translation: '안녕하세요.' }],
+              }),
+            };
+          },
+        };
+      };
+
+      global.chrome = {
+        runtime: {
+          onInstalled: { addListener() {} },
+          onStartup: { addListener() {} },
+          onMessage: {
+            addListener(listener) {
+              messageListener = listener;
+            },
+          },
+          sendMessage() {
+            return Promise.resolve();
+          },
+        },
+        action: { onClicked: { addListener() {} } },
+        commands: { onCommand: { addListener() {} } },
+        sidePanel: {
+          async setPanelBehavior() {},
+          async setOptions() {},
+          async open() {},
+        },
+        scripting: {
+          async executeScript() {},
+        },
+        storage: {
+          local: {
+            async get() {
+              return {
+                settings: {
+                  apiKey: 'sk-test',
+                  model: 'gpt-5.4-mini',
+                  targetLanguage: 'Korean',
+                  tone: 'technical',
+                  chunkMaxChars: 12000,
+                },
+              };
+            },
+            async set() {},
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/background.js');
+        assert.equal(typeof messageListener, 'function');
+
+        const responses = [];
+        messageListener(
+          {
+            type: 'TRANSLATE_TEXT_NODES',
+            records: [{ id: 'n1', text: 'Hello world.' }],
+          },
+          {},
+          (response) => responses.push(response)
+        );
+
+        for (let i = 0; i < 10 && responses.length < 1; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        assert.equal(fetchCount, 0);
+        assert.deepEqual(responses, [
+          { ok: false, error: { message: 'Unknown message' } },
+        ]);
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;
