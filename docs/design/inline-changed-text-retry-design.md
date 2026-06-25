@@ -291,7 +291,7 @@ node values after the same ownership checks used by the existing implementation.
 
 ## Testing
 
-Focused unit coverage in `tests/content-helpers.test.js` should verify:
+Focused unit coverage in `tests/content-helpers.test.js` covers:
 
 - `stale` records are counted as `changed`, not `failed`.
 - `failed` records still count as `failed`.
@@ -314,7 +314,7 @@ Focused unit coverage in `tests/content-helpers.test.js` should verify:
 - successful retry application follows the existing translated/cache behavior.
 
 Existing tests for operation invalidation, restore behavior, cache reuse,
-oversized record failure, API failure, and syntax checks should continue to pass.
+oversized record failure, API failure, and syntax checks continue to pass.
 
 Run:
 
@@ -336,14 +336,14 @@ and the extension never overwrites text that changed after capture.
 
 ## Implementation Boundary
 
-This spec covers design only. Implementation should be planned separately before
-code changes.
+This document records the design boundary used for the shipped change. The
+implementation stayed scoped to inline viewport content-script behavior, focused
+helper tests, and README user-facing status documentation.
 
-Expected implementation files:
+Implementation files:
 
 - `extension/content.js`
 - `tests/content-helpers.test.js`
 - `README.md`
 
-`extension/background.js` should not need behavioral changes unless the
-implementation plan identifies a narrow helper export adjustment for tests.
+`extension/background.js` did not require behavioral changes.
