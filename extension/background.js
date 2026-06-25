@@ -32,6 +32,11 @@ const MIN_MAX_OUTPUT_TOKENS = 256;
 const MAX_MAX_OUTPUT_TOKENS = 128000;
 const INLINE_TRANSLATION_MIN_MAX_CHARS = 1000;
 const INLINE_TRANSLATION_EXPANSION_RATIO = 4;
+const TONE_INSTRUCTIONS = {
+  technical: 'Use a clear, technical tone suitable for docs.',
+  natural: 'Use natural, fluent tone.',
+  formal: 'Use formal and polite tone.',
+};
 
 // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
 const stateByTab = new Map();
@@ -236,33 +241,23 @@ function assertFullPageTranslationBudget(
 }
 
 function buildInstructions({ targetLanguage, tone }) {
-  const toneMap = {
-    technical: 'Use a clear, technical tone suitable for docs.',
-    natural: 'Use natural, fluent tone.',
-    formal: 'Use formal and polite tone.',
-  };
-  const toneLine = toneMap[tone] || toneMap.technical;
-
   return [
     `Translate the user's input into ${targetLanguage}.`,
-    toneLine,
+    getToneInstruction(tone),
     'Preserve Markdown structure (headings, lists, links).',
     'Do NOT translate code blocks fenced by ``` or inline code wrapped by backticks. Keep them exactly as-is.',
     'Do NOT add extra commentary. Output ONLY the translated Markdown.',
   ].join('\n');
 }
 
-function buildTextNodeInstructions({ targetLanguage, tone }) {
-  const toneMap = {
-    technical: 'Use a clear, technical tone suitable for docs.',
-    natural: 'Use natural, fluent tone.',
-    formal: 'Use formal and polite tone.',
-  };
-  const toneLine = toneMap[tone] || toneMap.technical;
+function getToneInstruction(tone) {
+  return TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.technical;
+}
 
+function buildTextNodeInstructions({ targetLanguage, tone }) {
   return [
     `Translate each record's text into ${targetLanguage}.`,
-    toneLine,
+    getToneInstruction(tone),
     'Return one translation object for every input record.',
     'Preserve every id exactly.',
     'Do not translate code, commands, identifiers, URLs, filenames, product API names, or version strings.',

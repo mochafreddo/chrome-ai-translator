@@ -432,25 +432,33 @@ function cacheInlineViewportRecordTranslation(store, record) {
   return true;
 }
 
+function createInlineViewportRecord(store, node, values = {}) {
+  const record = {
+    id: `v${store.nextId + 1}`,
+    node,
+    translation: null,
+    state: 'original',
+    operationId: store.operationId,
+    ...values,
+  };
+  stampInlineViewportRecordSettings(store, record);
+  store.nextId += 1;
+  store.byNode.set(node, record);
+  store.records.push(record);
+  return record;
+}
+
 function applyCachedInlineViewportTranslation(store, node, text) {
   const key = getInlineOriginalTextCacheKey(text);
   const cached = key ? store?.translationByOriginal?.get(key) : null;
   if (!cached || typeof cached.translation !== 'string') return null;
   if (!node?.isConnected || node.nodeValue !== cached.original) return null;
 
-  const record = {
-    id: `v${store.nextId + 1}`,
-    node,
+  const record = createInlineViewportRecord(store, node, {
     original: cached.original,
     translation: cached.translation,
     state: 'translated',
-    operationId: store.operationId,
-  };
-  stampInlineViewportRecordSettings(store, record);
-
-  store.nextId += 1;
-  store.byNode.set(node, record);
-  store.records.push(record);
+  });
   node.nodeValue = cached.translation;
   return record;
 }
@@ -483,21 +491,10 @@ function queueInlineViewportRecord(store, node, text) {
   }
 
   const record =
-    existing || {
-      id: `v${store.nextId + 1}`,
-      node,
+    existing ||
+    createInlineViewportRecord(store, node, {
       original: text,
-      translation: null,
-      state: 'original',
-      operationId: store.operationId,
-    };
-  stampInlineViewportRecordSettings(store, record);
-
-  if (!existing) {
-    store.nextId += 1;
-    store.byNode.set(node, record);
-    store.records.push(record);
-  }
+    });
 
   record.original = text;
   record.translation = null;
@@ -562,21 +559,11 @@ function queueInlineViewportRetryRecord(
   if (!isTranslatableInlineText(text)) return null;
   if (text === staleRecord.original || text === rejectedTranslation) return null;
 
-  const retryRecord = {
-    id: `v${store.nextId + 1}`,
-    node,
+  const retryRecord = createInlineViewportRecord(store, node, {
     original: text,
-    translation: null,
-    state: 'original',
-    operationId: store.operationId,
     retryOf: staleRecord.id,
     retryCount: getInlineViewportRetryCount(staleRecord) + 1,
-  };
-  stampInlineViewportRecordSettings(store, retryRecord);
-
-  store.nextId += 1;
-  store.byNode.set(node, retryRecord);
-  store.records.push(retryRecord);
+  });
   markInlineViewportRetrySuperseded(store, retryRecord);
 
   const key = getInlineOriginalTextCacheKey(text);
