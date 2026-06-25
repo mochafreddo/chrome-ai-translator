@@ -96,6 +96,8 @@ function stopInlineViewportTranslation(state = inlineState) {
   if (!store) return state.operationId;
 
   addInlineRestorableRecords(state, store.records);
+  clearCanceledInlineViewportRetrySupersessions(store, ['translating']);
+  resetQueuedInlineViewportRecords(store);
   store.stopped = true;
   store.queue = [];
   if (store.scanTimer) {
@@ -502,8 +504,98 @@ function queueInlineViewportRecord(store, node, text) {
   record.state = 'queued';
   record.operationId = store.operationId;
   stampInlineViewportRecordSettings(store, record);
+  markInlineViewportRetrySuperseded(store, record);
   store.queue.push(record);
   return record;
+}
+
+function getInlineViewportRetryCount(record) {
+  const parsed = Number(record?.retryCount);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+function findInlineViewportRecordById(store, id) {
+  if (!id) return null;
+  return (store?.records || []).find((record) => record?.id === id) || null;
+}
+
+function markInlineViewportRetrySuperseded(store, retryRecord) {
+  if (!retryRecord?.retryOf) return false;
+  const parent = findInlineViewportRecordById(store, retryRecord.retryOf);
+  if (!parent) return false;
+  parent.supersededByRetryId = retryRecord.id;
+  return true;
+}
+
+function clearInlineViewportRetrySupersession(store, retryRecord) {
+  if (!retryRecord?.retryOf) return false;
+  const parent = findInlineViewportRecordById(store, retryRecord.retryOf);
+  if (!parent || parent.supersededByRetryId !== retryRecord.id) return false;
+  delete parent.supersededByRetryId;
+  return true;
+}
+
+function clearCanceledInlineViewportRetrySupersessions(
+  store,
+  canceledStates = ['queued']
+) {
+  const states = new Set(canceledStates);
+  for (const record of store?.records || []) {
+    if (record?.retryOf && states.has(record.state)) {
+      clearInlineViewportRetrySupersession(store, record);
+    }
+  }
+}
+
+function queueInlineViewportRetryRecord(
+  store,
+  staleRecord,
+  currentText,
+  rejectedTranslation = ''
+) {
+  if (!store || store.stopped || !staleRecord?.node) return null;
+  const node = staleRecord.node;
+  const text = String(currentText || '');
+  if (!node.isConnected || node.nodeValue !== text) return null;
+  if (store.byNode?.get(node) !== staleRecord) return null;
+  if (getInlineViewportRetryCount(staleRecord) >= 1) return null;
+  if (!isTranslatableInlineText(text)) return null;
+  if (text === staleRecord.original || text === rejectedTranslation) return null;
+
+  const retryRecord = {
+    id: `v${store.nextId + 1}`,
+    node,
+    original: text,
+    translation: null,
+    state: 'original',
+    operationId: store.operationId,
+    retryOf: staleRecord.id,
+    retryCount: getInlineViewportRetryCount(staleRecord) + 1,
+  };
+  stampInlineViewportRecordSettings(store, retryRecord);
+
+  store.nextId += 1;
+  store.byNode.set(node, retryRecord);
+  store.records.push(retryRecord);
+  markInlineViewportRetrySuperseded(store, retryRecord);
+
+  const key = getInlineOriginalTextCacheKey(text);
+  const cached = key ? store.translationByOriginal?.get(key) : null;
+  if (
+    cached &&
+    typeof cached.translation === 'string' &&
+    node.nodeValue === cached.original
+  ) {
+    retryRecord.translation = cached.translation;
+    retryRecord.state = 'translated';
+    node.nodeValue = cached.translation;
+    cacheInlineViewportRecordTranslation(store, retryRecord);
+    return retryRecord;
+  }
+
+  retryRecord.state = 'queued';
+  store.queue.push(retryRecord);
+  return retryRecord;
 }
 
 function resetQueuedInlineViewportRecords(store) {
@@ -512,6 +604,7 @@ function resetQueuedInlineViewportRecords(store) {
   const retained = [];
   for (const record of store.queue) {
     if (record?.state === 'queued') {
+      clearInlineViewportRetrySupersession(store, record);
       record.state = 'original';
       record.translation = null;
       continue;
@@ -559,7 +652,7 @@ function takeInlineViewportBatch(
 
 function applyInlineViewportBatchTranslations(records, translations, operationId, store = null) {
   const byId = new Map((translations || []).map((item) => [item.id, item.translation]));
-  const result = { applied: 0, stale: 0, ignored: 0 };
+  const result = { applied: 0, stale: 0, retried: 0, ignored: 0 };
 
   for (const record of records || []) {
     if (record.operationId !== operationId) {
@@ -574,8 +667,15 @@ function applyInlineViewportBatchTranslations(records, translations, operationId
     }
 
     if (!record.node?.isConnected || record.node.nodeValue !== record.original) {
+      const currentText = record.node?.nodeValue;
       record.state = 'stale';
       result.stale += 1;
+      if (
+        typeof currentText === 'string' &&
+        queueInlineViewportRetryRecord(store, record, currentText, translation)
+      ) {
+        result.retried += 1;
+      }
       continue;
     }
 
@@ -599,13 +699,16 @@ function markInlineViewportBatchFailed(records, operationId) {
 }
 
 function getInlineViewportStatusCounts(records) {
-  const counts = { translated: 0, pending: 0, failed: 0 };
+  const counts = { translated: 0, pending: 0, changed: 0, failed: 0 };
   for (const record of records || []) {
     if (record.state === 'translated') counts.translated += 1;
     if (record.state === 'queued' || record.state === 'translating') {
       counts.pending += 1;
     }
-    if (record.state === 'failed' || record.state === 'stale') counts.failed += 1;
+    if (record.state === 'stale' && !record.supersededByRetryId) {
+      counts.changed += 1;
+    }
+    if (record.state === 'failed') counts.failed += 1;
   }
   return counts;
 }
@@ -617,7 +720,9 @@ function formatInlineViewportStatusMessage(counts, status = 'active') {
     stopped ? 'Visible translation stopped' : 'Visible translation on',
     `Translated ${Number(safe.translated) || 0} · Pending ${
       stopped ? 0 : Number(safe.pending) || 0
-    } · Failed ${Number(safe.failed) || 0}`,
+    } · Changed ${Number(safe.changed) || 0} · Failed ${
+      Number(safe.failed) || 0
+    }`,
   ].join('\n');
 }
 
@@ -1602,6 +1707,7 @@ if (typeof module !== 'undefined' && module.exports) {
     seedInlineViewportStoreWithRestorableRecords,
     createInlineViewportStore,
     queueInlineViewportRecord,
+    queueInlineViewportRetryRecord,
     takeInlineViewportBatch,
     applyInlineViewportBatchTranslations,
     markInlineViewportBatchFailed,

@@ -85,6 +85,10 @@ the toolbar click. Starting inline translation still requires choosing
 - Inline viewport batches are capped at 2,000 input characters and 2,048 output
   tokens. Over-expanded inline responses are rejected before they can be applied
   to the page.
+- Inline status separates page-change conflicts from request failures. `Changed`
+  means the page modified a text node before the extension could safely apply a
+  returned translation; changed text is retried once when the current text is
+  still translatable. `Failed` means the request or response validation failed.
 - Inline translations restored with **Original text** are cached only in the
   current page instance. The cache is reused only when target language, tone,
   model, and reasoning effort still match, and it is cleared by reloads,
@@ -93,6 +97,7 @@ the toolbar click. Starting inline translation still requires choosing
   node/character/chunk counts, timings, and redacted errors.
 
 ## Related docs
+- [Inline changed text retry design](docs/design/inline-changed-text-retry-design.md)
 - [Inline restore cache design](docs/design/inline-restore-cache-design.md)
 - [Local extension QA report](docs/qa/qa-report-local-extension-2026-06-15.md)
 

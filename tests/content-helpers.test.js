@@ -82,15 +82,31 @@ function withFakeViewportDom(fn, options = {}) {
   if ('clearTimeout' in options) global.clearTimeout = options.clearTimeout;
   if ('setTimeout' in options) global.setTimeout = options.setTimeout;
 
-  try {
-    return fn({ FakeElement, text });
-  } finally {
+  const restore = () => {
     global.chrome = previous.chrome;
     global.clearTimeout = previous.clearTimeout;
     global.document = previous.document;
     global.HTMLElement = previous.HTMLElement;
     global.setTimeout = previous.setTimeout;
     global.window = previous.window;
+  };
+
+  try {
+    const result = fn({ FakeElement, text });
+    if (result && typeof result.then === 'function') {
+      return result.finally(restore);
+    }
+    restore();
+    return result;
+  } catch (error) {
+    restore();
+    throw error;
+  }
+}
+
+async function flushMicrotasks(count = 8) {
+  for (let index = 0; index < count; index += 1) {
+    await Promise.resolve();
   }
 }
 
@@ -913,6 +929,107 @@ exports.tests = [
     },
   },
   {
+    name: 'drains queued changed-text retries through the runtime viewport loop',
+    async fn() {
+      const state = global.__chromeAiTranslatorInlineState;
+      const previousState = {
+        status: state.status,
+        records: state.records,
+        message: state.message,
+        operationId: state.operationId,
+        viewport: state.viewport,
+      };
+      const calls = [];
+
+      try {
+        await withFakeViewportDom(async ({ FakeElement, text }) => {
+          const node = text('Original article text.');
+          const root = new FakeElement([node]);
+          const store = helpers.createInlineViewportStore(32);
+          store.root = root;
+          state.status = 'active';
+          state.operationId = 32;
+          state.viewport = store;
+          state.records = store.records;
+
+          helpers.runInlineViewportScan();
+          await flushMicrotasks();
+
+          assert.equal(calls.length, 2);
+          assert.deepEqual(
+            calls.map((message) => ({
+              type: message.type,
+              operationId: message.operationId,
+              settingsSnapshot: message.settingsSnapshot,
+              recordCount: message.records.length,
+            })),
+            [
+              {
+                type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
+                operationId: 32,
+                settingsSnapshot: null,
+                recordCount: 1,
+              },
+              {
+                type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
+                operationId: 32,
+                settingsSnapshot: null,
+                recordCount: 1,
+              },
+            ]
+          );
+          assert.deepEqual(
+            calls.map((message) => message.records.map((record) => record.text)),
+            [['Original article text.'], ['Updated article text.']]
+          );
+          const retry = store.records.find(
+            (record) => record.retryOf === calls[0].records[0].id
+          );
+          assert.equal(calls[1].records[0].id, retry.id);
+          assert.equal(node.nodeValue, '업데이트된 기사 텍스트.');
+          assert.equal(store.inFlight, 0);
+          assert.equal(store.queue.length, 0);
+          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+            translated: 1,
+            pending: 0,
+            changed: 0,
+            failed: 0,
+          });
+        }, {
+          chrome: {
+            runtime: {
+              async sendMessage(message) {
+                calls.push(message);
+                const record = message.records[0];
+                if (calls.length === 1) {
+                  state.viewport.records[0].node.nodeValue = 'Updated article text.';
+                  return {
+                    ok: true,
+                    translations: [
+                      { id: record.id, translation: '원문 기사 텍스트.' },
+                    ],
+                  };
+                }
+                return {
+                  ok: true,
+                  translations: [
+                    { id: record.id, translation: '업데이트된 기사 텍스트.' },
+                  ],
+                };
+              },
+            },
+          },
+        });
+      } finally {
+        state.status = previousState.status;
+        state.records = previousState.records;
+        state.message = previousState.message;
+        state.operationId = previousState.operationId;
+        state.viewport = previousState.viewport;
+      }
+    },
+  },
+  {
     name: 'queues each visible text node once per active operation',
     fn() {
       const store = helpers.createInlineViewportStore(7);
@@ -968,6 +1085,7 @@ exports.tests = [
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 2,
         pending: 0,
+        changed: 0,
         failed: 0,
       });
     },
@@ -1141,6 +1259,7 @@ exports.tests = [
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 1,
         pending: 0,
+        changed: 0,
         failed: 0,
       });
     },
@@ -1265,6 +1384,7 @@ exports.tests = [
       assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
         translated: 1,
         pending: 0,
+        changed: 0,
         failed: 0,
       });
     },
@@ -1348,6 +1468,7 @@ exports.tests = [
       assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
         translated: 1,
         pending: 0,
+        changed: 0,
         failed: 0,
       });
     },
@@ -1439,6 +1560,7 @@ exports.tests = [
         {
           translated: 0,
           pending: 0,
+          changed: 0,
           failed: 0,
         }
       );
@@ -1563,6 +1685,7 @@ exports.tests = [
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
         pending: 1,
+        changed: 0,
         failed: 1,
       });
     },
@@ -1613,10 +1736,646 @@ exports.tests = [
       assert.equal(stableNode.nodeValue, '안녕하세요.');
       assert.equal(changedNode.nodeValue, 'Updated text.');
       assert.equal(detachedNode.nodeValue, 'Detached text.');
-      assert.deepEqual(result, { applied: 1, stale: 2, ignored: 0 });
+      assert.deepEqual(result, { applied: 1, stale: 2, retried: 0, ignored: 0 });
       assert.equal(records[0].state, 'translated');
       assert.equal(records[1].state, 'stale');
       assert.equal(records[2].state, 'stale');
+    },
+  },
+  {
+    name: 'queues one retry when stale node has changed translatable text',
+    fn() {
+      const store = helpers.createInlineViewportStore(21);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const batch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      const result = helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        21,
+        store
+      );
+
+      const retry = store.records.find((record) => record.retryOf === original.id);
+
+      assert.deepEqual(result, { applied: 0, stale: 1, retried: 1, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, retry.id);
+      assert.equal(retry.original, 'Updated article text.');
+      assert.equal(retry.retryCount, 1);
+      assert.equal(retry.state, 'queued');
+      assert.equal(store.byNode.get(node), retry);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id, retry.id]
+      );
+      assert.deepEqual(store.queue.map((record) => record.id), [retry.id]);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 1,
+        changed: 0,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'does not retry disconnected changed nodes',
+    fn() {
+      const store = helpers.createInlineViewportStore(22);
+      let connected = true;
+      const node = {
+        get isConnected() {
+          return connected;
+        },
+        nodeValue: 'Original article text.',
+      };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const batch = helpers.takeInlineViewportBatch(store);
+
+      connected = false;
+      node.nodeValue = 'Updated article text.';
+      const result = helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        22,
+        store
+      );
+
+      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id]
+      );
+      assert.equal(
+        store.records.some((record) => record.retryOf === original.id),
+        false
+      );
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 1,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'applies queued retry translations successfully',
+    fn() {
+      const store = helpers.createInlineViewportStore(26);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const firstBatch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      helpers.applyInlineViewportBatchTranslations(
+        firstBatch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        26,
+        store
+      );
+
+      const retry = store.queue[0];
+      const retryBatch = helpers.takeInlineViewportBatch(store);
+      const result = helpers.applyInlineViewportBatchTranslations(
+        retryBatch,
+        [{ id: retry.id, translation: '업데이트된 기사 텍스트.' }],
+        26,
+        store
+      );
+
+      assert.deepEqual(result, { applied: 1, stale: 0, retried: 0, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, retry.id);
+      assert.equal(retry.state, 'translated');
+      assert.equal(retry.translation, '업데이트된 기사 텍스트.');
+      assert.equal(node.nodeValue, '업데이트된 기사 텍스트.');
+      assert.equal(store.byNode.get(node), retry);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id, retry.id]
+      );
+      assert.deepEqual(store.translationByOriginal.get('Updated article text.'), {
+        original: 'Updated article text.',
+        translation: '업데이트된 기사 텍스트.',
+      });
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 1,
+        pending: 0,
+        changed: 0,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'stamps retry records and cache writes with active settings',
+    fn() {
+      const settings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+        apiKey: 'sk-korean',
+      };
+      const otherSettings = { ...settings, targetLanguage: 'Japanese' };
+      const state = {
+        status: 'active',
+        operationId: 29,
+        translationCacheBySettings: new Map(),
+      };
+      const cache = helpers.activateInlineTranslationCacheBucket(state, settings);
+      const otherCache = helpers.activateInlineTranslationCacheBucket(
+        state,
+        otherSettings
+      );
+      const signature = helpers.getInlineTranslationCacheSignature(settings);
+      const store = helpers.createInlineViewportStore(29, cache, settings);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const firstBatch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      helpers.applyInlineViewportBatchTranslations(
+        firstBatch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        29,
+        store
+      );
+
+      const retry = store.queue[0];
+      const retryBatch = helpers.takeInlineViewportBatch(store);
+      helpers.applyInlineViewportBatchTranslations(
+        retryBatch,
+        [{ id: retry.id, translation: '업데이트된 기사 텍스트.' }],
+        29,
+        store
+      );
+
+      assert.equal(original.translationSettingsSignature, signature);
+      assert.equal(retry.translationSettingsSignature, signature);
+      assert.deepEqual(cache.get('Updated article text.'), {
+        original: 'Updated article text.',
+        translation: '업데이트된 기사 텍스트.',
+      });
+      assert.equal(otherCache.has('Updated article text.'), false);
+    },
+  },
+  {
+    name: 'marks retry records failed when retry response is missing',
+    fn() {
+      const store = helpers.createInlineViewportStore(30);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const firstBatch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      helpers.applyInlineViewportBatchTranslations(
+        firstBatch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        30,
+        store
+      );
+
+      const retry = store.queue[0];
+      const retryBatch = helpers.takeInlineViewportBatch(store);
+      const result = helpers.applyInlineViewportBatchTranslations(
+        retryBatch,
+        [],
+        30,
+        store
+      );
+
+      assert.deepEqual(result, { applied: 0, stale: 0, retried: 0, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, retry.id);
+      assert.equal(retry.state, 'failed');
+      assert.equal(node.nodeValue, 'Updated article text.');
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 0,
+        failed: 1,
+      });
+    },
+  },
+  {
+    name: 'resetting queued retries restores changed status until requeued',
+    fn() {
+      const state = global.__chromeAiTranslatorInlineState;
+      const previousState = {
+        status: state.status,
+        records: state.records,
+        message: state.message,
+        operationId: state.operationId,
+        viewport: state.viewport,
+      };
+
+      try {
+        withFakeViewportDom(() => {
+          const store = helpers.createInlineViewportStore(31);
+          const node = { isConnected: true, nodeValue: 'Original article text.' };
+          const original = helpers.queueInlineViewportRecord(
+            store,
+            node,
+            'Original article text.'
+          );
+          const firstBatch = helpers.takeInlineViewportBatch(store);
+          state.status = 'active';
+          state.operationId = 31;
+          state.viewport = store;
+          state.records = store.records;
+
+          node.nodeValue = 'Updated article text.';
+          helpers.applyInlineViewportBatchTranslations(
+            firstBatch,
+            [{ id: original.id, translation: '원문 기사 텍스트.' }],
+            31,
+            store
+          );
+
+          const retry = store.queue[0];
+          assert.equal(original.supersededByRetryId, retry.id);
+          helpers.scheduleInlineViewportScanFromViewportChange();
+
+          assert.equal(retry.state, 'original');
+          assert.equal(original.supersededByRetryId, undefined);
+          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+            translated: 0,
+            pending: 0,
+            changed: 1,
+            failed: 0,
+          });
+
+          const requeued = helpers.queueInlineViewportRecord(
+            store,
+            node,
+            node.nodeValue
+          );
+          assert.equal(requeued, retry);
+          assert.equal(original.supersededByRetryId, retry.id);
+          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+            translated: 0,
+            pending: 1,
+            changed: 0,
+            failed: 0,
+          });
+        }, {
+          clearTimeout() {},
+          setTimeout() {
+            return 123;
+          },
+        });
+      } finally {
+        state.status = previousState.status;
+        state.records = previousState.records;
+        state.message = previousState.message;
+        state.operationId = previousState.operationId;
+        state.viewport = previousState.viewport;
+      }
+    },
+  },
+  {
+    name: 'stopping queued retries keeps unresolved changed status visible',
+    fn() {
+      const store = helpers.createInlineViewportStore(33);
+      const state = {
+        status: 'active',
+        operationId: 33,
+        records: [],
+        restorableRecords: [],
+        viewport: store,
+      };
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const firstBatch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      helpers.applyInlineViewportBatchTranslations(
+        firstBatch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        33,
+        store
+      );
+
+      const retry = store.queue[0];
+      assert.equal(original.supersededByRetryId, retry.id);
+      helpers.stopInlineViewportTranslation(state);
+
+      assert.equal(store.stopped, true);
+      assert.equal(store.queue.length, 0);
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 1,
+        failed: 0,
+      });
+      assert.equal(
+        helpers.formatInlineViewportStatusMessage(
+          helpers.getInlineViewportStatusCounts(store.records),
+          'stopped'
+        ),
+        'Visible translation stopped\nTranslated 0 · Pending 0 · Changed 1 · Failed 0'
+      );
+    },
+  },
+  {
+    name: 'stopping in-flight retries keeps unresolved changed status visible',
+    fn() {
+      const store = helpers.createInlineViewportStore(34);
+      const state = {
+        status: 'active',
+        operationId: 34,
+        records: [],
+        restorableRecords: [],
+        viewport: store,
+      };
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const firstBatch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      helpers.applyInlineViewportBatchTranslations(
+        firstBatch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        34,
+        store
+      );
+
+      const retry = store.queue[0];
+      helpers.takeInlineViewportBatch(store);
+      assert.equal(retry.state, 'translating');
+      assert.equal(original.supersededByRetryId, retry.id);
+      helpers.stopInlineViewportTranslation(state);
+
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 1,
+        changed: 1,
+        failed: 0,
+      });
+      assert.equal(
+        helpers.formatInlineViewportStatusMessage(
+          helpers.getInlineViewportStatusCounts(store.records),
+          'stopped'
+        ),
+        'Visible translation stopped\nTranslated 0 · Pending 0 · Changed 1 · Failed 0'
+      );
+    },
+  },
+  {
+    name: 'does not retry stale records that no longer own the node',
+    fn() {
+      const store = helpers.createInlineViewportStore(27);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const batch = helpers.takeInlineViewportBatch(store);
+      const replacement = {
+        id: 'v-replacement',
+        node,
+        original: 'Updated article text.',
+        translation: null,
+        state: 'queued',
+        operationId: 27,
+      };
+
+      node.nodeValue = 'Updated article text.';
+      store.byNode.set(node, replacement);
+      const result = helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        27,
+        store
+      );
+
+      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.equal(store.byNode.get(node), replacement);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id]
+      );
+      assert.equal(
+        store.records.some((record) => record.retryOf === original.id),
+        false
+      );
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 1,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'does not retry changed text that equals the rejected translation',
+    fn() {
+      const store = helpers.createInlineViewportStore(28);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const batch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      const result = helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: original.id, translation: 'Updated article text.' }],
+        28,
+        store
+      );
+
+      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id]
+      );
+      assert.equal(
+        store.records.some((record) => record.retryOf === original.id),
+        false
+      );
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 1,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'does not retry non-translatable changed text',
+    fn() {
+      const store = helpers.createInlineViewportStore(23);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const batch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'ABC';
+      const result = helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        23,
+        store
+      );
+
+      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id]
+      );
+      assert.equal(
+        store.records.some((record) => record.retryOf === original.id),
+        false
+      );
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 1,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'does not retry a stale retry record again',
+    fn() {
+      const store = helpers.createInlineViewportStore(24);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const firstBatch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      helpers.applyInlineViewportBatchTranslations(
+        firstBatch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        24,
+        store
+      );
+
+      const retry = store.queue[0];
+      const retryBatch = helpers.takeInlineViewportBatch(store);
+      node.nodeValue = 'Updated article text again.';
+      const result = helpers.applyInlineViewportBatchTranslations(
+        retryBatch,
+        [{ id: retry.id, translation: '업데이트된 기사 텍스트.' }],
+        24,
+        store
+      );
+
+      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
+      assert.equal(retry.state, 'stale');
+      assert.equal(retry.supersededByRetryId, undefined);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id, retry.id]
+      );
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 1,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'applies cached translation for changed retry text without queueing',
+    fn() {
+      const store = helpers.createInlineViewportStore(25);
+      store.translationByOriginal.set('Updated article text.', {
+        original: 'Updated article text.',
+        translation: '업데이트된 기사 텍스트.',
+      });
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      const batch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = 'Updated article text.';
+      const result = helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: original.id, translation: '원문 기사 텍스트.' }],
+        25,
+        store
+      );
+
+      const retry = store.records.find((record) => record.retryOf === original.id);
+
+      assert.deepEqual(result, { applied: 0, stale: 1, retried: 1, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, retry.id);
+      assert.equal(retry.state, 'translated');
+      assert.equal(retry.translation, '업데이트된 기사 텍스트.');
+      assert.equal(node.nodeValue, '업데이트된 기사 텍스트.');
+      assert.equal(store.byNode.get(node), retry);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id, retry.id]
+      );
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 1,
+        pending: 0,
+        changed: 0,
+        failed: 0,
+      });
     },
   },
   {
@@ -1640,7 +2399,7 @@ exports.tests = [
         5
       );
 
-      assert.deepEqual(result, { applied: 0, stale: 0, ignored: 1 });
+      assert.deepEqual(result, { applied: 0, stale: 0, retried: 0, ignored: 1 });
       assert.equal(node.nodeValue, 'Hello world.');
       assert.equal(records[0].state, 'translating');
     },
@@ -1666,7 +2425,7 @@ exports.tests = [
     },
   },
   {
-    name: 'counts translated pending and failed viewport records',
+    name: 'counts translated pending changed and failed viewport records',
     fn() {
       const counts = helpers.getInlineViewportStatusCounts([
         { state: 'translated' },
@@ -1674,13 +2433,15 @@ exports.tests = [
         { state: 'translating' },
         { state: 'failed' },
         { state: 'stale' },
+        { state: 'stale', supersededByRetryId: 'v7' },
         { state: 'original' },
       ]);
 
       assert.deepEqual(counts, {
         translated: 1,
         pending: 2,
-        failed: 2,
+        changed: 1,
+        failed: 1,
       });
     },
   },
@@ -1690,12 +2451,13 @@ exports.tests = [
       const message = helpers.formatInlineViewportStatusMessage({
         translated: 18,
         pending: 4,
+        changed: 3,
         failed: 1,
       });
 
       assert.equal(
         message,
-        'Visible translation on\nTranslated 18 · Pending 4 · Failed 1'
+        'Visible translation on\nTranslated 18 · Pending 4 · Changed 3 · Failed 1'
       );
     },
   },
@@ -1875,6 +2637,7 @@ exports.tests = [
         {
           translated: 3,
           pending: 2,
+          changed: 4,
           failed: 1,
         },
         'stopped'
@@ -1882,7 +2645,7 @@ exports.tests = [
 
       assert.equal(
         message,
-        'Visible translation stopped\nTranslated 3 · Pending 0 · Failed 1'
+        'Visible translation stopped\nTranslated 3 · Pending 0 · Changed 4 · Failed 1'
       );
     },
   },
@@ -2018,6 +2781,7 @@ exports.tests = [
         {
           translated: 1,
           pending: 0,
+          changed: 0,
           failed: 0,
         }
       );
