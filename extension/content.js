@@ -432,6 +432,13 @@ function cacheInlineViewportRecordTranslation(store, record) {
   return true;
 }
 
+function getInlineBoundaryPreservedTranslation(
+  record,
+  translation = record?.translation
+) {
+  return preserveInlineBoundaryWhitespace(record?.original, translation);
+}
+
 function createInlineViewportRecord(store, node, values = {}) {
   const record = {
     id: `v${store.nextId + 1}`,
@@ -453,10 +460,7 @@ function applyCachedInlineViewportTranslation(store, node, text) {
   const cached = key ? store?.translationByOriginal?.get(key) : null;
   if (!cached || typeof cached.translation !== 'string') return null;
   if (!node?.isConnected || node.nodeValue !== cached.original) return null;
-  const preservedTranslation = preserveInlineBoundaryWhitespace(
-    cached.original,
-    cached.translation
-  );
+  const preservedTranslation = getInlineBoundaryPreservedTranslation(cached);
 
   const record = createInlineViewportRecord(store, node, {
     original: cached.original,
@@ -578,10 +582,7 @@ function queueInlineViewportRetryRecord(
     typeof cached.translation === 'string' &&
     node.nodeValue === cached.original
   ) {
-    retryRecord.translation = preserveInlineBoundaryWhitespace(
-      cached.original,
-      cached.translation
-    );
+    retryRecord.translation = getInlineBoundaryPreservedTranslation(cached);
     retryRecord.state = 'translated';
     node.nodeValue = retryRecord.translation;
     cached.translation = retryRecord.translation;
@@ -666,8 +667,8 @@ function applyInlineViewportBatchTranslations(records, translations, operationId
       const currentText = record.node?.nodeValue;
       record.state = 'stale';
       result.stale += 1;
-      const preservedRejectedTranslation = preserveInlineBoundaryWhitespace(
-        record.original,
+      const preservedRejectedTranslation = getInlineBoundaryPreservedTranslation(
+        record,
         translation
       );
       if (
@@ -684,8 +685,8 @@ function applyInlineViewportBatchTranslations(records, translations, operationId
       continue;
     }
 
-    const preservedTranslation = preserveInlineBoundaryWhitespace(
-      record.original,
+    const preservedTranslation = getInlineBoundaryPreservedTranslation(
+      record,
       translation
     );
     record.node.nodeValue = preservedTranslation;
@@ -910,10 +911,7 @@ function applyInlineTranslationRecords(records) {
       skipped += 1;
       continue;
     }
-    record.translation = preserveInlineBoundaryWhitespace(
-      record.original,
-      record.translation
-    );
+    record.translation = getInlineBoundaryPreservedTranslation(record);
     record.node.nodeValue = record.translation;
     applied.push(record);
   }
