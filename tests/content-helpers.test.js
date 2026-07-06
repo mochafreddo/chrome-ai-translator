@@ -487,6 +487,54 @@ exports.tests = [
     },
   },
   {
+    name: 'preserves text-node boundary spaces when applying translations',
+    fn() {
+      const dashNode = {
+        isConnected: true,
+        nodeValue: ' - Activates before writing code.',
+      };
+      const conjunctionNode = { isConnected: true, nodeValue: ' or ' };
+
+      helpers.applyInlineTranslationRecords([
+        {
+          id: 'n1',
+          node: dashNode,
+          original: ' - Activates before writing code.',
+          translation: '- 코드 작성 전에 활성화됩니다.',
+        },
+        {
+          id: 'n2',
+          node: conjunctionNode,
+          original: ' or ',
+          translation: '또는',
+        },
+      ]);
+
+      assert.equal(dashNode.nodeValue, ' - 코드 작성 전에 활성화됩니다.');
+      assert.equal(conjunctionNode.nodeValue, ' 또는 ');
+    },
+  },
+  {
+    name: 'preserves exact original boundary whitespace',
+    fn() {
+      const nbspNode = {
+        isConnected: true,
+        nodeValue: '\u00a0Hello world.  ',
+      };
+
+      helpers.applyInlineTranslationRecords([
+        {
+          id: 'n1',
+          node: nbspNode,
+          original: '\u00a0Hello world.  ',
+          translation: ' 안녕하세요. ',
+        },
+      ]);
+
+      assert.equal(nbspNode.nodeValue, '\u00a0안녕하세요.  ');
+    },
+  },
+  {
     name: 'requires closed shadow UI isolation',
     fn() {
       assert.equal(helpers.getInlineShadowMode(), 'closed');
@@ -1088,6 +1136,63 @@ exports.tests = [
         changed: 0,
         failed: 0,
       });
+    },
+  },
+  {
+    name: 'preserves boundary spaces in viewport translations and cache',
+    fn() {
+      const store = helpers.createInlineViewportStore(7);
+      const conjunctionNode = { isConnected: true, nodeValue: ' or ' };
+
+      helpers.queueInlineViewportRecord(store, conjunctionNode, ' or ');
+      const batch = helpers.takeInlineViewportBatch(store);
+      helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: batch[0].id, translation: '또는' }],
+        7,
+        store
+      );
+
+      assert.equal(conjunctionNode.nodeValue, ' 또는 ');
+      assert.equal(batch[0].translation, ' 또는 ');
+
+      const rerenderedNode = { isConnected: true, nodeValue: ' or ' };
+      const queued = helpers.queueInlineViewportRecord(
+        store,
+        rerenderedNode,
+        ' or '
+      );
+
+      assert.equal(queued, null);
+      assert.equal(rerenderedNode.nodeValue, ' 또는 ');
+    },
+  },
+  {
+    name: 'normalizes unpreserved cached viewport translations',
+    fn() {
+      const store = helpers.createInlineViewportStore(7);
+      store.translationByOriginal.set(' - Activates before writing code.', {
+        original: ' - Activates before writing code.',
+        translation: '- 코드 작성 전에 활성화됩니다.',
+      });
+      const node = {
+        isConnected: true,
+        nodeValue: ' - Activates before writing code.',
+      };
+
+      const queued = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        ' - Activates before writing code.'
+      );
+
+      assert.equal(queued, null);
+      assert.equal(node.nodeValue, ' - 코드 작성 전에 활성화됩니다.');
+      assert.equal(
+        store.translationByOriginal.get(' - Activates before writing code.')
+          .translation,
+        ' - 코드 작성 전에 활성화됩니다.'
+      );
     },
   },
   {
@@ -2244,6 +2349,82 @@ exports.tests = [
         changed: 1,
         failed: 0,
       });
+    },
+  },
+  {
+    name: 'does not retry changed text that equals preserved rejected translation',
+    fn() {
+      const store = helpers.createInlineViewportStore(28);
+      const node = { isConnected: true, nodeValue: ' Original article text. ' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        ' Original article text. '
+      );
+      const batch = helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = ' 업데이트된 기사 텍스트. ';
+      const result = helpers.applyInlineViewportBatchTranslations(
+        batch,
+        [{ id: original.id, translation: '업데이트된 기사 텍스트.' }],
+        28,
+        store
+      );
+
+      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
+      assert.equal(original.state, 'stale');
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(
+        store.records.map((record) => record.id),
+        [original.id]
+      );
+      assert.equal(
+        store.records.some((record) => record.retryOf === original.id),
+        false
+      );
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 1,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'normalizes cached changed-text retry translations',
+    fn() {
+      const store = helpers.createInlineViewportStore(28);
+      const node = { isConnected: true, nodeValue: 'Original article text.' };
+      const original = helpers.queueInlineViewportRecord(
+        store,
+        node,
+        'Original article text.'
+      );
+      helpers.takeInlineViewportBatch(store);
+
+      node.nodeValue = ' Updated article text. ';
+      store.translationByOriginal.set(' Updated article text. ', {
+        original: ' Updated article text. ',
+        translation: '업데이트된 기사 텍스트.',
+      });
+
+      const retry = helpers.queueInlineViewportRetryRecord(
+        store,
+        original,
+        ' Updated article text. ',
+        ''
+      );
+
+      assert.equal(retry.state, 'translated');
+      assert.equal(retry.translation, ' 업데이트된 기사 텍스트. ');
+      assert.equal(node.nodeValue, ' 업데이트된 기사 텍스트. ');
+      assert.equal(
+        store.translationByOriginal.get(' Updated article text. ').translation,
+        ' 업데이트된 기사 텍스트. '
+      );
+      assert.equal(original.supersededByRetryId, retry.id);
+      assert.equal(store.queue.length, 0);
     },
   },
   {

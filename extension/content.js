@@ -453,13 +453,18 @@ function applyCachedInlineViewportTranslation(store, node, text) {
   const cached = key ? store?.translationByOriginal?.get(key) : null;
   if (!cached || typeof cached.translation !== 'string') return null;
   if (!node?.isConnected || node.nodeValue !== cached.original) return null;
+  const preservedTranslation = preserveInlineBoundaryWhitespace(
+    cached.original,
+    cached.translation
+  );
 
   const record = createInlineViewportRecord(store, node, {
     original: cached.original,
-    translation: cached.translation,
+    translation: preservedTranslation,
     state: 'translated',
   });
-  node.nodeValue = cached.translation;
+  node.nodeValue = preservedTranslation;
+  cached.translation = preservedTranslation;
   return record;
 }
 
@@ -573,9 +578,13 @@ function queueInlineViewportRetryRecord(
     typeof cached.translation === 'string' &&
     node.nodeValue === cached.original
   ) {
-    retryRecord.translation = cached.translation;
+    retryRecord.translation = preserveInlineBoundaryWhitespace(
+      cached.original,
+      cached.translation
+    );
     retryRecord.state = 'translated';
-    node.nodeValue = cached.translation;
+    node.nodeValue = retryRecord.translation;
+    cached.translation = retryRecord.translation;
     cacheInlineViewportRecordTranslation(store, retryRecord);
     return retryRecord;
   }
@@ -657,17 +666,30 @@ function applyInlineViewportBatchTranslations(records, translations, operationId
       const currentText = record.node?.nodeValue;
       record.state = 'stale';
       result.stale += 1;
+      const preservedRejectedTranslation = preserveInlineBoundaryWhitespace(
+        record.original,
+        translation
+      );
       if (
         typeof currentText === 'string' &&
-        queueInlineViewportRetryRecord(store, record, currentText, translation)
+        queueInlineViewportRetryRecord(
+          store,
+          record,
+          currentText,
+          preservedRejectedTranslation
+        )
       ) {
         result.retried += 1;
       }
       continue;
     }
 
-    record.node.nodeValue = translation;
-    record.translation = translation;
+    const preservedTranslation = preserveInlineBoundaryWhitespace(
+      record.original,
+      translation
+    );
+    record.node.nodeValue = preservedTranslation;
+    record.translation = preservedTranslation;
     record.state = 'translated';
     stampInlineViewportRecordSettings(store, record);
     cacheInlineViewportRecordTranslation(store, record);
@@ -866,6 +888,18 @@ function hasInlineTranslationAuthorization(state = inlineState, now = Date.now()
   return Number(state.authorizedUntil) > now;
 }
 
+function preserveInlineBoundaryWhitespace(original, translation) {
+  const originalText = String(original || '');
+  const translatedText = String(translation || '');
+  if (!translatedText) return translatedText;
+
+  const leading = originalText.match(/^\s*/)?.[0] || '';
+  const trailing = originalText.match(/\s*$/)?.[0] || '';
+  const core = translatedText.replace(/^\s+|\s+$/g, '');
+  if (!core) return translatedText;
+  return `${leading}${core}${trailing}`;
+}
+
 function applyInlineTranslationRecords(records) {
   const applied = [];
   let skipped = 0;
@@ -876,6 +910,10 @@ function applyInlineTranslationRecords(records) {
       skipped += 1;
       continue;
     }
+    record.translation = preserveInlineBoundaryWhitespace(
+      record.original,
+      record.translation
+    );
     record.node.nodeValue = record.translation;
     applied.push(record);
   }
