@@ -1479,12 +1479,6 @@ function scheduleInlineViewportScanFromViewportChange() {
   scheduleInlineViewportScan({ resetScanStartIndex: true });
 }
 
-function addUniqueInlineViewportEventTarget(targets, seen, target) {
-  if (!target || seen.has(target) || !target.addEventListener) return;
-  targets.push(target);
-  seen.add(target);
-}
-
 function isInlineScrollableElement(el) {
   if (!el || !(el instanceof HTMLElement)) return false;
   const style = window.getComputedStyle(el);
@@ -1496,16 +1490,21 @@ function isInlineScrollableElement(el) {
 function getInlineViewportScrollTargets(root) {
   const targets = [];
   const seen = new Set();
+  const addTarget = (target) => {
+    if (!target || seen.has(target) || !target.addEventListener) return;
+    targets.push(target);
+    seen.add(target);
+  };
 
-  addUniqueInlineViewportEventTarget(targets, seen, window);
-  addUniqueInlineViewportEventTarget(targets, seen, document);
-  addUniqueInlineViewportEventTarget(targets, seen, document.scrollingElement);
-  addUniqueInlineViewportEventTarget(targets, seen, document.documentElement);
-  addUniqueInlineViewportEventTarget(targets, seen, document.body);
+  addTarget(window);
+  addTarget(document);
+  addTarget(document.scrollingElement);
+  addTarget(document.documentElement);
+  addTarget(document.body);
 
   for (let el = root; el; el = el.parentElement) {
     if (isInlineScrollableElement(el)) {
-      addUniqueInlineViewportEventTarget(targets, seen, el);
+      addTarget(el);
     }
   }
 
@@ -1534,8 +1533,9 @@ function attachInlineViewportWatchers(root) {
 }
 
 function detachInlineViewportWatchers() {
-  const scrollTargets = inlineState.viewport?.scrollTargets?.length
-    ? inlineState.viewport.scrollTargets
+  const store = inlineState.viewport;
+  const scrollTargets = store?.scrollTargets?.length
+    ? store.scrollTargets
     : [window];
   for (const target of scrollTargets) {
     target?.removeEventListener?.(
@@ -1544,12 +1544,12 @@ function detachInlineViewportWatchers() {
     );
   }
   window.removeEventListener('resize', scheduleInlineViewportScanFromViewportChange);
-  if (inlineState.viewport) {
-    inlineState.viewport.scrollTargets = [];
-  }
-  if (inlineState.viewport?.observer) {
-    inlineState.viewport.observer.disconnect();
-    inlineState.viewport.observer = null;
+  if (store) {
+    store.scrollTargets = [];
+    if (store.observer) {
+      store.observer.disconnect();
+      store.observer = null;
+    }
   }
 }
 

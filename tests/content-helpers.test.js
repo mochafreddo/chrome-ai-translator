@@ -887,15 +887,14 @@ exports.tests = [
     fn() {
       withFakeViewportDom(({ FakeElement }) => {
         function makeEventTarget(el) {
-          el.addEventListener = function addEventListener() {};
-          el.removeEventListener = function removeEventListener() {};
-          return el;
+          return Object.assign(el, {
+            addEventListener() {},
+            removeEventListener() {},
+          });
         }
 
-        global.window.addEventListener = function addEventListener() {};
-        global.window.removeEventListener = function removeEventListener() {};
-        global.document.addEventListener = function addEventListener() {};
-        global.document.removeEventListener = function removeEventListener() {};
+        makeEventTarget(global.window);
+        makeEventTarget(global.document);
 
         const root = makeEventTarget(new FakeElement([]));
         const scrollContainer = makeEventTarget(new FakeElement([root]));
