@@ -883,6 +883,60 @@ exports.tests = [
     },
   },
   {
+    name: 'includes body and scrollable ancestors in viewport scroll targets',
+    fn() {
+      withFakeViewportDom(({ FakeElement }) => {
+        function makeEventTarget(el) {
+          el.addEventListener = function addEventListener() {};
+          el.removeEventListener = function removeEventListener() {};
+          return el;
+        }
+
+        global.window.addEventListener = function addEventListener() {};
+        global.window.removeEventListener = function removeEventListener() {};
+        global.document.addEventListener = function addEventListener() {};
+        global.document.removeEventListener = function removeEventListener() {};
+
+        const root = makeEventTarget(new FakeElement([]));
+        const scrollContainer = makeEventTarget(new FakeElement([root]));
+        scrollContainer.clientHeight = 300;
+        scrollContainer.scrollHeight = 900;
+        scrollContainer.overflowY = 'auto';
+
+        const body = makeEventTarget(new FakeElement([scrollContainer]));
+        body.tagName = 'BODY';
+        body.clientHeight = 577;
+        body.scrollHeight = 13648;
+        body.overflowY = 'auto';
+
+        const html = makeEventTarget(new FakeElement([body]));
+        html.tagName = 'HTML';
+        html.clientHeight = 577;
+        html.scrollHeight = 577;
+        body.parentElement = html;
+
+        global.document.body = body;
+        global.document.documentElement = html;
+        global.document.scrollingElement = html;
+        global.window.getComputedStyle = (el) => ({
+          display: 'block',
+          visibility: 'visible',
+          opacity: '1',
+          overflow: el.overflowY || 'visible',
+          overflowY: el.overflowY || 'visible',
+        });
+
+        const targets = helpers.getInlineViewportScrollTargets(root);
+
+        assert.equal(targets.includes(global.window), true);
+        assert.equal(targets.includes(global.document), true);
+        assert.equal(targets.includes(html), true);
+        assert.equal(targets.includes(body), true);
+        assert.equal(targets.includes(scrollContainer), true);
+      });
+    },
+  },
+  {
     name: 'advances viewport scans through large pages with a text-node budget',
     fn() {
       withFakeViewportDom(({ FakeElement, text }) => {

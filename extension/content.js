@@ -71,6 +71,7 @@ function createInlineViewportStore(
       translationByOriginal instanceof Map ? translationByOriginal : new Map(),
     scanTimer: null,
     observer: null,
+    scrollTargets: [],
     root: null,
     stopped: false,
     scanStartIndex: 0,
@@ -1478,8 +1479,48 @@ function scheduleInlineViewportScanFromViewportChange() {
   scheduleInlineViewportScan({ resetScanStartIndex: true });
 }
 
+function addUniqueInlineViewportEventTarget(targets, seen, target) {
+  if (!target || seen.has(target) || !target.addEventListener) return;
+  targets.push(target);
+  seen.add(target);
+}
+
+function isInlineScrollableElement(el) {
+  if (!el || !(el instanceof HTMLElement)) return false;
+  const style = window.getComputedStyle(el);
+  const overflowY = style.overflowY || style.overflow || '';
+  if (!/(auto|scroll|overlay)/.test(overflowY)) return false;
+  return Number(el.scrollHeight) > Number(el.clientHeight) + 1;
+}
+
+function getInlineViewportScrollTargets(root) {
+  const targets = [];
+  const seen = new Set();
+
+  addUniqueInlineViewportEventTarget(targets, seen, window);
+  addUniqueInlineViewportEventTarget(targets, seen, document);
+  addUniqueInlineViewportEventTarget(targets, seen, document.scrollingElement);
+  addUniqueInlineViewportEventTarget(targets, seen, document.documentElement);
+  addUniqueInlineViewportEventTarget(targets, seen, document.body);
+
+  for (let el = root; el; el = el.parentElement) {
+    if (isInlineScrollableElement(el)) {
+      addUniqueInlineViewportEventTarget(targets, seen, el);
+    }
+  }
+
+  return targets;
+}
+
 function attachInlineViewportWatchers(root) {
-  window.addEventListener('scroll', scheduleInlineViewportScanFromViewportChange, { passive: true });
+  const scrollTargets = getInlineViewportScrollTargets(root);
+  for (const target of scrollTargets) {
+    target.addEventListener(
+      'scroll',
+      scheduleInlineViewportScanFromViewportChange,
+      { passive: true }
+    );
+  }
   window.addEventListener('resize', scheduleInlineViewportScanFromViewportChange);
 
   const observer = new MutationObserver(scheduleInlineViewportScanFromViewportChange);
@@ -1489,11 +1530,23 @@ function attachInlineViewportWatchers(root) {
     characterData: true,
   });
   inlineState.viewport.observer = observer;
+  inlineState.viewport.scrollTargets = scrollTargets;
 }
 
 function detachInlineViewportWatchers() {
-  window.removeEventListener('scroll', scheduleInlineViewportScanFromViewportChange);
+  const scrollTargets = inlineState.viewport?.scrollTargets?.length
+    ? inlineState.viewport.scrollTargets
+    : [window];
+  for (const target of scrollTargets) {
+    target?.removeEventListener?.(
+      'scroll',
+      scheduleInlineViewportScanFromViewportChange
+    );
+  }
   window.removeEventListener('resize', scheduleInlineViewportScanFromViewportChange);
+  if (inlineState.viewport) {
+    inlineState.viewport.scrollTargets = [];
+  }
   if (inlineState.viewport?.observer) {
     inlineState.viewport.observer.disconnect();
     inlineState.viewport.observer = null;
@@ -1740,6 +1793,7 @@ if (typeof module !== 'undefined' && module.exports) {
     toggleInlineTranslatorMenu,
     runInlineViewportScan,
     scheduleInlineViewportScanFromViewportChange,
+    getInlineViewportScrollTargets,
     restoreInlineViewportRecords,
     restoreInlineOriginal,
   };
