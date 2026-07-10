@@ -313,17 +313,60 @@ function buildTextNodeResponseFormat() {
   };
 }
 
+function getTargetLanguageCode(targetLanguage) {
+  const normalized = String(targetLanguage || '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!normalized) return '';
+  if (
+    /^en(?:[-_][a-z0-9]+)*$/i.test(normalized) ||
+    /^english\b/i.test(normalized) ||
+    /^(?:american|british|us|uk|australian|canadian|new zealand) english\b/i.test(
+      normalized
+    ) ||
+    /^(?:(?:미국|영국|호주|캐나다|뉴질랜드)(?:식)?\s*)?(?:영어|영문)(?:\s|$|\()/.test(
+      normalized
+    )
+  ) {
+    return 'en';
+  }
+  if (
+    /^ko(?:[-_][a-z0-9]+)*$/i.test(normalized) ||
+    /^(?:korean|south korean|north korean)\b/i.test(normalized) ||
+    /^(?:한국어|한국말|조선어|조선말)(?:\s|$|\()/.test(normalized)
+  ) {
+    return 'ko';
+  }
+  return '';
+}
+
+function isKoreanTargetLanguage(targetLanguage) {
+  return getTargetLanguageCode(targetLanguage) === 'ko';
+}
+
 function buildBlockInstructions({ targetLanguage, tone }) {
-  return [
+  const instructions = [
     `Translate each complete semantic block into ${targetLanguage}.`,
     getToneInstruction(tone),
     'Return one translation object for every input record and preserve every id exactly.',
     'Preserve every token byte-for-byte and emit each token exactly once.',
-    'Use atom labels only as context; atomic visible text remains represented by its token.',
-    'Move tokens when required by target-language grammar without changing token parent relationships.',
-    'When repair is non-null, redo the translation and correct the token contract named by previousErrorCode.',
-    'Do not output HTML, Markdown, commentary, or any field not required by the schema.',
-  ].join('\n');
+    'Translate all source-language prose, including text between wrapper OPEN and CLOSE tokens; wrapper tokens preserve formatting, not wording.',
+    'Use atom labels only as context; atomic visible text remains represented by its token and only atom text marked preserveText may remain unchanged.',
+    'Reorder and rewrite grammar naturally for the target language; source word order is not a constraint, but token parent relationships must not change.',
+    'Never return the source template unchanged or partially copy source-language prose.',
+  ];
+  if (isKoreanTargetLanguage(targetLanguage)) {
+    instructions.push(
+      'For Korean, place a preserved atom before the translated noun phrase when natural. Example: “Reasoning models like [GPT-5.5] use ...” becomes “[GPT-5.5]와 같은 추론 모델은 ...”; write “모델은”, never “모델는”, choose particles from the visible label, and never emit empty example parenthesis.',
+      'For Korean, do not guess a particle after an opaque technical or model atom. Add an appropriate classifier and attach the particle there, such as “[gpt-5.4] 모델을 고려하세요,” never “[gpt-5.4]을 고려하세요,” or rewrite the sentence to avoid a direct particle.'
+    );
+  }
+  instructions.push(
+    'When repair is non-null, redo the translation and correct previousErrorCode, including any translation_incomplete result.',
+    'Do not output HTML, Markdown, commentary, or any field not required by the schema.'
+  );
+  return instructions.join('\n');
 }
 
 function buildBlockResponseFormat() {
@@ -353,7 +396,7 @@ function buildBlockResponseFormat() {
   };
 }
 
-const INLINE_BLOCK_TOKEN_ERROR_CODES = new Set([
+const INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
   'token_missing',
   'token_duplicate',
   'token_unknown',
@@ -361,6 +404,7 @@ const INLINE_BLOCK_TOKEN_ERROR_CODES = new Set([
   'token_parent_changed',
   'output_too_long',
   'output_parse_failed',
+  'translation_incomplete',
 ]);
 const INLINE_BLOCK_ATOM_FIELDS = new Set([
   'token',
@@ -409,7 +453,7 @@ function normalizeBlockRepair(repair, recordId) {
   if (repair.attempt !== 1) {
     throw new Error(`Invalid repair attempt for block ${recordId}`);
   }
-  if (!INLINE_BLOCK_TOKEN_ERROR_CODES.has(repair.previousErrorCode)) {
+  if (!INLINE_BLOCK_REPAIRABLE_ERROR_CODES.has(repair.previousErrorCode)) {
     throw new Error(`Invalid repair error code for block ${recordId}`);
   }
   return {
@@ -510,7 +554,281 @@ function normalizeVisibleBlockBatchRecords(records) {
   return normalized;
 }
 
-function parseAndValidateBlockTranslations(outputText, records) {
+function normalizeBlockContainerText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function removeBlockLiteralTokens(value, literalTokens) {
+  let text = String(value || '');
+  for (const literal of literalTokens || []) {
+    if (typeof literal?.value !== 'string' || !literal.value) continue;
+    text = text.split(literal.value).join(' ');
+  }
+  return text;
+}
+
+function collectBlockContainerProseText(tree, literalTokens = []) {
+  const proseTextById = new Map();
+
+  function visit(container) {
+    const pieces = [];
+    for (const child of container.children || []) {
+      if (child.type === 'text') pieces.push(child.value);
+      if (child.type === 'wrapper') pieces.push(visit(child));
+    }
+    const proseText = normalizeBlockContainerText(
+      removeBlockLiteralTokens(pieces.join(' '), literalTokens)
+    );
+    proseTextById.set(container.id, proseText);
+    return proseText;
+  }
+
+  visit(tree);
+  return proseTextById;
+}
+
+function getEnglishWordEntries(value) {
+  const text = String(value || '');
+  return Array.from(
+    text.matchAll(/[A-Za-z]+(?:['’\u2019-][A-Za-z]+)*/g),
+    (match) => ({
+      word: match[0],
+      start: match.index,
+      end: match.index + match[0].length,
+    })
+  );
+}
+
+function getEnglishWords(value) {
+  return getEnglishWordEntries(value).map((entry) => entry.word);
+}
+
+const ENGLISH_PROSE_MARKERS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'as',
+  'at',
+  'be',
+  'by',
+  'for',
+  'from',
+  'get',
+  'getting',
+  'go',
+  'how',
+  'in',
+  'is',
+  'learn',
+  'more',
+  'of',
+  'on',
+  'or',
+  'read',
+  'start',
+  'started',
+  'the',
+  'this',
+  'to',
+  'use',
+  'using',
+  'view',
+  'with',
+  'you',
+  'your',
+]);
+const TECHNICAL_NAME_SUFFIXES = new Set(['API', 'SDK', 'CLI', 'IDE']);
+const NAMED_TECHNICAL_WORDS = new Set([
+  ...TECHNICAL_NAME_SUFFIXES,
+  'AI',
+  'GPT',
+  'HTTP',
+  'HTTPS',
+  'JSON',
+  'LLM',
+  'REST',
+  'SQL',
+  'UI',
+  'UX',
+  'XML',
+]);
+
+function isTechnicalEnglishWord(word) {
+  return (
+    NAMED_TECHNICAL_WORDS.has(String(word || '').toUpperCase()) ||
+    /[a-z][A-Z]/.test(word)
+  );
+}
+
+function isTechnicalTitleSeparator(value) {
+  return /^\s+$/.test(value) || /^\s*[()]\s*$/.test(value);
+}
+
+function isProtectedTechnicalTitleSequence(
+  sourceText,
+  sourceEntries,
+  sourceIndex,
+  sequenceLength
+) {
+  const sequence = sourceEntries.slice(
+    sourceIndex,
+    sourceIndex + sequenceLength
+  );
+  if (!sequence.every((entry) => /^[A-Z][A-Za-z]*$/.test(entry.word))) {
+    return false;
+  }
+  if (
+    sequence.some((entry) =>
+      ENGLISH_PROSE_MARKERS.has(entry.word.toLowerCase())
+    )
+  ) {
+    return false;
+  }
+
+  let start = sourceIndex;
+  let end = sourceIndex + sequenceLength;
+  while (start > 0) {
+    const previous = sourceEntries[start - 1];
+    const current = sourceEntries[start];
+    if (
+      !isTechnicalTitleSeparator(
+        sourceText.slice(previous.end, current.start)
+      ) ||
+      !/^[A-Z][A-Za-z]*$/.test(previous.word)
+    ) {
+      break;
+    }
+    start -= 1;
+  }
+  while (end < sourceEntries.length) {
+    const previous = sourceEntries[end - 1];
+    const current = sourceEntries[end];
+    if (TECHNICAL_NAME_SUFFIXES.has(previous.word)) break;
+    if (
+      !isTechnicalTitleSeparator(
+        sourceText.slice(previous.end, current.start)
+      ) ||
+      !/^[A-Z][A-Za-z]*$/.test(current.word)
+    ) {
+      break;
+    }
+    end += 1;
+  }
+  const titlePhrase = sourceEntries.slice(start, end);
+  const suffixIndex = titlePhrase.findIndex((entry) =>
+    TECHNICAL_NAME_SUFFIXES.has(entry.word)
+  );
+  if (suffixIndex >= 0 && suffixIndex !== titlePhrase.length - 1) {
+    return false;
+  }
+  return TECHNICAL_NAME_SUFFIXES.has(
+    titlePhrase[titlePhrase.length - 1]?.word
+  );
+}
+
+function isLikelyEnglishProse(words) {
+  if (words.length < 2) return false;
+  if (words.slice(1).some((word) => /^[a-z]/.test(word))) return true;
+  const normalizedWords = words.map((word) => word.toLowerCase());
+  if (normalizedWords.some((word) => ENGLISH_PROSE_MARKERS.has(word))) {
+    return true;
+  }
+  if (words.some((word) => /(?:ing|ed)$/i.test(word))) return true;
+  if (words.every((word) => /^[A-Z][a-z]+$/.test(word))) return true;
+  if (words.every((word) => /^[A-Z]+$/.test(word))) {
+    return words.some((word) => !isTechnicalEnglishWord(word));
+  }
+  if (words.length < 4) return false;
+  return words.filter(isTechnicalEnglishWord).length < 2;
+}
+
+function hasSharedEnglishWordSequence(sourceText, translatedText) {
+  const sourceEntries = getEnglishWordEntries(sourceText);
+  const sourceWords = sourceEntries.map((entry) => entry.word);
+  const translatedWords = getEnglishWords(translatedText).map((word) =>
+    word.toLowerCase()
+  );
+  for (
+    let sequenceLength = Math.min(4, sourceWords.length);
+    sequenceLength >= 2;
+    sequenceLength -= 1
+  ) {
+    const translatedSequences = new Set();
+    for (
+      let translatedIndex = 0;
+      translatedIndex <= translatedWords.length - sequenceLength;
+      translatedIndex += 1
+    ) {
+      translatedSequences.add(
+        translatedWords
+          .slice(translatedIndex, translatedIndex + sequenceLength)
+          .join('\u0000')
+      );
+    }
+    for (
+      let sourceIndex = 0;
+      sourceIndex <= sourceWords.length - sequenceLength;
+      sourceIndex += 1
+    ) {
+      const sourceSequence = sourceWords.slice(
+        sourceIndex,
+        sourceIndex + sequenceLength
+      );
+      if (
+        isLikelyEnglishProse(sourceSequence) &&
+        !isProtectedTechnicalTitleSequence(
+          sourceText,
+          sourceEntries,
+          sourceIndex,
+          sequenceLength
+        ) &&
+        translatedSequences.has(
+          sourceSequence.map((word) => word.toLowerCase()).join('\u0000')
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function shouldCheckEnglishTranslationResidue(targetLanguage) {
+  if (!String(targetLanguage || '').trim()) return false;
+  return getTargetLanguageCode(targetLanguage) !== 'en';
+}
+
+function hasUntranslatedEnglishContainer(
+  sourceValidation,
+  translatedValidation,
+  literalTokens = []
+) {
+  const sourceTextById = collectBlockContainerProseText(
+    sourceValidation.tree,
+    literalTokens
+  );
+  const translatedTextById = collectBlockContainerProseText(
+    translatedValidation.tree,
+    literalTokens
+  );
+  for (const [containerId, sourceText] of sourceTextById) {
+    if (
+      hasSharedEnglishWordSequence(
+        sourceText,
+        translatedTextById.get(containerId) || ''
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseAndValidateBlockTranslations(outputText, records, options = {}) {
   let parsed;
   try {
     parsed = JSON.parse(outputText);
@@ -546,9 +864,30 @@ function parseAndValidateBlockTranslations(outputText, records) {
       template,
       record.contract
     );
-    return validation.ok
-      ? { id: record.id, ok: true, template }
-      : { id: record.id, ok: false, errorCode: validation.errorCode };
+    if (!validation.ok) {
+      return { id: record.id, ok: false, errorCode: validation.errorCode };
+    }
+    if (shouldCheckEnglishTranslationResidue(options.targetLanguage)) {
+      const sourceValidation = inlineBlockCodec.validateTranslatedTemplate(
+        record.template,
+        record.contract
+      );
+      if (
+        sourceValidation.ok &&
+        hasUntranslatedEnglishContainer(
+          sourceValidation,
+          validation,
+          record.contract.literalTokens
+        )
+      ) {
+        return {
+          id: record.id,
+          ok: false,
+          errorCode: 'translation_incomplete',
+        };
+      }
+    }
+    return { id: record.id, ok: true, template };
   });
 }
 
@@ -1075,7 +1414,11 @@ async function translateVisibleTextBatch(records, settingsSnapshot = null) {
   }
 }
 
-async function translateVisibleBlockBatch(records, settingsSnapshot = null) {
+async function translateVisibleBlockBatch(
+  records,
+  settingsSnapshot = null,
+  options = {}
+) {
   const startedAtMs = Date.now();
   const logEntry = createInlineTranslationLogEntry(startedAtMs);
   let completed = false;
@@ -1130,7 +1473,14 @@ async function translateVisibleBlockBatch(records, settingsSnapshot = null) {
       textFormat: buildBlockResponseFormat(),
       maxOutputTokens: getBlockBatchMaxOutputTokens(totalCost),
     });
-    const results = parseAndValidateBlockTranslations(output, normalized);
+    const validateTranslationCompleteness =
+      options.validateTranslationCompleteness === true ||
+      (settingsSnapshot !== null && typeof settingsSnapshot === 'object');
+    const results = parseAndValidateBlockTranslations(output, normalized, {
+      targetLanguage: validateTranslationCompleteness
+        ? settings.targetLanguage
+        : '',
+    });
     if (logEntry.chunks[0]) {
       logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;
       logEntry.chunks[0].ok = true;
@@ -1418,7 +1768,11 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         if (msg?.type === 'TRANSLATE_VISIBLE_BLOCK_BATCH') {
           const results = await translateVisibleBlockBatch(
             msg.records || [],
-            msg.settingsSnapshot || null
+            msg.settingsSnapshot || null,
+            {
+              validateTranslationCompleteness:
+                msg.validateTranslationCompleteness === true,
+            }
           );
           sendResponse({ ok: true, results });
           return;

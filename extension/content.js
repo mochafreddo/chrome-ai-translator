@@ -736,7 +736,7 @@ function takeInlineViewportBlockBatch(
   return batch;
 }
 
-var INLINE_BLOCK_TOKEN_ERROR_CODES = new Set([
+var INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
   'token_missing',
   'token_duplicate',
   'token_unknown',
@@ -744,6 +744,7 @@ var INLINE_BLOCK_TOKEN_ERROR_CODES = new Set([
   'token_parent_changed',
   'output_too_long',
   'output_parse_failed',
+  'translation_incomplete',
 ]);
 
 function queueInlineViewportBlockRetry(
@@ -821,7 +822,7 @@ function applyInlineViewportBlockResults(
     record.state = 'failed';
     record.errorCode = errorCode;
     if (
-      INLINE_BLOCK_TOKEN_ERROR_CODES.has(errorCode) &&
+      INLINE_BLOCK_REPAIRABLE_ERROR_CODES.has(errorCode) &&
       queueInlineViewportBlockRetry(store, record, 'repair', errorCode)
     ) {
       summary.retried += 1;
@@ -2042,6 +2043,7 @@ async function drainInlineViewportQueue() {
       .sendMessage({
         type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
         operationId,
+        validateTranslationCompleteness: true,
         settingsSnapshot: store.translationSettings,
         records: batch.map((record) => ({
           id: record.id,
