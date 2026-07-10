@@ -602,10 +602,6 @@ function getEnglishWordEntries(value) {
   );
 }
 
-function getEnglishWords(value) {
-  return getEnglishWordEntries(value).map((entry) => entry.word);
-}
-
 const ENGLISH_PROSE_MARKERS = new Set([
   'a',
   'an',
@@ -668,65 +664,68 @@ function isTechnicalTitleSeparator(value) {
   return /^\s+$/.test(value) || /^\s*[()]\s*$/.test(value);
 }
 
+function isEnglishTitleWord(word) {
+  return /^[A-Z][A-Za-z]*$/.test(word);
+}
+
+function getProtectedTechnicalTitleRangeIds(sourceText, sourceEntries) {
+  const rangeIds = new Array(sourceEntries.length).fill(-1);
+  let rangeId = 0;
+  let index = 0;
+
+  while (index < sourceEntries.length) {
+    if (!isEnglishTitleWord(sourceEntries[index].word)) {
+      index += 1;
+      continue;
+    }
+
+    const start = index;
+    index += 1;
+    while (
+      index < sourceEntries.length &&
+      !TECHNICAL_NAME_SUFFIXES.has(sourceEntries[index - 1].word) &&
+      isTechnicalTitleSeparator(
+        sourceText.slice(
+          sourceEntries[index - 1].end,
+          sourceEntries[index].start
+        )
+      ) &&
+      isEnglishTitleWord(sourceEntries[index].word)
+    ) {
+      index += 1;
+    }
+
+    if (!TECHNICAL_NAME_SUFFIXES.has(sourceEntries[index - 1].word)) {
+      continue;
+    }
+    for (let member = start; member < index; member += 1) {
+      rangeIds[member] = rangeId;
+    }
+    rangeId += 1;
+  }
+
+  return rangeIds;
+}
+
 function isProtectedTechnicalTitleSequence(
-  sourceText,
-  sourceEntries,
+  sourceSequence,
   sourceIndex,
-  sequenceLength
+  protectedRangeIds
 ) {
-  const sequence = sourceEntries.slice(
-    sourceIndex,
-    sourceIndex + sequenceLength
-  );
-  if (!sequence.every((entry) => /^[A-Z][A-Za-z]*$/.test(entry.word))) {
+  if (!sourceSequence.every((word) => isEnglishTitleWord(word))) {
     return false;
   }
   if (
-    sequence.some((entry) =>
-      ENGLISH_PROSE_MARKERS.has(entry.word.toLowerCase())
+    sourceSequence.some((word) =>
+      ENGLISH_PROSE_MARKERS.has(word.toLowerCase())
     )
   ) {
     return false;
   }
-
-  let start = sourceIndex;
-  let end = sourceIndex + sequenceLength;
-  while (start > 0) {
-    const previous = sourceEntries[start - 1];
-    const current = sourceEntries[start];
-    if (
-      !isTechnicalTitleSeparator(
-        sourceText.slice(previous.end, current.start)
-      ) ||
-      !/^[A-Z][A-Za-z]*$/.test(previous.word)
-    ) {
-      break;
-    }
-    start -= 1;
-  }
-  while (end < sourceEntries.length) {
-    const previous = sourceEntries[end - 1];
-    const current = sourceEntries[end];
-    if (TECHNICAL_NAME_SUFFIXES.has(previous.word)) break;
-    if (
-      !isTechnicalTitleSeparator(
-        sourceText.slice(previous.end, current.start)
-      ) ||
-      !/^[A-Z][A-Za-z]*$/.test(current.word)
-    ) {
-      break;
-    }
-    end += 1;
-  }
-  const titlePhrase = sourceEntries.slice(start, end);
-  const suffixIndex = titlePhrase.findIndex((entry) =>
-    TECHNICAL_NAME_SUFFIXES.has(entry.word)
-  );
-  if (suffixIndex >= 0 && suffixIndex !== titlePhrase.length - 1) {
-    return false;
-  }
-  return TECHNICAL_NAME_SUFFIXES.has(
-    titlePhrase[titlePhrase.length - 1]?.word
+  const rangeId = protectedRangeIds[sourceIndex];
+  return (
+    rangeId >= 0 &&
+    protectedRangeIds[sourceIndex + sourceSequence.length - 1] === rangeId
   );
 }
 
@@ -746,29 +745,38 @@ function isLikelyEnglishProse(words) {
   return words.filter(isTechnicalEnglishWord).length < 2;
 }
 
+function getWordSequenceSet(words, sequenceLength) {
+  const sequences = new Set();
+  for (
+    let index = 0;
+    index <= words.length - sequenceLength;
+    index += 1
+  ) {
+    sequences.add(words.slice(index, index + sequenceLength).join('\u0000'));
+  }
+  return sequences;
+}
+
 function hasSharedEnglishWordSequence(sourceText, translatedText) {
   const sourceEntries = getEnglishWordEntries(sourceText);
   const sourceWords = sourceEntries.map((entry) => entry.word);
-  const translatedWords = getEnglishWords(translatedText).map((word) =>
-    word.toLowerCase()
+  const normalizedSourceWords = sourceWords.map((word) => word.toLowerCase());
+  const protectedRangeIds = getProtectedTechnicalTitleRangeIds(
+    sourceText,
+    sourceEntries
+  );
+  const translatedWords = getEnglishWordEntries(translatedText).map((entry) =>
+    entry.word.toLowerCase()
   );
   for (
     let sequenceLength = Math.min(4, sourceWords.length);
     sequenceLength >= 2;
     sequenceLength -= 1
   ) {
-    const translatedSequences = new Set();
-    for (
-      let translatedIndex = 0;
-      translatedIndex <= translatedWords.length - sequenceLength;
-      translatedIndex += 1
-    ) {
-      translatedSequences.add(
-        translatedWords
-          .slice(translatedIndex, translatedIndex + sequenceLength)
-          .join('\u0000')
-      );
-    }
+    const translatedSequences = getWordSequenceSet(
+      translatedWords,
+      sequenceLength
+    );
     for (
       let sourceIndex = 0;
       sourceIndex <= sourceWords.length - sequenceLength;
@@ -781,13 +789,14 @@ function hasSharedEnglishWordSequence(sourceText, translatedText) {
       if (
         isLikelyEnglishProse(sourceSequence) &&
         !isProtectedTechnicalTitleSequence(
-          sourceText,
-          sourceEntries,
+          sourceSequence,
           sourceIndex,
-          sequenceLength
+          protectedRangeIds
         ) &&
         translatedSequences.has(
-          sourceSequence.map((word) => word.toLowerCase()).join('\u0000')
+          normalizedSourceWords
+            .slice(sourceIndex, sourceIndex + sequenceLength)
+            .join('\u0000')
         )
       ) {
         return true;

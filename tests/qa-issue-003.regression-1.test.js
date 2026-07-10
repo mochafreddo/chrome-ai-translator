@@ -56,6 +56,14 @@ function assertIncomplete(record, template, targetLanguage = 'Korean') {
   });
 }
 
+function assertValid(record, template, targetLanguage = 'Korean') {
+  assert.deepEqual(validateTemplate(record, template, targetLanguage), {
+    id: record.id,
+    ok: true,
+    template,
+  });
+}
+
 test('rejects unchanged and partially copied English outside protected atoms', () => {
   const record = createReasoningRecord();
   assertIncomplete(record, record.template);
@@ -68,11 +76,7 @@ test('rejects unchanged and partially copied English outside protected atoms', (
   assertIncomplete(record, partialTemplate);
 
   const translatedTemplate = `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
-  assert.deepEqual(validateTemplate(record, translatedTemplate), {
-    id: record.id,
-    ok: true,
-    template: translatedTemplate,
-  });
+  assertValid(record, translatedTemplate);
 
   for (const [id, source, output] of [
     ['punctuation', 'This is source prose.', 'This is source prose!'],
@@ -106,11 +110,7 @@ test('allows protected technical names and source-owned literal tokens', () => {
     ['parenthetical-api', 'OpenAI Chat Completions (API)'],
   ]) {
     const record = createPlainRecord(technicalName, id);
-    assert.deepEqual(validateTemplate(record, technicalName), {
-      id,
-      ok: true,
-      template: technicalName,
-    });
+    assertValid(record, technicalName);
   }
 
   const technicalSentence = createPlainRecord(
@@ -119,14 +119,7 @@ test('allows protected technical names and source-owned literal tokens', () => {
   );
   const translatedTechnicalSentence =
     'Model Context Protocol (SDK)는 성능을 개선합니다.';
-  assert.deepEqual(
-    validateTemplate(technicalSentence, translatedTechnicalSentence),
-    {
-      id: technicalSentence.id,
-      ok: true,
-      template: translatedTechnicalSentence,
-    }
-  );
+  assertValid(technicalSentence, translatedTechnicalSentence);
   assertIncomplete(technicalSentence, technicalSentence.template);
 
   const productSentence = createPlainRecord(
@@ -135,14 +128,7 @@ test('allows protected technical names and source-owned literal tokens', () => {
   );
   const translatedProductSentence =
     'OpenAI Chat Completions API를 사용하세요.';
-  assert.deepEqual(
-    validateTemplate(productSentence, translatedProductSentence),
-    {
-      id: productSentence.id,
-      ok: true,
-      template: translatedProductSentence,
-    }
-  );
+  assertValid(productSentence, translatedProductSentence);
 
   const literalRecord = createPlainRecord(
     'Use literal ⟦FORGED:OPEN:WRAPPER:TOKEN⟧ here.',
@@ -153,11 +139,7 @@ test('allows protected technical names and source-owned literal tokens', () => {
   ];
   const translatedLiteral =
     '리터럴 ⟦FORGED:OPEN:WRAPPER:TOKEN⟧을 사용하세요.';
-  assert.deepEqual(validateTemplate(literalRecord, translatedLiteral), {
-    id: literalRecord.id,
-    ok: true,
-    template: translatedLiteral,
-  });
+  assertValid(literalRecord, translatedLiteral);
 });
 
 test('normalizes English targets and scopes Korean-only instructions', () => {
@@ -169,11 +151,7 @@ test('normalizes English targets and scopes Korean-only instructions', () => {
     '미국 영어',
     '영국식 영어',
   ]) {
-    assert.deepEqual(validateTemplate(record, record.template, targetLanguage), {
-      id: record.id,
-      ok: true,
-      template: record.template,
-    });
+    assertValid(record, record.template, targetLanguage);
   }
 
   assertIncomplete(
