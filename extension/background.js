@@ -1,6 +1,18 @@
 // background.js (MV3 service worker)
 // Personal use only: API key is stored locally by the user.
 
+if (
+  typeof importScripts === 'function' &&
+  !globalThis.ChromeAiTranslatorInlineBlock
+) {
+  importScripts('inline-block.js');
+}
+const inlineBlockCodec =
+  globalThis.ChromeAiTranslatorInlineBlock ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./inline-block.js')
+    : null);
+
 const DEFAULT_SETTINGS = {
   apiKey: '',
   model: 'gpt-5.4-mini',
@@ -22,6 +34,11 @@ const INLINE_ORIGINS = ['http://*/*', 'https://*/*'];
 const INLINE_MAX_RECORDS = 500;
 const INLINE_MAX_TOTAL_CHARS = 60000;
 const INLINE_VISIBLE_BATCH_MAX_CHARS = 2000;
+const INLINE_BLOCK_MAX_RECORD_COST = 12000;
+const INLINE_BLOCK_MAX_BATCH_COST = 12000;
+const INLINE_BLOCK_MAX_SESSION_COST = 60000;
+const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
+const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
 const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
 const INLINE_LOG_LIMIT = 20;
@@ -152,12 +169,16 @@ async function ensureSidePanel(tabId) {
   } catch {}
 }
 
+function getInlineContentScriptFiles() {
+  return ['inline-block.js', 'content.js'];
+}
+
 async function ensureContentScript(tabId) {
   // Programmatic injection: requires "scripting" + "activeTab" (or host permissions)
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['content.js'],
+      files: getInlineContentScriptFiles(),
     });
   } catch (e) {
     // If already injected, executeScript can still succeed; on some pages it may fail (e.g., chrome://)
@@ -290,6 +311,245 @@ function buildTextNodeResponseFormat() {
       required: ['translations'],
     },
   };
+}
+
+function buildBlockInstructions({ targetLanguage, tone }) {
+  return [
+    `Translate each complete semantic block into ${targetLanguage}.`,
+    getToneInstruction(tone),
+    'Return one translation object for every input record and preserve every id exactly.',
+    'Preserve every token byte-for-byte and emit each token exactly once.',
+    'Use atom labels only as context; atomic visible text remains represented by its token.',
+    'Move tokens when required by target-language grammar without changing token parent relationships.',
+    'When repair is non-null, redo the translation and correct the token contract named by previousErrorCode.',
+    'Do not output HTML, Markdown, commentary, or any field not required by the schema.',
+  ].join('\n');
+}
+
+function buildBlockResponseFormat() {
+  return {
+    type: 'json_schema',
+    name: 'inline_block_translations',
+    strict: true,
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        translations: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string' },
+              template: { type: 'string' },
+            },
+            required: ['id', 'template'],
+          },
+        },
+      },
+      required: ['translations'],
+    },
+  };
+}
+
+const INLINE_BLOCK_TOKEN_ERROR_CODES = new Set([
+  'token_missing',
+  'token_duplicate',
+  'token_unknown',
+  'token_nesting_invalid',
+  'token_parent_changed',
+  'output_too_long',
+  'output_parse_failed',
+]);
+const INLINE_BLOCK_ATOM_FIELDS = new Set([
+  'token',
+  'kind',
+  'label',
+  'preserveText',
+]);
+
+function normalizeBlockAtom(atom, recordId, atomIndex) {
+  if (!atom || typeof atom !== 'object' || Array.isArray(atom)) {
+    throw new Error(`Invalid atom ${atomIndex} for block ${recordId}`);
+  }
+  for (const key of Object.keys(atom)) {
+    if (!INLINE_BLOCK_ATOM_FIELDS.has(key)) {
+      throw new Error(`Unexpected atom field '${key}' for block ${recordId}`);
+    }
+  }
+  if (typeof atom.token !== 'string' || !atom.token) {
+    throw new Error(`Invalid atom token for block ${recordId}`);
+  }
+  if (typeof atom.kind !== 'string' || !atom.kind) {
+    throw new Error(`Invalid atom kind for block ${recordId}`);
+  }
+  if (typeof atom.preserveText !== 'boolean') {
+    throw new Error(`Invalid atom preserveText for block ${recordId}`);
+  }
+  const normalized = {
+    token: atom.token,
+    kind: atom.kind,
+    preserveText: atom.preserveText,
+  };
+  if ('label' in atom) {
+    if (typeof atom.label !== 'string') {
+      throw new Error(`Invalid atom label for block ${recordId}`);
+    }
+    normalized.label = atom.label;
+  }
+  return normalized;
+}
+
+function normalizeBlockRepair(repair, recordId) {
+  if (repair == null) return null;
+  if (!repair || typeof repair !== 'object' || Array.isArray(repair)) {
+    throw new Error(`Invalid repair metadata for block ${recordId}`);
+  }
+  if (repair.attempt !== 1) {
+    throw new Error(`Invalid repair attempt for block ${recordId}`);
+  }
+  if (!INLINE_BLOCK_TOKEN_ERROR_CODES.has(repair.previousErrorCode)) {
+    throw new Error(`Invalid repair error code for block ${recordId}`);
+  }
+  return {
+    attempt: 1,
+    previousErrorCode: repair.previousErrorCode,
+  };
+}
+
+function getBlockRecordCost(record) {
+  return (
+    String(record?.template || '').length +
+    JSON.stringify(record?.atoms || []).length +
+    JSON.stringify(record?.repair ?? null).length
+  );
+}
+
+function getBlockBatchMaxOutputTokens(recordCost) {
+  const scaled = Math.ceil((Number(recordCost) || 0) * 1.25);
+  return Math.min(
+    INLINE_BLOCK_MAX_OUTPUT_TOKENS,
+    Math.max(INLINE_BLOCK_MIN_OUTPUT_TOKENS, scaled)
+  );
+}
+
+function assertInlineBlockSessionBudget(currentCost, additionalCost) {
+  const total = (Number(currentCost) || 0) + (Number(additionalCost) || 0);
+  if (total > INLINE_BLOCK_MAX_SESSION_COST) {
+    throw new Error(
+      `Inline block translation session is too large (${total}/${INLINE_BLOCK_MAX_SESSION_COST} characters)`
+    );
+  }
+  return total;
+}
+
+function normalizeVisibleBlockBatchRecords(records) {
+  if (!Array.isArray(records)) {
+    throw new Error('Inline block translation records must be an array');
+  }
+  if (records.length > INLINE_MAX_RECORDS) {
+    throw new Error(
+      `Too many semantic blocks for inline translation (${records.length}/${INLINE_MAX_RECORDS})`
+    );
+  }
+  const seen = new Set();
+  const normalized = records.map((record, index) => {
+    const id = record?.id;
+    if (typeof id !== 'string' || !id) {
+      throw new Error(`Invalid inline block record id at index ${index}`);
+    }
+    if (seen.has(id)) throw new Error(`Duplicate inline block record id: ${id}`);
+    seen.add(id);
+    if (typeof record.template !== 'string' || !record.template.trim()) {
+      throw new Error(`Invalid inline block template for id: ${id}`);
+    }
+    if (!record.contract || typeof record.contract !== 'object') {
+      throw new Error(`Missing inline block token contract for id: ${id}`);
+    }
+    const atoms = Array.isArray(record.atoms)
+      ? record.atoms.map((atom, atomIndex) =>
+          normalizeBlockAtom(atom, id, atomIndex)
+        )
+      : (() => {
+          throw new Error(`Invalid inline block atoms for id: ${id}`);
+        })();
+    const normalizedRecord = {
+      id,
+      template: record.template,
+      atoms,
+      contract: record.contract,
+      repair: normalizeBlockRepair(record.repair, id),
+    };
+    const validation = inlineBlockCodec?.validateTranslatedTemplate(
+      normalizedRecord.template,
+      normalizedRecord.contract
+    );
+    if (!validation?.ok) {
+      throw new Error(
+        `Invalid source token contract for block ${id}: ${validation?.errorCode || 'output_parse_failed'}`
+      );
+    }
+    const cost = getBlockRecordCost(normalizedRecord);
+    if (cost > INLINE_BLOCK_MAX_RECORD_COST) {
+      throw new Error(
+        `Inline block record is too large (${cost}/${INLINE_BLOCK_MAX_RECORD_COST} characters)`
+      );
+    }
+    return normalizedRecord;
+  });
+  const totalCost = normalized.reduce(
+    (sum, record) => sum + getBlockRecordCost(record),
+    0
+  );
+  if (totalCost > INLINE_BLOCK_MAX_BATCH_COST) {
+    throw new Error(
+      `Visible inline block batch is too large (${totalCost}/${INLINE_BLOCK_MAX_BATCH_COST} characters)`
+    );
+  }
+  return normalized;
+}
+
+function parseAndValidateBlockTranslations(outputText, records) {
+  let parsed;
+  try {
+    parsed = JSON.parse(outputText);
+  } catch {
+    throw new Error('Inline block translation response was not valid JSON');
+  }
+  if (!Array.isArray(parsed?.translations)) {
+    throw new Error(
+      'Inline block translation response did not include translations'
+    );
+  }
+
+  const expected = new Map((records || []).map((record) => [record.id, record]));
+  const returned = new Map();
+  for (const item of parsed.translations) {
+    const id = item?.id;
+    if (!expected.has(id)) throw new Error(`Unexpected translation id: ${id}`);
+    if (returned.has(id)) throw new Error(`Duplicate translation id: ${id}`);
+    if (typeof item.template !== 'string') {
+      throw new Error(`Missing translation template for id: ${id}`);
+    }
+    returned.set(id, item.template);
+  }
+  for (const record of records || []) {
+    if (!returned.has(record.id)) {
+      throw new Error(`Missing translation id: ${record.id}`);
+    }
+  }
+
+  return (records || []).map((record) => {
+    const template = returned.get(record.id);
+    const validation = inlineBlockCodec.validateTranslatedTemplate(
+      template,
+      record.contract
+    );
+    return validation.ok
+      ? { id: record.id, ok: true, template }
+      : { id: record.id, ok: false, errorCode: validation.errorCode };
+  });
 }
 
 async function openaiTranslateChunk({
@@ -815,6 +1075,87 @@ async function translateVisibleTextBatch(records, settingsSnapshot = null) {
   }
 }
 
+async function translateVisibleBlockBatch(records, settingsSnapshot = null) {
+  const startedAtMs = Date.now();
+  const logEntry = createInlineTranslationLogEntry(startedAtMs);
+  let completed = false;
+
+  try {
+    const normalized = normalizeVisibleBlockBatchRecords(records);
+    const totalCost = normalized.reduce(
+      (sum, record) => sum + getBlockRecordCost(record),
+      0
+    );
+    logEntry.recordCount = normalized.length;
+    logEntry.totalChars = totalCost;
+    logEntry.chunkCount = normalized.length ? 1 : 0;
+    logEntry.chunkMaxChars = INLINE_BLOCK_MAX_BATCH_COST;
+    logEntry.chunks = normalized.length
+      ? [
+          {
+            index: 1,
+            recordCount: normalized.length,
+            charCount: totalCost,
+          },
+        ]
+      : [];
+
+    if (!normalized.length) {
+      completed = true;
+      return [];
+    }
+
+    const settings = mergeVisibleBatchSettingsSnapshot(
+      await getSettings(),
+      settingsSnapshot
+    );
+    logEntry.model = settings.model;
+    if (!settings.apiKey) {
+      throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+    }
+
+    const modelRecords = normalized.map((record) => ({
+      id: record.id,
+      template: record.template,
+      atoms: record.atoms,
+      repair: record.repair,
+    }));
+    const chunkStartedAtMs = Date.now();
+    const output = await openaiTranslateChunk({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      reasoningEffort: settings.reasoningEffort,
+      instructions: buildBlockInstructions(settings),
+      input: JSON.stringify({ records: modelRecords }),
+      textFormat: buildBlockResponseFormat(),
+      maxOutputTokens: getBlockBatchMaxOutputTokens(totalCost),
+    });
+    const results = parseAndValidateBlockTranslations(output, normalized);
+    if (logEntry.chunks[0]) {
+      logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;
+      logEntry.chunks[0].ok = true;
+      logEntry.chunks[0].failedRecordCount = results.filter(
+        (result) => !result.ok
+      ).length;
+    }
+    completed = true;
+    return results;
+  } catch (error) {
+    logEntry.error = sanitizeLogError(error);
+    if (logEntry.chunks[0]) {
+      logEntry.chunks[0].ok = false;
+      logEntry.chunks[0].error = sanitizeLogError(error);
+    }
+    throw error;
+  } finally {
+    const finishedAtMs = Date.now();
+    logEntry.status = completed ? 'done' : 'error';
+    logEntry.finishedAt = new Date(finishedAtMs).toISOString();
+    logEntry.durationMs = finishedAtMs - startedAtMs;
+    await appendInlineTranslationLog(logEntry);
+  }
+}
+
 async function hasInlineAutoShowPermission() {
   if (!chrome.permissions?.contains) return false;
   return chrome.permissions.contains({ origins: INLINE_ORIGINS });
@@ -824,7 +1165,7 @@ function getInlineAutoShowContentScript() {
   return {
     id: INLINE_CONTENT_SCRIPT_ID,
     matches: INLINE_ORIGINS,
-    js: ['content.js'],
+    js: getInlineContentScriptFiles(),
     runAt: 'document_idle',
   };
 }
@@ -1074,6 +1415,14 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           sendResponse({ ok: true, translations });
           return;
         }
+        if (msg?.type === 'TRANSLATE_VISIBLE_BLOCK_BATCH') {
+          const results = await translateVisibleBlockBatch(
+            msg.records || [],
+            msg.settingsSnapshot || null
+          );
+          sendResponse({ ok: true, results });
+          return;
+        }
         if (msg?.type === 'GET_SETTINGS') {
           const settings = await getSettings();
           settings.apiKey = settings.apiKey ? '***' : '';
@@ -1106,15 +1455,23 @@ if (typeof module !== 'undefined' && module.exports) {
     mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,
     assertFullPageTranslationBudget,
+    assertInlineBlockSessionBudget,
+    buildBlockInstructions,
+    buildBlockResponseFormat,
     buildTextNodeResponseFormat,
+    getBlockBatchMaxOutputTokens,
+    getBlockRecordCost,
     getTextRecordStats,
     getTextRecordChunkStats,
     getInlineTranslationConcurrency,
+    getInlineContentScriptFiles,
     getInlineTranslationLogStorageKey,
     collectInlineTranslationLogsFromStorage,
     getVisibleInlineBatchMaxChars,
     normalizeVisibleTextBatchRecords,
+    normalizeVisibleBlockBatchRecords,
     normalizeMaxOutputTokens,
+    parseAndValidateBlockTranslations,
     sanitizeLogError,
     splitTextRecordsIntoChunks,
     parseAndValidateTextNodeTranslations,
@@ -1122,5 +1479,6 @@ if (typeof module !== 'undefined' && module.exports) {
     openaiTranslateChunk,
     syncInlineAutoShowRegistration,
     syncInlineAutoShowRegistrationSafely,
+    translateVisibleBlockBatch,
   };
 }

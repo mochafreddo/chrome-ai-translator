@@ -1,5 +1,33 @@
 const assert = require('node:assert/strict');
 const helpers = require('../extension/background.js');
+const { createReasoningFixture } = require('./inline-block.test');
+
+function createBlockApiRecord(id = 'b1') {
+  const { serialized } = createReasoningFixture();
+  return {
+    id,
+    template: serialized.template,
+    atoms: serialized.atoms,
+    contract: serialized.contract,
+    repair: null,
+  };
+}
+
+function createTestPlainBlockRecord(id = 'b1') {
+  return {
+    id,
+    template: 'a',
+    atoms: [],
+    contract: {
+      codecVersion: 1,
+      namespace: 'CAT_PLAIN',
+      entries: [],
+      maxOutputChars: 2000,
+      requiresText: true,
+    },
+    repair: null,
+  };
+}
 
 exports.name = 'background helpers';
 exports.tests = [
@@ -211,6 +239,200 @@ exports.tests = [
     },
   },
   {
+    name: 'builds the strict semantic block response format and instructions',
+    fn() {
+      const format = helpers.buildBlockResponseFormat();
+      const instructions = helpers.buildBlockInstructions({
+        targetLanguage: 'Korean',
+        tone: 'technical',
+      });
+
+      assert.equal(format.type, 'json_schema');
+      assert.equal(format.name, 'inline_block_translations');
+      assert.equal(format.strict, true);
+      assert.deepEqual(
+        format.schema.properties.translations.items.required,
+        ['id', 'template']
+      );
+      assert.match(instructions, /complete semantic block/i);
+      assert.match(instructions, /token.*byte-for-byte/i);
+      assert.match(instructions, /Do not output HTML/i);
+      assert.match(instructions, /repair.*previousErrorCode/i);
+    },
+  },
+  {
+    name: 'normalizes block records without allowing DOM attributes',
+    fn() {
+      const record = createBlockApiRecord();
+      const normalized = helpers.normalizeVisibleBlockBatchRecords([record]);
+
+      assert.equal(normalized.length, 1);
+      assert.equal(normalized[0].id, 'b1');
+      assert.equal(normalized[0].template, record.template);
+      assert.deepEqual(normalized[0].atoms, record.atoms);
+      assert.deepEqual(normalized[0].contract, record.contract);
+      assert.equal(normalized[0].repair, null);
+      assert.equal(
+        helpers.getBlockRecordCost(normalized[0]),
+        record.template.length +
+          JSON.stringify(record.atoms).length +
+          JSON.stringify(null).length
+      );
+
+      assert.throws(
+        () =>
+          helpers.normalizeVisibleBlockBatchRecords([
+            {
+              ...record,
+              atoms: [{ ...record.atoms[0], href: 'https://example.com' }],
+            },
+          ]),
+        /Unexpected atom field/
+      );
+      assert.throws(
+        () =>
+          helpers.normalizeVisibleBlockBatchRecords([
+            {
+              ...record,
+              repair: { attempt: 2, previousErrorCode: 'token_missing' },
+            },
+          ]),
+        /repair attempt/
+      );
+    },
+  },
+  {
+    name: 'enforces semantic block record and batch budgets',
+    fn() {
+      const record = createBlockApiRecord();
+      const oversized = {
+        ...record,
+        template: `${'x'.repeat(12000)}${record.template}`,
+        contract: { ...record.contract, maxOutputChars: 48000 },
+      };
+
+      assert.throws(
+        () => helpers.normalizeVisibleBlockBatchRecords([oversized]),
+        /block record is too large/i
+      );
+      assert.equal(helpers.getBlockBatchMaxOutputTokens(100), 4096);
+      assert.equal(helpers.getBlockBatchMaxOutputTokens(12000), 15000);
+      assert.equal(helpers.getBlockBatchMaxOutputTokens(20000), 16000);
+      assert.doesNotThrow(() => helpers.assertInlineBlockSessionBudget(48000, 12000));
+      assert.throws(
+        () => helpers.assertInlineBlockSessionBudget(48001, 12000),
+        /session.*too large/i
+      );
+      const plainFixture = createTestPlainBlockRecord();
+      assert.throws(
+        () =>
+          helpers.normalizeVisibleBlockBatchRecords(
+            Array.from({ length: 501 }, (_item, index) => ({
+              ...plainFixture,
+              id: `b${index + 1}`,
+            }))
+          ),
+        /Too many semantic blocks/
+      );
+    },
+  },
+  {
+    name: 'returns per-record token failures after exact block ID validation',
+    fn() {
+      const first = createBlockApiRecord('b1');
+      const second = createBlockApiRecord('b2');
+      const atom = second.contract.entries.find((entry) => entry.kind === 'atom');
+      const parsed = helpers.parseAndValidateBlockTranslations(
+        JSON.stringify({
+          translations: [
+            { id: 'b1', template: first.template },
+            { id: 'b2', template: second.template.replace(atom.token, '') },
+          ],
+        }),
+        [first, second]
+      );
+
+      assert.deepEqual(parsed, [
+        { id: 'b1', ok: true, template: first.template },
+        { id: 'b2', ok: false, errorCode: 'token_missing' },
+      ]);
+      assert.throws(
+        () =>
+          helpers.parseAndValidateBlockTranslations(
+            JSON.stringify({
+              translations: [{ id: 'other', template: first.template }],
+            }),
+            [first]
+          ),
+        /Unexpected translation id/
+      );
+    },
+  },
+  {
+    name: 'sends semantic block payloads without token contracts or attributes',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const record = createBlockApiRecord();
+      let requestBody = null;
+      global.chrome = {
+        storage: {
+          local: {
+            async get(key) {
+              if (key === 'settings' || key?.includes?.('settings')) {
+                return {
+                  settings: {
+                    apiKey: 'sk-test',
+                    model: 'gpt-5.4-mini',
+                    reasoningEffort: 'none',
+                    targetLanguage: 'Korean',
+                    tone: 'technical',
+                  },
+                };
+              }
+              return {};
+            },
+            async set() {},
+          },
+        },
+      };
+      global.fetch = async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return {
+          ok: true,
+          async json() {
+            return {
+              output_text: JSON.stringify({
+                translations: [{ id: record.id, template: record.template }],
+              }),
+            };
+          },
+        };
+      };
+
+      try {
+        const results = await helpers.translateVisibleBlockBatch([record]);
+        const input = JSON.parse(requestBody.input);
+
+        assert.deepEqual(results, [
+          { id: record.id, ok: true, template: record.template },
+        ]);
+        assert.equal(input.records[0].contract, undefined);
+        assert.equal(input.records[0].atoms[0].href, undefined);
+        assert.equal(requestBody.text.format.name, 'inline_block_translations');
+        assert.equal(
+          requestBody.max_output_tokens,
+          helpers.getBlockBatchMaxOutputTokens(
+            helpers.getBlockRecordCost(record)
+          )
+        );
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+      }
+    },
+  },
+  {
     name: 'summarizes text record chunks without retaining raw text',
     fn() {
       const records = [
@@ -241,6 +463,15 @@ exports.tests = [
       assert.equal(helpers.getInlineTranslationConcurrency(1), 1);
       assert.equal(helpers.getInlineTranslationConcurrency(2), 2);
       assert.equal(helpers.getInlineTranslationConcurrency(9), 3);
+    },
+  },
+  {
+    name: 'loads the semantic block codec before the content script',
+    fn() {
+      assert.deepEqual(helpers.getInlineContentScriptFiles(), [
+        'inline-block.js',
+        'content.js',
+      ]);
     },
   },
   {
@@ -376,7 +607,7 @@ exports.tests = [
           {
             id: 'inline-translator-auto-show',
             matches: ['http://*/*', 'https://*/*'],
-            js: ['content.js'],
+            js: ['inline-block.js', 'content.js'],
             runAt: 'document_idle',
           }
         );
@@ -440,7 +671,7 @@ exports.tests = [
           {
             id: 'inline-translator-auto-show',
             matches: ['http://*/*', 'https://*/*'],
-            js: ['content.js'],
+            js: ['inline-block.js', 'content.js'],
             runAt: 'document_idle',
           }
         );
@@ -876,6 +1107,95 @@ exports.tests = [
         assert.deepEqual(responses, [{ ok: true }]);
         assert.equal(requestBodies.length, 1);
         assert.equal(requestBodies[0].max_output_tokens, markdown.length);
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
+  {
+    name: 'handles semantic block viewport translation messages',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const modulePath = require.resolve('../extension/background.js');
+      const originalModule = require.cache[modulePath];
+      const record = createBlockApiRecord();
+      let messageListener = null;
+
+      global.fetch = async () => ({
+        ok: true,
+        async json() {
+          return {
+            output_text: JSON.stringify({
+              translations: [{ id: record.id, template: record.template }],
+            }),
+          };
+        },
+      });
+      global.chrome = {
+        runtime: {
+          onInstalled: { addListener() {} },
+          onStartup: { addListener() {} },
+          onMessage: {
+            addListener(listener) {
+              messageListener = listener;
+            },
+          },
+          sendMessage() {
+            return Promise.resolve();
+          },
+        },
+        action: { onClicked: { addListener() {} } },
+        commands: { onCommand: { addListener() {} } },
+        sidePanel: {
+          async setPanelBehavior() {},
+          async setOptions() {},
+          async open() {},
+        },
+        scripting: { async executeScript() {} },
+        storage: {
+          local: {
+            async get() {
+              return {
+                settings: {
+                  apiKey: 'sk-test',
+                  model: 'gpt-5.4-mini',
+                  reasoningEffort: 'none',
+                  targetLanguage: 'Korean',
+                  tone: 'technical',
+                },
+              };
+            },
+            async set() {},
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/background.js');
+        const responses = [];
+        messageListener(
+          {
+            type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+            records: [record],
+          },
+          {},
+          (response) => responses.push(response)
+        );
+        for (let index = 0; index < 10 && !responses.length; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        assert.deepEqual(responses, [
+          {
+            ok: true,
+            results: [{ id: record.id, ok: true, template: record.template }],
+          },
+        ]);
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;

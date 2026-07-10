@@ -44,4 +44,30 @@ exports.tests = [
       assert.equal(helpers.shouldClearStoredApiKey(() => true), true);
     },
   },
+  {
+    name: 'labels inline diagnostic chunks as records rather than nodes',
+    fn() {
+      const formatted = helpers.formatInlineLog({
+        startedAt: '2026-07-10T00:00:00.000Z',
+        status: 'done',
+        durationMs: 10,
+        recordCount: 1,
+        totalChars: 100,
+        chunkCount: 1,
+        chunkMaxChars: 12000,
+        chunks: [
+          {
+            index: 1,
+            ok: true,
+            durationMs: 5,
+            recordCount: 1,
+            charCount: 100,
+          },
+        ],
+      });
+
+      assert.match(formatted, /1 records, 100 chars/);
+      assert.equal(formatted.includes(' nodes'), false);
+    },
+  },
 ];

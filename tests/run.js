@@ -1,4 +1,5 @@
 const suites = [
+  require('./inline-block.test'),
   require('./content-helpers.test'),
   require('./background-helpers.test'),
   require('./options-helpers.test'),
