@@ -3,5 +3,6 @@
   "scripts": {
     "test": "node tests/run.js",
     "check:syntax": "node --check extension/inline-block.js && node --check extension/content.js && node --check extension/background.js && node --check extension/options.js && node --check extension/sidepanel.js"
-  }
+  },
+  "version": "0.2.0.0"
 }
