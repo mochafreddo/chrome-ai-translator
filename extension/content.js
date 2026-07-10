@@ -1,10 +1,18 @@
 // content.js
 
+var inlineBlockCodec =
+  globalThis.ChromeAiTranslatorInlineBlock ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./inline-block.js')
+    : null);
+
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
 var INLINE_MAX_TOTAL_CHARS = 60000;
 var INLINE_TRANSLATION_AUTH_MS = 5 * 60 * 1000;
 var INLINE_VIEWPORT_BATCH_MAX_CHARS = 2000;
+var INLINE_BLOCK_BATCH_MAX_CHARS = 12000;
+var INLINE_BLOCK_SESSION_MAX_CHARS = 60000;
 var INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;
 var INLINE_VIEWPORT_SCAN_DEBOUNCE_MS = 250;
 var INLINE_VIEWPORT_PREFETCH_RATIO = 0.5;
@@ -48,11 +56,11 @@ var INLINE_EXCLUDED_ROLES = new Set([
   'tablist',
   'toolbar',
 ]);
-
 function createInlineViewportStore(
   operationId,
   translationByOriginal = null,
-  translationSettings = null
+  translationSettings = null,
+  sessionRecordCost = 0
 ) {
   const translationSettingsSnapshot = translationSettings
     ? createInlineTranslationSettingsSnapshot(translationSettings)
@@ -63,10 +71,13 @@ function createInlineViewportStore(
   return {
     operationId,
     byNode: new WeakMap(),
+    byBlock: new WeakMap(),
     records: [],
     queue: [],
     inFlight: 0,
     nextId: 0,
+    nextBlockId: 0,
+    sessionRecordCost: Math.max(0, Number(sessionRecordCost) || 0),
     translationByOriginal:
       translationByOriginal instanceof Map ? translationByOriginal : new Map(),
     scanTimer: null,
@@ -190,9 +201,30 @@ function addInlineRestorableRecords(state = inlineState, records = []) {
 }
 
 function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
-  if (!store?.byNode) return store;
+  if (!store?.byNode || !store?.byBlock) return store;
   const seenRecords = new Set(store.records);
   for (const record of records || []) {
+    if (record?.snapshot?.blockElement) {
+      const blockElement = record.snapshot.blockElement;
+      if (record.state !== 'translated' || !blockElement.isConnected) continue;
+      if (hasInlineViewportSettingsSignatureMismatch(store, record)) {
+        if (inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) {
+          const restored = inlineBlockCodec.restoreBlock(record.snapshot);
+          if (restored.ok) record.state = 'original';
+        }
+        continue;
+      }
+      if (!inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) continue;
+      if (!store.byBlock.get(blockElement)) {
+        store.byBlock.set(blockElement, record);
+      }
+      if (!seenRecords.has(record)) {
+        store.records.push(record);
+        seenRecords.add(record);
+      }
+      cacheInlineViewportBlockTranslation(store, record);
+      continue;
+    }
     if (record?.state !== 'translated' || !record.node?.isConnected) continue;
     if (hasInlineViewportSettingsSignatureMismatch(store, record)) {
       if (
@@ -278,6 +310,18 @@ function isInlineTranslationExcludedElement(el) {
   if (isInlineTranslationExcludedTag(el.tagName)) return true;
   const role = String(el.getAttribute?.('role') || '').toLowerCase();
   return INLINE_EXCLUDED_ROLES.has(role);
+}
+
+function isInlineEffectivelyEditable(element) {
+  if (element?.isContentEditable === true) return true;
+  for (let current = element; current; current = current.parentElement) {
+    if (!current.hasAttribute?.('contenteditable')) continue;
+    return (
+      String(current.getAttribute?.('contenteditable') || '').toLowerCase() !==
+      'false'
+    );
+  }
+  return false;
 }
 
 function isCodeLikeInlineText(text) {
@@ -516,6 +560,329 @@ function queueInlineViewportRecord(store, node, text) {
   return record;
 }
 
+function findInlineSemanticBlock(textNode, root) {
+  for (
+    let element = textNode?.parentElement;
+    element;
+    element = element.parentElement
+  ) {
+    if (inlineBlockCodec?.isSemanticBlockElement(element)) {
+      return element;
+    }
+    if (element === root) break;
+  }
+  return null;
+}
+
+function getInlineBlockRecordCost(record) {
+  return (
+    String(record?.template || '').length +
+    JSON.stringify(record?.atoms || []).length +
+    JSON.stringify(record?.repair ?? null).length
+  );
+}
+
+function createInlineViewportBlockRecord(store, blockElement, values = {}) {
+  const record = {
+    id: `b${store.nextBlockId + 1}`,
+    blockElement,
+    state: 'original',
+    operationId: store.operationId,
+    pageChangeRetryCount: 0,
+    repairRetryCount: 0,
+    repair: null,
+    ...values,
+  };
+  store.nextBlockId += 1;
+  stampInlineViewportRecordSettings(store, record);
+  store.byBlock.set(blockElement, record);
+  store.records.push(record);
+  return record;
+}
+
+function createQueuedInlineBlockRecordFromSerialized(
+  store,
+  blockElement,
+  serialized,
+  options = {}
+) {
+  return createInlineViewportBlockRecord(store, blockElement, {
+    template: serialized.template,
+    atoms: serialized.atoms,
+    contract: serialized.contract,
+    snapshot: serialized.snapshot,
+    cacheKey: `block:${serialized.cacheKey}`,
+    pageChangeRetryCount: Number(options.pageChangeRetryCount) || 0,
+    repairRetryCount: Number(options.repairRetryCount) || 0,
+    retryOf: options.retryOf || null,
+    repair: options.repair || null,
+    state: 'queued',
+  });
+}
+
+function cacheInlineViewportBlockTranslation(store, record) {
+  if (
+    !store?.translationByOriginal ||
+    record?.state !== 'translated' ||
+    !record.cacheKey ||
+    typeof record.translatedTemplate !== 'string' ||
+    hasInlineViewportSettingsSignatureMismatch(store, record)
+  ) {
+    return false;
+  }
+  store.translationByOriginal.set(record.cacheKey, {
+    codecVersion: inlineBlockCodec.CODEC_VERSION,
+    translatedTemplate: record.translatedTemplate,
+  });
+  return true;
+}
+
+function applyCachedInlineViewportBlock(store, record) {
+  const cached = store?.translationByOriginal?.get(record?.cacheKey);
+  if (
+    cached?.codecVersion !== inlineBlockCodec.CODEC_VERSION ||
+    typeof cached?.translatedTemplate !== 'string'
+  ) {
+    return false;
+  }
+  const plan = inlineBlockCodec.createPatchPlan(
+    record.snapshot,
+    cached.translatedTemplate
+  );
+  if (!plan.ok) return false;
+  const applied = inlineBlockCodec.applyPatchPlan(record.snapshot, plan);
+  if (!applied.ok) return false;
+  record.state = 'translated';
+  record.translatedTemplate = cached.translatedTemplate;
+  record.translation = cached.translatedTemplate;
+  return true;
+}
+
+function queueInlineViewportBlock(store, blockElement, options = {}) {
+  if (!store?.byBlock || !blockElement?.isConnected || !inlineBlockCodec) {
+    return null;
+  }
+  const existing = store.byBlock.get(blockElement);
+  if (existing) {
+    if (existing.state === 'translated') {
+      if (inlineBlockCodec.matchesAppliedOwnership(existing.snapshot)) {
+        return null;
+      }
+      existing.state = 'stale';
+      existing.errorCode = 'block_changed';
+      store.byBlock.delete(blockElement);
+    } else if (
+      ['queued', 'translating', 'failed', 'stale'].includes(existing.state)
+    ) {
+      return null;
+    }
+  }
+
+  const serialized = inlineBlockCodec.serializeBlock(blockElement);
+  if (!serialized.ok) {
+    return createInlineViewportBlockRecord(store, blockElement, {
+      state: 'failed',
+      errorCode: serialized.errorCode || 'unsupported_block',
+    });
+  }
+  const record = createQueuedInlineBlockRecordFromSerialized(
+    store,
+    blockElement,
+    serialized,
+    options
+  );
+  if (applyCachedInlineViewportBlock(store, record)) return null;
+  store.queue.push(record);
+  return record;
+}
+
+function takeInlineViewportBlockBatch(
+  store,
+  maxChars = INLINE_BLOCK_BATCH_MAX_CHARS
+) {
+  if (!store || store.stopped || store.inFlight >= INLINE_VIEWPORT_MAX_IN_FLIGHT) {
+    return [];
+  }
+  const limit = Number(maxChars) || INLINE_BLOCK_BATCH_MAX_CHARS;
+  const batch = [];
+  let batchCost = 0;
+
+  while (store.queue.length) {
+    if (batch.length >= INLINE_MAX_RECORDS) break;
+    const record = store.queue[0];
+    const cost = getInlineBlockRecordCost(record);
+    if (cost > limit) {
+      store.queue.shift();
+      record.state = 'failed';
+      record.errorCode = 'block_too_large';
+      continue;
+    }
+    if (store.sessionRecordCost + cost > INLINE_BLOCK_SESSION_MAX_CHARS) {
+      store.queue.shift();
+      record.state = 'failed';
+      record.errorCode = 'session_too_large';
+      continue;
+    }
+    if (batch.length && batchCost + cost > limit) break;
+
+    store.queue.shift();
+    record.state = 'translating';
+    batch.push(record);
+    batchCost += cost;
+    store.sessionRecordCost += cost;
+    if (batchCost >= limit) break;
+  }
+  if (batch.length) store.inFlight += 1;
+  return batch;
+}
+
+var INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
+  'token_missing',
+  'token_duplicate',
+  'token_unknown',
+  'token_nesting_invalid',
+  'token_parent_changed',
+  'output_too_long',
+  'output_parse_failed',
+  'translation_incomplete',
+]);
+
+function queueInlineViewportBlockRetry(
+  store,
+  parentRecord,
+  retryKind,
+  errorCode = ''
+) {
+  if (
+    !store ||
+    store.stopped ||
+    !parentRecord?.blockElement?.isConnected ||
+    store.byBlock?.get(parentRecord.blockElement) !== parentRecord
+  ) {
+    return null;
+  }
+  const pageChangeRetryCount =
+    Number(parentRecord.pageChangeRetryCount) || 0;
+  const repairRetryCount = Number(parentRecord.repairRetryCount) || 0;
+  if (retryKind === 'page-change' && pageChangeRetryCount >= 1) return null;
+  if (retryKind === 'repair' && repairRetryCount >= 1) return null;
+
+  const serialized = inlineBlockCodec.serializeBlock(parentRecord.blockElement);
+  if (!serialized.ok) return null;
+  const retryRecord = createQueuedInlineBlockRecordFromSerialized(
+    store,
+    parentRecord.blockElement,
+    serialized,
+    {
+      pageChangeRetryCount:
+        pageChangeRetryCount + (retryKind === 'page-change' ? 1 : 0),
+      repairRetryCount:
+        repairRetryCount + (retryKind === 'repair' ? 1 : 0),
+      retryOf: parentRecord.id,
+      repair:
+        retryKind === 'repair'
+          ? { attempt: 1, previousErrorCode: errorCode }
+          : null,
+    }
+  );
+  parentRecord.supersededByRetryId = retryRecord.id;
+  if (!applyCachedInlineViewportBlock(store, retryRecord)) {
+    store.queue.push(retryRecord);
+  }
+  return retryRecord;
+}
+
+function applyInlineViewportBlockResults(
+  records,
+  results,
+  operationId,
+  store = null
+) {
+  const byId = new Map((results || []).map((result) => [result.id, result]));
+  const summary = {
+    applied: 0,
+    stale: 0,
+    retried: 0,
+    failed: 0,
+    ignored: 0,
+  };
+
+  function queuePageRetry(record) {
+    record.state = 'stale';
+    record.errorCode = 'block_changed';
+    summary.stale += 1;
+    if (queueInlineViewportBlockRetry(store, record, 'page-change')) {
+      summary.retried += 1;
+      return true;
+    }
+    return false;
+  }
+
+  function queueRepair(record, errorCode) {
+    record.state = 'failed';
+    record.errorCode = errorCode;
+    if (
+      INLINE_BLOCK_REPAIRABLE_ERROR_CODES.has(errorCode) &&
+      queueInlineViewportBlockRetry(store, record, 'repair', errorCode)
+    ) {
+      summary.retried += 1;
+      return true;
+    }
+    summary.failed += 1;
+    return false;
+  }
+
+  for (const record of records || []) {
+    if (record.operationId !== operationId) {
+      summary.ignored += 1;
+      continue;
+    }
+    const result = byId.get(record.id);
+    if (!result) {
+      record.state = 'failed';
+      record.errorCode = 'request_failed';
+      summary.failed += 1;
+      continue;
+    }
+    if (!result.ok || typeof result.template !== 'string') {
+      if (!inlineBlockCodec.matchesOriginalOwnership(record.snapshot)) {
+        queuePageRetry(record);
+        continue;
+      }
+      queueRepair(record, result.errorCode || 'request_failed');
+      continue;
+    }
+
+    const plan = inlineBlockCodec.createPatchPlan(
+      record.snapshot,
+      result.template
+    );
+    if (!plan.ok) {
+      if (plan.errorCode === 'block_changed') queuePageRetry(record);
+      else queueRepair(record, plan.errorCode || 'output_parse_failed');
+      continue;
+    }
+    const applied = inlineBlockCodec.applyPatchPlan(record.snapshot, plan);
+    if (!applied.ok) {
+      if (applied.errorCode === 'block_changed') queuePageRetry(record);
+      else {
+        record.state = 'failed';
+        record.errorCode = applied.errorCode || 'apply_failed';
+        summary.failed += 1;
+      }
+      continue;
+    }
+
+    record.state = 'translated';
+    record.translatedTemplate = result.template;
+    record.translation = result.template;
+    stampInlineViewportRecordSettings(store, record);
+    cacheInlineViewportBlockTranslation(store, record);
+    summary.applied += 1;
+  }
+  return summary;
+}
+
 function getInlineViewportRetryCount(record) {
   const parsed = Number(record?.retryCount);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
@@ -602,6 +969,10 @@ function resetQueuedInlineViewportRecords(store) {
   const retained = [];
   for (const record of store.queue) {
     if (record?.state === 'queued') {
+      if (record?.snapshot?.blockElement && record.retryOf) {
+        retained.push(record);
+        continue;
+      }
       clearInlineViewportRetrySupersession(store, record);
       record.state = 'original';
       record.translation = null;
@@ -719,7 +1090,9 @@ function getInlineViewportStatusCounts(records) {
     if (record.state === 'stale' && !record.supersededByRetryId) {
       counts.changed += 1;
     }
-    if (record.state === 'failed') counts.failed += 1;
+    if (record.state === 'failed' && !record.supersededByRetryId) {
+      counts.failed += 1;
+    }
   }
   return counts;
 }
@@ -784,6 +1157,10 @@ async function toggleInlineTranslatorMenu(
 
 function restoreInlineViewportRecords(state = inlineState) {
   const viewport = state.viewport;
+  const sessionRecordCost = Math.max(
+    0,
+    Number(viewport?.sessionRecordCost) || 0
+  );
   if (viewport?.observer) {
     viewport.observer.disconnect();
   }
@@ -792,7 +1169,25 @@ function restoreInlineViewportRecords(state = inlineState) {
   }
 
   const restoredNodes = new Set();
+  const restoredBlocks = new Set();
   for (const record of getInlineViewportRestoreRecords(state)) {
+    if (record?.snapshot?.blockElement) {
+      const blockElement = record.snapshot.blockElement;
+      if (
+        record.state === 'translated' &&
+        blockElement.isConnected &&
+        !restoredBlocks.has(blockElement)
+      ) {
+        const restored = inlineBlockCodec.restoreBlock(record.snapshot);
+        if (!restored.ok) {
+          record.state = 'stale';
+          continue;
+        }
+        restoredBlocks.add(blockElement);
+      }
+      record.state = 'original';
+      continue;
+    }
     if (
       record.state === 'translated' &&
       record.node?.isConnected &&
@@ -817,7 +1212,9 @@ function restoreInlineViewportRecords(state = inlineState) {
   state.operationId = (Number(state.operationId) || 0) + 1;
   state.viewport = createInlineViewportStore(
     state.operationId,
-    state.translationCache
+    state.translationCache,
+    null,
+    sessionRecordCost
   );
 }
 
@@ -1169,11 +1566,26 @@ function shouldSkipInlineTextNode(textNode) {
   const parent = textNode.parentElement;
   if (!parent) return true;
   if (parent.closest(`#${INLINE_TRANSLATOR_ID}`)) return true;
+  if (isInlineEffectivelyEditable(parent)) return true;
   for (let el = parent; el; el = el.parentElement) {
     if (isInlineTranslationExcludedElement(el)) return true;
     if (isElementHidden(el)) return true;
   }
   return !isTranslatableInlineText(textNode.nodeValue);
+}
+
+function shouldSkipInlineBlockCandidateTextNode(textNode) {
+  const parent = textNode?.parentElement;
+  if (!parent) return true;
+  if (parent.closest(`#${INLINE_TRANSLATOR_ID}`)) return true;
+  if (isInlineEffectivelyEditable(parent)) return true;
+  for (let element = parent; element; element = element.parentElement) {
+    if (isInlineTranslationExcludedElement(element)) return true;
+    if (isElementHidden(element)) return true;
+  }
+  const value = String(textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
+  if (!/[A-Za-z]/.test(value)) return true;
+  return isCodeLikeInlineText(value);
 }
 
 function normalizeInlineViewportScanLimit(maxTextNodes) {
@@ -1191,7 +1603,11 @@ function isInlineTextNode(node) {
 function shouldSkipInlineElementSubtree(node, viewport = getInlineViewportInfo()) {
   if (!node || !(node instanceof HTMLElement)) return false;
   if (node.closest?.(`#${INLINE_TRANSLATOR_ID}`)) return true;
-  if (isInlineTranslationExcludedElement(node) || isElementHidden(node)) {
+  if (
+    isInlineTranslationExcludedElement(node) ||
+    isInlineEffectivelyEditable(node) ||
+    isElementHidden(node)
+  ) {
     return true;
   }
   const rect = node.getBoundingClientRect?.();
@@ -1302,6 +1718,59 @@ function collectVisibleInlineTextNodes(
     return collectVisibleInlineTextNodesFromDom(root, store, maxTextNodes);
   }
   return collectVisibleInlineTextNodesWithTreeWalker(root, store, maxTextNodes);
+}
+
+function collectVisibleInlineBlocks(
+  root,
+  store,
+  maxTextNodes = INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES
+) {
+  const limit = normalizeInlineViewportScanLimit(maxTextNodes);
+  const startIndex = Math.max(0, Number(store?.scanStartIndex) || 0);
+  const viewport = getInlineViewportInfo();
+  const queued = [];
+  const queuedBlocks = new Set();
+  const stack = [root];
+  let textIndex = 0;
+  let inspected = 0;
+  let truncated = false;
+
+  while (stack.length) {
+    const node = stack.pop();
+    if (isInlineTextNode(node)) {
+      if (textIndex < startIndex) {
+        textIndex += 1;
+        continue;
+      }
+      if (inspected >= limit) {
+        truncated = true;
+        break;
+      }
+      textIndex += 1;
+      inspected += 1;
+      if (
+        !shouldSkipInlineBlockCandidateTextNode(node) &&
+        isInlineTextNodeInViewport(node, viewport)
+      ) {
+        const block = findInlineSemanticBlock(node, root);
+        if (block && !queuedBlocks.has(block)) {
+          queuedBlocks.add(block);
+          const record = queueInlineViewportBlock(store, block);
+          if (record) queued.push(record);
+        }
+      }
+      continue;
+    }
+
+    if (shouldSkipInlineElementSubtree(node, viewport)) continue;
+    const children = getInlineChildNodes(node);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index]);
+    }
+  }
+
+  if (store) store.scanStartIndex = truncated ? textIndex : 0;
+  return queued;
 }
 
 function setInlineMessage(message) {
@@ -1451,7 +1920,7 @@ function runInlineViewportScan() {
     return;
   }
   store.root = root;
-  collectVisibleInlineTextNodes(root, store);
+  collectVisibleInlineBlocks(root, store);
   if (store.scanStartIndex > 0) {
     scheduleInlineViewportScan();
   }
@@ -1563,7 +2032,7 @@ async function drainInlineViewportQueue() {
     store.inFlight < INLINE_VIEWPORT_MAX_IN_FLIGHT &&
     store.queue.length
   ) {
-    const batch = takeInlineViewportBatch(store);
+    const batch = takeInlineViewportBlockBatch(store);
     if (!batch.length) {
       updateInlineViewportMessage();
       return;
@@ -1572,25 +2041,29 @@ async function drainInlineViewportQueue() {
 
     chrome.runtime
       .sendMessage({
-        type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
+        type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
         operationId,
+        validateTranslationCompleteness: true,
         settingsSnapshot: store.translationSettings,
         records: batch.map((record) => ({
           id: record.id,
-          text: record.original,
+          template: record.template,
+          atoms: record.atoms,
+          contract: record.contract,
+          repair: record.repair,
         })),
       })
       .then((resp) => {
         if (!isInlineViewportOperationCurrent(inlineState, store, operationId)) {
           return;
         }
-        if (!resp?.ok || !Array.isArray(resp.translations)) {
+        if (!resp?.ok || !Array.isArray(resp.results)) {
           markInlineViewportBatchFailed(batch, operationId);
           return;
         }
-        applyInlineViewportBatchTranslations(
+        applyInlineViewportBlockResults(
           batch,
-          resp.translations,
+          resp.results,
           operationId,
           store
         );
@@ -1655,12 +2128,17 @@ async function translateInlinePage() {
     inlineState,
     settingsSnapshot
   );
+  const sessionRecordCost = Math.max(
+    0,
+    Number(inlineState.viewport?.sessionRecordCost) || 0
+  );
   inlineState.operationId = (Number(inlineState.operationId) || 0) + 1;
   inlineState.status = 'active';
   inlineState.viewport = createInlineViewportStore(
     inlineState.operationId,
     translationCache,
-    settingsSnapshot
+    settingsSnapshot,
+    sessionRecordCost
   );
   inlineState.viewport.root = root;
   seedInlineViewportStoreWithRestorableRecords(
@@ -1770,6 +2248,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineTextNodeRect,
     isInlineTextNodeInViewport,
     collectVisibleInlineTextNodes,
+    collectVisibleInlineBlocks,
     isInlineViewportOperationCurrent,
     stopInlineViewportTranslation,
     canRestartInlineViewportTranslation,
@@ -1782,10 +2261,16 @@ if (typeof module !== 'undefined' && module.exports) {
     activateInlineTranslationCacheBucket,
     seedInlineViewportStoreWithRestorableRecords,
     createInlineViewportStore,
+    findInlineSemanticBlock,
+    getInlineBlockRecordCost,
+    queueInlineViewportBlock,
+    queueInlineViewportBlockRetry,
     queueInlineViewportRecord,
     queueInlineViewportRetryRecord,
     takeInlineViewportBatch,
+    takeInlineViewportBlockBatch,
     applyInlineViewportBatchTranslations,
+    applyInlineViewportBlockResults,
     markInlineViewportBatchFailed,
     getInlineViewportStatusCounts,
     formatInlineViewportStatusMessage,

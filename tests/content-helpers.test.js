@@ -1,5 +1,18 @@
 const assert = require('node:assert/strict');
 const helpers = require('../extension/content.js');
+const {
+  createReasoningFixture,
+  createTestDocument,
+} = require('./inline-block.test');
+const inlineBlockCodec = require('../extension/inline-block.js');
+
+function getReasoningTranslatedTemplate(record) {
+  const wrapper = record.contract.entries.find(
+    (entry) => entry.kind === 'wrapper'
+  );
+  const atom = record.contract.entries.find((entry) => entry.kind === 'atom');
+  return `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
+}
 
 exports.name = 'content helpers';
 
@@ -1030,103 +1043,109 @@ exports.tests = [
     },
   },
   {
-    name: 'drains queued changed-text retries through the runtime viewport loop',
+    name: 'drains semantic block page-change retries through the runtime loop',
     async fn() {
       const state = global.__chromeAiTranslatorInlineState;
-      const previousState = {
+      const previous = {
+        chrome: global.chrome,
+        document: global.document,
+        HTMLElement: global.HTMLElement,
+        window: global.window,
         status: state.status,
         records: state.records,
         message: state.message,
         operationId: state.operationId,
         viewport: state.viewport,
       };
+      const fixture = createReasoningFixture();
       const calls = [];
+      fixture.document.documentElement = {
+        clientWidth: 0,
+        clientHeight: 0,
+      };
+      fixture.document.createRange = () => {
+        throw new Error('range unavailable');
+      };
+      global.document = fixture.document;
+      global.HTMLElement = fixture.block.constructor;
+      global.window = {
+        innerWidth: 500,
+        innerHeight: 300,
+        getComputedStyle() {
+          return {
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+      global.chrome = {
+        runtime: {
+          async sendMessage(message) {
+            calls.push(message);
+            const activeRecord = state.viewport.records.find(
+              (record) => record.id === message.records[0].id
+            );
+            if (calls.length === 1) {
+              activeRecord.snapshot.originalTextValues.keys().next().value.nodeValue =
+                'Updated reasoning models';
+            }
+            return {
+              ok: true,
+              results: [
+                {
+                  id: activeRecord.id,
+                  ok: true,
+                  template: getReasoningTranslatedTemplate(activeRecord),
+                },
+              ],
+            };
+          },
+        },
+      };
 
       try {
-        await withFakeViewportDom(async ({ FakeElement, text }) => {
-          const node = text('Original article text.');
-          const root = new FakeElement([node]);
-          const store = helpers.createInlineViewportStore(32);
-          store.root = root;
-          state.status = 'active';
-          state.operationId = 32;
-          state.viewport = store;
-          state.records = store.records;
+        const store = helpers.createInlineViewportStore(32);
+        store.root = fixture.block;
+        state.status = 'active';
+        state.operationId = 32;
+        state.viewport = store;
+        state.records = store.records;
 
-          helpers.runInlineViewportScan();
-          await flushMicrotasks();
+        helpers.runInlineViewportScan();
+        await flushMicrotasks(16);
 
-          assert.equal(calls.length, 2);
-          assert.deepEqual(
-            calls.map((message) => ({
-              type: message.type,
-              operationId: message.operationId,
-              settingsSnapshot: message.settingsSnapshot,
-              recordCount: message.records.length,
-            })),
-            [
-              {
-                type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
-                operationId: 32,
-                settingsSnapshot: null,
-                recordCount: 1,
-              },
-              {
-                type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
-                operationId: 32,
-                settingsSnapshot: null,
-                recordCount: 1,
-              },
-            ]
-          );
-          assert.deepEqual(
-            calls.map((message) => message.records.map((record) => record.text)),
-            [['Original article text.'], ['Updated article text.']]
-          );
-          const retry = store.records.find(
-            (record) => record.retryOf === calls[0].records[0].id
-          );
-          assert.equal(calls[1].records[0].id, retry.id);
-          assert.equal(node.nodeValue, '업데이트된 기사 텍스트.');
-          assert.equal(store.inFlight, 0);
-          assert.equal(store.queue.length, 0);
-          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-            translated: 1,
-            pending: 0,
-            changed: 0,
-            failed: 0,
-          });
-        }, {
-          chrome: {
-            runtime: {
-              async sendMessage(message) {
-                calls.push(message);
-                const record = message.records[0];
-                if (calls.length === 1) {
-                  state.viewport.records[0].node.nodeValue = 'Updated article text.';
-                  return {
-                    ok: true,
-                    translations: [
-                      { id: record.id, translation: '원문 기사 텍스트.' },
-                    ],
-                  };
-                }
-                return {
-                  ok: true,
-                  translations: [
-                    { id: record.id, translation: '업데이트된 기사 텍스트.' },
-                  ],
-                };
-              },
-            },
-          },
+        assert.equal(calls.length, 2);
+        assert.deepEqual(
+          calls.map((message) => message.type),
+          ['TRANSLATE_VISIBLE_BLOCK_BATCH', 'TRANSLATE_VISIBLE_BLOCK_BATCH']
+        );
+        assert.match(calls[0].records[0].template, /Reasoning models/);
+        assert.match(calls[1].records[0].template, /Updated reasoning models/);
+        assert.equal(calls[0].records[0].text, undefined);
+        assert.equal(fixture.block.childNodes[0], fixture.link);
+        assert.equal(
+          fixture.block.textContent,
+          'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.'
+        );
+        assert.equal(store.inFlight, 0);
+        assert.equal(store.queue.length, 0);
+        assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+          translated: 1,
+          pending: 0,
+          changed: 0,
+          failed: 0,
         });
       } finally {
-        state.status = previousState.status;
-        state.records = previousState.records;
-        state.message = previousState.message;
-        state.operationId = previousState.operationId;
-        state.viewport = previousState.viewport;
+        global.chrome = previous.chrome;
+        global.document = previous.document;
+        global.HTMLElement = previous.HTMLElement;
+        global.window = previous.window;
+        state.status = previous.status;
+        state.records = previous.records;
+        state.message = previous.message;
+        state.operationId = previous.operationId;
+        state.viewport = previous.viewport;
       }
     },
   },
@@ -3046,6 +3065,570 @@ exports.tests = [
       assert.equal(record.state, 'stale');
       assert.equal(state.status, 'original');
       assert.equal(state.operationId, 9);
+    },
+  },
+  {
+    name: 'selects the nearest supported semantic block',
+    fn() {
+      const { block, strong } = createReasoningFixture();
+
+      assert.equal(
+        helpers.findInlineSemanticBlock(strong.childNodes[0], block),
+        block
+      );
+    },
+  },
+  {
+    name: 'queues one semantic record for all text in the same block',
+    fn() {
+      const { block } = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(12);
+
+      const first = helpers.queueInlineViewportBlock(store, block);
+      const duplicate = helpers.queueInlineViewportBlock(store, block);
+
+      assert.equal(first.state, 'queued');
+      assert.equal(first.blockElement, block);
+      assert.equal(first.template.includes('GPT-5.5'), false);
+      assert.equal(first.atoms[0].label, 'GPT-5.5');
+      assert.equal(duplicate, null);
+      assert.equal(store.records.length, 1);
+      assert.equal(store.queue.length, 1);
+      assert.equal(store.byBlock.get(block), first);
+    },
+  },
+  {
+    name: 'uses short prose around inline code to discover a block',
+    fn() {
+      const previous = {
+        document: global.document,
+        HTMLElement: global.HTMLElement,
+        window: global.window,
+      };
+      const { document, element, text } = createTestDocument();
+      const code = element('code', text('x'));
+      const block = element('p', text('Run '), code, text('.'));
+      document.body.appendChild(block);
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => {
+        throw new Error('range unavailable');
+      };
+      global.document = document;
+      global.HTMLElement = block.constructor;
+      global.window = {
+        innerWidth: 500,
+        innerHeight: 300,
+        getComputedStyle() {
+          return {
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+
+      try {
+        const store = helpers.createInlineViewportStore(12);
+        const queued = helpers.collectVisibleInlineBlocks(block, store);
+
+        assert.equal(queued.length, 1);
+        assert.equal(store.queue.length, 1);
+        assert.equal(store.queue[0].atoms[0].label, 'x');
+      } finally {
+        global.document = previous.document;
+        global.HTMLElement = previous.HTMLElement;
+        global.window = previous.window;
+      }
+    },
+  },
+  {
+    name: 'does not collect blocks inside inherited editable regions',
+    fn() {
+      const previous = {
+        document: global.document,
+        HTMLElement: global.HTMLElement,
+        window: global.window,
+      };
+      const { document, element, text } = createTestDocument();
+      const block = element('p', text('Unpublished draft text.'));
+      const editor = element('div', block);
+      editor.setAttribute('contenteditable', 'true');
+      document.body.appendChild(editor);
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => {
+        throw new Error('range unavailable');
+      };
+      global.document = document;
+      global.HTMLElement = block.constructor;
+      global.window = {
+        innerWidth: 500,
+        innerHeight: 300,
+        getComputedStyle() {
+          return {
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+
+      try {
+        const store = helpers.createInlineViewportStore(12);
+        const queued = helpers.collectVisibleInlineBlocks(editor, store);
+
+        assert.deepEqual(queued, []);
+        assert.equal(store.records.length, 0);
+      } finally {
+        global.document = previous.document;
+        global.HTMLElement = previous.HTMLElement;
+        global.window = previous.window;
+      }
+    },
+  },
+  {
+    name: 'fails closed when a block contains a nested semantic block',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const nested = element('p', text('Nested paragraph text.'));
+      const block = element('li', text('Outer item text.'), nested);
+      document.body.appendChild(block);
+      const store = helpers.createInlineViewportStore(13);
+
+      const record = helpers.queueInlineViewportBlock(store, block);
+
+      assert.equal(record.state, 'failed');
+      assert.equal(record.errorCode, 'unsupported_block');
+      assert.equal(store.queue.length, 0);
+    },
+  },
+  {
+    name: 'takes semantic block batches within the record-cost limit',
+    fn() {
+      const firstFixture = createReasoningFixture();
+      const secondFixture = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(14);
+      const first = helpers.queueInlineViewportBlock(
+        store,
+        firstFixture.block
+      );
+      const second = helpers.queueInlineViewportBlock(
+        store,
+        secondFixture.block
+      );
+
+      const batch = helpers.takeInlineViewportBlockBatch(store, 12000);
+
+      assert.deepEqual(batch, [first, second]);
+      assert.equal(first.state, 'translating');
+      assert.equal(second.state, 'translating');
+      assert.equal(store.inFlight, 1);
+      assert.equal(
+        store.sessionRecordCost,
+        helpers.getInlineBlockRecordCost(first) +
+          helpers.getInlineBlockRecordCost(second)
+      );
+    },
+  },
+  {
+    name: 'caps semantic block batches at the background record limit',
+    fn() {
+      const store = helpers.createInlineViewportStore(14);
+      store.queue = Array.from({ length: 501 }, (_, index) => ({
+        id: `b${index + 1}`,
+        state: 'queued',
+        operationId: 14,
+        template: 'text',
+        atoms: [],
+        repair: null,
+      }));
+      store.records = [...store.queue];
+
+      const batch = helpers.takeInlineViewportBlockBatch(store, 12000);
+
+      assert.equal(batch.length, 500);
+      assert.equal(store.queue.length, 1);
+      assert.equal(store.queue[0].id, 'b501');
+      assert.equal(store.queue[0].state, 'queued');
+    },
+  },
+  {
+    name: 'preserves the semantic block session budget across original restore',
+    fn() {
+      const cache = new Map();
+      const firstStore = helpers.createInlineViewportStore(14, cache);
+      firstStore.sessionRecordCost = 60000;
+      const state = {
+        status: 'active',
+        operationId: 14,
+        viewport: firstStore,
+        translationCache: cache,
+        records: [],
+        restorableRecords: [],
+      };
+
+      helpers.restoreInlineViewportRecords(state);
+
+      assert.equal(state.viewport.sessionRecordCost, 60000);
+      const { block } = createReasoningFixture();
+      const record = helpers.queueInlineViewportBlock(state.viewport, block);
+      assert.deepEqual(
+        helpers.takeInlineViewportBlockBatch(state.viewport, 12000),
+        []
+      );
+      assert.equal(record.state, 'failed');
+      assert.equal(record.errorCode, 'session_too_large');
+    },
+  },
+  {
+    name: 'applies a semantic block result and rehydrates it from cache',
+    fn() {
+      const { block, link } = createReasoningFixture();
+      const cache = new Map();
+      const firstStore = helpers.createInlineViewportStore(15, cache);
+      const record = helpers.queueInlineViewportBlock(firstStore, block);
+      const batch = helpers.takeInlineViewportBlockBatch(firstStore);
+      const translatedTemplate = getReasoningTranslatedTemplate(record);
+
+      const applied = helpers.applyInlineViewportBlockResults(
+        batch,
+        [{ id: record.id, ok: true, template: translatedTemplate }],
+        15,
+        firstStore
+      );
+
+      assert.deepEqual(applied, {
+        applied: 1,
+        stale: 0,
+        retried: 0,
+        failed: 0,
+        ignored: 0,
+      });
+      assert.equal(record.state, 'translated');
+      assert.equal(block.childNodes[0], link);
+      assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
+      assert.equal(cache.get(record.cacheKey).translatedTemplate, translatedTemplate);
+
+      assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+      const secondStore = helpers.createInlineViewportStore(16, cache);
+      const queued = helpers.queueInlineViewportBlock(secondStore, block);
+
+      assert.equal(queued, null);
+      assert.equal(secondStore.queue.length, 0);
+      assert.equal(secondStore.records.length, 1);
+      assert.equal(secondStore.records[0].state, 'translated');
+      assert.equal(block.childNodes[0], link);
+      assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
+    },
+  },
+  {
+    name: 'queues at most one page-change retry for a semantic block',
+    fn() {
+      const { block } = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(17);
+      const first = helpers.queueInlineViewportBlock(store, block);
+      helpers.takeInlineViewportBlockBatch(store);
+      const firstText = first.snapshot.originalTextValues.keys().next().value;
+      firstText.nodeValue = 'Updated reasoning models';
+
+      const firstResult = helpers.applyInlineViewportBlockResults(
+        [first],
+        [{ id: first.id, ok: true, template: getReasoningTranslatedTemplate(first) }],
+        17,
+        store
+      );
+      const retry = store.queue[0];
+
+      assert.equal(first.state, 'stale');
+      assert.equal(firstResult.retried, 1);
+      assert.equal(retry.pageChangeRetryCount, 1);
+      assert.equal(retry.repairRetryCount, 0);
+      assert.equal(first.supersededByRetryId, retry.id);
+
+      helpers.takeInlineViewportBlockBatch(store);
+      const retryText = retry.snapshot.originalTextValues.keys().next().value;
+      retryText.nodeValue = 'Updated again';
+      const secondResult = helpers.applyInlineViewportBlockResults(
+        [retry],
+        [{ id: retry.id, ok: true, template: getReasoningTranslatedTemplate(retry) }],
+        17,
+        store
+      );
+
+      assert.equal(secondResult.retried, 0);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 1,
+        failed: 0,
+      });
+    },
+  },
+  {
+    name: 'queues one token repair and counts only the active failed leaf',
+    fn() {
+      const { block } = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(18);
+      const first = helpers.queueInlineViewportBlock(store, block);
+      helpers.takeInlineViewportBlockBatch(store);
+
+      const firstResult = helpers.applyInlineViewportBlockResults(
+        [first],
+        [{ id: first.id, ok: false, errorCode: 'token_missing' }],
+        18,
+        store
+      );
+      const repair = store.queue[0];
+
+      assert.equal(firstResult.retried, 1);
+      assert.equal(first.state, 'failed');
+      assert.equal(repair.repairRetryCount, 1);
+      assert.equal(repair.pageChangeRetryCount, 0);
+      assert.deepEqual(repair.repair, {
+        attempt: 1,
+        previousErrorCode: 'token_missing',
+      });
+
+      helpers.takeInlineViewportBlockBatch(store);
+      const secondResult = helpers.applyInlineViewportBlockResults(
+        [repair],
+        [{ id: repair.id, ok: false, errorCode: 'token_missing' }],
+        18,
+        store
+      );
+
+      assert.equal(secondResult.retried, 0);
+      assert.equal(store.queue.length, 0);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        pending: 0,
+        changed: 0,
+        failed: 1,
+      });
+    },
+  },
+  {
+    name: 'preserves queued semantic retries across viewport rescans',
+    fn() {
+      const state = global.__chromeAiTranslatorInlineState;
+      const previous = {
+        status: state.status,
+        operationId: state.operationId,
+        viewport: state.viewport,
+        records: state.records,
+      };
+      const { block } = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(18);
+      const first = helpers.queueInlineViewportBlock(store, block);
+      helpers.takeInlineViewportBlockBatch(store);
+      helpers.applyInlineViewportBlockResults(
+        [first],
+        [{ id: first.id, ok: false, errorCode: 'token_missing' }],
+        18,
+        store
+      );
+      const repair = store.queue[0];
+
+      try {
+        state.status = 'active';
+        state.operationId = 18;
+        state.viewport = store;
+        state.records = store.records;
+        withFakeViewportDom(
+          () => helpers.scheduleInlineViewportScanFromViewportChange(),
+          {
+            clearTimeout() {},
+            setTimeout() {
+              return 123;
+            },
+          }
+        );
+
+        assert.equal(store.queue[0], repair);
+        assert.equal(repair.state, 'queued');
+        assert.equal(first.supersededByRetryId, repair.id);
+        assert.deepEqual(repair.repair, {
+          attempt: 1,
+          previousErrorCode: 'token_missing',
+        });
+      } finally {
+        state.status = previous.status;
+        state.operationId = previous.operationId;
+        state.viewport = previous.viewport;
+        state.records = previous.records;
+      }
+    },
+  },
+  {
+    name: 'prioritizes a page-change retry over a stale token repair',
+    fn() {
+      const { block } = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(18);
+      const first = helpers.queueInlineViewportBlock(store, block);
+      helpers.takeInlineViewportBlockBatch(store);
+      const changedText = first.snapshot.originalTextValues.keys().next().value;
+      changedText.nodeValue = 'Updated reasoning models';
+
+      const firstResult = helpers.applyInlineViewportBlockResults(
+        [first],
+        [{ id: first.id, ok: false, errorCode: 'token_missing' }],
+        18,
+        store
+      );
+      const pageRetry = store.queue[0];
+
+      assert.equal(firstResult.stale, 1);
+      assert.equal(first.state, 'stale');
+      assert.equal(pageRetry.pageChangeRetryCount, 1);
+      assert.equal(pageRetry.repairRetryCount, 0);
+      assert.equal(pageRetry.repair, null);
+
+      helpers.takeInlineViewportBlockBatch(store);
+      helpers.applyInlineViewportBlockResults(
+        [pageRetry],
+        [{ id: pageRetry.id, ok: false, errorCode: 'token_missing' }],
+        18,
+        store
+      );
+      const repair = store.queue[0];
+      assert.equal(repair.pageChangeRetryCount, 1);
+      assert.equal(repair.repairRetryCount, 1);
+      assert.deepEqual(repair.repair, {
+        attempt: 1,
+        previousErrorCode: 'token_missing',
+      });
+    },
+  },
+  {
+    name: 'isolates an invalid block result from valid siblings',
+    fn() {
+      const firstFixture = createReasoningFixture();
+      const secondFixture = createReasoningFixture();
+      secondFixture.strong.childNodes[0].nodeValue = 'Other reasoning models';
+      const store = helpers.createInlineViewportStore(19);
+      const first = helpers.queueInlineViewportBlock(store, firstFixture.block);
+      const second = helpers.queueInlineViewportBlock(store, secondFixture.block);
+      const batch = helpers.takeInlineViewportBlockBatch(store);
+
+      const result = helpers.applyInlineViewportBlockResults(
+        batch,
+        [
+          { id: first.id, ok: true, template: getReasoningTranslatedTemplate(first) },
+          { id: second.id, ok: false, errorCode: 'token_unknown' },
+        ],
+        19,
+        store
+      );
+
+      assert.equal(result.applied, 1);
+      assert.equal(result.retried, 1);
+      assert.equal(first.state, 'translated');
+      assert.equal(second.state, 'failed');
+      assert.equal(store.queue.length, 1);
+    },
+  },
+  {
+    name: 'restores semantic block records through Original text',
+    fn() {
+      const { block, strong, link } = createReasoningFixture();
+      const originalBlockChildren = [...block.childNodes];
+      const originalStrongChildren = [...strong.childNodes];
+      const cache = new Map();
+      const store = helpers.createInlineViewportStore(20, cache);
+      const record = helpers.queueInlineViewportBlock(store, block);
+      const batch = helpers.takeInlineViewportBlockBatch(store);
+      helpers.applyInlineViewportBlockResults(
+        batch,
+        [{ id: record.id, ok: true, template: getReasoningTranslatedTemplate(record) }],
+        20,
+        store
+      );
+      const state = {
+        status: 'active',
+        operationId: 20,
+        viewport: store,
+        records: store.records,
+        restorableRecords: [record],
+        translationCache: cache,
+      };
+
+      helpers.restoreInlineViewportRecords(state);
+
+      assert.deepEqual(block.childNodes, originalBlockChildren);
+      assert.deepEqual(strong.childNodes, originalStrongChildren);
+      assert.equal(block.childNodes[2], link);
+      assert.equal(block.textContent, 'Reasoning models like GPT-5.5 use internal reasoning tokens.');
+      assert.equal(record.state, 'original');
+      assert.equal(state.status, 'original');
+      assert.equal(state.operationId, 21);
+    },
+  },
+  {
+    name: 'seeds same-settings translated blocks after a stopped restart',
+    fn() {
+      const { block } = createReasoningFixture();
+      const settings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+      };
+      const cache = new Map();
+      const firstStore = helpers.createInlineViewportStore(21, cache, settings);
+      const record = helpers.queueInlineViewportBlock(firstStore, block);
+      helpers.applyInlineViewportBlockResults(
+        helpers.takeInlineViewportBlockBatch(firstStore),
+        [{ id: record.id, ok: true, template: getReasoningTranslatedTemplate(record) }],
+        21,
+        firstStore
+      );
+      const state = {
+        status: 'active',
+        operationId: 21,
+        viewport: firstStore,
+        records: firstStore.records,
+        restorableRecords: [],
+      };
+      helpers.stopInlineViewportTranslation(state);
+      const secondStore = helpers.createInlineViewportStore(22, cache, settings);
+
+      helpers.seedInlineViewportStoreWithRestorableRecords(
+        secondStore,
+        state.restorableRecords
+      );
+
+      assert.equal(secondStore.byBlock.get(block), record);
+      assert.deepEqual(secondStore.records, [record]);
+      assert.equal(record.state, 'translated');
+      assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
+    },
+  },
+  {
+    name: 'requeues a block rerendered with equivalent page-owned nodes',
+    fn() {
+      const { document, block } = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(23);
+      const first = helpers.queueInlineViewportBlock(store, block);
+      helpers.applyInlineViewportBlockResults(
+        helpers.takeInlineViewportBlockBatch(store),
+        [{ id: first.id, ok: true, template: getReasoningTranslatedTemplate(first) }],
+        23,
+        store
+      );
+      const extensionText = block.childNodes[1];
+      const pageOwnedText = document.createTextNode(extensionText.nodeValue);
+      block.childNodes.splice(1, 1, pageOwnedText);
+      extensionText.parentNode = null;
+      pageOwnedText.parentNode = block;
+
+      const rerendered = helpers.queueInlineViewportBlock(store, block);
+
+      assert.equal(first.state, 'stale');
+      assert.equal(first.errorCode, 'block_changed');
+      assert.equal(rerendered.state, 'queued');
+      assert.equal(rerendered.blockElement, block);
+      assert.equal(store.byBlock.get(block), rerendered);
+      assert.deepEqual(store.queue, [rerendered]);
     },
   },
 ];

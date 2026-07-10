@@ -2,3 +2,4 @@
 .worktrees/
 docs/superpowers/
 .gstack/
+.env.local

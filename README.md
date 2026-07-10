@@ -60,10 +60,12 @@ For inline page translation:
 
 1. Open the floating **Translate** button.
 2. Choose **Page in Korean** to start viewport-first inline translation.
-3. As you scroll, newly visible article text is translated and kept in place.
+3. As you scroll, newly visible article blocks are translated in place. Inline
+   links, emphasis, and code keep their existing DOM objects and can move to
+   match the translated word order.
 4. Choose **Stop** to stop translating newly visible text while keeping current
    translations.
-5. Choose **Original text** to restore the page text that was replaced.
+5. Choose **Original text** to restore the original text and inline-node order.
 6. Choose **Page in Korean** again on the same page to reuse matching in-memory
    translations instead of sending the same visible text again.
 
@@ -82,19 +84,28 @@ the toolbar click. Starting inline translation still requires choosing
   scans again on scroll, resize, and page mutations. Large pages are scanned in
   bounded windows and viewport changes reset pending scan work so the current
   visible text is prioritized.
-- Inline viewport batches are capped at 2,000 input characters and 2,048 output
-  tokens. Over-expanded inline responses are rejected before they can be applied
-  to the page.
+- Inline translation serializes one semantic paragraph, heading, list item, or
+  table cell with protected tokens for inline elements. A block and a batch are
+  each capped at 12,000 serialized characters; one page session is capped at
+  60,000 outbound characters, including retries. Output caps scale from 4,096
+  to 16,000 tokens. Oversized or malformed blocks remain unchanged instead of
+  falling back to fragment translation.
+- Protected visible labels such as model names, commands, and API names are sent
+  as translation context. Link destinations, DOM attributes, hidden text, and
+  event state are not sent.
 - Inline status separates page-change conflicts from request failures. `Changed`
-  means the page modified a text node before the extension could safely apply a
-  returned translation; changed text is retried once when the current text is
-  still translatable. `Failed` means the request or response validation failed.
+  means the page modified a block or replaced its owned DOM nodes before the
+  extension could safely apply a returned translation. Page changes and invalid
+  token output are retried at most once each. `Failed` means the request,
+  protected-token contract, or safe DOM application failed. Counts represent
+  semantic blocks rather than individual text nodes.
 - Inline translations restored with **Original text** are cached only in the
   current page instance. The cache is reused only when target language, tone,
-  model, and reasoning effort still match, and it is cleared by reloads,
-  navigations, or browser restarts.
+  model, reasoning effort, semantic template, and protected-token context still
+  match, and it is cleared by reloads, navigations, or browser restarts.
 - Options shows the 20 most recent inline translation runs with status, model,
-  node/character/chunk counts, timings, and redacted errors.
+  block/cost counts, timings, and redacted errors. Source text, translations,
+  protected labels, URLs, and request bodies are not persisted in diagnostics.
 
 ## Related docs
 - [Inline changed text retry design](docs/design/inline-changed-text-retry-design.md)
@@ -108,7 +119,9 @@ the toolbar click. Starting inline translation still requires choosing
 ## Notes
 - Settings are stored in `chrome.storage.local` under `settings`.
 - It won't work on restricted pages like `chrome://`.
-- Inline translation skips code-like text, links, filenames, commands, and page
-  chrome. It translates visible article text in small batches while active.
+- Inline translation excludes page chrome and editable controls. Code-like text,
+  filenames, commands, versions, and protected link labels remain exact through
+  atomic tokens; natural-language link text can be translated in place.
 - Inline translation uses structured JSON output and records recent run
-  diagnostics in Options without storing source text, translations, or API keys.
+  diagnostics in Options without storing source text, translations, protected
+  labels, URLs, request bodies, or API keys.

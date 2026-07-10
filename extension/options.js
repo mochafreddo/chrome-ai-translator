@@ -64,7 +64,7 @@ function formatInlineLog(log) {
       const status = chunk.ok === false ? 'failed' : 'ok';
       const duration = chunk.durationMs == null ? '' : ` ${formatDuration(chunk.durationMs)}`;
       const error = chunk.error ? ` error=${chunk.error}` : '';
-      return `  chunk ${chunk.index}: ${status}${duration}, ${chunk.recordCount} nodes, ${chunk.charCount} chars${error}`;
+      return `  chunk ${chunk.index}: ${status}${duration}, ${chunk.recordCount} records, ${chunk.charCount} chars${error}`;
     })
     .join('\n');
   const lines = [

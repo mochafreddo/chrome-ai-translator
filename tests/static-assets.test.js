@@ -93,4 +93,17 @@ exports.tests = [
       assert.deepEqual(ignoredTrackedFiles, []);
     },
   },
+  {
+    name: 'checks semantic block codec syntax with extension scripts',
+    fn() {
+      const packageJson = JSON.parse(
+        fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')
+      );
+
+      assert.match(
+        packageJson.scripts['check:syntax'],
+        /node --check extension\/inline-block\.js/
+      );
+    },
+  },
 ];

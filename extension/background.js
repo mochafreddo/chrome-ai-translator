@@ -1,6 +1,18 @@
 // background.js (MV3 service worker)
 // Personal use only: API key is stored locally by the user.
 
+if (
+  typeof importScripts === 'function' &&
+  !globalThis.ChromeAiTranslatorInlineBlock
+) {
+  importScripts('inline-block.js');
+}
+const inlineBlockCodec =
+  globalThis.ChromeAiTranslatorInlineBlock ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./inline-block.js')
+    : null);
+
 const DEFAULT_SETTINGS = {
   apiKey: '',
   model: 'gpt-5.4-mini',
@@ -22,6 +34,11 @@ const INLINE_ORIGINS = ['http://*/*', 'https://*/*'];
 const INLINE_MAX_RECORDS = 500;
 const INLINE_MAX_TOTAL_CHARS = 60000;
 const INLINE_VISIBLE_BATCH_MAX_CHARS = 2000;
+const INLINE_BLOCK_MAX_RECORD_COST = 12000;
+const INLINE_BLOCK_MAX_BATCH_COST = 12000;
+const INLINE_BLOCK_MAX_SESSION_COST = 60000;
+const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
+const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
 const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
 const INLINE_LOG_LIMIT = 20;
@@ -152,12 +169,16 @@ async function ensureSidePanel(tabId) {
   } catch {}
 }
 
+function getInlineContentScriptFiles() {
+  return ['inline-block.js', 'content.js'];
+}
+
 async function ensureContentScript(tabId) {
   // Programmatic injection: requires "scripting" + "activeTab" (or host permissions)
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['content.js'],
+      files: getInlineContentScriptFiles(),
     });
   } catch (e) {
     // If already injected, executeScript can still succeed; on some pages it may fail (e.g., chrome://)
@@ -290,6 +311,593 @@ function buildTextNodeResponseFormat() {
       required: ['translations'],
     },
   };
+}
+
+function getTargetLanguageCode(targetLanguage) {
+  const normalized = String(targetLanguage || '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!normalized) return '';
+  if (
+    /^en(?:[-_][a-z0-9]+)*$/i.test(normalized) ||
+    /^english\b/i.test(normalized) ||
+    /^(?:american|british|us|uk|australian|canadian|new zealand) english\b/i.test(
+      normalized
+    ) ||
+    /^(?:(?:미국|영국|호주|캐나다|뉴질랜드)(?:식)?\s*)?(?:영어|영문)(?:\s|$|\()/.test(
+      normalized
+    )
+  ) {
+    return 'en';
+  }
+  if (
+    /^ko(?:[-_][a-z0-9]+)*$/i.test(normalized) ||
+    /^(?:korean|south korean|north korean)\b/i.test(normalized) ||
+    /^(?:한국어|한국말|조선어|조선말)(?:\s|$|\()/.test(normalized)
+  ) {
+    return 'ko';
+  }
+  return '';
+}
+
+function isKoreanTargetLanguage(targetLanguage) {
+  return getTargetLanguageCode(targetLanguage) === 'ko';
+}
+
+function buildBlockInstructions({ targetLanguage, tone }) {
+  const instructions = [
+    `Translate each complete semantic block into ${targetLanguage}.`,
+    getToneInstruction(tone),
+    'Return one translation object for every input record and preserve every id exactly.',
+    'Preserve every token byte-for-byte and emit each token exactly once.',
+    'Translate all source-language prose, including text between wrapper OPEN and CLOSE tokens; wrapper tokens preserve formatting, not wording.',
+    'Use atom labels only as context; atomic visible text remains represented by its token and only atom text marked preserveText may remain unchanged.',
+    'Reorder and rewrite grammar naturally for the target language; source word order is not a constraint, but token parent relationships must not change.',
+    'Never return the source template unchanged or partially copy source-language prose.',
+  ];
+  if (isKoreanTargetLanguage(targetLanguage)) {
+    instructions.push(
+      'For Korean, place a preserved atom before the translated noun phrase when natural. Example: “Reasoning models like [GPT-5.5] use ...” becomes “[GPT-5.5]와 같은 추론 모델은 ...”; write “모델은”, never “모델는”, choose particles from the visible label, and never emit empty example parenthesis.',
+      'For Korean, do not guess a particle after an opaque technical or model atom. Add an appropriate classifier and attach the particle there, such as “[gpt-5.4] 모델을 고려하세요,” never “[gpt-5.4]을 고려하세요,” or rewrite the sentence to avoid a direct particle.'
+    );
+  }
+  instructions.push(
+    'When repair is non-null, redo the translation and correct previousErrorCode, including any translation_incomplete result.',
+    'Do not output HTML, Markdown, commentary, or any field not required by the schema.'
+  );
+  return instructions.join('\n');
+}
+
+function buildBlockResponseFormat() {
+  return {
+    type: 'json_schema',
+    name: 'inline_block_translations',
+    strict: true,
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        translations: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string' },
+              template: { type: 'string' },
+            },
+            required: ['id', 'template'],
+          },
+        },
+      },
+      required: ['translations'],
+    },
+  };
+}
+
+const INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
+  'token_missing',
+  'token_duplicate',
+  'token_unknown',
+  'token_nesting_invalid',
+  'token_parent_changed',
+  'output_too_long',
+  'output_parse_failed',
+  'translation_incomplete',
+]);
+const INLINE_BLOCK_ATOM_FIELDS = new Set([
+  'token',
+  'kind',
+  'label',
+  'preserveText',
+]);
+
+function normalizeBlockAtom(atom, recordId, atomIndex) {
+  if (!atom || typeof atom !== 'object' || Array.isArray(atom)) {
+    throw new Error(`Invalid atom ${atomIndex} for block ${recordId}`);
+  }
+  for (const key of Object.keys(atom)) {
+    if (!INLINE_BLOCK_ATOM_FIELDS.has(key)) {
+      throw new Error(`Unexpected atom field '${key}' for block ${recordId}`);
+    }
+  }
+  if (typeof atom.token !== 'string' || !atom.token) {
+    throw new Error(`Invalid atom token for block ${recordId}`);
+  }
+  if (typeof atom.kind !== 'string' || !atom.kind) {
+    throw new Error(`Invalid atom kind for block ${recordId}`);
+  }
+  if (typeof atom.preserveText !== 'boolean') {
+    throw new Error(`Invalid atom preserveText for block ${recordId}`);
+  }
+  const normalized = {
+    token: atom.token,
+    kind: atom.kind,
+    preserveText: atom.preserveText,
+  };
+  if ('label' in atom) {
+    if (typeof atom.label !== 'string') {
+      throw new Error(`Invalid atom label for block ${recordId}`);
+    }
+    normalized.label = atom.label;
+  }
+  return normalized;
+}
+
+function normalizeBlockRepair(repair, recordId) {
+  if (repair == null) return null;
+  if (!repair || typeof repair !== 'object' || Array.isArray(repair)) {
+    throw new Error(`Invalid repair metadata for block ${recordId}`);
+  }
+  if (repair.attempt !== 1) {
+    throw new Error(`Invalid repair attempt for block ${recordId}`);
+  }
+  if (!INLINE_BLOCK_REPAIRABLE_ERROR_CODES.has(repair.previousErrorCode)) {
+    throw new Error(`Invalid repair error code for block ${recordId}`);
+  }
+  return {
+    attempt: 1,
+    previousErrorCode: repair.previousErrorCode,
+  };
+}
+
+function getBlockRecordCost(record) {
+  return (
+    String(record?.template || '').length +
+    JSON.stringify(record?.atoms || []).length +
+    JSON.stringify(record?.repair ?? null).length
+  );
+}
+
+function getBlockBatchMaxOutputTokens(recordCost) {
+  const scaled = Math.ceil((Number(recordCost) || 0) * 1.25);
+  return Math.min(
+    INLINE_BLOCK_MAX_OUTPUT_TOKENS,
+    Math.max(INLINE_BLOCK_MIN_OUTPUT_TOKENS, scaled)
+  );
+}
+
+function assertInlineBlockSessionBudget(currentCost, additionalCost) {
+  const total = (Number(currentCost) || 0) + (Number(additionalCost) || 0);
+  if (total > INLINE_BLOCK_MAX_SESSION_COST) {
+    throw new Error(
+      `Inline block translation session is too large (${total}/${INLINE_BLOCK_MAX_SESSION_COST} characters)`
+    );
+  }
+  return total;
+}
+
+function normalizeVisibleBlockBatchRecords(records) {
+  if (!Array.isArray(records)) {
+    throw new Error('Inline block translation records must be an array');
+  }
+  if (records.length > INLINE_MAX_RECORDS) {
+    throw new Error(
+      `Too many semantic blocks for inline translation (${records.length}/${INLINE_MAX_RECORDS})`
+    );
+  }
+  const seen = new Set();
+  const normalized = records.map((record, index) => {
+    const id = record?.id;
+    if (typeof id !== 'string' || !id) {
+      throw new Error(`Invalid inline block record id at index ${index}`);
+    }
+    if (seen.has(id)) throw new Error(`Duplicate inline block record id: ${id}`);
+    seen.add(id);
+    if (typeof record.template !== 'string' || !record.template.trim()) {
+      throw new Error(`Invalid inline block template for id: ${id}`);
+    }
+    if (!record.contract || typeof record.contract !== 'object') {
+      throw new Error(`Missing inline block token contract for id: ${id}`);
+    }
+    const atoms = Array.isArray(record.atoms)
+      ? record.atoms.map((atom, atomIndex) =>
+          normalizeBlockAtom(atom, id, atomIndex)
+        )
+      : (() => {
+          throw new Error(`Invalid inline block atoms for id: ${id}`);
+        })();
+    const normalizedRecord = {
+      id,
+      template: record.template,
+      atoms,
+      contract: record.contract,
+      repair: normalizeBlockRepair(record.repair, id),
+    };
+    const validation = inlineBlockCodec?.validateTranslatedTemplate(
+      normalizedRecord.template,
+      normalizedRecord.contract
+    );
+    if (!validation?.ok) {
+      throw new Error(
+        `Invalid source token contract for block ${id}: ${validation?.errorCode || 'output_parse_failed'}`
+      );
+    }
+    const cost = getBlockRecordCost(normalizedRecord);
+    if (cost > INLINE_BLOCK_MAX_RECORD_COST) {
+      throw new Error(
+        `Inline block record is too large (${cost}/${INLINE_BLOCK_MAX_RECORD_COST} characters)`
+      );
+    }
+    return normalizedRecord;
+  });
+  const totalCost = normalized.reduce(
+    (sum, record) => sum + getBlockRecordCost(record),
+    0
+  );
+  if (totalCost > INLINE_BLOCK_MAX_BATCH_COST) {
+    throw new Error(
+      `Visible inline block batch is too large (${totalCost}/${INLINE_BLOCK_MAX_BATCH_COST} characters)`
+    );
+  }
+  return normalized;
+}
+
+function normalizeBlockContainerText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function removeBlockLiteralTokens(value, literalTokens) {
+  let text = String(value || '');
+  for (const literal of literalTokens || []) {
+    if (typeof literal?.value !== 'string' || !literal.value) continue;
+    text = text.split(literal.value).join(' ');
+  }
+  return text;
+}
+
+function collectBlockContainerProseText(tree, literalTokens = []) {
+  const proseTextById = new Map();
+
+  function visit(container) {
+    const pieces = [];
+    for (const child of container.children || []) {
+      if (child.type === 'text') pieces.push(child.value);
+      if (child.type === 'wrapper') pieces.push(visit(child));
+    }
+    const proseText = normalizeBlockContainerText(
+      removeBlockLiteralTokens(pieces.join(' '), literalTokens)
+    );
+    proseTextById.set(container.id, proseText);
+    return proseText;
+  }
+
+  visit(tree);
+  return proseTextById;
+}
+
+function getEnglishWordEntries(value) {
+  const text = String(value || '');
+  return Array.from(
+    text.matchAll(/[A-Za-z]+(?:['’\u2019-][A-Za-z]+)*/g),
+    (match) => ({
+      word: match[0],
+      start: match.index,
+      end: match.index + match[0].length,
+    })
+  );
+}
+
+const ENGLISH_PROSE_MARKERS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'as',
+  'at',
+  'be',
+  'by',
+  'for',
+  'from',
+  'get',
+  'getting',
+  'go',
+  'how',
+  'in',
+  'is',
+  'learn',
+  'more',
+  'of',
+  'on',
+  'or',
+  'read',
+  'start',
+  'started',
+  'the',
+  'this',
+  'to',
+  'use',
+  'using',
+  'view',
+  'with',
+  'you',
+  'your',
+]);
+const TECHNICAL_NAME_SUFFIXES = new Set(['API', 'SDK', 'CLI', 'IDE']);
+const NAMED_TECHNICAL_WORDS = new Set([
+  ...TECHNICAL_NAME_SUFFIXES,
+  'AI',
+  'GPT',
+  'HTTP',
+  'HTTPS',
+  'JSON',
+  'LLM',
+  'REST',
+  'SQL',
+  'UI',
+  'UX',
+  'XML',
+]);
+
+function isTechnicalEnglishWord(word) {
+  return (
+    NAMED_TECHNICAL_WORDS.has(String(word || '').toUpperCase()) ||
+    /[a-z][A-Z]/.test(word)
+  );
+}
+
+function isTechnicalTitleSeparator(value) {
+  return /^\s+$/.test(value) || /^\s*[()]\s*$/.test(value);
+}
+
+function isEnglishTitleWord(word) {
+  return /^[A-Z][A-Za-z]*$/.test(word);
+}
+
+function getProtectedTechnicalTitleRangeIds(sourceText, sourceEntries) {
+  const rangeIds = new Array(sourceEntries.length).fill(-1);
+  let rangeId = 0;
+  let index = 0;
+
+  while (index < sourceEntries.length) {
+    if (!isEnglishTitleWord(sourceEntries[index].word)) {
+      index += 1;
+      continue;
+    }
+
+    const start = index;
+    index += 1;
+    while (
+      index < sourceEntries.length &&
+      !TECHNICAL_NAME_SUFFIXES.has(sourceEntries[index - 1].word) &&
+      isTechnicalTitleSeparator(
+        sourceText.slice(
+          sourceEntries[index - 1].end,
+          sourceEntries[index].start
+        )
+      ) &&
+      isEnglishTitleWord(sourceEntries[index].word)
+    ) {
+      index += 1;
+    }
+
+    if (!TECHNICAL_NAME_SUFFIXES.has(sourceEntries[index - 1].word)) {
+      continue;
+    }
+    for (let member = start; member < index; member += 1) {
+      rangeIds[member] = rangeId;
+    }
+    rangeId += 1;
+  }
+
+  return rangeIds;
+}
+
+function isProtectedTechnicalTitleSequence(
+  sourceSequence,
+  sourceIndex,
+  protectedRangeIds
+) {
+  if (!sourceSequence.every((word) => isEnglishTitleWord(word))) {
+    return false;
+  }
+  if (
+    sourceSequence.some((word) =>
+      ENGLISH_PROSE_MARKERS.has(word.toLowerCase())
+    )
+  ) {
+    return false;
+  }
+  const rangeId = protectedRangeIds[sourceIndex];
+  return (
+    rangeId >= 0 &&
+    protectedRangeIds[sourceIndex + sourceSequence.length - 1] === rangeId
+  );
+}
+
+function isLikelyEnglishProse(words) {
+  if (words.length < 2) return false;
+  if (words.slice(1).some((word) => /^[a-z]/.test(word))) return true;
+  const normalizedWords = words.map((word) => word.toLowerCase());
+  if (normalizedWords.some((word) => ENGLISH_PROSE_MARKERS.has(word))) {
+    return true;
+  }
+  if (words.some((word) => /(?:ing|ed)$/i.test(word))) return true;
+  if (words.every((word) => /^[A-Z][a-z]+$/.test(word))) return true;
+  if (words.every((word) => /^[A-Z]+$/.test(word))) {
+    return words.some((word) => !isTechnicalEnglishWord(word));
+  }
+  if (words.length < 4) return false;
+  return words.filter(isTechnicalEnglishWord).length < 2;
+}
+
+function getWordSequenceSet(words, sequenceLength) {
+  const sequences = new Set();
+  for (
+    let index = 0;
+    index <= words.length - sequenceLength;
+    index += 1
+  ) {
+    sequences.add(words.slice(index, index + sequenceLength).join('\u0000'));
+  }
+  return sequences;
+}
+
+function hasSharedEnglishWordSequence(sourceText, translatedText) {
+  const sourceEntries = getEnglishWordEntries(sourceText);
+  const sourceWords = sourceEntries.map((entry) => entry.word);
+  const normalizedSourceWords = sourceWords.map((word) => word.toLowerCase());
+  const protectedRangeIds = getProtectedTechnicalTitleRangeIds(
+    sourceText,
+    sourceEntries
+  );
+  const translatedWords = getEnglishWordEntries(translatedText).map((entry) =>
+    entry.word.toLowerCase()
+  );
+  for (
+    let sequenceLength = Math.min(4, sourceWords.length);
+    sequenceLength >= 2;
+    sequenceLength -= 1
+  ) {
+    const translatedSequences = getWordSequenceSet(
+      translatedWords,
+      sequenceLength
+    );
+    for (
+      let sourceIndex = 0;
+      sourceIndex <= sourceWords.length - sequenceLength;
+      sourceIndex += 1
+    ) {
+      const sourceSequence = sourceWords.slice(
+        sourceIndex,
+        sourceIndex + sequenceLength
+      );
+      if (
+        isLikelyEnglishProse(sourceSequence) &&
+        !isProtectedTechnicalTitleSequence(
+          sourceSequence,
+          sourceIndex,
+          protectedRangeIds
+        ) &&
+        translatedSequences.has(
+          normalizedSourceWords
+            .slice(sourceIndex, sourceIndex + sequenceLength)
+            .join('\u0000')
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function shouldCheckEnglishTranslationResidue(targetLanguage) {
+  if (!String(targetLanguage || '').trim()) return false;
+  return getTargetLanguageCode(targetLanguage) !== 'en';
+}
+
+function hasUntranslatedEnglishContainer(
+  sourceValidation,
+  translatedValidation,
+  literalTokens = []
+) {
+  const sourceTextById = collectBlockContainerProseText(
+    sourceValidation.tree,
+    literalTokens
+  );
+  const translatedTextById = collectBlockContainerProseText(
+    translatedValidation.tree,
+    literalTokens
+  );
+  for (const [containerId, sourceText] of sourceTextById) {
+    if (
+      hasSharedEnglishWordSequence(
+        sourceText,
+        translatedTextById.get(containerId) || ''
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseAndValidateBlockTranslations(outputText, records, options = {}) {
+  let parsed;
+  try {
+    parsed = JSON.parse(outputText);
+  } catch {
+    throw new Error('Inline block translation response was not valid JSON');
+  }
+  if (!Array.isArray(parsed?.translations)) {
+    throw new Error(
+      'Inline block translation response did not include translations'
+    );
+  }
+
+  const expected = new Map((records || []).map((record) => [record.id, record]));
+  const returned = new Map();
+  for (const item of parsed.translations) {
+    const id = item?.id;
+    if (!expected.has(id)) throw new Error(`Unexpected translation id: ${id}`);
+    if (returned.has(id)) throw new Error(`Duplicate translation id: ${id}`);
+    if (typeof item.template !== 'string') {
+      throw new Error(`Missing translation template for id: ${id}`);
+    }
+    returned.set(id, item.template);
+  }
+  for (const record of records || []) {
+    if (!returned.has(record.id)) {
+      throw new Error(`Missing translation id: ${record.id}`);
+    }
+  }
+
+  return (records || []).map((record) => {
+    const template = returned.get(record.id);
+    const validation = inlineBlockCodec.validateTranslatedTemplate(
+      template,
+      record.contract
+    );
+    if (!validation.ok) {
+      return { id: record.id, ok: false, errorCode: validation.errorCode };
+    }
+    if (shouldCheckEnglishTranslationResidue(options.targetLanguage)) {
+      const sourceValidation = inlineBlockCodec.validateTranslatedTemplate(
+        record.template,
+        record.contract
+      );
+      if (
+        sourceValidation.ok &&
+        hasUntranslatedEnglishContainer(
+          sourceValidation,
+          validation,
+          record.contract.literalTokens
+        )
+      ) {
+        return {
+          id: record.id,
+          ok: false,
+          errorCode: 'translation_incomplete',
+        };
+      }
+    }
+    return { id: record.id, ok: true, template };
+  });
 }
 
 async function openaiTranslateChunk({
@@ -815,6 +1423,98 @@ async function translateVisibleTextBatch(records, settingsSnapshot = null) {
   }
 }
 
+async function translateVisibleBlockBatch(
+  records,
+  settingsSnapshot = null,
+  options = {}
+) {
+  const startedAtMs = Date.now();
+  const logEntry = createInlineTranslationLogEntry(startedAtMs);
+  let completed = false;
+
+  try {
+    const normalized = normalizeVisibleBlockBatchRecords(records);
+    const totalCost = normalized.reduce(
+      (sum, record) => sum + getBlockRecordCost(record),
+      0
+    );
+    logEntry.recordCount = normalized.length;
+    logEntry.totalChars = totalCost;
+    logEntry.chunkCount = normalized.length ? 1 : 0;
+    logEntry.chunkMaxChars = INLINE_BLOCK_MAX_BATCH_COST;
+    logEntry.chunks = normalized.length
+      ? [
+          {
+            index: 1,
+            recordCount: normalized.length,
+            charCount: totalCost,
+          },
+        ]
+      : [];
+
+    if (!normalized.length) {
+      completed = true;
+      return [];
+    }
+
+    const settings = mergeVisibleBatchSettingsSnapshot(
+      await getSettings(),
+      settingsSnapshot
+    );
+    logEntry.model = settings.model;
+    if (!settings.apiKey) {
+      throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+    }
+
+    const modelRecords = normalized.map((record) => ({
+      id: record.id,
+      template: record.template,
+      atoms: record.atoms,
+      repair: record.repair,
+    }));
+    const chunkStartedAtMs = Date.now();
+    const output = await openaiTranslateChunk({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      reasoningEffort: settings.reasoningEffort,
+      instructions: buildBlockInstructions(settings),
+      input: JSON.stringify({ records: modelRecords }),
+      textFormat: buildBlockResponseFormat(),
+      maxOutputTokens: getBlockBatchMaxOutputTokens(totalCost),
+    });
+    const validateTranslationCompleteness =
+      options.validateTranslationCompleteness === true ||
+      (settingsSnapshot !== null && typeof settingsSnapshot === 'object');
+    const results = parseAndValidateBlockTranslations(output, normalized, {
+      targetLanguage: validateTranslationCompleteness
+        ? settings.targetLanguage
+        : '',
+    });
+    if (logEntry.chunks[0]) {
+      logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;
+      logEntry.chunks[0].ok = true;
+      logEntry.chunks[0].failedRecordCount = results.filter(
+        (result) => !result.ok
+      ).length;
+    }
+    completed = true;
+    return results;
+  } catch (error) {
+    logEntry.error = sanitizeLogError(error);
+    if (logEntry.chunks[0]) {
+      logEntry.chunks[0].ok = false;
+      logEntry.chunks[0].error = sanitizeLogError(error);
+    }
+    throw error;
+  } finally {
+    const finishedAtMs = Date.now();
+    logEntry.status = completed ? 'done' : 'error';
+    logEntry.finishedAt = new Date(finishedAtMs).toISOString();
+    logEntry.durationMs = finishedAtMs - startedAtMs;
+    await appendInlineTranslationLog(logEntry);
+  }
+}
+
 async function hasInlineAutoShowPermission() {
   if (!chrome.permissions?.contains) return false;
   return chrome.permissions.contains({ origins: INLINE_ORIGINS });
@@ -824,7 +1524,7 @@ function getInlineAutoShowContentScript() {
   return {
     id: INLINE_CONTENT_SCRIPT_ID,
     matches: INLINE_ORIGINS,
-    js: ['content.js'],
+    js: getInlineContentScriptFiles(),
     runAt: 'document_idle',
   };
 }
@@ -1074,6 +1774,18 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           sendResponse({ ok: true, translations });
           return;
         }
+        if (msg?.type === 'TRANSLATE_VISIBLE_BLOCK_BATCH') {
+          const results = await translateVisibleBlockBatch(
+            msg.records || [],
+            msg.settingsSnapshot || null,
+            {
+              validateTranslationCompleteness:
+                msg.validateTranslationCompleteness === true,
+            }
+          );
+          sendResponse({ ok: true, results });
+          return;
+        }
         if (msg?.type === 'GET_SETTINGS') {
           const settings = await getSettings();
           settings.apiKey = settings.apiKey ? '***' : '';
@@ -1106,15 +1818,23 @@ if (typeof module !== 'undefined' && module.exports) {
     mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,
     assertFullPageTranslationBudget,
+    assertInlineBlockSessionBudget,
+    buildBlockInstructions,
+    buildBlockResponseFormat,
     buildTextNodeResponseFormat,
+    getBlockBatchMaxOutputTokens,
+    getBlockRecordCost,
     getTextRecordStats,
     getTextRecordChunkStats,
     getInlineTranslationConcurrency,
+    getInlineContentScriptFiles,
     getInlineTranslationLogStorageKey,
     collectInlineTranslationLogsFromStorage,
     getVisibleInlineBatchMaxChars,
     normalizeVisibleTextBatchRecords,
+    normalizeVisibleBlockBatchRecords,
     normalizeMaxOutputTokens,
+    parseAndValidateBlockTranslations,
     sanitizeLogError,
     splitTextRecordsIntoChunks,
     parseAndValidateTextNodeTranslations,
@@ -1122,5 +1842,6 @@ if (typeof module !== 'undefined' && module.exports) {
     openaiTranslateChunk,
     syncInlineAutoShowRegistration,
     syncInlineAutoShowRegistrationSafely,
+    translateVisibleBlockBatch,
   };
 }
