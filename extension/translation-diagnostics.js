@@ -6,6 +6,8 @@
   const RUN_PREFIX = 'inlineDiagnostics:v2:run:';
   const SECRET_KEY = 'inlineDiagnostics:v2:hmacSecret';
   const CODE_PREFIXES = ['protocol.', 'structure.', 'quality.', 'runtime.'];
+  let installSecretPromise = null;
+  let storageMutation = Promise.resolve();
 
   function safeCode(value, fallback = 'runtime.request_failed') {
     const code = String(value || '');
@@ -35,12 +37,14 @@
       sourceFingerprint: String(block.sourceFingerprint || '').slice(0, 100),
       contractFingerprint: String(block.contractFingerprint || '').slice(0, 100),
       terminalCode: safeCode(block.terminalCode),
-      terminalDisposition: ['apply_with_warning', 'reject', 'changed'].includes(block.terminalDisposition)
+      terminalDisposition: ['apply', 'apply_with_warning', 'reject', 'changed'].includes(block.terminalDisposition)
         ? block.terminalDisposition
         : 'reject',
       attemptCount: Math.min(2, Math.max(1, Number(block.attemptCount) || 1)),
       structure: {
-        status: block.structure?.status === 'safe' ? 'safe' : 'unsafe',
+        status: ['safe', 'unsafe'].includes(block.structure?.status)
+          ? block.structure.status
+          : 'unknown',
         codes: safeCodes(block.structure?.codes),
       },
       quality: {
@@ -51,8 +55,10 @@
         evidence: safeEvidence(block.quality?.evidence),
       },
       timeline: (block.timeline || []).slice(0, 2).map((entry) => ({
-        stage: entry.stage === 'repair_validation' ? 'repair_validation' : 'initial_validation',
-        disposition: ['apply', 'apply_with_warning', 'retry', 'reject'].includes(entry.disposition)
+        stage: ['initial_validation', 'repair_validation', 'runtime_application'].includes(entry.stage)
+          ? entry.stage
+          : 'initial_validation',
+        disposition: ['apply', 'apply_with_warning', 'retry', 'reject', 'changed'].includes(entry.disposition)
           ? entry.disposition
           : 'reject',
         codes: safeCodes(entry.codes),
@@ -104,17 +110,30 @@
   }
 
   async function fingerprintBlock(chromeApi, sourceTemplate, contract) {
-    const storage = chromeApi.storage.local;
-    const stored = await storage.get([SECRET_KEY]);
-    let encoded = stored[SECRET_KEY];
-    if (!encoded) {
-      const bytes = globalScope.crypto.getRandomValues(new Uint8Array(32));
-      encoded = base64Url(bytes);
-      await storage.set({ [SECRET_KEY]: encoded });
+    if (!installSecretPromise) {
+      installSecretPromise = (async () => {
+        const storage = chromeApi.storage.local;
+        const stored = await storage.get([SECRET_KEY]);
+        let encoded = stored[SECRET_KEY];
+        let decode = null;
+        try {
+          decode = typeof Buffer !== 'undefined'
+            ? new Uint8Array(Buffer.from(String(encoded || ''), 'base64url'))
+            : new Uint8Array(Array.from(atob(String(encoded || '').replace(/-/g, '+').replace(/_/g, '/')), (char) => char.charCodeAt(0)));
+          if (decode.length !== 32) decode = null;
+        } catch { decode = null; }
+        if (!decode) {
+          decode = globalScope.crypto.getRandomValues(new Uint8Array(32));
+          encoded = base64Url(decode);
+          await storage.set({ [SECRET_KEY]: encoded });
+        }
+        return decode;
+      })().catch((error) => {
+        installSecretPromise = null;
+        throw error;
+      });
     }
-    const decode = typeof Buffer !== 'undefined'
-      ? new Uint8Array(Buffer.from(encoded, 'base64url'))
-      : new Uint8Array(Array.from(atob(encoded.replace(/-/g, '+').replace(/_/g, '/')), (char) => char.charCodeAt(0)));
+    const decode = await installSecretPromise;
     return {
       sourceFingerprint: await fingerprint(decode, String(sourceTemplate || '')),
       contractFingerprint: await fingerprint(decode, JSON.stringify(contract || {})),
@@ -122,7 +141,7 @@
   }
 
   async function persistRun(chromeApi, run) {
-    try {
+    const operation = storageMutation.catch(() => {}).then(async () => {
       const storage = chromeApi.storage.local;
       const stored = await storage.get(null);
       const previousIds = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
@@ -137,9 +156,9 @@
       );
       if (removal.length && storage.remove) await storage.remove(removal);
       return { persisted: true };
-    } catch {
-      return { persisted: false };
-    }
+    }).catch(() => ({ persisted: false }));
+    storageMutation = operation;
+    return operation;
   }
 
   async function loadDiagnostics(chromeApi) {

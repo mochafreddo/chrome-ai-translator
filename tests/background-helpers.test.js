@@ -1315,4 +1315,45 @@ exports.tests = [
       }
     },
   },
+  {
+    name: 'isolates a malformed repair response and preserves its protocol code',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const first = createBlockApiRecord('first');
+      const second = createBlockApiRecord('second');
+      const firstTranslation = first.template
+        .replace('Reasoning models', '추론 모델')
+        .replace(' like ', '와 같은 ')
+        .replace(' use internal reasoning tokens.', '은 내부 추론 토큰을 사용합니다.');
+      let call = 0;
+      global.chrome = {
+        storage: { local: { async get(key) {
+          if (Array.isArray(key) && key.includes('settings')) return { settings: { apiKey: 'sk-test', model: 'gpt-5.4-mini', targetLanguage: 'Korean' } };
+          return {};
+        }, async set() {}, async remove() {} } },
+        runtime: { getManifest() { return { version: 'test' }; } },
+      };
+      global.fetch = async () => {
+        call += 1;
+        if (call === 2) {
+          return { ok: true, async json() { return { output_text: '{invalid' }; } };
+        }
+        return { ok: true, async json() { return { output_text: JSON.stringify({
+          translations: [
+            { id: first.id, template: firstTranslation },
+            { id: second.id, template: second.template },
+          ],
+        }) }; } };
+      };
+      try {
+        const results = await helpers.translateVisibleBlockBatch([first, second]);
+        assert.equal(results.find((result) => result.id === first.id).disposition, 'apply');
+        assert.equal(results.find((result) => result.id === second.id).terminalCode, 'protocol.invalid_json');
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+      }
+    },
+  },
 ];

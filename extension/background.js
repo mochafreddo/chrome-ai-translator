@@ -1430,8 +1430,10 @@ async function translateVisibleBlockBatch(
   options = {}
 ) {
   const startedAtMs = Date.now();
+  const runId = `run-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
   const logEntry = createInlineTranslationLogEntry(startedAtMs);
   let completed = false;
+  let diagnosticsPersisted = true;
 
   try {
     const normalized = normalizeVisibleBlockBatchRecords(records);
@@ -1466,6 +1468,16 @@ async function translateVisibleBlockBatch(
     if (!settings.apiKey) {
       throw new Error('OpenAI API key is not set. Open Options and paste your key.');
     }
+    const preflight = await translationDiagnostics.persistRun(chrome, {
+      runId,
+      startedAt: new Date(startedAtMs).toISOString(),
+      model: settings.model,
+      targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+      outcome: 'interrupted',
+      summary: { requested: normalized.length },
+      blocks: [],
+    });
+    diagnosticsPersisted = preflight.persisted;
 
     const chunkStartedAtMs = Date.now();
     async function requestAndValidate(batch) {
@@ -1493,6 +1505,7 @@ async function translateVisibleBlockBatch(
 
     const initial = await requestAndValidate(normalized);
     const terminalById = new Map();
+    const initialById = new Map(initial.map((result) => [result.id, result]));
     const repairs = [];
     for (const result of initial) {
       const decision = translationPolicy.decideBlockDisposition(result, 1);
@@ -1503,17 +1516,56 @@ async function translateVisibleBlockBatch(
           repair: { attempt: 1, previousErrorCode: decision.terminalCode },
         });
       } else {
-        terminalById.set(result.id, { result, decision, attemptCount: 1 });
+        terminalById.set(result.id, {
+          result,
+          decision,
+          attemptCount: 1,
+          timeline: [{
+            stage: 'initial_validation',
+            disposition: decision.disposition,
+            codes: [decision.terminalCode].filter(Boolean),
+          }],
+        });
       }
     }
     if (repairs.length) {
-      const repaired = await requestAndValidate(repairs);
-      for (const result of repaired) {
-        terminalById.set(result.id, {
-          result,
-          decision: translationPolicy.decideBlockDisposition(result, 2),
-          attemptCount: 2,
-        });
+      try {
+        const repaired = await requestAndValidate(repairs);
+        for (const result of repaired) {
+          const initialResult = initialById.get(result.id);
+          const initialDecision = translationPolicy.decideBlockDisposition(initialResult, 1);
+          const decision = translationPolicy.decideBlockDisposition(result, 2);
+          terminalById.set(result.id, {
+            result,
+            decision,
+            attemptCount: 2,
+            timeline: [
+              { stage: 'initial_validation', disposition: 'retry', codes: [initialDecision.terminalCode].filter(Boolean) },
+              { stage: 'repair_validation', disposition: decision.disposition, codes: [decision.terminalCode].filter(Boolean) },
+            ],
+          });
+        }
+      } catch (error) {
+        const repairCode = String(error?.code || '').startsWith('protocol.')
+          ? error.code
+          : 'runtime.repair_request_failed';
+        for (const repair of repairs) {
+          const initialResult = initialById.get(repair.id);
+          const initialDecision = translationPolicy.decideBlockDisposition(initialResult, 1);
+          terminalById.set(repair.id, {
+            result: initialResult,
+            decision: {
+              disposition: 'reject',
+              terminalCode: repairCode,
+              messageKey: 'repair_request_failed',
+            },
+            attemptCount: 2,
+            timeline: [
+              { stage: 'initial_validation', disposition: 'retry', codes: [initialDecision.terminalCode].filter(Boolean) },
+              { stage: 'repair_validation', disposition: 'reject', codes: [repairCode] },
+            ],
+          });
+        }
       }
     }
     const results = normalized.map((record) => {
@@ -1526,10 +1578,15 @@ async function translateVisibleBlockBatch(
         terminalCode: terminal.decision.terminalCode,
         messageKey: terminal.decision.messageKey,
         attemptCount: terminal.attemptCount,
+        diagnostic: {
+          structure: terminal.result.structure,
+          quality: terminal.result.quality,
+          timeline: terminal.timeline,
+        },
       };
     });
-    const runId = `run-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
-    const problemResults = results.filter(
+    try {
+      const problemResults = results.filter(
       (result) => result.attemptCount === 2 || result.disposition !== 'apply'
     );
     const diagnosticBlocks = await Promise.all(problemResults.map(async (result) => {
@@ -1545,9 +1602,12 @@ async function translateVisibleBlockBatch(
         terminalCode: result.terminalCode,
         terminalDisposition: result.disposition,
         attemptCount: result.attemptCount,
+        structure: result.diagnostic.structure,
+        quality: result.diagnostic.quality,
+        timeline: result.diagnostic.timeline,
       };
     }));
-    await translationDiagnostics.persistRun(chrome, {
+      const persistence = await translationDiagnostics.persistRun(chrome, {
       runId,
       startedAt: new Date(startedAtMs).toISOString(),
       finishedAt: new Date().toISOString(),
@@ -1566,8 +1626,13 @@ async function translateVisibleBlockBatch(
         failed: results.filter((result) => result.disposition === 'reject').length,
         repairs: results.filter((result) => result.attemptCount === 2).length,
       },
-      blocks: diagnosticBlocks,
-    });
+        blocks: diagnosticBlocks,
+      });
+      diagnosticsPersisted = diagnosticsPersisted && persistence.persisted;
+    } catch {
+      // Diagnostics must never change an otherwise valid translation result.
+      diagnosticsPersisted = false;
+    }
     if (logEntry.chunks[0]) {
       logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;
       logEntry.chunks[0].ok = true;
@@ -1576,9 +1641,31 @@ async function translateVisibleBlockBatch(
       ).length;
     }
     completed = true;
-    return results;
+    return results.map(({ diagnostic, ...result }) => ({
+      ...result,
+      ...(!diagnosticsPersisted ? { diagnosticsUnavailable: true } : {}),
+    }));
   } catch (error) {
     logEntry.error = sanitizeLogError(error);
+    await translationDiagnostics.persistRun(chrome, {
+      runId,
+      startedAt: new Date(startedAtMs).toISOString(),
+      finishedAt: new Date().toISOString(),
+      model: logEntry.model,
+      outcome: 'failed',
+      summary: { requested: logEntry.recordCount, failed: logEntry.recordCount },
+      blocks: [{
+        diagnosticId: `${runId}/request`,
+        terminalCode: error?.code || 'runtime.request_failed',
+        terminalDisposition: 'reject',
+        attemptCount: 1,
+        timeline: [{
+          stage: 'initial_validation',
+          disposition: 'reject',
+          codes: [error?.code || 'runtime.request_failed'],
+        }],
+      }],
+    });
     if (logEntry.chunks[0]) {
       logEntry.chunks[0].ok = false;
       logEntry.chunks[0].error = sanitizeLogError(error);
@@ -1862,6 +1949,30 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
             }
           );
           sendResponse({ ok: true, results });
+          return;
+        }
+        if (msg?.type === 'RECORD_INLINE_RUNTIME_DIAGNOSTIC') {
+          const outcomes = Array.isArray(msg.outcomes) ? msg.outcomes.slice(0, 100) : [];
+          const startedAt = Date.now();
+          const persistence = await translationDiagnostics.persistRun(chrome, {
+            runId: `runtime-${startedAt}`,
+            startedAt: new Date(startedAt).toISOString(),
+            finishedAt: new Date().toISOString(),
+            outcome: 'failed',
+            summary: { requested: outcomes.length, failed: outcomes.length },
+            blocks: outcomes.map((outcome, index) => ({
+              diagnosticId: `runtime-${startedAt}/${index}`,
+              terminalCode: outcome?.code,
+              terminalDisposition: outcome?.code === 'runtime.page_changed' ? 'changed' : 'reject',
+              attemptCount: 1,
+              timeline: [{
+                stage: 'runtime_application',
+                disposition: outcome?.code === 'runtime.page_changed' ? 'changed' : 'reject',
+                codes: [outcome?.code],
+              }],
+            })),
+          });
+          sendResponse({ ok: persistence.persisted });
           return;
         }
         if (msg?.type === 'GET_SETTINGS') {

@@ -49,4 +49,30 @@ exports.tests = [
       assert.equal(exported.runs[0].blocks.length, 100);
     },
   },
+  {
+    name: 'preserves successful repair and changed dispositions',
+    fn() {
+      const repaired = diagnostics.serializeProblemBlock({
+        diagnosticId: 'repaired',
+        terminalCode: 'quality.english_residue',
+        terminalDisposition: 'apply',
+        attemptCount: 2,
+        structure: { status: 'safe', codes: [] },
+        quality: { status: 'complete', codes: [], evidence: {} },
+        timeline: [
+          { stage: 'initial_validation', disposition: 'retry', codes: ['quality.english_residue'] },
+          { stage: 'repair_validation', disposition: 'apply', codes: [] },
+        ],
+      });
+      const changed = diagnostics.serializeProblemBlock({
+        diagnosticId: 'changed',
+        terminalCode: 'runtime.page_changed',
+        terminalDisposition: 'changed',
+        timeline: [{ stage: 'runtime_application', disposition: 'changed', codes: ['runtime.page_changed'] }],
+      });
+      assert.equal(repaired.terminalDisposition, 'apply');
+      assert.equal(repaired.timeline[1].disposition, 'apply');
+      assert.equal(changed.timeline[0].disposition, 'changed');
+    },
+  },
 ];

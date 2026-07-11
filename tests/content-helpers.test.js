@@ -1083,6 +1083,9 @@ exports.tests = [
         runtime: {
           async sendMessage(message) {
             calls.push(message);
+            if (message.type === 'RECORD_INLINE_RUNTIME_DIAGNOSTIC') {
+              return { ok: true };
+            }
             const activeRecord = state.viewport.records.find(
               (record) => record.id === message.records[0].id
             );
@@ -1115,13 +1118,16 @@ exports.tests = [
         helpers.runInlineViewportScan();
         await flushMicrotasks(16);
 
-        assert.equal(calls.length, 2);
+        const translationCalls = calls.filter(
+          (message) => message.type === 'TRANSLATE_VISIBLE_BLOCK_BATCH'
+        );
+        assert.equal(translationCalls.length, 2);
         assert.deepEqual(
-          calls.map((message) => message.type),
+          translationCalls.map((message) => message.type),
           ['TRANSLATE_VISIBLE_BLOCK_BATCH', 'TRANSLATE_VISIBLE_BLOCK_BATCH']
         );
-        assert.match(calls[0].records[0].template, /Reasoning models/);
-        assert.match(calls[1].records[0].template, /Updated reasoning models/);
+        assert.match(translationCalls[0].records[0].template, /Reasoning models/);
+        assert.match(translationCalls[1].records[0].template, /Updated reasoning models/);
         assert.equal(calls[0].records[0].text, undefined);
         assert.equal(fixture.block.childNodes[0], fixture.link);
         assert.equal(
@@ -3423,7 +3429,7 @@ exports.tests = [
     },
   },
   {
-    name: 'restores semantic block records through Original text',
+    name: 'restores partial semantic block records through Original text',
     fn() {
       const { block, strong, link } = createReasoningFixture();
       const originalBlockChildren = [...block.childNodes];
@@ -3434,7 +3440,13 @@ exports.tests = [
       const batch = helpers.takeInlineViewportBlockBatch(store);
       helpers.applyInlineViewportBlockResults(
         batch,
-        [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
+        [{
+          id: record.id,
+          disposition: 'apply_with_warning',
+          template: getReasoningTranslatedTemplate(record),
+          terminalCode: 'quality.english_residue',
+          attemptCount: 2,
+        }],
         20,
         store
       );

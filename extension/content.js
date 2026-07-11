@@ -23,6 +23,9 @@ var INLINE_TRANSLATION_SETTINGS_DEFAULTS = {
   model: 'gpt-5.4-mini',
   reasoningEffort: 'none',
 };
+function isInlineTranslatedState(state) {
+  return state === 'translated' || state === 'translated_with_warning';
+}
 var INLINE_EXCLUDED_TAGS = new Set([
   'SCRIPT',
   'STYLE',
@@ -192,7 +195,7 @@ function addInlineRestorableRecords(state = inlineState, records = []) {
   const restorableRecords = ensureInlineRestorableRecords(state);
   const seen = new Set(restorableRecords);
   for (const record of records || []) {
-    if (record?.state === 'translated' && !seen.has(record)) {
+    if (isInlineTranslatedState(record?.state) && !seen.has(record)) {
       restorableRecords.push(record);
       seen.add(record);
     }
@@ -206,7 +209,7 @@ function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
   for (const record of records || []) {
     if (record?.snapshot?.blockElement) {
       const blockElement = record.snapshot.blockElement;
-      if (record.state !== 'translated' || !blockElement.isConnected) continue;
+      if (!isInlineTranslatedState(record.state) || !blockElement.isConnected) continue;
       if (hasInlineViewportSettingsSignatureMismatch(store, record)) {
         if (inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) {
           const restored = inlineBlockCodec.restoreBlock(record.snapshot);
@@ -225,7 +228,7 @@ function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
       cacheInlineViewportBlockTranslation(store, record);
       continue;
     }
-    if (record?.state !== 'translated' || !record.node?.isConnected) continue;
+    if (!isInlineTranslatedState(record?.state) || !record.node?.isConnected) continue;
     if (hasInlineViewportSettingsSignatureMismatch(store, record)) {
       if (
         typeof record.translation === 'string' &&
@@ -464,7 +467,7 @@ function stampInlineViewportRecordSettings(store, record) {
 }
 
 function cacheInlineViewportRecordTranslation(store, record) {
-  if (!store?.translationByOriginal || record?.state !== 'translated') {
+  if (!store?.translationByOriginal || !isInlineTranslatedState(record?.state)) {
     return false;
   }
   if (hasInlineViewportSettingsSignatureMismatch(store, record)) return false;
@@ -521,7 +524,7 @@ function queueInlineViewportRecord(store, node, text) {
   if (!store || !node) return null;
   const existing = store.byNode.get(node);
   if (
-    existing?.state === 'translated' &&
+    isInlineTranslatedState(existing?.state) &&
     typeof existing.translation === 'string' &&
     node.isConnected &&
     node.nodeValue === existing.original
@@ -621,7 +624,7 @@ function createQueuedInlineBlockRecordFromSerialized(
 function cacheInlineViewportBlockTranslation(store, record) {
   if (
     !store?.translationByOriginal ||
-    record?.state !== 'translated' ||
+    !isInlineTranslatedState(record?.state) ||
     !record.cacheKey ||
     typeof record.translatedTemplate !== 'string' ||
     hasInlineViewportSettingsSignatureMismatch(store, record)
@@ -662,7 +665,7 @@ function queueInlineViewportBlock(store, blockElement, options = {}) {
   }
   const existing = store.byBlock.get(blockElement);
   if (existing) {
-    if (existing.state === 'translated') {
+    if (isInlineTranslatedState(existing.state)) {
       if (inlineBlockCodec.matchesAppliedOwnership(existing.snapshot)) {
         return null;
       }
@@ -1155,7 +1158,7 @@ function restoreInlineViewportRecords(state = inlineState) {
     if (record?.snapshot?.blockElement) {
       const blockElement = record.snapshot.blockElement;
       if (
-        record.state === 'translated' &&
+        isInlineTranslatedState(record.state) &&
         blockElement.isConnected &&
         !restoredBlocks.has(blockElement)
       ) {
@@ -1170,7 +1173,7 @@ function restoreInlineViewportRecords(state = inlineState) {
       continue;
     }
     if (
-      record.state === 'translated' &&
+      isInlineTranslatedState(record.state) &&
       record.node?.isConnected &&
       !restoredNodes.has(record.node)
     ) {
@@ -1765,6 +1768,9 @@ function updateInlineViewportMessage() {
     counts,
     inlineState.status
   );
+  if (inlineState.viewport?.diagnosticsUnavailable) {
+    inlineState.message += '\nDiagnostics could not be saved.';
+  }
   updateInlineTranslatorUi();
 }
 
@@ -2048,6 +2054,31 @@ async function drainInlineViewportQueue() {
           operationId,
           store
         );
+        const runtimeOutcomes = batch
+          .filter((record) =>
+            (record.state === 'failed' && !record.terminalCode && String(record.errorCode || '').startsWith('runtime.')) ||
+            (record.state === 'stale' && !record.supersededByRetryId)
+          )
+          .map((record) => ({
+            code: record.state === 'stale'
+              ? 'runtime.page_changed'
+              : record.terminalCode || record.errorCode || 'runtime.apply_failed',
+          }));
+        if (runtimeOutcomes.length) {
+          chrome.runtime.sendMessage({
+            type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+            outcomes: runtimeOutcomes,
+          }).then((diagnosticResponse) => {
+            if (diagnosticResponse?.ok !== true) {
+              store.diagnosticsUnavailable = true;
+            }
+          }).catch(() => {
+            store.diagnosticsUnavailable = true;
+          });
+        }
+        if (resp.results.some((result) => result.diagnosticsUnavailable)) {
+          store.diagnosticsUnavailable = true;
+        }
         addInlineRestorableRecords(inlineState, batch);
       })
       .catch(() => {

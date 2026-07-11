@@ -39,10 +39,12 @@
   }
 
   function words(value) {
-    const proseOnly = String(value || '').replace(
-      /\b[A-Za-z0-9_-]+\.(?:md|json|ya?ml|toml|js|ts|tsx?|jsx?|py|rb|go|rs)\b/gi,
-      ' '
-    );
+    const proseOnly = String(value || '')
+      .replace(/⟦[^⟧]*⟧/g, ' ')
+      .replace(
+        /\b[A-Za-z0-9_-]+\.(?:md|json|ya?ml|toml|js|ts|tsx?|jsx?|py|rb|go|rs)\b/gi,
+        ' '
+      );
     return Array.from(
       proseOnly.matchAll(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g),
       (match) => match[0]

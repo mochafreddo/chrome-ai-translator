@@ -69,4 +69,20 @@ exports.tests = [
       assert.equal(result.records[0].quality.status, 'complete');
     },
   },
+  {
+    name: 'does not count protected token syntax as English residue',
+    fn() {
+      const { serialized } = require('./inline-block.test').createReasoningFixture();
+      const translated = serialized.template
+        .replace('Reasoning models', '추론 모델')
+        .replace(' like ', '와 같은 ')
+        .replace(' use internal reasoning tokens.', '은 내부 추론 토큰을 사용합니다.');
+      const result = validation.validateBlockResponse(
+        JSON.stringify({ translations: [{ id: 'tokenized', template: translated }] }),
+        [{ id: 'tokenized', ...serialized }],
+        { targetLanguage: 'Korean' }
+      );
+      assert.equal(result.records[0].quality.status, 'complete');
+    },
+  },
 ];
