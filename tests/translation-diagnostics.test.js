@@ -75,4 +75,14 @@ exports.tests = [
       assert.equal(changed.timeline[0].disposition, 'changed');
     },
   },
+  {
+    name: 'exports canonical newest-first run order',
+    fn() {
+      const exported = diagnostics.exportDiagnostics([
+        { runId: 'newest', outcome: 'done' },
+        { runId: 'older', outcome: 'done' },
+      ]);
+      assert.deepEqual(exported.runs.map((run) => run.runId), ['newest', 'older']);
+    },
+  },
 ];

@@ -69,7 +69,7 @@
   function exportDiagnostics(runs = []) {
     return {
       schemaVersion: SCHEMA_VERSION,
-      runs: runs.slice(-MAX_RUNS).reverse().map((run) => ({
+      runs: runs.slice(0, MAX_RUNS).map((run) => ({
         schemaVersion: SCHEMA_VERSION,
         runId: String(run.runId || '').slice(0, 80),
         startedAt: String(run.startedAt || ''),

@@ -718,7 +718,8 @@ function takeInlineViewportBlockBatch(
       record.errorCode = 'block_too_large';
       continue;
     }
-    if (store.sessionRecordCost + cost > INLINE_BLOCK_SESSION_MAX_CHARS) {
+    const reservedCost = cost * 2;
+    if (store.sessionRecordCost + reservedCost > INLINE_BLOCK_SESSION_MAX_CHARS) {
       store.queue.shift();
       record.state = 'failed';
       record.errorCode = 'session_too_large';
@@ -730,7 +731,7 @@ function takeInlineViewportBlockBatch(
     record.state = 'translating';
     batch.push(record);
     batchCost += cost;
-    store.sessionRecordCost += cost;
+    store.sessionRecordCost += reservedCost;
     if (batchCost >= limit) break;
   }
   if (batch.length) store.inFlight += 1;

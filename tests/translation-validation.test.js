@@ -85,4 +85,17 @@ exports.tests = [
       assert.equal(result.records[0].quality.status, 'complete');
     },
   },
+  {
+    name: 'retains page-owned bracket prose in quality assessment',
+    fn() {
+      const prose = '⟦Read the safety instructions carefully⟧';
+      const result = validation.assessTranslationQuality(
+        prose,
+        prose,
+        'Korean'
+      );
+      assert.equal(result.status, 'partial');
+      assert.deepEqual(result.codes, ['quality.english_residue']);
+    },
+  },
 ];

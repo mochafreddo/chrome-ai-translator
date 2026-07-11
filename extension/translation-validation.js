@@ -39,9 +39,7 @@
   }
 
   function words(value) {
-    const proseOnly = String(value || '')
-      .replace(/⟦[^⟧]*⟧/g, ' ')
-      .replace(
+    const proseOnly = String(value || '').replace(
         /\b[A-Za-z0-9_-]+\.(?:md|json|ya?ml|toml|js|ts|tsx?|jsx?|py|rb|go|rs)\b/gi,
         ' '
       );
@@ -78,9 +76,19 @@
     return { longest, count };
   }
 
-  function assessTranslationQuality(sourceText, translatedText, targetLanguage) {
-    const source = String(sourceText || '');
-    const output = String(translatedText || '');
+  function removeContractTokens(value, contract) {
+    let text = String(value || '');
+    for (const entry of contract?.entries || []) {
+      for (const token of [entry.token, entry.openToken, entry.closeToken]) {
+        if (typeof token === 'string' && token) text = text.split(token).join(' ');
+      }
+    }
+    return text;
+  }
+
+  function assessTranslationQuality(sourceText, translatedText, targetLanguage, contract = null) {
+    const source = removeContractTokens(sourceText, contract);
+    const output = removeContractTokens(translatedText, contract);
     const evidence = {
       sourceChars: source.length,
       outputChars: output.length,
@@ -159,7 +167,8 @@
             ? assessTranslationQuality(
                 record.template,
                 template,
-                options.targetLanguage
+                options.targetLanguage,
+                record.contract
               )
             : { status: 'uncertain', codes: [], evidence: {} },
         };

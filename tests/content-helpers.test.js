@@ -3296,8 +3296,10 @@ exports.tests = [
       assert.equal(store.inFlight, 1);
       assert.equal(
         store.sessionRecordCost,
-        helpers.getInlineBlockRecordCost(first) +
+        2 * (
+          helpers.getInlineBlockRecordCost(first) +
           helpers.getInlineBlockRecordCost(second)
+        )
       );
     },
   },
