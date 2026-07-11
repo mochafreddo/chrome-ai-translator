@@ -963,8 +963,8 @@ exports.tests = [
               return {
                 settings: {
                   apiKey: 'sk-test',
-                  model: 'gpt-5.4-mini',
-                  targetLanguage: 'Korean',
+                  model: 'ft:gpt_custom/model',
+                  targetLanguage: 'Japanese',
                   tone: 'technical',
                   chunkMaxChars: 12000,
                 },
@@ -1140,7 +1140,22 @@ exports.tests = [
       const record = createBlockApiRecord();
       let messageListener = null;
       const stored = {};
-      const sessionStored = {};
+      const sessionStored = {
+        'inlineRuntimeCorrelations:v1': {
+          '00000000-0000-4000-8000-000000000000': {
+            expiresAt: Date.now() + 60000,
+            runId: 'run-1-bad',
+            diagnosticId: 'run-1-bad/b1',
+            sourceFingerprint: 'raw secret must not persist',
+            contractFingerprint: 'raw source must not persist',
+            model: 'gpt-5.4-mini',
+            targetLanguageCode: 'ko',
+            extensionVersion: 'test',
+            tabId: 7,
+            operationId: 42,
+          },
+        },
+      };
 
       global.fetch = async () => ({
         ok: true,
@@ -1190,9 +1205,9 @@ exports.tests = [
               if (keys === 'settings' || keys?.includes?.('settings')) return {
                 settings: {
                   apiKey: 'sk-test',
-                  model: 'gpt-5.4-mini',
+                  model: 'ft:gpt_custom/model',
                   reasoningEffort: 'none',
-                  targetLanguage: 'Korean',
+                  targetLanguage: 'Japanese',
                   tone: 'technical',
                 },
               };
@@ -1261,8 +1276,8 @@ exports.tests = [
         const runtimeRun = Object.values(stored).find((value) =>
           value?.blocks?.[0]?.terminalCode === 'runtime.apply_failed'
         );
-        assert.equal(runtimeRun.model, 'gpt-5.4-mini');
-        assert.equal(runtimeRun.targetLanguageCode, 'ko');
+        assert.equal(runtimeRun.model, 'ft:gpt_custom/model');
+        assert.equal(runtimeRun.targetLanguageCode, '');
         assert.match(runtimeRun.blocks[0].parentRunId, /^run-/);
         assert.match(runtimeRun.blocks[0].parentDiagnosticId, /^run-.*\/b1$/);
         assert.match(runtimeRun.blocks[0].sourceFingerprint, /^hmac-sha256:/);

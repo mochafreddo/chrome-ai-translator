@@ -2685,6 +2685,33 @@ exports.tests = [
     },
   },
   {
+    name: 'releases runtime tokens from stale operation responses',
+    fn() {
+      const previousChrome = global.chrome;
+      const messages = [];
+      global.chrome = { runtime: { sendMessage(message) {
+        messages.push(message);
+        return Promise.resolve({ ok: true });
+      } } };
+      try {
+        assert.equal(helpers.releaseInlineRuntimeTokensFromStaleResponse({
+          results: [
+            { correlationToken: 'token-1', template: 'ignored translation' },
+            { correlationToken: 'token-2' },
+          ],
+        }, 41), true);
+        assert.deepEqual(messages, [{
+          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+          operationId: 41,
+          outcomes: [],
+          releaseTokens: ['token-1', 'token-2'],
+        }]);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
     name: 'marks only current translating viewport records as failed',
     fn() {
       const records = [

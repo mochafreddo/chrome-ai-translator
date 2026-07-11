@@ -2080,6 +2080,20 @@ function detachInlineViewportWatchers() {
   }
 }
 
+function releaseInlineRuntimeTokensFromStaleResponse(resp, operationId) {
+  const releaseTokens = Array.isArray(resp?.results)
+    ? resp.results.map((result) => result?.correlationToken).filter(Boolean)
+    : [];
+  if (!releaseTokens.length) return false;
+  chrome.runtime.sendMessage({
+    type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+    operationId,
+    outcomes: [],
+    releaseTokens,
+  }).catch(() => {});
+  return true;
+}
+
 async function drainInlineViewportQueue() {
   const store = inlineState.viewport;
   if (!store || store.stopped || inlineState.status !== 'active') return;
@@ -2113,6 +2127,7 @@ async function drainInlineViewportQueue() {
       })
       .then((resp) => {
         if (!isInlineViewportOperationCurrent(inlineState, store, operationId)) {
+          releaseInlineRuntimeTokensFromStaleResponse(resp, operationId);
           return;
         }
         if (!resp?.ok || !Array.isArray(resp.results)) {
@@ -2368,6 +2383,7 @@ if (typeof module !== 'undefined' && module.exports) {
     takeInlineViewportBlockBatch,
     applyInlineViewportBatchTranslations,
     applyInlineViewportBlockResults,
+    releaseInlineRuntimeTokensFromStaleResponse,
     markInlineViewportBatchFailed,
     getInlineViewportStatusCounts,
     formatInlineViewportStatusMessage,

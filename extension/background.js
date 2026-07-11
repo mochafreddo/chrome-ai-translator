@@ -65,6 +65,30 @@ const INLINE_RUNTIME_CORRELATION_LIMIT = 1000;
 const INLINE_RUNTIME_CORRELATION_STORAGE_KEY = 'inlineRuntimeCorrelations:v1';
 const inlineRuntimeCorrelations = new Map();
 let inlineRuntimeCorrelationMutation = Promise.resolve();
+
+function normalizeInlineRuntimeCorrelationEntries(value) {
+  const normalized = Object.create(null);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return normalized;
+  for (const [token, entry] of Object.entries(value)) {
+    const runId = typeof entry?.runId === 'string' ? entry.runId : '';
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token) ||
+      !entry || typeof entry !== 'object' || Array.isArray(entry) ||
+      !Number.isFinite(entry.expiresAt) || entry.expiresAt <= 0 ||
+      !/^run-\d+-[a-z0-9]{1,12}$/.test(runId) ||
+      typeof entry.diagnosticId !== 'string' || !entry.diagnosticId.startsWith(`${runId}/`) ||
+      !/^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(entry.sourceFingerprint) ||
+      !/^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(entry.contractFingerprint) ||
+      !/^[A-Za-z0-9._:/-]{1,80}$/.test(entry.model) ||
+      !(entry.targetLanguageCode === '' || /^[a-z]{2,16}$/i.test(entry.targetLanguageCode)) ||
+      !/^[0-9A-Za-z.-]{0,40}$/.test(entry.extensionVersion) ||
+      !(entry.tabId === null || Number.isInteger(entry.tabId)) ||
+      !(entry.operationId === null || Number.isInteger(entry.operationId))
+    ) continue;
+    normalized[token] = entry;
+  }
+  return normalized;
+}
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 const INLINE_VISIBLE_BATCH_MAX_OUTPUT_TOKENS = 2048;
 const MIN_MAX_OUTPUT_TOKENS = 256;
@@ -1439,9 +1463,10 @@ async function translateVisibleTextBatch(records, settingsSnapshot = null) {
 async function mutateInlineRuntimeCorrelations(mutator) {
   const operation = inlineRuntimeCorrelationMutation.catch(() => {}).then(async () => {
     const session = globalThis.chrome?.storage?.session;
-    const stored = session
+    const storedValue = session
       ? (await session.get([INLINE_RUNTIME_CORRELATION_STORAGE_KEY]))[INLINE_RUNTIME_CORRELATION_STORAGE_KEY] || {}
       : Object.fromEntries(inlineRuntimeCorrelations);
+    const stored = normalizeInlineRuntimeCorrelationEntries(storedValue);
     const result = await mutator(stored);
     if (session) await session.set({ [INLINE_RUNTIME_CORRELATION_STORAGE_KEY]: stored });
     else {
@@ -1465,8 +1490,7 @@ async function issueInlineRuntimeCorrelations(items, context = {}) {
     }
     const issued = new Map();
     for (const { id, metadata } of items) {
-      const token = globalThis.crypto?.randomUUID?.()
-        || `${now}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+      const token = createInlineRuntimeCorrelationToken();
       entries[token] = {
         ...metadata,
         tabId: Number.isInteger(context.tabId) ? context.tabId : null,
@@ -1477,6 +1501,17 @@ async function issueInlineRuntimeCorrelations(items, context = {}) {
     }
     return issued;
   });
+}
+
+function createInlineRuntimeCorrelationToken() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 async function consumeInlineRuntimeCorrelations(outcomes, releaseTokens, context = {}) {
@@ -1491,7 +1526,7 @@ async function consumeInlineRuntimeCorrelations(outcomes, releaseTokens, context
     ];
     for (const item of requested) {
       const token = String(item.token || '');
-      const entry = entries[token];
+      const entry = Object.hasOwn(entries, token) ? entries[token] : null;
       if (
         !token || tokens.has(token) || !entry || entry.expiresAt <= now || entry.reservedAt ||
         entry.tabId !== (Number.isInteger(context.tabId) ? context.tabId : null) ||
