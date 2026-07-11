@@ -84,6 +84,9 @@
         extensionVersion: String(run.extensionVersion || '').slice(0, 40),
         model: String(run.model || '').slice(0, 80),
         targetLanguageCode: String(run.targetLanguageCode || '').slice(0, 16),
+        idempotencyFingerprint: /^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(run.idempotencyFingerprint || '')
+          ? run.idempotencyFingerprint
+          : '',
         outcome: ['done', 'partial', 'failed', 'changed', 'interrupted'].includes(run.outcome)
           ? run.outcome
           : 'interrupted',
@@ -169,6 +172,40 @@
     return operation;
   }
 
+  async function persistRunIdempotent(chromeApi, run) {
+    const operation = storageMutation.catch(() => {}).then(async () => {
+      const storage = chromeApi.storage.local;
+      const runId = String(run.runId || '');
+      const runKey = `${RUN_PREFIX}${runId}`;
+      const stored = await storage.get(null);
+      const existing = stored[runKey];
+      const previousIds = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
+      const ids = [runId, ...previousIds.filter((id) => id !== runId)].slice(0, MAX_RUNS);
+      const validExistingFingerprint = /^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(
+        existing?.idempotencyFingerprint || ''
+      );
+      if (existing && validExistingFingerprint && existing.idempotencyFingerprint !== run.idempotencyFingerprint) {
+        return { persisted: false, conflict: true };
+      }
+      const removal = Object.keys(stored).filter((key) =>
+        key === 'inlineTranslationLogs' ||
+        key.startsWith('inlineTranslationLogs:') ||
+        (key.startsWith(RUN_PREFIX) && !ids.includes(key.slice(RUN_PREFIX.length)))
+      );
+      const sanitized = exportDiagnostics([run]).runs[0];
+      if (existing && validExistingFingerprint) {
+        await storage.set({ [INDEX_KEY]: ids, [runKey]: sanitized });
+        if (removal.length && storage.remove) await storage.remove(removal);
+        return { persisted: true, duplicate: true };
+      }
+      await storage.set({ [INDEX_KEY]: ids, [runKey]: sanitized });
+      if (removal.length && storage.remove) await storage.remove(removal);
+      return { persisted: true, duplicate: false };
+    }).catch(() => ({ persisted: false }));
+    storageMutation = operation;
+    return operation;
+  }
+
   async function discardRun(chromeApi, runId) {
     const operation = storageMutation.catch(() => {}).then(async () => {
       const storage = chromeApi.storage.local;
@@ -199,6 +236,7 @@
     fingerprintBlock,
     loadDiagnostics,
     persistRun,
+    persistRunIdempotent,
     serializeProblemBlock,
   };
   globalScope.ChromeAiTranslatorDiagnostics = api;

@@ -2191,6 +2191,16 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           return;
         }
         if (msg?.type === 'RECORD_INLINE_LOCAL_DIAGNOSTIC') {
+          const diagnosticBatchId = String(msg.diagnosticBatchId || '');
+          const senderTabId = sender?.tab?.id;
+          const operationId = msg.operationId;
+          if (
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(diagnosticBatchId) ||
+            !Number.isInteger(senderTabId) || !Number.isInteger(operationId)
+          ) {
+            sendResponse({ ok: false });
+            return;
+          }
           const allowedCodes = new Set([
             'runtime.unsupported_block',
             'runtime.block_too_large',
@@ -2249,10 +2259,14 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
             if (entryCost > INLINE_BLOCK_MAX_RECORD_COST) continue;
             if (localDiagnosticPayloadCost + entryCost > INLINE_BLOCK_MAX_SESSION_COST) continue;
             localDiagnosticPayloadCost += entryCost;
+            const evidence = {};
+            for (const key of ['recordCost', 'sessionCost', 'limit']) {
+              if (Number.isFinite(entry.evidence?.[key])) evidence[key] = Math.max(0, Number(entry.evidence[key]));
+            }
             diagnostics.push({
               code: entry.code,
               ...(template && contract ? { template, contract } : {}),
-              evidence: entry.evidence || {},
+              evidence,
             });
           }
           if (!diagnostics.length) {
@@ -2264,7 +2278,19 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
             msg.settingsSnapshot || null
           );
           const startedAt = Date.now();
-          const runId = createRuntimeDiagnosticId(startedAt);
+          const runId = `local-${senderTabId}-${operationId}-${diagnosticBatchId}`.slice(0, 80);
+          const extensionVersion = chrome.runtime?.getManifest?.().version || '';
+          const targetLanguageCode = getTargetLanguageCode(settings.targetLanguage);
+          const idempotencyFingerprint = (await translationDiagnostics.fingerprintBlock(
+            chrome,
+            JSON.stringify({
+              diagnostics,
+              model: settings.model,
+              targetLanguageCode,
+              extensionVersion,
+            }),
+            {}
+          )).sourceFingerprint;
           const blocks = await Promise.all(diagnostics.slice(0, 100).map(async (entry, index) => {
             let fingerprints = {};
             if (typeof entry.template === 'string' && entry.contract) {
@@ -2290,13 +2316,14 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
               }],
             };
           }));
-          const persistence = await translationDiagnostics.persistRun(chrome, {
+          const persistence = await translationDiagnostics.persistRunIdempotent(chrome, {
             runId,
             startedAt: new Date(startedAt).toISOString(),
             finishedAt: new Date().toISOString(),
-            extensionVersion: chrome.runtime?.getManifest?.().version || '',
+            extensionVersion,
             model: settings.model,
-            targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+            targetLanguageCode,
+            idempotencyFingerprint,
             outcome: 'failed',
             summary: { requested: diagnostics.length, failed: diagnostics.length },
             blocks,

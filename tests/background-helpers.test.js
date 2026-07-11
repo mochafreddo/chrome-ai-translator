@@ -1330,6 +1330,8 @@ exports.tests = [
         const localResponses = [];
         messageListener({
           type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+          diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
+          operationId: 123,
           settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
           diagnostics: [
             {
@@ -1366,6 +1368,44 @@ exports.tests = [
         assert.equal(localRun.blocks[0].sourceFingerprint, expectedFingerprints.sourceFingerprint);
         assert.equal(localRun.blocks[0].contractFingerprint, expectedFingerprints.contractFingerprint);
         assert.equal(JSON.stringify(localRun).includes(record.template), false);
+
+        const duplicateResponses = [];
+        messageListener({
+          type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+          diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
+          operationId: 123,
+          settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
+          diagnostics: [{
+            code: 'runtime.block_too_large',
+            template: record.template,
+            contract: record.contract,
+            evidence: { recordCost: 13000, limit: 12000 },
+          }],
+        }, { tab: { id: 7 } }, (response) => duplicateResponses.push(response));
+        for (let index = 0; index < 10 && !duplicateResponses.length; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        assert.deepEqual(duplicateResponses, [{ ok: true }]);
+        const localRunId = 'local-7-123-11111111-1111-4111-8111-111111111111';
+        assert.equal(stored['inlineDiagnostics:v2:index'].filter((id) => id === localRunId).length, 1);
+        assert.equal(Object.keys(stored).filter((key) => key === `inlineDiagnostics:v2:run:${localRunId}`).length, 1);
+
+        const conflictResponses = [];
+        messageListener({
+          type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+          diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
+          operationId: 123,
+          settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
+          diagnostics: [{
+            code: 'runtime.session_too_large',
+            evidence: { sessionCost: 60000, limit: 60000 },
+          }],
+        }, { tab: { id: 7 } }, (response) => conflictResponses.push(response));
+        for (let index = 0; index < 10 && !conflictResponses.length; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        assert.deepEqual(conflictResponses, [{ ok: false }]);
+        assert.equal(stored[`inlineDiagnostics:v2:run:${localRunId}`].blocks[0].terminalCode, 'runtime.block_too_large');
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;

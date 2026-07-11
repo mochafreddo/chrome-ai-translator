@@ -106,6 +106,53 @@ exports.tests = [
     },
   },
   {
+    name: 'repairs idempotent run indexes and replaces corrupt records',
+    async fn() {
+      const fingerprint = `hmac-sha256:${'A'.repeat(43)}`;
+      const runKey = 'inlineDiagnostics:v2:run:local-test';
+      const stored = {
+        'inlineDiagnostics:v2:index': [],
+        [runKey]: {
+          runId: 'wrong-run',
+          idempotencyFingerprint: fingerprint,
+          outcome: 'interrupted',
+          summary: { failed: 999 },
+        },
+      };
+      const chromeApi = { storage: { local: {
+        async get() { return { ...stored }; },
+        async set(values) { Object.assign(stored, values); },
+        async remove(keys) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
+        },
+      } } };
+      const run = {
+        runId: 'local-test',
+        idempotencyFingerprint: fingerprint,
+        outcome: 'failed',
+        summary: { requested: 1, failed: 1 },
+        blocks: [],
+      };
+
+      assert.deepEqual(await diagnostics.persistRunIdempotent(chromeApi, run), {
+        persisted: true,
+        duplicate: true,
+      });
+      assert.deepEqual(stored['inlineDiagnostics:v2:index'], ['local-test']);
+      assert.equal(stored[runKey].runId, 'local-test');
+      assert.equal(stored[runKey].outcome, 'failed');
+      assert.equal(stored[runKey].summary.failed, 1);
+
+      stored[runKey] = { runId: 'local-test', idempotencyFingerprint: 'corrupt', outcome: 'interrupted' };
+      assert.deepEqual(await diagnostics.persistRunIdempotent(chromeApi, run), {
+        persisted: true,
+        duplicate: false,
+      });
+      assert.equal(stored[runKey].idempotencyFingerprint, fingerprint);
+      assert.equal(stored[runKey].outcome, 'failed');
+    },
+  },
+  {
     name: 'preserves changed-only run outcome and summary',
     fn() {
       const exported = diagnostics.exportDiagnostics([{
