@@ -2812,6 +2812,34 @@ exports.tests = [
     },
   },
   {
+    name: 'selects the most recently completed unsuperseded terminal reason',
+    fn() {
+      const records = [
+        {
+          state: 'translated_with_warning',
+          terminalCode: 'quality.english_residue',
+          terminalSequence: 3,
+        },
+        {
+          state: 'failed',
+          terminalCode: 'structure.token_missing',
+          terminalSequence: 2,
+        },
+        {
+          state: 'failed',
+          terminalCode: 'protocol.invalid_json',
+          terminalSequence: 4,
+          supersededByRetryId: 'retry-1',
+        },
+      ];
+
+      assert.match(
+        helpers.getInlineTerminalReason(records),
+        /Partial translation: Some source-language prose remained/
+      );
+    },
+  },
+  {
     name: 'builds inline menu model from status and target language',
     fn() {
       assert.deepEqual(
@@ -3297,6 +3325,7 @@ exports.tests = [
 
       assert.equal(record.state, 'failed');
       assert.equal(record.errorCode, 'unsupported_block');
+      assert.equal(record.terminalSequence, 1);
       assert.equal(store.queue.length, 0);
     },
   },
@@ -3410,6 +3439,7 @@ exports.tests = [
       );
       assert.equal(record.state, 'failed');
       assert.equal(record.errorCode, 'session_too_large');
+      assert.equal(record.terminalSequence, 1);
     },
   },
   {
@@ -3661,6 +3691,7 @@ exports.tests = [
         restorableRecords: [],
       };
       helpers.stopInlineViewportTranslation(state);
+      record.terminalSequence = 9;
       const secondStore = helpers.createInlineViewportStore(22, cache, settings);
 
       helpers.seedInlineViewportStoreWithRestorableRecords(
@@ -3671,6 +3702,11 @@ exports.tests = [
       assert.equal(secondStore.byBlock.get(block), record);
       assert.deepEqual(secondStore.records, [record]);
       assert.equal(record.state, 'translated');
+      assert.equal(secondStore.nextTerminalSequence, 9);
+      const laterFailure = { state: 'translating', operationId: 22 };
+      secondStore.records.push(laterFailure);
+      helpers.markInlineViewportBatchFailed([laterFailure], 22, secondStore);
+      assert.equal(laterFailure.terminalSequence, 10);
       assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
     },
   },
