@@ -13,6 +13,7 @@ var INLINE_TRANSLATION_AUTH_MS = 5 * 60 * 1000;
 var INLINE_VIEWPORT_BATCH_MAX_CHARS = 2000;
 var INLINE_BLOCK_BATCH_MAX_CHARS = 12000;
 var INLINE_BLOCK_SESSION_MAX_CHARS = 60000;
+var INLINE_BLOCK_MAX_DIAGNOSTIC_CODE_CHARS = 80;
 var INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;
 var INLINE_VIEWPORT_SCAN_DEBOUNCE_MS = 250;
 var INLINE_VIEWPORT_PREFETCH_RATIO = 0.5;
@@ -585,6 +586,17 @@ function getInlineBlockRecordCost(record) {
   );
 }
 
+function getInlineBlockReservedRecordCost(record) {
+  const repairRecord = {
+    ...record,
+    repair: {
+      attempt: 1,
+      previousErrorCode: 'x'.repeat(INLINE_BLOCK_MAX_DIAGNOSTIC_CODE_CHARS),
+    },
+  };
+  return getInlineBlockRecordCost(record) + getInlineBlockRecordCost(repairRecord);
+}
+
 function createInlineViewportBlockRecord(store, blockElement, values = {}) {
   const record = {
     id: `b${store.nextBlockId + 1}`,
@@ -718,7 +730,7 @@ function takeInlineViewportBlockBatch(
       record.errorCode = 'block_too_large';
       continue;
     }
-    const reservedCost = cost * 2;
+    const reservedCost = getInlineBlockReservedRecordCost(record);
     if (store.sessionRecordCost + reservedCost > INLINE_BLOCK_SESSION_MAX_CHARS) {
       store.queue.shift();
       record.state = 'failed';
@@ -2312,6 +2324,7 @@ if (typeof module !== 'undefined' && module.exports) {
     createInlineViewportStore,
     findInlineSemanticBlock,
     getInlineBlockRecordCost,
+    getInlineBlockReservedRecordCost,
     queueInlineViewportBlock,
     queueInlineViewportBlockRetry,
     queueInlineViewportRecord,

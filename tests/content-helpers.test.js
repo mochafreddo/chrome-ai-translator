@@ -3296,15 +3296,29 @@ exports.tests = [
       assert.equal(store.inFlight, 1);
       assert.equal(
         store.sessionRecordCost,
-        2 * (
-          helpers.getInlineBlockRecordCost(first) +
-          helpers.getInlineBlockRecordCost(second)
-        )
+        helpers.getInlineBlockReservedRecordCost(first) +
+          helpers.getInlineBlockReservedRecordCost(second)
       );
+      for (const record of [first, second]) {
+        const actualInitialAndRepairCost =
+          helpers.getInlineBlockRecordCost(record) +
+          helpers.getInlineBlockRecordCost({
+            ...record,
+            repair: {
+              attempt: 1,
+              previousErrorCode: 'quality.target_language_uncertain',
+            },
+          });
+        assert.equal(
+          actualInitialAndRepairCost <=
+            helpers.getInlineBlockReservedRecordCost(record),
+          true
+        );
+      }
     },
   },
   {
-    name: 'caps semantic block batches at the background record limit',
+    name: 'caps semantic block batches at record and reserved session limits',
     fn() {
       const store = helpers.createInlineViewportStore(14);
       store.queue = Array.from({ length: 501 }, (_, index) => ({
@@ -3319,10 +3333,13 @@ exports.tests = [
 
       const batch = helpers.takeInlineViewportBlockBatch(store, 12000);
 
-      assert.equal(batch.length, 500);
-      assert.equal(store.queue.length, 1);
-      assert.equal(store.queue[0].id, 'b501');
-      assert.equal(store.queue[0].state, 'queued');
+      assert.equal(batch.length <= 500, true);
+      assert.equal(store.sessionRecordCost <= 60000, true);
+      assert.equal(
+        store.records.filter((record) => record.state === 'failed').length,
+        501 - batch.length
+      );
+      assert.equal(store.queue.length, 0);
     },
   },
   {
