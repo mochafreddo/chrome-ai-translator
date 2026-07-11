@@ -19,11 +19,16 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorPolicy) {
     importScripts('translation-policy.js');
   }
+  if (!globalThis.ChromeAiTranslatorDiagnostics) {
+    importScripts('translation-diagnostics.js');
+  }
 }
 const translationValidation =
   globalThis.ChromeAiTranslatorValidation || require('./translation-validation.js');
 const translationPolicy =
   globalThis.ChromeAiTranslatorPolicy || require('./translation-policy.js');
+const translationDiagnostics =
+  globalThis.ChromeAiTranslatorDiagnostics || require('./translation-diagnostics.js');
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
@@ -1540,6 +1545,46 @@ async function translateVisibleBlockBatch(
         // Removed with the content-side contract migration in Task 4.
         ok: apply,
       };
+    });
+    const runId = `run-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
+    const problemResults = results.filter(
+      (result) => result.attemptCount === 2 || result.disposition !== 'apply'
+    );
+    const diagnosticBlocks = await Promise.all(problemResults.map(async (result) => {
+      const record = normalized.find((candidate) => candidate.id === result.id);
+      const fingerprints = await translationDiagnostics.fingerprintBlock(
+        chrome,
+        record?.template,
+        record?.contract
+      );
+      return {
+        diagnosticId: `${runId}/${result.id}`,
+        ...fingerprints,
+        terminalCode: result.terminalCode,
+        terminalDisposition: result.disposition,
+        attemptCount: result.attemptCount,
+      };
+    }));
+    await translationDiagnostics.persistRun(chrome, {
+      runId,
+      startedAt: new Date(startedAtMs).toISOString(),
+      finishedAt: new Date().toISOString(),
+      extensionVersion: chrome.runtime?.getManifest?.().version || '',
+      model: settings.model,
+      targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+      outcome: results.some((result) => result.disposition === 'reject')
+        ? 'failed'
+        : results.some((result) => result.disposition === 'apply_with_warning')
+          ? 'partial'
+          : 'done',
+      summary: {
+        requested: results.length,
+        translated: results.filter((result) => result.disposition === 'apply').length,
+        translatedWithWarning: results.filter((result) => result.disposition === 'apply_with_warning').length,
+        failed: results.filter((result) => result.disposition === 'reject').length,
+        repairs: results.filter((result) => result.attemptCount === 2).length,
+      },
+      blocks: diagnosticBlocks,
     });
     if (logEntry.chunks[0]) {
       logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;

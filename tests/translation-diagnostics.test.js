@@ -1,2 +1,52 @@
+const assert = require('node:assert/strict');
+const diagnostics = require('../extension/translation-diagnostics.js');
+
 exports.name = 'translation diagnostics';
-exports.tests = [];
+exports.tests = [
+  {
+    name: 'allowlists problem fields and removes sensitive values',
+    fn() {
+      const block = diagnostics.serializeProblemBlock({
+        diagnosticId: 'd1',
+        terminalCode: 'structure.token_missing',
+        terminalDisposition: 'reject',
+        attemptCount: 2,
+        structure: { status: 'unsafe', codes: ['structure.token_missing'] },
+        quality: { status: 'uncertain', codes: [], evidence: { sourceChars: 10 } },
+        source: 'source prose', template: 'translated prose',
+        url: 'https://example.com/private', apiKey: 'sk-test-secret',
+      });
+      const json = JSON.stringify(block);
+      for (const secret of ['source prose', 'translated prose', 'https://example.com', 'sk-test']) {
+        assert.equal(json.includes(secret), false);
+      }
+      assert.equal(block.terminalCode, 'structure.token_missing');
+    },
+  },
+  {
+    name: 'creates installation-scoped stable HMAC fingerprints',
+    async fn() {
+      const a = new Uint8Array(32).fill(1);
+      const b = new Uint8Array(32).fill(2);
+      assert.equal(await diagnostics.fingerprint(a, 'same'), await diagnostics.fingerprint(a, 'same'));
+      assert.notEqual(await diagnostics.fingerprint(a, 'same'), await diagnostics.fingerprint(b, 'same'));
+    },
+  },
+  {
+    name: 'bounds runs and problem blocks',
+    fn() {
+      const runs = Array.from({ length: 21 }, (_, index) => ({
+        runId: `r${index}`,
+        blocks: Array.from({ length: 101 }, (_, block) => ({
+          diagnosticId: `d${block}`,
+          terminalCode: 'quality.english_residue',
+          terminalDisposition: 'apply_with_warning',
+          attemptCount: 2,
+        })),
+      }));
+      const exported = diagnostics.exportDiagnostics(runs);
+      assert.equal(exported.runs.length, 20);
+      assert.equal(exported.runs[0].blocks.length, 100);
+    },
+  },
+];
