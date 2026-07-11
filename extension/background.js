@@ -60,6 +60,11 @@ const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
 const INLINE_LOG_LIMIT = 20;
 const INLINE_TRANSLATION_MAX_CONCURRENCY = 3;
+const INLINE_RUNTIME_CORRELATION_TTL_MS = 5 * 60 * 1000;
+const INLINE_RUNTIME_CORRELATION_LIMIT = 1000;
+const INLINE_RUNTIME_CORRELATION_STORAGE_KEY = 'inlineRuntimeCorrelations:v1';
+const inlineRuntimeCorrelations = new Map();
+let inlineRuntimeCorrelationMutation = Promise.resolve();
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 const INLINE_VISIBLE_BATCH_MAX_OUTPUT_TOKENS = 2048;
 const MIN_MAX_OUTPUT_TOKENS = 256;
@@ -1431,6 +1436,90 @@ async function translateVisibleTextBatch(records, settingsSnapshot = null) {
   }
 }
 
+async function mutateInlineRuntimeCorrelations(mutator) {
+  const operation = inlineRuntimeCorrelationMutation.catch(() => {}).then(async () => {
+    const session = globalThis.chrome?.storage?.session;
+    const stored = session
+      ? (await session.get([INLINE_RUNTIME_CORRELATION_STORAGE_KEY]))[INLINE_RUNTIME_CORRELATION_STORAGE_KEY] || {}
+      : Object.fromEntries(inlineRuntimeCorrelations);
+    const result = await mutator(stored);
+    if (session) await session.set({ [INLINE_RUNTIME_CORRELATION_STORAGE_KEY]: stored });
+    else {
+      inlineRuntimeCorrelations.clear();
+      for (const [token, entry] of Object.entries(stored)) inlineRuntimeCorrelations.set(token, entry);
+    }
+    return result;
+  });
+  inlineRuntimeCorrelationMutation = operation;
+  return operation;
+}
+
+async function issueInlineRuntimeCorrelations(items, context = {}) {
+  return mutateInlineRuntimeCorrelations((entries) => {
+    const now = Date.now();
+    for (const [token, entry] of Object.entries(entries)) {
+      if (entry.expiresAt <= now) delete entries[token];
+    }
+    if (Object.keys(entries).length + items.length > INLINE_RUNTIME_CORRELATION_LIMIT) {
+      throw new Error('Inline runtime correlation capacity exceeded');
+    }
+    const issued = new Map();
+    for (const { id, metadata } of items) {
+      const token = globalThis.crypto?.randomUUID?.()
+        || `${now}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+      entries[token] = {
+        ...metadata,
+        tabId: Number.isInteger(context.tabId) ? context.tabId : null,
+        operationId: context.operationId ?? null,
+        expiresAt: now + INLINE_RUNTIME_CORRELATION_TTL_MS,
+      };
+      issued.set(id, token);
+    }
+    return issued;
+  });
+}
+
+async function consumeInlineRuntimeCorrelations(outcomes, releaseTokens, context = {}) {
+  return mutateInlineRuntimeCorrelations((entries) => {
+    const now = Date.now();
+    const resolved = [];
+    const tokens = new Set();
+    const validated = [];
+    const requested = [
+      ...outcomes.map((outcome) => ({ token: outcome?.correlationToken, outcome })),
+      ...releaseTokens.map((token) => ({ token, outcome: null })),
+    ];
+    for (const item of requested) {
+      const token = String(item.token || '');
+      const entry = entries[token];
+      if (
+        !token || tokens.has(token) || !entry || entry.expiresAt <= now || entry.reservedAt ||
+        entry.tabId !== (Number.isInteger(context.tabId) ? context.tabId : null) ||
+        entry.operationId !== (context.operationId ?? null)
+      ) return null;
+      tokens.add(token);
+      validated.push({ token, outcome: item.outcome, entry });
+    }
+    if (validated.some(({ entry }) => entry.runId !== validated[0].entry.runId)) return null;
+    for (const item of validated) {
+      if (item.outcome) {
+        item.entry.reservedAt = now;
+        resolved.push(item);
+      } else delete entries[item.token];
+    }
+    return resolved;
+  });
+}
+
+async function finalizeInlineRuntimeCorrelations(resolved, persisted) {
+  return mutateInlineRuntimeCorrelations((entries) => {
+    for (const { token } of resolved) {
+      if (persisted) delete entries[token];
+      else if (entries[token]) delete entries[token].reservedAt;
+    }
+  });
+}
+
 async function translateVisibleBlockBatch(
   records,
   settingsSnapshot = null,
@@ -1619,20 +1708,34 @@ async function translateVisibleBlockBatch(
       if (!persistence.persisted) await translationDiagnostics.discardRun(chrome, runId);
       return persistence;
     }
+    const correlationsById = new Map();
     try {
-      const problemResults = results.filter(
+      const correlationEntries = await Promise.all(results.map(async (result) => {
+        const record = normalized.find((candidate) => candidate.id === result.id);
+        const fingerprints = await translationDiagnostics.fingerprintBlock(
+          chrome,
+          record?.template,
+          record?.contract
+        );
+        return [result.id, {
+          runId,
+          diagnosticId: `${runId}/${result.id}`,
+          ...fingerprints,
+          extensionVersion: chrome.runtime?.getManifest?.().version || '',
+          model: settings.model,
+          targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+        }];
+      }));
+      for (const [id, correlation] of correlationEntries) correlationsById.set(id, correlation);
+    const problemResults = results.filter(
       (result) => result.attemptCount === 2 || result.disposition !== 'apply'
     );
-    const diagnosticBlocks = await Promise.all(problemResults.map(async (result) => {
-      const record = normalized.find((candidate) => candidate.id === result.id);
-      const fingerprints = await translationDiagnostics.fingerprintBlock(
-        chrome,
-        record?.template,
-        record?.contract
-      );
+    const diagnosticBlocks = problemResults.map((result) => {
+      const correlation = correlationsById.get(result.id) || {};
       return {
-        diagnosticId: `${runId}/${result.id}`,
-        ...fingerprints,
+        diagnosticId: correlation.diagnosticId,
+        sourceFingerprint: correlation.sourceFingerprint,
+        contractFingerprint: correlation.contractFingerprint,
         terminalCode: result.terminalCode,
         terminalDisposition: result.disposition,
         attemptCount: result.attemptCount,
@@ -1640,7 +1743,7 @@ async function translateVisibleBlockBatch(
         quality: result.diagnostic.quality,
         timeline: result.diagnostic.timeline,
       };
-    }));
+    });
       const persistence = await translationDiagnostics.persistRun(chrome, {
       runId,
       startedAt: new Date(startedAtMs).toISOString(),
@@ -1667,8 +1770,24 @@ async function translateVisibleBlockBatch(
       ).length;
     }
     completed = true;
+    let issuedTokens = new Map();
+    if (diagnosticsPersisted) {
+      try {
+        issuedTokens = await issueInlineRuntimeCorrelations(
+          results
+            .filter((result) => correlationsById.has(result.id))
+            .map((result) => ({ id: result.id, metadata: correlationsById.get(result.id) })),
+          options.correlationContext
+        );
+      } catch {
+        diagnosticsPersisted = false;
+      }
+    }
     return results.map(({ diagnostic, ...result }) => ({
       ...result,
+      ...(issuedTokens.has(result.id)
+        ? { correlationToken: issuedTokens.get(result.id) }
+        : {}),
       ...(!diagnosticsPersisted ? { diagnosticsUnavailable: true } : {}),
     }));
   } catch (error) {
@@ -1972,6 +2091,10 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
             {
               validateTranslationCompleteness:
                 msg.validateTranslationCompleteness === true,
+              correlationContext: {
+                tabId: sender?.tab?.id,
+                operationId: msg.operationId ?? null,
+              },
             }
           );
           sendResponse({ ok: true, results });
@@ -1979,24 +2102,45 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         }
         if (msg?.type === 'RECORD_INLINE_RUNTIME_DIAGNOSTIC') {
           const outcomes = Array.isArray(msg.outcomes) ? msg.outcomes.slice(0, 100) : [];
+          const releaseTokens = Array.isArray(msg.releaseTokens) ? msg.releaseTokens.slice(0, 500) : [];
           const startedAt = Date.now();
           const runtimeRunId = createRuntimeDiagnosticId(startedAt);
           const changedCount = outcomes.filter(
             (outcome) => outcome?.code === 'runtime.page_changed'
           ).length;
           const failedCount = outcomes.length - changedCount;
+          const resolvedOutcomes = await consumeInlineRuntimeCorrelations(outcomes, releaseTokens, {
+            tabId: sender?.tab?.id,
+            operationId: msg.operationId ?? null,
+          });
+          if (!resolvedOutcomes) {
+            sendResponse({ ok: false });
+            return;
+          }
+          if (!resolvedOutcomes.length) {
+            sendResponse({ ok: true });
+            return;
+          }
+          const firstEntry = resolvedOutcomes[0].entry;
           const persistence = await translationDiagnostics.persistRun(chrome, {
             runId: runtimeRunId,
             startedAt: new Date(startedAt).toISOString(),
             finishedAt: new Date().toISOString(),
+            extensionVersion: firstEntry.extensionVersion,
+            model: firstEntry.model,
+            targetLanguageCode: firstEntry.targetLanguageCode,
             outcome: failedCount > 0 ? 'failed' : 'changed',
             summary: {
               requested: outcomes.length,
               failed: failedCount,
               changed: changedCount,
             },
-            blocks: outcomes.map((outcome, index) => ({
+            blocks: resolvedOutcomes.map(({ outcome, entry }, index) => ({
               diagnosticId: `${runtimeRunId}/${index}`,
+              parentRunId: entry.runId,
+              parentDiagnosticId: entry.diagnosticId,
+              sourceFingerprint: entry.sourceFingerprint,
+              contractFingerprint: entry.contractFingerprint,
               terminalCode: outcome?.code,
               terminalDisposition: outcome?.code === 'runtime.page_changed' ? 'changed' : 'reject',
               attemptCount: 1,
@@ -2007,6 +2151,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
               }],
             })),
           });
+          await finalizeInlineRuntimeCorrelations(resolvedOutcomes, persistence.persisted);
           sendResponse({ ok: persistence.persisted });
           return;
         }

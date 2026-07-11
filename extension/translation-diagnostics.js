@@ -37,6 +37,8 @@
       : 'reject';
     return {
       diagnosticId: String(block.diagnosticId || '').slice(0, 80),
+      parentRunId: String(block.parentRunId || '').slice(0, 80),
+      parentDiagnosticId: String(block.parentDiagnosticId || '').slice(0, 80),
       sourceFingerprint: String(block.sourceFingerprint || '').slice(0, 100),
       contractFingerprint: String(block.contractFingerprint || '').slice(0, 100),
       terminalCode:
@@ -78,7 +80,7 @@
         runId: String(run.runId || '').slice(0, 80),
         startedAt: String(run.startedAt || ''),
         finishedAt: String(run.finishedAt || ''),
-        extensionVersion: String(run.extensionVersion || ''),
+        extensionVersion: String(run.extensionVersion || '').slice(0, 40),
         model: String(run.model || '').slice(0, 80),
         targetLanguageCode: String(run.targetLanguageCode || '').slice(0, 16),
         outcome: ['done', 'partial', 'failed', 'changed', 'interrupted'].includes(run.outcome)

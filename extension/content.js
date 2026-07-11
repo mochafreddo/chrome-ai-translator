@@ -853,6 +853,7 @@ function applyInlineViewportBlockResults(
       summary.failed += 1;
       continue;
     }
+    record.correlationToken = result.correlationToken || null;
     if (result.disposition === 'reject' || typeof result.template !== 'string') {
       if (!inlineBlockCodec.matchesOriginalOwnership(record.snapshot)) {
         queuePageRetry(record);
@@ -2133,11 +2134,18 @@ async function drainInlineViewportQueue() {
             code: record.state === 'stale'
               ? 'runtime.page_changed'
               : record.terminalCode || record.errorCode || 'runtime.apply_failed',
+            correlationToken: record.correlationToken,
           }));
-        if (runtimeOutcomes.length) {
+        const runtimeTokens = new Set(runtimeOutcomes.map((outcome) => outcome.correlationToken));
+        const releaseTokens = batch
+          .map((record) => record.correlationToken)
+          .filter((token) => token && !runtimeTokens.has(token));
+        if (runtimeOutcomes.length || releaseTokens.length) {
           chrome.runtime.sendMessage({
             type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+            operationId,
             outcomes: runtimeOutcomes,
+            releaseTokens,
           }).then((diagnosticResponse) => {
             if (diagnosticResponse?.ok !== true) {
               store.diagnosticsUnavailable = true;

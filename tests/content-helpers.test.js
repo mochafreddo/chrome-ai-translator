@@ -3547,13 +3547,19 @@ exports.tests = [
       try {
         helpers.applyInlineViewportBlockResults(
           batch,
-          [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
+          [{
+            id: record.id,
+            disposition: 'apply',
+            template: getReasoningTranslatedTemplate(record),
+            correlationToken: 'opaque-token',
+          }],
           191,
           store
         );
         assert.equal(record.state, 'failed');
         assert.equal(record.errorCode, 'runtime.apply_failed');
         assert.equal(record.terminalCode, undefined);
+        assert.equal(record.correlationToken, 'opaque-token');
       } finally {
         codec.applyPatchPlan = previousApply;
       }

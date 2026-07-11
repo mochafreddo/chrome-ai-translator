@@ -378,6 +378,10 @@ exports.tests = [
       let requestCount = 0;
       global.chrome = {
         storage: {
+          session: {
+            async get() { return {}; },
+            async set() { throw new Error('session unavailable'); },
+          },
           local: {
             async get(key) {
               if (key === 'settings' || key?.includes?.('settings')) {
@@ -416,6 +420,8 @@ exports.tests = [
         const results = await helpers.translateVisibleBlockBatch([record]);
         const input = JSON.parse(requestBody.input);
 
+        assert.equal(results[0].correlationToken, undefined);
+
         assert.deepEqual(results, [{
           id: record.id,
           disposition: 'apply_with_warning',
@@ -423,6 +429,7 @@ exports.tests = [
           terminalCode: 'quality.english_residue',
           messageKey: 'partial_translation_applied',
           attemptCount: 2,
+          diagnosticsUnavailable: true,
         }]);
         assert.equal(requestCount, 2);
         assert.equal(input.records[0].contract, undefined);
@@ -1132,6 +1139,8 @@ exports.tests = [
       const originalModule = require.cache[modulePath];
       const record = createBlockApiRecord();
       let messageListener = null;
+      const stored = {};
+      const sessionStored = {};
 
       global.fetch = async () => ({
         ok: true,
@@ -1165,9 +1174,20 @@ exports.tests = [
         },
         scripting: { async executeScript() {} },
         storage: {
+          session: {
+            async get(keys) {
+              const result = {};
+              for (const key of Array.isArray(keys) ? keys : [keys]) {
+                if (Object.hasOwn(sessionStored, key)) result[key] = sessionStored[key];
+              }
+              return result;
+            },
+            async set(values) { Object.assign(sessionStored, values); },
+          },
           local: {
-            async get() {
-              return {
+            async get(keys) {
+              if (keys === null) return { ...stored };
+              if (keys === 'settings' || keys?.includes?.('settings')) return {
                 settings: {
                   apiKey: 'sk-test',
                   model: 'gpt-5.4-mini',
@@ -1176,8 +1196,16 @@ exports.tests = [
                   tone: 'technical',
                 },
               };
+              const result = {};
+              for (const key of Array.isArray(keys) ? keys : [keys]) {
+                if (Object.hasOwn(stored, key)) result[key] = stored[key];
+              }
+              return result;
             },
-            async set() {},
+            async set(values) { Object.assign(stored, values); },
+            async remove(keys) {
+              for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
+            },
           },
         },
       };
@@ -1189,28 +1217,67 @@ exports.tests = [
         messageListener(
           {
             type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+            operationId: 42,
             records: [record],
           },
-          {},
+          { tab: { id: 7 } },
           (response) => responses.push(response)
         );
         for (let index = 0; index < 10 && !responses.length; index += 1) {
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
 
-        assert.deepEqual(responses, [
-          {
-            ok: true,
-            results: [{
-              id: record.id,
-              disposition: 'apply_with_warning',
-              template: record.template,
-              terminalCode: 'quality.english_residue',
-              messageKey: 'partial_translation_applied',
-              attemptCount: 2,
-            }],
-          },
-        ]);
+        assert.equal(responses[0].ok, true);
+        const translated = responses[0].results[0];
+        assert.equal(translated.id, record.id);
+        assert.equal(typeof translated.correlationToken, 'string');
+
+        // Simulate an MV3 service-worker restart between translation and DOM outcome.
+        delete require.cache[modulePath];
+        messageListener = null;
+        require('../extension/background.js');
+        assert.equal(typeof messageListener, 'function');
+
+        const runtimeResponses = [];
+        messageListener({
+          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+          operationId: 42,
+          outcomes: [{
+            code: 'runtime.apply_failed',
+            correlationToken: translated.correlationToken,
+            diagnosticCorrelation: {
+              sourceFingerprint: 'must not persist forged fingerprint',
+              model: 'must not persist forged model',
+              extensionVersion: 'must not persist forged version',
+            },
+            source: 'must not persist',
+            template: 'must not persist',
+          }],
+        }, { tab: { id: 7 } }, (response) => runtimeResponses.push(response));
+        for (let index = 0; index < 10 && !runtimeResponses.length; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        assert.deepEqual(runtimeResponses, [{ ok: true }]);
+        const runtimeRun = Object.values(stored).find((value) =>
+          value?.blocks?.[0]?.terminalCode === 'runtime.apply_failed'
+        );
+        assert.equal(runtimeRun.model, 'gpt-5.4-mini');
+        assert.equal(runtimeRun.targetLanguageCode, 'ko');
+        assert.match(runtimeRun.blocks[0].parentRunId, /^run-/);
+        assert.match(runtimeRun.blocks[0].parentDiagnosticId, /^run-.*\/b1$/);
+        assert.match(runtimeRun.blocks[0].sourceFingerprint, /^hmac-sha256:/);
+        assert.equal(JSON.stringify(runtimeRun).includes('must not persist'), false);
+
+        const replayResponses = [];
+        messageListener({
+          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+          operationId: 42,
+          outcomes: [{ code: 'runtime.apply_failed', correlationToken: translated.correlationToken }],
+        }, { tab: { id: 7 } }, (response) => replayResponses.push(response));
+        for (let index = 0; index < 10 && !replayResponses.length; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        assert.deepEqual(replayResponses, [{ ok: false }]);
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;
