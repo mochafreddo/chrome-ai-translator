@@ -658,6 +658,9 @@ function cacheInlineViewportBlockTranslation(store, record) {
   store.translationByOriginal.set(record.cacheKey, {
     codecVersion: inlineBlockCodec.CODEC_VERSION,
     translatedTemplate: record.translatedTemplate,
+    state: record.state,
+    terminalCode: record.terminalCode || null,
+    attemptCount: Math.min(2, Math.max(1, Number(record.attemptCount) || 1)),
   });
   return true;
 }
@@ -677,7 +680,13 @@ function applyCachedInlineViewportBlock(store, record) {
   if (!plan.ok) return false;
   const applied = inlineBlockCodec.applyPatchPlan(record.snapshot, plan);
   if (!applied.ok) return false;
-  record.state = 'translated';
+  record.state = cached.state === 'translated_with_warning'
+    ? 'translated_with_warning'
+    : 'translated';
+  record.terminalCode = record.state === 'translated_with_warning'
+    ? cached.terminalCode || 'quality.target_language_uncertain'
+    : null;
+  record.attemptCount = Math.min(2, Math.max(1, Number(cached.attemptCount) || 1));
   record.translatedTemplate = cached.translatedTemplate;
   record.translation = cached.translatedTemplate;
   return true;

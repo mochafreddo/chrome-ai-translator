@@ -77,7 +77,7 @@
         extensionVersion: String(run.extensionVersion || ''),
         model: String(run.model || '').slice(0, 80),
         targetLanguageCode: String(run.targetLanguageCode || '').slice(0, 16),
-        outcome: ['done', 'partial', 'failed', 'interrupted'].includes(run.outcome)
+        outcome: ['done', 'partial', 'failed', 'changed', 'interrupted'].includes(run.outcome)
           ? run.outcome
           : 'interrupted',
         summary: {
@@ -85,6 +85,7 @@
           translated: Math.max(0, Number(run.summary?.translated) || 0),
           translatedWithWarning: Math.max(0, Number(run.summary?.translatedWithWarning) || 0),
           failed: Math.max(0, Number(run.summary?.failed) || 0),
+          changed: Math.max(0, Number(run.summary?.changed) || 0),
           repairs: Math.max(0, Number(run.summary?.repairs) || 0),
         },
         blocks: (run.blocks || []).slice(0, MAX_PROBLEM_BLOCKS).map(serializeProblemBlock),

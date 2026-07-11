@@ -1356,4 +1356,13 @@ exports.tests = [
       }
     },
   },
+  {
+    name: 'creates collision-resistant runtime diagnostic ids within one millisecond',
+    fn() {
+      const first = helpers.createRuntimeDiagnosticId(1234);
+      const second = helpers.createRuntimeDiagnosticId(1234);
+      assert.notEqual(first, second);
+      assert.match(first, /^runtime-1234-/);
+    },
+  },
 ];

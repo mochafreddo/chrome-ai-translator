@@ -84,7 +84,7 @@ function formatDiagnosticRun(run) {
   const codes = (run?.blocks || []).map((block) => block.terminalCode).filter(Boolean);
   return [
     `${run?.startedAt || '(unknown time)'} ${run?.outcome || 'interrupted'} model=${run?.model || '(unset)'}`,
-    `  Translated ${summary.translated || 0} · Partial ${summary.translatedWithWarning || 0} · Failed ${summary.failed || 0} · Repairs ${summary.repairs || 0}`,
+    `  Translated ${summary.translated || 0} · Partial ${summary.translatedWithWarning || 0} · Changed ${summary.changed || 0} · Failed ${summary.failed || 0} · Repairs ${summary.repairs || 0}`,
     ...(codes.length ? [`  codes=${codes.join(',')}`] : []),
   ].join('\n');
 }

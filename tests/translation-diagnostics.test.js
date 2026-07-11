@@ -85,4 +85,17 @@ exports.tests = [
       assert.deepEqual(exported.runs.map((run) => run.runId), ['newest', 'older']);
     },
   },
+  {
+    name: 'preserves changed-only run outcome and summary',
+    fn() {
+      const exported = diagnostics.exportDiagnostics([{
+        runId: 'changed-run',
+        outcome: 'changed',
+        summary: { requested: 2, changed: 2, failed: 0 },
+      }]).runs[0];
+      assert.equal(exported.outcome, 'changed');
+      assert.equal(exported.summary.changed, 2);
+      assert.equal(exported.summary.failed, 0);
+    },
+  },
 ];

@@ -3471,6 +3471,37 @@ exports.tests = [
     },
   },
   {
+    name: 'rehydrates cached partial translations without false success',
+    fn() {
+      const { block } = createReasoningFixture();
+      const cache = new Map();
+      const firstStore = helpers.createInlineViewportStore(161, cache);
+      const record = helpers.queueInlineViewportBlock(firstStore, block);
+      helpers.applyInlineViewportBlockResults(
+        helpers.takeInlineViewportBlockBatch(firstStore),
+        [{
+          id: record.id,
+          disposition: 'apply_with_warning',
+          template: getReasoningTranslatedTemplate(record),
+          terminalCode: 'quality.english_residue',
+          attemptCount: 2,
+        }],
+        161,
+        firstStore
+      );
+      assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+
+      const secondStore = helpers.createInlineViewportStore(162, cache);
+      assert.equal(helpers.queueInlineViewportBlock(secondStore, block), null);
+      const cachedRecord = secondStore.records[0];
+      assert.equal(cachedRecord.state, 'translated_with_warning');
+      assert.equal(cachedRecord.terminalCode, 'quality.english_residue');
+      assert.equal(cachedRecord.attemptCount, 2);
+      assert.match(helpers.getInlineTerminalReason([cachedRecord]), /Partial translation/);
+      assert.equal(secondStore.queue.length, 0);
+    },
+  },
+  {
     name: 'isolates an invalid block result from valid siblings',
     fn() {
       const firstFixture = createReasoningFixture();

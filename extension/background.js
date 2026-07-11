@@ -166,6 +166,13 @@ function safeError(err) {
   };
 }
 
+function createRuntimeDiagnosticId(startedAt, cryptoApi = globalThis.crypto) {
+  const suffix = typeof cryptoApi?.randomUUID === 'function'
+    ? cryptoApi.randomUUID()
+    : Math.random().toString(36).slice(2, 12);
+  return `runtime-${startedAt}-${suffix}`;
+}
+
 async function ensureSidePanel(tabId) {
   // Allow clicking extension icon to open the side panel
   // (Fails silently on older versions or if not supported)
@@ -1954,14 +1961,23 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         if (msg?.type === 'RECORD_INLINE_RUNTIME_DIAGNOSTIC') {
           const outcomes = Array.isArray(msg.outcomes) ? msg.outcomes.slice(0, 100) : [];
           const startedAt = Date.now();
+          const runtimeRunId = createRuntimeDiagnosticId(startedAt);
+          const changedCount = outcomes.filter(
+            (outcome) => outcome?.code === 'runtime.page_changed'
+          ).length;
+          const failedCount = outcomes.length - changedCount;
           const persistence = await translationDiagnostics.persistRun(chrome, {
-            runId: `runtime-${startedAt}`,
+            runId: runtimeRunId,
             startedAt: new Date(startedAt).toISOString(),
             finishedAt: new Date().toISOString(),
-            outcome: 'failed',
-            summary: { requested: outcomes.length, failed: outcomes.length },
+            outcome: failedCount > 0 ? 'failed' : 'changed',
+            summary: {
+              requested: outcomes.length,
+              failed: failedCount,
+              changed: changedCount,
+            },
             blocks: outcomes.map((outcome, index) => ({
-              diagnosticId: `runtime-${startedAt}/${index}`,
+              diagnosticId: `${runtimeRunId}/${index}`,
               terminalCode: outcome?.code,
               terminalDisposition: outcome?.code === 'runtime.page_changed' ? 'changed' : 'reject',
               attemptCount: 1,
@@ -2032,5 +2048,6 @@ if (typeof module !== 'undefined' && module.exports) {
     syncInlineAutoShowRegistration,
     syncInlineAutoShowRegistrationSafely,
     translateVisibleBlockBatch,
+    createRuntimeDiagnosticId,
   };
 }
