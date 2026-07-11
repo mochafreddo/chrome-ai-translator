@@ -2190,6 +2190,120 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           sendResponse({ ok: persistence.persisted });
           return;
         }
+        if (msg?.type === 'RECORD_INLINE_LOCAL_DIAGNOSTIC') {
+          const allowedCodes = new Set([
+            'runtime.unsupported_block',
+            'runtime.block_too_large',
+            'runtime.session_too_large',
+          ]);
+          let localDiagnosticPayloadCost = 0;
+          const diagnostics = [];
+          for (const entry of (Array.isArray(msg.diagnostics) ? msg.diagnostics : []).slice(0, INLINE_MAX_RECORDS)) {
+            if (!allowedCodes.has(entry?.code)) continue;
+            const template = typeof entry.template === 'string' ? entry.template : '';
+            let contract = null;
+            let contractJson = '';
+            if (entry.contract && typeof entry.contract === 'object' && !Array.isArray(entry.contract)) {
+              try {
+                const boundedString = (value, max = 200) => String(value || '').slice(0, max);
+                const copyString = (target, source, key, max) => {
+                  if (Object.hasOwn(source, key)) target[key] = boundedString(source[key], max);
+                };
+                contract = {};
+                if (Object.hasOwn(entry.contract, 'codecVersion')) contract.codecVersion = Number(entry.contract.codecVersion) || 0;
+                copyString(contract, entry.contract, 'namespace', 100);
+                if (Object.hasOwn(entry.contract, 'entries')) {
+                  contract.entries = (Array.isArray(entry.contract.entries) ? entry.contract.entries : [])
+                    .slice(0, INLINE_MAX_RECORDS)
+                    .map((item) => {
+                      const copied = {};
+                      for (const [key, max] of [
+                        ['id', 200], ['kind', 40], ['tagName', 40], ['parentId', 200],
+                        ['openToken', 200], ['closeToken', 200], ['token', 200], ['atomKind', 80],
+                      ]) copyString(copied, item || {}, key, max);
+                      if (Object.hasOwn(item || {}, 'preserveText')) copied.preserveText = item.preserveText === true;
+                      return copied;
+                    });
+                }
+                if (Object.hasOwn(entry.contract, 'maxOutputChars')) {
+                  contract.maxOutputChars = Math.max(0, Number(entry.contract.maxOutputChars) || 0);
+                }
+                if (Object.hasOwn(entry.contract, 'requiresText')) contract.requiresText = entry.contract.requiresText === true;
+                if (Object.hasOwn(entry.contract, 'literalTokens')) {
+                  contract.literalTokens = (Array.isArray(entry.contract.literalTokens) ? entry.contract.literalTokens : [])
+                    .slice(0, INLINE_MAX_RECORDS)
+                    .map((item) => ({
+                      value: boundedString(item?.value),
+                      count: Math.max(0, Number(item?.count) || 0),
+                    }));
+                }
+                contractJson = JSON.stringify(contract);
+                if (contractJson.length > INLINE_BLOCK_MAX_RECORD_COST) {
+                  contract = null;
+                  contractJson = '';
+                }
+              } catch {}
+            }
+            if (template.length > INLINE_BLOCK_MAX_RECORD_COST) continue;
+            const entryCost = template.length + contractJson.length;
+            if (entryCost > INLINE_BLOCK_MAX_RECORD_COST) continue;
+            if (localDiagnosticPayloadCost + entryCost > INLINE_BLOCK_MAX_SESSION_COST) continue;
+            localDiagnosticPayloadCost += entryCost;
+            diagnostics.push({
+              code: entry.code,
+              ...(template && contract ? { template, contract } : {}),
+              evidence: entry.evidence || {},
+            });
+          }
+          if (!diagnostics.length) {
+            sendResponse({ ok: false });
+            return;
+          }
+          const settings = mergeVisibleBatchSettingsSnapshot(
+            await getSettings(),
+            msg.settingsSnapshot || null
+          );
+          const startedAt = Date.now();
+          const runId = createRuntimeDiagnosticId(startedAt);
+          const blocks = await Promise.all(diagnostics.slice(0, 100).map(async (entry, index) => {
+            let fingerprints = {};
+            if (typeof entry.template === 'string' && entry.contract) {
+              try {
+                fingerprints = await translationDiagnostics.fingerprintBlock(
+                  chrome,
+                  entry.template,
+                  entry.contract
+                );
+              } catch {}
+            }
+            return {
+              diagnosticId: `${runId}/${index}`,
+              ...fingerprints,
+              terminalCode: entry.code,
+              terminalDisposition: 'reject',
+              attemptCount: 1,
+              quality: { status: 'uncertain', codes: [], evidence: entry.evidence || {} },
+              timeline: [{
+                stage: 'runtime_application',
+                disposition: 'reject',
+                codes: [entry.code],
+              }],
+            };
+          }));
+          const persistence = await translationDiagnostics.persistRun(chrome, {
+            runId,
+            startedAt: new Date(startedAt).toISOString(),
+            finishedAt: new Date().toISOString(),
+            extensionVersion: chrome.runtime?.getManifest?.().version || '',
+            model: settings.model,
+            targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+            outcome: 'failed',
+            summary: { requested: diagnostics.length, failed: diagnostics.length },
+            blocks,
+          });
+          sendResponse({ ok: persistence.persisted });
+          return;
+        }
         if (msg?.type === 'GET_SETTINGS') {
           const settings = await getSettings();
           settings.apiKey = settings.apiKey ? '***' : '';

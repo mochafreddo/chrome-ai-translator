@@ -82,6 +82,9 @@ function createInlineViewportStore(
     nextId: 0,
     nextBlockId: 0,
     nextTerminalSequence: 0,
+    localDiagnostics: [],
+    localDiagnosticsInFlight: null,
+    localDiagnosticRetryCount: 0,
     sessionRecordCost: Math.max(0, Number(sessionRecordCost) || 0),
     translationByOriginal:
       translationByOriginal instanceof Map ? translationByOriginal : new Map(),
@@ -101,6 +104,46 @@ function markInlineTerminalTransition(store, record) {
   if (store) store.nextTerminalSequence = (Number(store.nextTerminalSequence) || 0) + 1;
   record.terminalSequence = store?.nextTerminalSequence || (Number(record.terminalSequence) || 0) + 1;
   return record.terminalSequence;
+}
+
+function queueInlineLocalDiagnostic(store, record, code, evidence = {}) {
+  if (!store?.localDiagnostics) return;
+  store.localDiagnostics.push({
+    code,
+    ...(typeof record?.template === 'string' ? { template: record.template } : {}),
+    ...(record?.contract ? { contract: record.contract } : {}),
+    evidence,
+  });
+}
+
+function flushInlineLocalDiagnostics(store) {
+  if (!store?.localDiagnostics?.length || store.localDiagnosticsInFlight) return;
+  const diagnostics = store.localDiagnostics.splice(0, 500);
+  store.localDiagnosticsInFlight = diagnostics;
+  const fail = () => {
+    store.localDiagnosticsInFlight = null;
+    store.diagnosticsUnavailable = true;
+    if (store.localDiagnosticRetryCount < 1) {
+      store.localDiagnosticRetryCount += 1;
+      store.localDiagnostics.unshift(...diagnostics);
+      setTimeout(() => flushInlineLocalDiagnostics(store), 250);
+    }
+    if (inlineState.viewport === store && inlineState.operationId === store.operationId) {
+      updateInlineViewportMessage();
+    }
+  };
+  chrome.runtime.sendMessage({
+    type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+    settingsSnapshot: store.translationSettings,
+    diagnostics,
+  }).then((response) => {
+    if (response?.ok !== true) {
+      fail();
+      return;
+    }
+    store.localDiagnosticsInFlight = null;
+    store.localDiagnosticRetryCount = 0;
+  }).catch(fail);
 }
 
 function isInlineViewportOperationCurrent(state, store, operationId) {
@@ -733,6 +776,7 @@ function queueInlineViewportBlock(store, blockElement, options = {}) {
       errorCode: serialized.errorCode || 'unsupported_block',
     });
     markInlineTerminalTransition(store, failedRecord);
+    queueInlineLocalDiagnostic(store, failedRecord, 'runtime.unsupported_block');
     return failedRecord;
   }
   const record = createQueuedInlineBlockRecordFromSerialized(
@@ -766,6 +810,10 @@ function takeInlineViewportBlockBatch(
       record.state = 'failed';
       record.errorCode = 'block_too_large';
       markInlineTerminalTransition(store, record);
+      queueInlineLocalDiagnostic(store, record, 'runtime.block_too_large', {
+        recordCost: cost,
+        limit,
+      });
       continue;
     }
     const reservedCost = getInlineBlockReservedRecordCost(record);
@@ -774,6 +822,10 @@ function takeInlineViewportBlockBatch(
       record.state = 'failed';
       record.errorCode = 'block_too_large';
       markInlineTerminalTransition(store, record);
+      queueInlineLocalDiagnostic(store, record, 'runtime.block_too_large', {
+        recordCost: reservedCost,
+        limit,
+      });
       continue;
     }
     if (store.sessionRecordCost + reservedCost > INLINE_BLOCK_SESSION_MAX_CHARS) {
@@ -781,6 +833,11 @@ function takeInlineViewportBlockBatch(
       record.state = 'failed';
       record.errorCode = 'session_too_large';
       markInlineTerminalTransition(store, record);
+      queueInlineLocalDiagnostic(store, record, 'runtime.session_too_large', {
+        recordCost: reservedCost,
+        sessionCost: store.sessionRecordCost,
+        limit: INLINE_BLOCK_SESSION_MAX_CHARS,
+      });
       continue;
     }
     if (batch.length && batchCost + reservedCost > limit) break;
@@ -1188,6 +1245,15 @@ function getInlineTerminalReason(records) {
   }
   if (code === 'runtime.apply_failed') {
     return 'Translation failed: The page rejected the translated update, so the original was kept.';
+  }
+  if (code === 'runtime.unsupported_block' || code === 'unsupported_block') {
+    return 'Translation failed: This page block has unsupported structure, so no request was sent.';
+  }
+  if (code === 'runtime.block_too_large' || code === 'block_too_large') {
+    return 'Translation failed: This page block exceeds the 12,000-character request limit, so no request was sent.';
+  }
+  if (code === 'runtime.session_too_large' || code === 'session_too_large') {
+    return 'Translation failed: The visible translation session reached its 60,000-character limit, so no request was sent.';
   }
   return 'Translation failed: The translation request could not be completed.';
 }
@@ -2128,6 +2194,7 @@ async function drainInlineViewportQueue() {
   const store = inlineState.viewport;
   if (!store || store.stopped || inlineState.status !== 'active') return;
   const operationId = store.operationId;
+  flushInlineLocalDiagnostics(store);
 
   while (
     isInlineViewportOperationCurrent(inlineState, store, operationId) &&
@@ -2135,6 +2202,7 @@ async function drainInlineViewportQueue() {
     store.queue.length
   ) {
     const batch = takeInlineViewportBlockBatch(store);
+    flushInlineLocalDiagnostics(store);
     if (!batch.length) {
       updateInlineViewportMessage();
       return;
@@ -2414,6 +2482,7 @@ if (typeof module !== 'undefined' && module.exports) {
     applyInlineViewportBatchTranslations,
     applyInlineViewportBlockResults,
     releaseInlineRuntimeTokensFromStaleResponse,
+    flushInlineLocalDiagnostics,
     markInlineViewportBatchFailed,
     getInlineViewportStatusCounts,
     formatInlineViewportStatusMessage,

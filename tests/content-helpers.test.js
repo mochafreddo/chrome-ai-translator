@@ -3326,6 +3326,21 @@ exports.tests = [
       assert.equal(record.state, 'failed');
       assert.equal(record.errorCode, 'unsupported_block');
       assert.equal(record.terminalSequence, 1);
+      assert.match(helpers.getInlineTerminalReason([record]), /unsupported structure/);
+      const previousChrome = global.chrome;
+      const messages = [];
+      global.chrome = { runtime: { sendMessage(message) {
+        messages.push(message);
+        return Promise.resolve({ ok: true });
+      } } };
+      try {
+        helpers.flushInlineLocalDiagnostics(store);
+        assert.equal(messages[0].type, 'RECORD_INLINE_LOCAL_DIAGNOSTIC');
+        assert.equal(messages[0].diagnostics[0].code, 'runtime.unsupported_block');
+        assert.equal(messages[0].diagnostics[0].template, undefined);
+      } finally {
+        global.chrome = previousChrome;
+      }
       assert.equal(store.queue.length, 0);
     },
   },
@@ -3440,6 +3455,7 @@ exports.tests = [
       assert.equal(record.state, 'failed');
       assert.equal(record.errorCode, 'session_too_large');
       assert.equal(record.terminalSequence, 1);
+      assert.match(helpers.getInlineTerminalReason([record]), /60,000-character limit/);
     },
   },
   {

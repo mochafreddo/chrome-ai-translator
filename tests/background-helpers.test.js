@@ -1326,6 +1326,46 @@ exports.tests = [
         const bulkRun = Object.values(stored).find((value) => value?.summary?.failed === 500);
         assert.equal(bulkRun.blocks.length, 100);
         assert.equal(Object.keys(sessionStored['inlineRuntimeCorrelations:v1']).length, 0);
+
+        const localResponses = [];
+        messageListener({
+          type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+          settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
+          diagnostics: [
+            {
+              code: 'runtime.block_too_large',
+              template: 'x'.repeat(8000),
+              contract: {
+                codecVersion: 1,
+                literalTokens: Array.from({ length: 24 }, (_, index) => ({
+                  value: `${index}-${'y'.repeat(195)}`,
+                  count: 1,
+                })),
+              },
+            },
+            {
+              code: 'runtime.block_too_large',
+              template: record.template,
+              contract: record.contract,
+              evidence: { recordCost: 13000, limit: 12000, raw: 'ignored' },
+            },
+          ],
+        }, { tab: { id: 7 } }, (response) => localResponses.push(response));
+        for (let index = 0; index < 10 && !localResponses.length; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        assert.deepEqual(localResponses, [{ ok: true }]);
+        const localRun = Object.values(stored).find((value) =>
+          value?.blocks?.[0]?.terminalCode === 'runtime.block_too_large'
+        );
+        assert.equal(localRun.summary.requested, 1);
+        assert.equal(localRun.blocks[0].quality.evidence.recordCost, 13000);
+        assert.equal(localRun.blocks[0].quality.evidence.limit, 12000);
+        const expectedFingerprints = await require('../extension/translation-diagnostics.js')
+          .fingerprintBlock(global.chrome, record.template, record.contract);
+        assert.equal(localRun.blocks[0].sourceFingerprint, expectedFingerprints.sourceFingerprint);
+        assert.equal(localRun.blocks[0].contractFingerprint, expectedFingerprints.contractFingerprint);
+        assert.equal(JSON.stringify(localRun).includes(record.template), false);
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;
