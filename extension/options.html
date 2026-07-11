@@ -68,16 +68,18 @@
       <section>
         <h2>Inline diagnostics</h2>
         <p class="muted">
-          Recent inline translation runs. Text content and API keys are not
-          stored here.
+          Recent partial translations and failures. Source text, translations,
+          URLs, protected labels, and API keys are never stored.
         </p>
         <div class="row">
-          <button id="btnRefreshInlineLogs" class="btn">Refresh logs</button>
+          <button id="btnCopyDiagnostics" class="btn">Copy diagnostics</button>
+          <button id="btnSaveDiagnostics" class="btn">Save diagnostics</button>
         </div>
-        <pre id="inlineLogs" class="muted"></pre>
+        <pre id="inlineDiagnostics" class="muted"></pre>
       </section>
     </main>
 
+    <script src="translation-diagnostics.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

@@ -15,10 +15,13 @@ const elInlineAutoShow = hasDocument
 
 const elStatus = hasDocument ? document.getElementById('status') : null;
 const elError = hasDocument ? document.getElementById('errorBox') : null;
-const elInlineLogs = hasDocument ? document.getElementById('inlineLogs') : null;
-const btnRefreshInlineLogs = hasDocument
-  ? document.getElementById('btnRefreshInlineLogs')
-  : null;
+const elInlineLogs = hasDocument ? document.getElementById('inlineDiagnostics') : null;
+const btnCopyDiagnostics = hasDocument ? document.getElementById('btnCopyDiagnostics') : null;
+const btnSaveDiagnostics = hasDocument ? document.getElementById('btnSaveDiagnostics') : null;
+const diagnosticsApi = globalThis.ChromeAiTranslatorDiagnostics ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./translation-diagnostics.js')
+    : null);
 
 const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
@@ -76,6 +79,20 @@ function formatInlineLog(log) {
   return lines.join('\n');
 }
 
+function formatDiagnosticRun(run) {
+  const summary = run?.summary || {};
+  const codes = (run?.blocks || []).map((block) => block.terminalCode).filter(Boolean);
+  return [
+    `${run?.startedAt || '(unknown time)'} ${run?.outcome || 'interrupted'} model=${run?.model || '(unset)'}`,
+    `  Translated ${summary.translated || 0} · Partial ${summary.translatedWithWarning || 0} · Failed ${summary.failed || 0} · Repairs ${summary.repairs || 0}`,
+    ...(codes.length ? [`  codes=${codes.join(',')}`] : []),
+  ].join('\n');
+}
+
+function buildDiagnosticExport(runs) {
+  return diagnosticsApi.exportDiagnostics(runs || []);
+}
+
 function isInlineTranslationLogStorageKey(key) {
   return String(key || '').startsWith(INLINE_LOG_STORAGE_KEY_PREFIX);
 }
@@ -112,11 +129,28 @@ function collectInlineTranslationLogsFromStorage(stored) {
 }
 
 async function loadInlineLogs() {
-  const stored = await chrome.storage.local.get(null);
-  const logs = collectInlineTranslationLogsFromStorage(stored);
-  elInlineLogs.textContent = logs.length
-    ? logs.map(formatInlineLog).join('\n\n')
-    : 'No inline translation logs yet.';
+  const payload = await diagnosticsApi.loadDiagnostics(chrome);
+  elInlineLogs.textContent = payload.runs.length
+    ? payload.runs.map(formatDiagnosticRun).join('\n\n')
+    : 'No inline diagnostics yet.';
+  return payload;
+}
+
+async function copyDiagnostics() {
+  const payload = await diagnosticsApi.loadDiagnostics(chrome);
+  await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+  setStatus('Diagnostics copied.');
+}
+
+async function saveDiagnostics() {
+  const payload = await diagnosticsApi.loadDiagnostics(chrome);
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = `chrome-ai-translator-diagnostics-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
 }
 
 async function save() {
@@ -205,9 +239,8 @@ function handleSaveClick() {
 if (hasDocument) {
   document.getElementById('btnSave').addEventListener('click', handleSaveClick);
   document.getElementById('btnClear').addEventListener('click', clearKey);
-  btnRefreshInlineLogs.addEventListener('click', () => {
-    loadInlineLogs().catch((error) => setError(error?.message || String(error)));
-  });
+  btnCopyDiagnostics.addEventListener('click', () => copyDiagnostics().catch((error) => setError(error?.message || String(error))));
+  btnSaveDiagnostics.addEventListener('click', () => saveDiagnostics().catch((error) => setError(error?.message || String(error))));
 
   load()
     .then(loadInlineLogs)
@@ -219,6 +252,8 @@ if (typeof module !== 'undefined' && module.exports) {
     clearStoredApiKey,
     collectInlineTranslationLogsFromStorage,
     formatInlineLog,
+    formatDiagnosticRun,
+    buildDiagnosticExport,
     shouldClearStoredApiKey,
   };
 }

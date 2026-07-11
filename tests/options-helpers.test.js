@@ -70,4 +70,19 @@ exports.tests = [
       assert.equal(formatted.includes(' nodes'), false);
     },
   },
+  {
+    name: 'formats schema-2 partial diagnostics with stable codes',
+    fn() {
+      const formatted = helpers.formatDiagnosticRun({
+        startedAt: '2026-07-11T00:00:00.000Z',
+        outcome: 'partial',
+        model: 'gpt-5.4-mini',
+        summary: { translated: 0, translatedWithWarning: 1, failed: 0, repairs: 1 },
+        blocks: [{ terminalCode: 'quality.english_residue' }],
+      });
+      assert.match(formatted, /Partial 1/);
+      assert.match(formatted, /quality\.english_residue/);
+      assert.equal(helpers.buildDiagnosticExport([]).schemaVersion, 2);
+    },
+  },
 ];
