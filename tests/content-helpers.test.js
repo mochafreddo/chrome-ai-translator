@@ -2744,6 +2744,47 @@ exports.tests = [
     },
   },
   {
+    name: 'formats human-readable terminal reasons without exposing internal codes',
+    fn() {
+      assert.match(
+        helpers.getInlineTerminalReason([{
+          state: 'translated_with_warning',
+          terminalCode: 'quality.english_residue',
+        }]),
+        /Partial translation: Some source-language prose remained/
+      );
+      assert.match(
+        helpers.getInlineTerminalReason([{
+          state: 'failed',
+          terminalCode: 'structure.token_missing',
+        }]),
+        /Protected page structure could not be preserved/
+      );
+      assert.match(
+        helpers.getInlineTerminalReason([{
+          state: 'failed',
+          terminalCode: 'protocol.invalid_json',
+        }]),
+        /model response was malformed or incomplete/
+      );
+      assert.match(
+        helpers.getInlineTerminalReason([{
+          state: 'stale',
+          errorCode: 'block_changed',
+        }]),
+        /Page changed before translation could be applied/
+      );
+      assert.equal(
+        helpers.getInlineTerminalReason([{
+          state: 'failed',
+          terminalCode: 'structure.token_missing',
+          supersededByRetryId: 'retry-1',
+        }]),
+        ''
+      );
+    },
+  },
+  {
     name: 'builds inline menu model from status and target language',
     fn() {
       assert.deepEqual(
@@ -3395,7 +3436,7 @@ exports.tests = [
       });
     },
   },
-   {
+  {
     name: 'isolates an invalid block result from valid siblings',
     fn() {
       const firstFixture = createReasoningFixture();
@@ -3426,6 +3467,31 @@ exports.tests = [
       assert.equal(first.state, 'translated');
       assert.equal(second.state, 'failed');
       assert.equal(store.queue.length, 0);
+    },
+  },
+  {
+    name: 'normalizes local DOM apply failures for runtime diagnostics',
+    fn() {
+      const codec = require('../extension/inline-block.js');
+      const previousApply = codec.applyPatchPlan;
+      const { block } = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(191);
+      const record = helpers.queueInlineViewportBlock(store, block);
+      const batch = helpers.takeInlineViewportBlockBatch(store);
+      codec.applyPatchPlan = () => ({ ok: false, errorCode: 'apply_failed' });
+      try {
+        helpers.applyInlineViewportBlockResults(
+          batch,
+          [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
+          191,
+          store
+        );
+        assert.equal(record.state, 'failed');
+        assert.equal(record.errorCode, 'runtime.apply_failed');
+        assert.equal(record.terminalCode, undefined);
+      } finally {
+        codec.applyPatchPlan = previousApply;
+      }
     },
   },
   {

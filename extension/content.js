@@ -844,7 +844,7 @@ function applyInlineViewportBlockResults(
       if (applied.errorCode === 'block_changed') queuePageRetry(record);
       else {
         record.state = 'failed';
-        record.errorCode = applied.errorCode || 'apply_failed';
+        record.errorCode = `runtime.${applied.errorCode || 'apply_failed'}`;
         summary.failed += 1;
       }
       continue;
@@ -1092,6 +1092,33 @@ function formatInlineViewportStatusMessage(counts, status = 'active') {
       Number(safe.failed) || 0
     }`,
   ].join('\n');
+}
+
+function getInlineTerminalReason(records) {
+  const candidates = (records || []).filter(
+    (record) =>
+      !record.supersededByRetryId &&
+      ['translated_with_warning', 'failed', 'stale'].includes(record.state)
+  );
+  const record = candidates[candidates.length - 1];
+  if (!record) return '';
+  const code = String(record.terminalCode || record.errorCode || '');
+  if (record.state === 'translated_with_warning') {
+    return 'Partial translation: Some source-language prose remained after one repair attempt.';
+  }
+  if (record.state === 'stale' || code === 'runtime.page_changed') {
+    return 'Page changed before translation could be applied.';
+  }
+  if (code.startsWith('structure.')) {
+    return 'Translation failed: Protected page structure could not be preserved, so the original was kept.';
+  }
+  if (code.startsWith('protocol.')) {
+    return 'Translation failed: The model response was malformed or incomplete.';
+  }
+  if (code === 'runtime.apply_failed') {
+    return 'Translation failed: The page rejected the translated update, so the original was kept.';
+  }
+  return 'Translation failed: The translation request could not be completed.';
 }
 
 function getInlineTranslatorUiModel(
@@ -1763,11 +1790,14 @@ function setInlineMessage(message) {
 }
 
 function updateInlineViewportMessage() {
-  const counts = getInlineViewportStatusCounts(inlineState.viewport?.records || []);
+  const records = inlineState.viewport?.records || [];
+  const counts = getInlineViewportStatusCounts(records);
   inlineState.message = formatInlineViewportStatusMessage(
     counts,
     inlineState.status
   );
+  const terminalReason = getInlineTerminalReason(records);
+  if (terminalReason) inlineState.message += `\n${terminalReason}`;
   if (inlineState.viewport?.diagnosticsUnavailable) {
     inlineState.message += '\nDiagnostics could not be saved.';
   }
@@ -2071,9 +2101,15 @@ async function drainInlineViewportQueue() {
           }).then((diagnosticResponse) => {
             if (diagnosticResponse?.ok !== true) {
               store.diagnosticsUnavailable = true;
+              if (isInlineViewportOperationCurrent(inlineState, store, operationId)) {
+                updateInlineViewportMessage();
+              }
             }
           }).catch(() => {
             store.diagnosticsUnavailable = true;
+            if (isInlineViewportOperationCurrent(inlineState, store, operationId)) {
+              updateInlineViewportMessage();
+            }
           });
         }
         if (resp.results.some((result) => result.diagnosticsUnavailable)) {
@@ -2286,6 +2322,7 @@ if (typeof module !== 'undefined' && module.exports) {
     markInlineViewportBatchFailed,
     getInlineViewportStatusCounts,
     formatInlineViewportStatusMessage,
+    getInlineTerminalReason,
     getInlineTranslatorUiModel,
     toggleInlineTranslatorMenu,
     runInlineViewportScan,
