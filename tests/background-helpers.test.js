@@ -1357,6 +1357,71 @@ exports.tests = [
     },
   },
   {
+    name: 'persists repaired detail and falls back to compact final when fingerprints fail',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const diagnostics = require('../extension/translation-diagnostics.js');
+      const previousFingerprintBlock = diagnostics.fingerprintBlock;
+      const stored = {};
+      let record = createTestPlainBlockRecord('repair-success');
+      record.template = 'Hello world.';
+      let call = 0;
+      global.chrome = {
+        storage: { local: {
+          async get(keys) {
+            if (Array.isArray(keys) && keys.includes('settings')) {
+              return { settings: { apiKey: 'sk-test', model: 'gpt-5.4-mini', targetLanguage: 'Korean' } };
+            }
+            if (keys === null) return { ...stored };
+            const result = {};
+            for (const key of Array.isArray(keys) ? keys : [keys]) {
+              if (Object.hasOwn(stored, key)) result[key] = stored[key];
+            }
+            return result;
+          },
+          async set(values) { Object.assign(stored, values); },
+          async remove(keys) {
+            for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
+          },
+        } },
+        runtime: { getManifest() { return { version: 'test' }; } },
+      };
+      global.fetch = async () => {
+        call += 1;
+        return { ok: true, async json() { return { output_text: JSON.stringify({
+          translations: [{ id: record.id, template: call === 1 ? record.template : '한국어 문장입니다.' }],
+        }) }; } };
+      };
+      try {
+        const detailedResults = await helpers.translateVisibleBlockBatch([record]);
+        const detailedRun = Object.values(stored).find((value) => value?.blocks?.length === 1);
+        assert.equal(detailedResults[0].disposition, 'apply');
+        assert.equal(detailedResults[0].diagnosticsUnavailable, undefined);
+        assert.equal(detailedRun.outcome, 'done');
+        assert.equal(detailedRun.blocks[0].terminalDisposition, 'apply');
+        assert.equal(detailedRun.blocks[0].terminalCode, '');
+        assert.equal(detailedRun.blocks[0].timeline[1].disposition, 'apply');
+
+        record = createTestPlainBlockRecord('fingerprint-failure');
+        record.template = 'Hello world.';
+        call = 0;
+        diagnostics.fingerprintBlock = async () => { throw new Error('fingerprint unavailable'); };
+        const fallbackResults = await helpers.translateVisibleBlockBatch([record]);
+        const compactRun = Object.values(stored).find((value) =>
+          value?.outcome === 'done' && Array.isArray(value.blocks) && value.blocks.length === 0
+        );
+        assert.equal(fallbackResults[0].disposition, 'apply');
+        assert.equal(fallbackResults[0].diagnosticsUnavailable, true);
+        assert.ok(compactRun);
+      } finally {
+        diagnostics.fingerprintBlock = previousFingerprintBlock;
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+      }
+    },
+  },
+  {
     name: 'creates collision-resistant runtime diagnostic ids within one millisecond',
     fn() {
       const first = helpers.createRuntimeDiagnosticId(1234);

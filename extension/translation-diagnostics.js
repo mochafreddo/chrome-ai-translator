@@ -32,14 +32,18 @@
   }
 
   function serializeProblemBlock(block = {}) {
+    const terminalDisposition = ['apply', 'apply_with_warning', 'reject', 'changed'].includes(block.terminalDisposition)
+      ? block.terminalDisposition
+      : 'reject';
     return {
       diagnosticId: String(block.diagnosticId || '').slice(0, 80),
       sourceFingerprint: String(block.sourceFingerprint || '').slice(0, 100),
       contractFingerprint: String(block.contractFingerprint || '').slice(0, 100),
-      terminalCode: safeCode(block.terminalCode),
-      terminalDisposition: ['apply', 'apply_with_warning', 'reject', 'changed'].includes(block.terminalDisposition)
-        ? block.terminalDisposition
-        : 'reject',
+      terminalCode:
+        terminalDisposition === 'apply' && !block.terminalCode
+          ? ''
+          : safeCode(block.terminalCode),
+      terminalDisposition,
       attemptCount: Math.min(2, Math.max(1, Number(block.attemptCount) || 1)),
       structure: {
         status: ['safe', 'unsafe'].includes(block.structure?.status)
@@ -162,6 +166,22 @@
     return operation;
   }
 
+  async function discardRun(chromeApi, runId) {
+    const operation = storageMutation.catch(() => {}).then(async () => {
+      const storage = chromeApi.storage.local;
+      const stored = await storage.get([INDEX_KEY]);
+      const normalizedRunId = String(runId || '');
+      const ids = Array.isArray(stored[INDEX_KEY])
+        ? stored[INDEX_KEY].filter((id) => id !== normalizedRunId)
+        : [];
+      await storage.set({ [INDEX_KEY]: ids });
+      if (storage.remove) await storage.remove(`${RUN_PREFIX}${normalizedRunId}`);
+      return { discarded: true };
+    }).catch(() => ({ discarded: false }));
+    storageMutation = operation;
+    return operation;
+  }
+
   async function loadDiagnostics(chromeApi) {
     const stored = await chromeApi.storage.local.get(null);
     const ids = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
@@ -170,6 +190,7 @@
 
   const api = {
     SCHEMA_VERSION,
+    discardRun,
     exportDiagnostics,
     fingerprint,
     fingerprintBlock,

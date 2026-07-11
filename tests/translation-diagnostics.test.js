@@ -54,7 +54,7 @@ exports.tests = [
     fn() {
       const repaired = diagnostics.serializeProblemBlock({
         diagnosticId: 'repaired',
-        terminalCode: 'quality.english_residue',
+        terminalCode: null,
         terminalDisposition: 'apply',
         attemptCount: 2,
         structure: { status: 'safe', codes: [] },
@@ -71,6 +71,7 @@ exports.tests = [
         timeline: [{ stage: 'runtime_application', disposition: 'changed', codes: ['runtime.page_changed'] }],
       });
       assert.equal(repaired.terminalDisposition, 'apply');
+      assert.equal(repaired.terminalCode, '');
       assert.equal(repaired.timeline[1].disposition, 'apply');
       assert.equal(changed.timeline[0].disposition, 'changed');
     },
@@ -83,6 +84,25 @@ exports.tests = [
         { runId: 'older', outcome: 'done' },
       ]);
       assert.deepEqual(exported.runs.map((run) => run.runId), ['newest', 'older']);
+    },
+  },
+  {
+    name: 'discards a provisional run from its record and index',
+    async fn() {
+      const stored = {
+        'inlineDiagnostics:v2:index': ['provisional', 'kept'],
+        'inlineDiagnostics:v2:run:provisional': { outcome: 'interrupted' },
+        'inlineDiagnostics:v2:run:kept': { outcome: 'done' },
+      };
+      const chromeApi = { storage: { local: {
+        async get() { return { 'inlineDiagnostics:v2:index': stored['inlineDiagnostics:v2:index'] }; },
+        async set(values) { Object.assign(stored, values); },
+        async remove(key) { delete stored[key]; },
+      } } };
+
+      assert.deepEqual(await diagnostics.discardRun(chromeApi, 'provisional'), { discarded: true });
+      assert.deepEqual(stored['inlineDiagnostics:v2:index'], ['kept']);
+      assert.equal(stored['inlineDiagnostics:v2:run:provisional'], undefined);
     },
   },
   {

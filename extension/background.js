@@ -1592,6 +1592,33 @@ async function translateVisibleBlockBatch(
         },
       };
     });
+    const finalOutcome = results.some((result) => result.disposition === 'reject')
+      ? 'failed'
+      : results.some((result) => result.disposition === 'apply_with_warning')
+        ? 'partial'
+        : 'done';
+    const finalSummary = {
+      requested: results.length,
+      translated: results.filter((result) => result.disposition === 'apply').length,
+      translatedWithWarning: results.filter((result) => result.disposition === 'apply_with_warning').length,
+      failed: results.filter((result) => result.disposition === 'reject').length,
+      repairs: results.filter((result) => result.attemptCount === 2).length,
+    };
+    async function persistCompactFinal() {
+      const persistence = await translationDiagnostics.persistRun(chrome, {
+        runId,
+        startedAt: new Date(startedAtMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        extensionVersion: chrome.runtime?.getManifest?.().version || '',
+        model: settings.model,
+        targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+        outcome: finalOutcome,
+        summary: finalSummary,
+        blocks: [],
+      });
+      if (!persistence.persisted) await translationDiagnostics.discardRun(chrome, runId);
+      return persistence;
+    }
     try {
       const problemResults = results.filter(
       (result) => result.attemptCount === 2 || result.disposition !== 'apply'
@@ -1621,23 +1648,15 @@ async function translateVisibleBlockBatch(
       extensionVersion: chrome.runtime?.getManifest?.().version || '',
       model: settings.model,
       targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-      outcome: results.some((result) => result.disposition === 'reject')
-        ? 'failed'
-        : results.some((result) => result.disposition === 'apply_with_warning')
-          ? 'partial'
-          : 'done',
-      summary: {
-        requested: results.length,
-        translated: results.filter((result) => result.disposition === 'apply').length,
-        translatedWithWarning: results.filter((result) => result.disposition === 'apply_with_warning').length,
-        failed: results.filter((result) => result.disposition === 'reject').length,
-        repairs: results.filter((result) => result.attemptCount === 2).length,
-      },
+      outcome: finalOutcome,
+      summary: finalSummary,
         blocks: diagnosticBlocks,
       });
-      diagnosticsPersisted = diagnosticsPersisted && persistence.persisted;
+      diagnosticsPersisted = persistence.persisted;
+      if (!persistence.persisted) await persistCompactFinal();
     } catch {
       // Diagnostics must never change an otherwise valid translation result.
+      await persistCompactFinal();
       diagnosticsPersisted = false;
     }
     if (logEntry.chunks[0]) {
