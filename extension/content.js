@@ -589,7 +589,6 @@ function createInlineViewportBlockRecord(store, blockElement, values = {}) {
     state: 'original',
     operationId: store.operationId,
     pageChangeRetryCount: 0,
-    repairRetryCount: 0,
     repair: null,
     ...values,
   };
@@ -613,7 +612,6 @@ function createQueuedInlineBlockRecordFromSerialized(
     snapshot: serialized.snapshot,
     cacheKey: `block:${serialized.cacheKey}`,
     pageChangeRetryCount: Number(options.pageChangeRetryCount) || 0,
-    repairRetryCount: Number(options.repairRetryCount) || 0,
     retryOf: options.retryOf || null,
     repair: options.repair || null,
     state: 'queued',
@@ -736,22 +734,10 @@ function takeInlineViewportBlockBatch(
   return batch;
 }
 
-var INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
-  'token_missing',
-  'token_duplicate',
-  'token_unknown',
-  'token_nesting_invalid',
-  'token_parent_changed',
-  'output_too_long',
-  'output_parse_failed',
-  'translation_incomplete',
-]);
-
 function queueInlineViewportBlockRetry(
   store,
   parentRecord,
-  retryKind,
-  errorCode = ''
+  retryKind
 ) {
   if (
     !store ||
@@ -763,9 +749,8 @@ function queueInlineViewportBlockRetry(
   }
   const pageChangeRetryCount =
     Number(parentRecord.pageChangeRetryCount) || 0;
-  const repairRetryCount = Number(parentRecord.repairRetryCount) || 0;
   if (retryKind === 'page-change' && pageChangeRetryCount >= 1) return null;
-  if (retryKind === 'repair' && repairRetryCount >= 1) return null;
+  if (retryKind !== 'page-change') return null;
 
   const serialized = inlineBlockCodec.serializeBlock(parentRecord.blockElement);
   if (!serialized.ok) return null;
@@ -776,13 +761,8 @@ function queueInlineViewportBlockRetry(
     {
       pageChangeRetryCount:
         pageChangeRetryCount + (retryKind === 'page-change' ? 1 : 0),
-      repairRetryCount:
-        repairRetryCount + (retryKind === 'repair' ? 1 : 0),
       retryOf: parentRecord.id,
-      repair:
-        retryKind === 'repair'
-          ? { attempt: 1, previousErrorCode: errorCode }
-          : null,
+      repair: null,
     }
   );
   parentRecord.supersededByRetryId = retryRecord.id;
@@ -818,20 +798,6 @@ function applyInlineViewportBlockResults(
     return false;
   }
 
-  function queueRepair(record, errorCode) {
-    record.state = 'failed';
-    record.errorCode = errorCode;
-    if (
-      INLINE_BLOCK_REPAIRABLE_ERROR_CODES.has(errorCode) &&
-      queueInlineViewportBlockRetry(store, record, 'repair', errorCode)
-    ) {
-      summary.retried += 1;
-      return true;
-    }
-    summary.failed += 1;
-    return false;
-  }
-
   for (const record of records || []) {
     if (record.operationId !== operationId) {
       summary.ignored += 1;
@@ -844,12 +810,16 @@ function applyInlineViewportBlockResults(
       summary.failed += 1;
       continue;
     }
-    if (!result.ok || typeof result.template !== 'string') {
+    if (result.disposition === 'reject' || typeof result.template !== 'string') {
       if (!inlineBlockCodec.matchesOriginalOwnership(record.snapshot)) {
         queuePageRetry(record);
         continue;
       }
-      queueRepair(record, result.errorCode || 'request_failed');
+      record.state = 'failed';
+      record.errorCode = result.terminalCode || 'runtime.request_failed';
+      record.terminalCode = record.errorCode;
+      record.attemptCount = result.attemptCount || 1;
+      summary.failed += 1;
       continue;
     }
 
@@ -859,7 +829,11 @@ function applyInlineViewportBlockResults(
     );
     if (!plan.ok) {
       if (plan.errorCode === 'block_changed') queuePageRetry(record);
-      else queueRepair(record, plan.errorCode || 'output_parse_failed');
+      else {
+        record.state = 'failed';
+        record.errorCode = `runtime.${plan.errorCode || 'apply_failed'}`;
+        summary.failed += 1;
+      }
       continue;
     }
     const applied = inlineBlockCodec.applyPatchPlan(record.snapshot, plan);
@@ -873,7 +847,11 @@ function applyInlineViewportBlockResults(
       continue;
     }
 
-    record.state = 'translated';
+    record.state = result.disposition === 'apply_with_warning'
+      ? 'translated_with_warning'
+      : 'translated';
+    record.terminalCode = result.terminalCode || null;
+    record.attemptCount = result.attemptCount || 1;
     record.translatedTemplate = result.template;
     record.translation = result.template;
     stampInlineViewportRecordSettings(store, record);
@@ -1081,9 +1059,10 @@ function markInlineViewportBatchFailed(records, operationId) {
 }
 
 function getInlineViewportStatusCounts(records) {
-  const counts = { translated: 0, pending: 0, changed: 0, failed: 0 };
+  const counts = { translated: 0, partial: 0, pending: 0, changed: 0, failed: 0 };
   for (const record of records || []) {
     if (record.state === 'translated') counts.translated += 1;
+    if (record.state === 'translated_with_warning') counts.partial += 1;
     if (record.state === 'queued' || record.state === 'translating') {
       counts.pending += 1;
     }
@@ -1102,7 +1081,9 @@ function formatInlineViewportStatusMessage(counts, status = 'active') {
   const stopped = status === 'stopped';
   return [
     stopped ? 'Visible translation stopped' : 'Visible translation on',
-    `Translated ${Number(safe.translated) || 0} · Pending ${
+    `Translated ${Number(safe.translated) || 0} · Partial ${
+      Number(safe.partial) || 0
+    } · Pending ${
       stopped ? 0 : Number(safe.pending) || 0
     } · Changed ${Number(safe.changed) || 0} · Failed ${
       Number(safe.failed) || 0

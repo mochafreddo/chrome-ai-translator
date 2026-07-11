@@ -1542,8 +1542,6 @@ async function translateVisibleBlockBatch(
         terminalCode: terminal.decision.terminalCode,
         messageKey: terminal.decision.messageKey,
         attemptCount: terminal.attemptCount,
-        // Removed with the content-side contract migration in Task 4.
-        ok: apply,
       };
     });
     const runId = `run-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;

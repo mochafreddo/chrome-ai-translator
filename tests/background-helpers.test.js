@@ -423,7 +423,6 @@ exports.tests = [
           terminalCode: 'quality.english_residue',
           messageKey: 'partial_translation_applied',
           attemptCount: 2,
-          ok: true,
         }]);
         assert.equal(requestCount, 2);
         assert.equal(input.records[0].contract, undefined);
@@ -1209,7 +1208,6 @@ exports.tests = [
               terminalCode: 'quality.english_residue',
               messageKey: 'partial_translation_applied',
               attemptCount: 2,
-              ok: true,
             }],
           },
         ]);

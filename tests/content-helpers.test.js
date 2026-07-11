@@ -1132,6 +1132,7 @@ exports.tests = [
         assert.equal(store.queue.length, 0);
         assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
           translated: 1,
+          partial: 0,
           pending: 0,
           changed: 0,
           failed: 0,
@@ -1204,6 +1205,7 @@ exports.tests = [
       assert.equal(store.records.length, 2);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 2,
+        partial: 0,
         pending: 0,
         changed: 0,
         failed: 0,
@@ -1435,6 +1437,7 @@ exports.tests = [
       assert.equal(store.records.length, 1);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 1,
+        partial: 0,
         pending: 0,
         changed: 0,
         failed: 0,
@@ -1560,6 +1563,7 @@ exports.tests = [
       assert.equal(secondStore.queue.length, 0);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
         translated: 1,
+        partial: 0,
         pending: 0,
         changed: 0,
         failed: 0,
@@ -1644,6 +1648,7 @@ exports.tests = [
       assert.equal(secondStore.queue.length, 0);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
         translated: 1,
+        partial: 0,
         pending: 0,
         changed: 0,
         failed: 0,
@@ -1736,6 +1741,7 @@ exports.tests = [
         helpers.getInlineViewportStatusCounts(secondStore.records),
         {
           translated: 0,
+          partial: 0,
           pending: 0,
           changed: 0,
           failed: 0,
@@ -1861,6 +1867,7 @@ exports.tests = [
       assert.equal(store.inFlight, 1);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 1,
         changed: 0,
         failed: 1,
@@ -1955,6 +1962,7 @@ exports.tests = [
       assert.deepEqual(store.queue.map((record) => record.id), [retry.id]);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 1,
         changed: 0,
         failed: 0,
@@ -2002,6 +2010,7 @@ exports.tests = [
       );
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 1,
         failed: 0,
@@ -2054,6 +2063,7 @@ exports.tests = [
       });
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 1,
+        partial: 0,
         pending: 0,
         changed: 0,
         failed: 0,
@@ -2153,6 +2163,7 @@ exports.tests = [
       assert.equal(node.nodeValue, 'Updated article text.');
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 0,
         failed: 1,
@@ -2202,6 +2213,7 @@ exports.tests = [
           assert.equal(original.supersededByRetryId, undefined);
           assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
             translated: 0,
+            partial: 0,
             pending: 0,
             changed: 1,
             failed: 0,
@@ -2216,6 +2228,7 @@ exports.tests = [
           assert.equal(original.supersededByRetryId, retry.id);
           assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
             translated: 0,
+            partial: 0,
             pending: 1,
             changed: 0,
             failed: 0,
@@ -2271,6 +2284,7 @@ exports.tests = [
       assert.equal(original.supersededByRetryId, undefined);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 1,
         failed: 0,
@@ -2280,7 +2294,7 @@ exports.tests = [
           helpers.getInlineViewportStatusCounts(store.records),
           'stopped'
         ),
-        'Visible translation stopped\nTranslated 0 · Pending 0 · Changed 1 · Failed 0'
+        'Visible translation stopped\nTranslated 0 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
       );
     },
   },
@@ -2320,6 +2334,7 @@ exports.tests = [
       assert.equal(original.supersededByRetryId, undefined);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 1,
         changed: 1,
         failed: 0,
@@ -2329,7 +2344,7 @@ exports.tests = [
           helpers.getInlineViewportStatusCounts(store.records),
           'stopped'
         ),
-        'Visible translation stopped\nTranslated 0 · Pending 0 · Changed 1 · Failed 0'
+        'Visible translation stopped\nTranslated 0 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
       );
     },
   },
@@ -2377,6 +2392,7 @@ exports.tests = [
       );
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 1,
         failed: 0,
@@ -2417,6 +2433,7 @@ exports.tests = [
       );
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 1,
         failed: 0,
@@ -2457,6 +2474,7 @@ exports.tests = [
       );
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 1,
         failed: 0,
@@ -2533,6 +2551,7 @@ exports.tests = [
       );
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 1,
         failed: 0,
@@ -2579,6 +2598,7 @@ exports.tests = [
       );
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 1,
         failed: 0,
@@ -2625,6 +2645,7 @@ exports.tests = [
       );
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 1,
+        partial: 0,
         pending: 0,
         changed: 0,
         failed: 0,
@@ -2692,6 +2713,7 @@ exports.tests = [
 
       assert.deepEqual(counts, {
         translated: 1,
+        partial: 0,
         pending: 2,
         changed: 1,
         failed: 1,
@@ -2703,6 +2725,7 @@ exports.tests = [
     fn() {
       const message = helpers.formatInlineViewportStatusMessage({
         translated: 18,
+        partial: 0,
         pending: 4,
         changed: 3,
         failed: 1,
@@ -2710,7 +2733,7 @@ exports.tests = [
 
       assert.equal(
         message,
-        'Visible translation on\nTranslated 18 · Pending 4 · Changed 3 · Failed 1'
+        'Visible translation on\nTranslated 18 · Partial 0 · Pending 4 · Changed 3 · Failed 1'
       );
     },
   },
@@ -2889,6 +2912,7 @@ exports.tests = [
       const message = helpers.formatInlineViewportStatusMessage(
         {
           translated: 3,
+          partial: 0,
           pending: 2,
           changed: 4,
           failed: 1,
@@ -2898,7 +2922,7 @@ exports.tests = [
 
       assert.equal(
         message,
-        'Visible translation stopped\nTranslated 3 · Pending 0 · Changed 4 · Failed 1'
+        'Visible translation stopped\nTranslated 3 · Partial 0 · Pending 0 · Changed 4 · Failed 1'
       );
     },
   },
@@ -3033,6 +3057,7 @@ exports.tests = [
         helpers.getInlineViewportStatusCounts(state.viewport.records),
         {
           translated: 1,
+          partial: 0,
           pending: 0,
           changed: 0,
           failed: 0,
@@ -3291,7 +3316,7 @@ exports.tests = [
 
       const applied = helpers.applyInlineViewportBlockResults(
         batch,
-        [{ id: record.id, ok: true, template: translatedTemplate }],
+        [{ id: record.id, disposition: 'apply', template: translatedTemplate }],
         15,
         firstStore
       );
@@ -3332,7 +3357,7 @@ exports.tests = [
 
       const firstResult = helpers.applyInlineViewportBlockResults(
         [first],
-        [{ id: first.id, ok: true, template: getReasoningTranslatedTemplate(first) }],
+        [{ id: first.id, disposition: 'apply', template: getReasoningTranslatedTemplate(first) }],
         17,
         store
       );
@@ -3341,7 +3366,6 @@ exports.tests = [
       assert.equal(first.state, 'stale');
       assert.equal(firstResult.retried, 1);
       assert.equal(retry.pageChangeRetryCount, 1);
-      assert.equal(retry.repairRetryCount, 0);
       assert.equal(first.supersededByRetryId, retry.id);
 
       helpers.takeInlineViewportBlockBatch(store);
@@ -3349,7 +3373,7 @@ exports.tests = [
       retryText.nodeValue = 'Updated again';
       const secondResult = helpers.applyInlineViewportBlockResults(
         [retry],
-        [{ id: retry.id, ok: true, template: getReasoningTranslatedTemplate(retry) }],
+        [{ id: retry.id, disposition: 'apply', template: getReasoningTranslatedTemplate(retry) }],
         17,
         store
       );
@@ -3358,148 +3382,14 @@ exports.tests = [
       assert.equal(store.queue.length, 0);
       assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
         translated: 0,
+        partial: 0,
         pending: 0,
         changed: 1,
         failed: 0,
       });
     },
   },
-  {
-    name: 'queues one token repair and counts only the active failed leaf',
-    fn() {
-      const { block } = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(18);
-      const first = helpers.queueInlineViewportBlock(store, block);
-      helpers.takeInlineViewportBlockBatch(store);
-
-      const firstResult = helpers.applyInlineViewportBlockResults(
-        [first],
-        [{ id: first.id, ok: false, errorCode: 'token_missing' }],
-        18,
-        store
-      );
-      const repair = store.queue[0];
-
-      assert.equal(firstResult.retried, 1);
-      assert.equal(first.state, 'failed');
-      assert.equal(repair.repairRetryCount, 1);
-      assert.equal(repair.pageChangeRetryCount, 0);
-      assert.deepEqual(repair.repair, {
-        attempt: 1,
-        previousErrorCode: 'token_missing',
-      });
-
-      helpers.takeInlineViewportBlockBatch(store);
-      const secondResult = helpers.applyInlineViewportBlockResults(
-        [repair],
-        [{ id: repair.id, ok: false, errorCode: 'token_missing' }],
-        18,
-        store
-      );
-
-      assert.equal(secondResult.retried, 0);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        pending: 0,
-        changed: 0,
-        failed: 1,
-      });
-    },
-  },
-  {
-    name: 'preserves queued semantic retries across viewport rescans',
-    fn() {
-      const state = global.__chromeAiTranslatorInlineState;
-      const previous = {
-        status: state.status,
-        operationId: state.operationId,
-        viewport: state.viewport,
-        records: state.records,
-      };
-      const { block } = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(18);
-      const first = helpers.queueInlineViewportBlock(store, block);
-      helpers.takeInlineViewportBlockBatch(store);
-      helpers.applyInlineViewportBlockResults(
-        [first],
-        [{ id: first.id, ok: false, errorCode: 'token_missing' }],
-        18,
-        store
-      );
-      const repair = store.queue[0];
-
-      try {
-        state.status = 'active';
-        state.operationId = 18;
-        state.viewport = store;
-        state.records = store.records;
-        withFakeViewportDom(
-          () => helpers.scheduleInlineViewportScanFromViewportChange(),
-          {
-            clearTimeout() {},
-            setTimeout() {
-              return 123;
-            },
-          }
-        );
-
-        assert.equal(store.queue[0], repair);
-        assert.equal(repair.state, 'queued');
-        assert.equal(first.supersededByRetryId, repair.id);
-        assert.deepEqual(repair.repair, {
-          attempt: 1,
-          previousErrorCode: 'token_missing',
-        });
-      } finally {
-        state.status = previous.status;
-        state.operationId = previous.operationId;
-        state.viewport = previous.viewport;
-        state.records = previous.records;
-      }
-    },
-  },
-  {
-    name: 'prioritizes a page-change retry over a stale token repair',
-    fn() {
-      const { block } = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(18);
-      const first = helpers.queueInlineViewportBlock(store, block);
-      helpers.takeInlineViewportBlockBatch(store);
-      const changedText = first.snapshot.originalTextValues.keys().next().value;
-      changedText.nodeValue = 'Updated reasoning models';
-
-      const firstResult = helpers.applyInlineViewportBlockResults(
-        [first],
-        [{ id: first.id, ok: false, errorCode: 'token_missing' }],
-        18,
-        store
-      );
-      const pageRetry = store.queue[0];
-
-      assert.equal(firstResult.stale, 1);
-      assert.equal(first.state, 'stale');
-      assert.equal(pageRetry.pageChangeRetryCount, 1);
-      assert.equal(pageRetry.repairRetryCount, 0);
-      assert.equal(pageRetry.repair, null);
-
-      helpers.takeInlineViewportBlockBatch(store);
-      helpers.applyInlineViewportBlockResults(
-        [pageRetry],
-        [{ id: pageRetry.id, ok: false, errorCode: 'token_missing' }],
-        18,
-        store
-      );
-      const repair = store.queue[0];
-      assert.equal(repair.pageChangeRetryCount, 1);
-      assert.equal(repair.repairRetryCount, 1);
-      assert.deepEqual(repair.repair, {
-        attempt: 1,
-        previousErrorCode: 'token_missing',
-      });
-    },
-  },
-  {
+   {
     name: 'isolates an invalid block result from valid siblings',
     fn() {
       const firstFixture = createReasoningFixture();
@@ -3513,18 +3403,23 @@ exports.tests = [
       const result = helpers.applyInlineViewportBlockResults(
         batch,
         [
-          { id: first.id, ok: true, template: getReasoningTranslatedTemplate(first) },
-          { id: second.id, ok: false, errorCode: 'token_unknown' },
+          { id: first.id, disposition: 'apply', template: getReasoningTranslatedTemplate(first) },
+          {
+            id: second.id,
+            disposition: 'reject',
+            terminalCode: 'structure.token_unknown',
+            attemptCount: 2,
+          },
         ],
         19,
         store
       );
 
       assert.equal(result.applied, 1);
-      assert.equal(result.retried, 1);
+      assert.equal(result.retried, 0);
       assert.equal(first.state, 'translated');
       assert.equal(second.state, 'failed');
-      assert.equal(store.queue.length, 1);
+      assert.equal(store.queue.length, 0);
     },
   },
   {
@@ -3539,7 +3434,7 @@ exports.tests = [
       const batch = helpers.takeInlineViewportBlockBatch(store);
       helpers.applyInlineViewportBlockResults(
         batch,
-        [{ id: record.id, ok: true, template: getReasoningTranslatedTemplate(record) }],
+        [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
         20,
         store
       );
@@ -3578,7 +3473,7 @@ exports.tests = [
       const record = helpers.queueInlineViewportBlock(firstStore, block);
       helpers.applyInlineViewportBlockResults(
         helpers.takeInlineViewportBlockBatch(firstStore),
-        [{ id: record.id, ok: true, template: getReasoningTranslatedTemplate(record) }],
+        [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
         21,
         firstStore
       );
@@ -3611,7 +3506,7 @@ exports.tests = [
       const first = helpers.queueInlineViewportBlock(store, block);
       helpers.applyInlineViewportBlockResults(
         helpers.takeInlineViewportBlockBatch(store),
-        [{ id: first.id, ok: true, template: getReasoningTranslatedTemplate(first) }],
+        [{ id: first.id, disposition: 'apply', template: getReasoningTranslatedTemplate(first) }],
         23,
         store
       );
