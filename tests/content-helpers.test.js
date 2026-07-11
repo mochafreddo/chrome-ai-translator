@@ -2712,6 +2712,80 @@ exports.tests = [
     },
   },
   {
+    name: 'grants each local diagnostic batch an independent retry',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousSetTimeout = global.setTimeout;
+      const timers = [];
+      let calls = 0;
+      global.setTimeout = (callback) => { timers.push(callback); return timers.length; };
+      global.chrome = { runtime: { sendMessage() {
+        calls += 1;
+        return calls === 4 ? Promise.resolve({ ok: true }) : Promise.reject(new Error('transient'));
+      } } };
+      const store = {
+        operationId: 77,
+        localDiagnostics: [{ code: 'runtime.unsupported_block', evidence: {} }],
+        localDiagnosticsInFlight: null,
+        translationSettings: null,
+      };
+      try {
+        helpers.flushInlineLocalDiagnostics(store);
+        await new Promise((resolve) => setImmediate(resolve));
+        store.localDiagnostics.push({ code: 'runtime.block_too_large', evidence: {} });
+        timers.shift()();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(calls, 2);
+        assert.equal(store.localDiagnostics.length, 1);
+
+        timers.shift()();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(calls, 3);
+        timers.shift()();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(calls, 4);
+        assert.equal(store.localDiagnostics.length, 0);
+        assert.equal(store.localDiagnosticsInFlight, null);
+      } finally {
+        global.chrome = previousChrome;
+        global.setTimeout = previousSetTimeout;
+      }
+    },
+  },
+  {
+    name: 'does not warn when a local diagnostic retry succeeds',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousSetTimeout = global.setTimeout;
+      const timers = [];
+      let calls = 0;
+      global.setTimeout = (callback) => { timers.push(callback); return timers.length; };
+      global.chrome = { runtime: { sendMessage() {
+        calls += 1;
+        return calls === 1 ? Promise.reject(new Error('transient')) : Promise.resolve({ ok: true });
+      } } };
+      const store = {
+        operationId: 78,
+        localDiagnostics: [{ code: 'runtime.unsupported_block', evidence: {} }],
+        localDiagnosticsInFlight: null,
+        translationSettings: null,
+      };
+      try {
+        helpers.flushInlineLocalDiagnostics(store);
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.notEqual(store.diagnosticsUnavailable, true);
+        timers.shift()();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(calls, 2);
+        assert.notEqual(store.diagnosticsUnavailable, true);
+        assert.equal(store.localDiagnosticsInFlight, null);
+      } finally {
+        global.chrome = previousChrome;
+        global.setTimeout = previousSetTimeout;
+      }
+    },
+  },
+  {
     name: 'marks only current translating viewport records as failed',
     fn() {
       const records = [

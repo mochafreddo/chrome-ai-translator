@@ -84,7 +84,6 @@ function createInlineViewportStore(
     nextTerminalSequence: 0,
     localDiagnostics: [],
     localDiagnosticsInFlight: null,
-    localDiagnosticRetryCount: 0,
     sessionRecordCost: Math.max(0, Number(sessionRecordCost) || 0),
     translationByOriginal:
       translationByOriginal instanceof Map ? translationByOriginal : new Map(),
@@ -118,31 +117,41 @@ function queueInlineLocalDiagnostic(store, record, code, evidence = {}) {
 
 function flushInlineLocalDiagnostics(store) {
   if (!store?.localDiagnostics?.length || store.localDiagnosticsInFlight) return;
-  const diagnostics = store.localDiagnostics.splice(0, 500);
-  store.localDiagnosticsInFlight = diagnostics;
+  const batch = {
+    diagnostics: store.localDiagnostics.splice(0, 500),
+    attempt: 0,
+  };
+  store.localDiagnosticsInFlight = batch;
+  sendInlineLocalDiagnosticBatch(store, batch);
+}
+
+function sendInlineLocalDiagnosticBatch(store, batch) {
   const fail = () => {
-    store.localDiagnosticsInFlight = null;
-    store.diagnosticsUnavailable = true;
-    if (store.localDiagnosticRetryCount < 1) {
-      store.localDiagnosticRetryCount += 1;
-      store.localDiagnostics.unshift(...diagnostics);
-      setTimeout(() => flushInlineLocalDiagnostics(store), 250);
+    if (batch.attempt < 1 && store.localDiagnosticsInFlight === batch) {
+      batch.attempt += 1;
+      setTimeout(() => sendInlineLocalDiagnosticBatch(store, batch), 250);
+    } else {
+      store.diagnosticsUnavailable = true;
+      if (store.localDiagnosticsInFlight === batch) store.localDiagnosticsInFlight = null;
+      if (store.localDiagnostics.length) {
+        setTimeout(() => flushInlineLocalDiagnostics(store), 250);
+      }
     }
-    if (inlineState.viewport === store && inlineState.operationId === store.operationId) {
+    if (store.diagnosticsUnavailable && inlineState.viewport === store && inlineState.operationId === store.operationId) {
       updateInlineViewportMessage();
     }
   };
   chrome.runtime.sendMessage({
     type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
     settingsSnapshot: store.translationSettings,
-    diagnostics,
+    diagnostics: batch.diagnostics,
   }).then((response) => {
     if (response?.ok !== true) {
       fail();
       return;
     }
-    store.localDiagnosticsInFlight = null;
-    store.localDiagnosticRetryCount = 0;
+    if (store.localDiagnosticsInFlight === batch) store.localDiagnosticsInFlight = null;
+    if (store.localDiagnostics.length) setTimeout(() => flushInlineLocalDiagnostics(store), 0);
   }).catch(fail);
 }
 
