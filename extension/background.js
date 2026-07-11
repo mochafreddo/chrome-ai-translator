@@ -12,6 +12,18 @@ const inlineBlockCodec =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-block.js')
     : null);
+if (typeof importScripts === 'function') {
+  if (!globalThis.ChromeAiTranslatorValidation) {
+    importScripts('translation-validation.js');
+  }
+  if (!globalThis.ChromeAiTranslatorPolicy) {
+    importScripts('translation-policy.js');
+  }
+}
+const translationValidation =
+  globalThis.ChromeAiTranslatorValidation || require('./translation-validation.js');
+const translationPolicy =
+  globalThis.ChromeAiTranslatorPolicy || require('./translation-policy.js');
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
@@ -1466,29 +1478,68 @@ async function translateVisibleBlockBatch(
       throw new Error('OpenAI API key is not set. Open Options and paste your key.');
     }
 
-    const modelRecords = normalized.map((record) => ({
-      id: record.id,
-      template: record.template,
-      atoms: record.atoms,
-      repair: record.repair,
-    }));
     const chunkStartedAtMs = Date.now();
-    const output = await openaiTranslateChunk({
-      apiKey: settings.apiKey,
-      model: settings.model,
-      reasoningEffort: settings.reasoningEffort,
-      instructions: buildBlockInstructions(settings),
-      input: JSON.stringify({ records: modelRecords }),
-      textFormat: buildBlockResponseFormat(),
-      maxOutputTokens: getBlockBatchMaxOutputTokens(totalCost),
-    });
-    const validateTranslationCompleteness =
-      options.validateTranslationCompleteness === true ||
-      (settingsSnapshot !== null && typeof settingsSnapshot === 'object');
-    const results = parseAndValidateBlockTranslations(output, normalized, {
-      targetLanguage: validateTranslationCompleteness
-        ? settings.targetLanguage
-        : '',
+    async function requestAndValidate(batch) {
+      const modelRecords = batch.map((record) => ({
+        id: record.id,
+        template: record.template,
+        atoms: record.atoms,
+        repair: record.repair || null,
+      }));
+      const output = await openaiTranslateChunk({
+        apiKey: settings.apiKey,
+        model: settings.model,
+        reasoningEffort: settings.reasoningEffort,
+        instructions: buildBlockInstructions(settings),
+        input: JSON.stringify({ records: modelRecords }),
+        textFormat: buildBlockResponseFormat(),
+        maxOutputTokens: getBlockBatchMaxOutputTokens(
+          batch.reduce((sum, record) => sum + getBlockRecordCost(record), 0)
+        ),
+      });
+      return translationValidation.validateBlockResponse(output, batch, {
+        targetLanguage: settings.targetLanguage,
+      }).records;
+    }
+
+    const initial = await requestAndValidate(normalized);
+    const terminalById = new Map();
+    const repairs = [];
+    for (const result of initial) {
+      const decision = translationPolicy.decideBlockDisposition(result, 1);
+      if (decision.disposition === 'retry') {
+        const source = normalized.find((record) => record.id === result.id);
+        repairs.push({
+          ...source,
+          repair: { attempt: 1, previousErrorCode: decision.terminalCode },
+        });
+      } else {
+        terminalById.set(result.id, { result, decision, attemptCount: 1 });
+      }
+    }
+    if (repairs.length) {
+      const repaired = await requestAndValidate(repairs);
+      for (const result of repaired) {
+        terminalById.set(result.id, {
+          result,
+          decision: translationPolicy.decideBlockDisposition(result, 2),
+          attemptCount: 2,
+        });
+      }
+    }
+    const results = normalized.map((record) => {
+      const terminal = terminalById.get(record.id);
+      const apply = terminal.decision.disposition !== 'reject';
+      return {
+        id: record.id,
+        disposition: terminal.decision.disposition,
+        ...(apply ? { template: terminal.result.template } : {}),
+        terminalCode: terminal.decision.terminalCode,
+        messageKey: terminal.decision.messageKey,
+        attemptCount: terminal.attemptCount,
+        // Removed with the content-side contract migration in Task 4.
+        ok: apply,
+      };
     });
     if (logEntry.chunks[0]) {
       logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;

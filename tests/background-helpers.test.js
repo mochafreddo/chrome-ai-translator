@@ -375,6 +375,7 @@ exports.tests = [
       const previousFetch = global.fetch;
       const record = createBlockApiRecord();
       let requestBody = null;
+      let requestCount = 0;
       global.chrome = {
         storage: {
           local: {
@@ -397,6 +398,7 @@ exports.tests = [
         },
       };
       global.fetch = async (_url, options) => {
+        requestCount += 1;
         requestBody = JSON.parse(options.body);
         return {
           ok: true,
@@ -414,9 +416,16 @@ exports.tests = [
         const results = await helpers.translateVisibleBlockBatch([record]);
         const input = JSON.parse(requestBody.input);
 
-        assert.deepEqual(results, [
-          { id: record.id, ok: true, template: record.template },
-        ]);
+        assert.deepEqual(results, [{
+          id: record.id,
+          disposition: 'apply_with_warning',
+          template: record.template,
+          terminalCode: 'quality.english_residue',
+          messageKey: 'partial_translation_applied',
+          attemptCount: 2,
+          ok: true,
+        }]);
+        assert.equal(requestCount, 2);
         assert.equal(input.records[0].contract, undefined);
         assert.equal(input.records[0].atoms[0].href, undefined);
         assert.equal(requestBody.text.format.name, 'inline_block_translations');
@@ -1193,7 +1202,15 @@ exports.tests = [
         assert.deepEqual(responses, [
           {
             ok: true,
-            results: [{ id: record.id, ok: true, template: record.template }],
+            results: [{
+              id: record.id,
+              disposition: 'apply_with_warning',
+              template: record.template,
+              terminalCode: 'quality.english_residue',
+              messageKey: 'partial_translation_applied',
+              attemptCount: 2,
+              ok: true,
+            }],
           },
         ]);
       } finally {
