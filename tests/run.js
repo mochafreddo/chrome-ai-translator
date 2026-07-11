@@ -1,5 +1,8 @@
 const suites = [
   require('./inline-block.test'),
+  require('./translation-validation.test'),
+  require('./translation-policy.test'),
+  require('./translation-diagnostics.test'),
   require('./content-helpers.test'),
   require('./background-helpers.test'),
   require('./options-helpers.test'),
