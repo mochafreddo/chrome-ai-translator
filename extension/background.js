@@ -22,6 +22,12 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorDiagnostics) {
     importScripts('translation-diagnostics.js');
   }
+  if (!globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol) {
+    importScripts('inline-diagnostics-protocol.js');
+  }
+  if (!globalThis.ChromeAiTranslatorInlineDiagnosticsController) {
+    importScripts('inline-diagnostics-controller.js');
+  }
 }
 const translationValidation =
   globalThis.ChromeAiTranslatorValidation || require('./translation-validation.js');
@@ -29,6 +35,10 @@ const translationPolicy =
   globalThis.ChromeAiTranslatorPolicy || require('./translation-policy.js');
 const translationDiagnostics =
   globalThis.ChromeAiTranslatorDiagnostics || require('./translation-diagnostics.js');
+const inlineDiagnosticsProtocol =
+  globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol || require('./inline-diagnostics-protocol.js');
+const inlineDiagnosticsController =
+  globalThis.ChromeAiTranslatorInlineDiagnosticsController || require('./inline-diagnostics-controller.js');
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
@@ -223,7 +233,7 @@ async function ensureSidePanel(tabId) {
 }
 
 function getInlineContentScriptFiles() {
-  return ['inline-block.js', 'content.js'];
+  return ['inline-block.js', 'inline-diagnostics-protocol.js', 'content.js'];
 }
 
 async function ensureContentScript(tabId) {
@@ -1504,14 +1514,7 @@ async function issueInlineRuntimeCorrelations(items, context = {}) {
 }
 
 function createInlineRuntimeCorrelationToken() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
-  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return inlineDiagnosticsProtocol.createUuidV4();
 }
 
 async function consumeInlineRuntimeCorrelations(outcomes, releaseTokens, context = {}) {
@@ -1744,9 +1747,10 @@ async function translateVisibleBlockBatch(
       return persistence;
     }
     const correlationsById = new Map();
+    const normalizedById = new Map(normalized.map((record) => [record.id, record]));
     try {
       const correlationEntries = await Promise.all(results.map(async (result) => {
-        const record = normalized.find((candidate) => candidate.id === result.id);
+        const record = normalizedById.get(result.id);
         const fingerprints = await translationDiagnostics.fingerprintBlock(
           chrome,
           record?.template,
@@ -2135,9 +2139,13 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           sendResponse({ ok: true, results });
           return;
         }
-        if (msg?.type === 'RECORD_INLINE_RUNTIME_DIAGNOSTIC') {
-          const outcomes = Array.isArray(msg.outcomes) ? msg.outcomes.slice(0, INLINE_MAX_RECORDS) : [];
-          const releaseTokens = Array.isArray(msg.releaseTokens) ? msg.releaseTokens.slice(0, 500) : [];
+        if (msg?.type === inlineDiagnosticsProtocol.messages.recordRuntime) {
+          const outcomes = Array.isArray(msg.outcomes)
+            ? msg.outcomes.slice(0, inlineDiagnosticsProtocol.limits.maxRecords)
+            : [];
+          const releaseTokens = Array.isArray(msg.releaseTokens)
+            ? msg.releaseTokens.slice(0, inlineDiagnosticsProtocol.limits.maxRecords)
+            : [];
           const startedAt = Date.now();
           const runtimeRunId = createRuntimeDiagnosticId(startedAt);
           const changedCount = outcomes.filter(
@@ -2190,85 +2198,21 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           sendResponse({ ok: persistence.persisted });
           return;
         }
-        if (msg?.type === 'RECORD_INLINE_LOCAL_DIAGNOSTIC') {
+        if (msg?.type === inlineDiagnosticsProtocol.messages.recordLocal) {
           const diagnosticBatchId = String(msg.diagnosticBatchId || '');
           const senderTabId = sender?.tab?.id;
           const operationId = msg.operationId;
           if (
-            !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(diagnosticBatchId) ||
+            !inlineDiagnosticsProtocol.uuidV4Pattern.test(diagnosticBatchId) ||
             !Number.isInteger(senderTabId) || !Number.isInteger(operationId)
           ) {
             sendResponse({ ok: false });
             return;
           }
-          const allowedCodes = new Set([
-            'runtime.unsupported_block',
-            'runtime.block_too_large',
-            'runtime.session_too_large',
-          ]);
-          let localDiagnosticPayloadCost = 0;
-          const diagnostics = [];
-          for (const entry of (Array.isArray(msg.diagnostics) ? msg.diagnostics : []).slice(0, INLINE_MAX_RECORDS)) {
-            if (!allowedCodes.has(entry?.code)) continue;
-            const template = typeof entry.template === 'string' ? entry.template : '';
-            let contract = null;
-            let contractJson = '';
-            if (entry.contract && typeof entry.contract === 'object' && !Array.isArray(entry.contract)) {
-              try {
-                const boundedString = (value, max = 200) => String(value || '').slice(0, max);
-                const copyString = (target, source, key, max) => {
-                  if (Object.hasOwn(source, key)) target[key] = boundedString(source[key], max);
-                };
-                contract = {};
-                if (Object.hasOwn(entry.contract, 'codecVersion')) contract.codecVersion = Number(entry.contract.codecVersion) || 0;
-                copyString(contract, entry.contract, 'namespace', 100);
-                if (Object.hasOwn(entry.contract, 'entries')) {
-                  contract.entries = (Array.isArray(entry.contract.entries) ? entry.contract.entries : [])
-                    .slice(0, INLINE_MAX_RECORDS)
-                    .map((item) => {
-                      const copied = {};
-                      for (const [key, max] of [
-                        ['id', 200], ['kind', 40], ['tagName', 40], ['parentId', 200],
-                        ['openToken', 200], ['closeToken', 200], ['token', 200], ['atomKind', 80],
-                      ]) copyString(copied, item || {}, key, max);
-                      if (Object.hasOwn(item || {}, 'preserveText')) copied.preserveText = item.preserveText === true;
-                      return copied;
-                    });
-                }
-                if (Object.hasOwn(entry.contract, 'maxOutputChars')) {
-                  contract.maxOutputChars = Math.max(0, Number(entry.contract.maxOutputChars) || 0);
-                }
-                if (Object.hasOwn(entry.contract, 'requiresText')) contract.requiresText = entry.contract.requiresText === true;
-                if (Object.hasOwn(entry.contract, 'literalTokens')) {
-                  contract.literalTokens = (Array.isArray(entry.contract.literalTokens) ? entry.contract.literalTokens : [])
-                    .slice(0, INLINE_MAX_RECORDS)
-                    .map((item) => ({
-                      value: boundedString(item?.value),
-                      count: Math.max(0, Number(item?.count) || 0),
-                    }));
-                }
-                contractJson = JSON.stringify(contract);
-                if (contractJson.length > INLINE_BLOCK_MAX_RECORD_COST) {
-                  contract = null;
-                  contractJson = '';
-                }
-              } catch {}
-            }
-            if (template.length > INLINE_BLOCK_MAX_RECORD_COST) continue;
-            const entryCost = template.length + contractJson.length;
-            if (entryCost > INLINE_BLOCK_MAX_RECORD_COST) continue;
-            if (localDiagnosticPayloadCost + entryCost > INLINE_BLOCK_MAX_SESSION_COST) continue;
-            localDiagnosticPayloadCost += entryCost;
-            const evidence = {};
-            for (const key of ['recordCost', 'sessionCost', 'limit']) {
-              if (Number.isFinite(entry.evidence?.[key])) evidence[key] = Math.max(0, Number(entry.evidence[key]));
-            }
-            diagnostics.push({
-              code: entry.code,
-              ...(template && contract ? { template, contract } : {}),
-              evidence,
-            });
-          }
+          const diagnostics = inlineDiagnosticsController.normalizeLocalDiagnostics(
+            msg.diagnostics,
+            inlineDiagnosticsProtocol
+          );
           if (!diagnostics.length) {
             sendResponse({ ok: false });
             return;

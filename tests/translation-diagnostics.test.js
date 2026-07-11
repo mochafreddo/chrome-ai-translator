@@ -33,6 +33,27 @@ exports.tests = [
     },
   },
   {
+    name: 'retries a transient HMAC key import failure',
+    async fn() {
+      const subtle = globalThis.crypto.subtle;
+      const originalImportKey = subtle.importKey;
+      let calls = 0;
+      subtle.importKey = async function transientImport(...args) {
+        calls += 1;
+        if (calls === 1) throw new Error('transient');
+        return originalImportKey.apply(this, args);
+      };
+      const secret = new Uint8Array(32).fill(9);
+      try {
+        await assert.rejects(diagnostics.fingerprint(secret, 'value'), /transient/);
+        assert.match(await diagnostics.fingerprint(secret, 'value'), /^hmac-sha256:/);
+        assert.equal(calls, 2);
+      } finally {
+        subtle.importKey = originalImportKey;
+      }
+    },
+  },
+  {
     name: 'bounds runs and problem blocks',
     fn() {
       const runs = Array.from({ length: 21 }, (_, index) => ({

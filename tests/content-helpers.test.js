@@ -1483,6 +1483,82 @@ exports.tests = [
     },
   },
   {
+    name: 'makes a final RCA persistence attempt when stopping during retry backoff',
+    fn() {
+      const previousChrome = global.chrome;
+      const messages = [];
+      global.chrome = { runtime: { sendMessage(message) {
+        messages.push(message);
+        return new Promise(() => {});
+      } } };
+      const store = helpers.createInlineViewportStore(5);
+      store.localDiagnosticsInFlight = {
+        id: globalThis.crypto.randomUUID(),
+        diagnostics: [{ code: 'runtime.block_too_large', evidence: {} }],
+        attempt: 1,
+      };
+      store.localDiagnostics.push({ code: 'runtime.session_too_large', evidence: {} });
+      store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
+      const state = { status: 'active', operationId: 5, viewport: store, records: [] };
+      try {
+        helpers.stopInlineViewportTranslation(state);
+        assert.equal(messages.length, 2);
+        assert.equal(messages[0].type, 'RECORD_INLINE_LOCAL_DIAGNOSTIC');
+        assert.equal(messages[1].diagnostics[0].code, 'runtime.session_too_large');
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'flushes queued RCA diagnostics when stopping before a deferred flush',
+    fn() {
+      const previousChrome = global.chrome;
+      const messages = [];
+      global.chrome = { runtime: { sendMessage(message) {
+        messages.push(message);
+        return new Promise(() => {});
+      } } };
+      const store = helpers.createInlineViewportStore(6);
+      store.localDiagnostics.push({ code: 'runtime.session_too_large', evidence: { limit: 60000 } });
+      store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
+      const state = { status: 'active', operationId: 6, viewport: store, records: [] };
+      try {
+        helpers.stopInlineViewportTranslation(state);
+        assert.equal(messages.length, 1);
+        assert.equal(messages[0].diagnostics[0].code, 'runtime.session_too_large');
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'drains queued RCA diagnostics while another request is active',
+    fn() {
+      const previousChrome = global.chrome;
+      const messages = [];
+      global.chrome = { runtime: { sendMessage(message) {
+        messages.push(message);
+        return new Promise(() => {});
+      } } };
+      const store = helpers.createInlineViewportStore(7);
+      store.localDiagnosticsInFlight = {
+        id: globalThis.crypto.randomUUID(),
+        diagnostics: [{ code: 'runtime.block_too_large', evidence: {} }],
+        attempt: 0,
+      };
+      store.localDiagnostics.push({ code: 'runtime.unsupported_block', evidence: {} });
+      const state = { status: 'active', operationId: 7, viewport: store, records: [] };
+      try {
+        helpers.stopInlineViewportTranslation(state);
+        assert.equal(messages.length, 1);
+        assert.equal(messages[0].diagnostics[0].code, 'runtime.unsupported_block');
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
     name: 'restores stopped-session translations after viewport restart',
     fn() {
       const firstStore = helpers.createInlineViewportStore(4);

@@ -5,6 +5,11 @@ var inlineBlockCodec =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-block.js')
     : null);
+var inlineDiagnosticsProtocol =
+  globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./inline-diagnostics-protocol.js')
+    : null);
 
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
@@ -84,6 +89,7 @@ function createInlineViewportStore(
     nextTerminalSequence: 0,
     localDiagnostics: [],
     localDiagnosticsInFlight: null,
+    localDiagnosticRetryTimer: null,
     sessionRecordCost: Math.max(0, Number(sessionRecordCost) || 0),
     translationByOriginal:
       translationByOriginal instanceof Map ? translationByOriginal : new Map(),
@@ -119,7 +125,7 @@ function flushInlineLocalDiagnostics(store) {
   if (!store?.localDiagnostics?.length || store.localDiagnosticsInFlight) return;
   const batch = {
     id: createInlineLocalDiagnosticBatchId(),
-    diagnostics: store.localDiagnostics.splice(0, 500),
+    diagnostics: store.localDiagnostics.splice(0, inlineDiagnosticsProtocol.limits.maxRecords),
     attempt: 0,
   };
   store.localDiagnosticsInFlight = batch;
@@ -127,26 +133,19 @@ function flushInlineLocalDiagnostics(store) {
 }
 
 function createInlineLocalDiagnosticBatchId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
-  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return inlineDiagnosticsProtocol.createUuidV4();
 }
 
 function sendInlineLocalDiagnosticBatch(store, batch) {
   const fail = () => {
     if (batch.attempt < 1 && store.localDiagnosticsInFlight === batch) {
       batch.attempt += 1;
-      setTimeout(() => sendInlineLocalDiagnosticBatch(store, batch), 250);
+      scheduleInlineLocalDiagnosticTask(store, () => sendInlineLocalDiagnosticBatch(store, batch), 250);
     } else {
       store.diagnosticsUnavailable = true;
       if (store.localDiagnosticsInFlight === batch) store.localDiagnosticsInFlight = null;
       if (store.localDiagnostics.length) {
-        setTimeout(() => flushInlineLocalDiagnostics(store), 250);
+        scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store), 250);
       }
     }
     if (store.diagnosticsUnavailable && inlineState.viewport === store && inlineState.operationId === store.operationId) {
@@ -154,7 +153,7 @@ function sendInlineLocalDiagnosticBatch(store, batch) {
     }
   };
   chrome.runtime.sendMessage({
-    type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+    type: inlineDiagnosticsProtocol.messages.recordLocal,
     diagnosticBatchId: batch.id,
     operationId: store.operationId,
     settingsSnapshot: store.translationSettings,
@@ -165,8 +164,33 @@ function sendInlineLocalDiagnosticBatch(store, batch) {
       return;
     }
     if (store.localDiagnosticsInFlight === batch) store.localDiagnosticsInFlight = null;
-    if (store.localDiagnostics.length) setTimeout(() => flushInlineLocalDiagnostics(store), 0);
+    if (store.localDiagnostics.length) {
+      scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store), 0);
+    }
   }).catch(fail);
+}
+
+function scheduleInlineLocalDiagnosticTask(store, task, delay) {
+  if (store.localDiagnosticRetryTimer) clearTimeout(store.localDiagnosticRetryTimer);
+  store.localDiagnosticRetryTimer = setTimeout(() => {
+    store.localDiagnosticRetryTimer = null;
+    if (!store.stopped) task();
+  }, delay);
+}
+
+function drainInlineLocalDiagnosticsOnStop(store, resendInFlight) {
+  if (resendInFlight && store.localDiagnosticsInFlight) {
+    const inFlight = store.localDiagnosticsInFlight;
+    store.localDiagnosticsInFlight = null;
+    sendInlineLocalDiagnosticBatch(store, inFlight);
+  }
+  while (store.localDiagnostics.length) {
+    sendInlineLocalDiagnosticBatch(store, {
+      id: createInlineLocalDiagnosticBatchId(),
+      diagnostics: store.localDiagnostics.splice(0, inlineDiagnosticsProtocol.limits.maxRecords),
+      attempt: 1,
+    });
+  }
 }
 
 function isInlineViewportOperationCurrent(state, store, operationId) {
@@ -185,6 +209,7 @@ function stopInlineViewportTranslation(state = inlineState) {
   const store = state.viewport;
   if (!store) return state.operationId;
 
+  const hasPendingDiagnosticTask = Boolean(store.localDiagnosticRetryTimer);
   addInlineRestorableRecords(state, store.records);
   clearCanceledInlineViewportRetrySupersessions(store, ['translating']);
   resetQueuedInlineViewportRecords(store);
@@ -194,6 +219,11 @@ function stopInlineViewportTranslation(state = inlineState) {
     clearTimeout(store.scanTimer);
     store.scanTimer = null;
   }
+  if (store.localDiagnosticRetryTimer) {
+    clearTimeout(store.localDiagnosticRetryTimer);
+    store.localDiagnosticRetryTimer = null;
+  }
+  drainInlineLocalDiagnosticsOnStop(store, hasPendingDiagnosticTask);
   if (state.operationId === store.operationId) {
     state.operationId = (Number(state.operationId) || 0) + 1;
   }
@@ -2205,7 +2235,7 @@ function releaseInlineRuntimeTokensFromStaleResponse(resp, operationId) {
     : [];
   if (!releaseTokens.length) return false;
   chrome.runtime.sendMessage({
-    type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+    type: inlineDiagnosticsProtocol.messages.recordRuntime,
     operationId,
     outcomes: [],
     releaseTokens,
@@ -2278,7 +2308,7 @@ async function drainInlineViewportQueue() {
           .filter((token) => token && !runtimeTokens.has(token));
         if (runtimeOutcomes.length || releaseTokens.length) {
           chrome.runtime.sendMessage({
-            type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+            type: inlineDiagnosticsProtocol.messages.recordRuntime,
             operationId,
             outcomes: runtimeOutcomes,
             releaseTokens,

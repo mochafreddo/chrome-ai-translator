@@ -8,6 +8,7 @@
   const CODE_PREFIXES = ['protocol.', 'structure.', 'quality.', 'runtime.'];
   let installSecretPromise = null;
   let storageMutation = Promise.resolve();
+  const hmacKeyPromises = new WeakMap();
 
   function safeCode(value, fallback = 'runtime.request_failed') {
     const code = String(value || '');
@@ -111,9 +112,17 @@
   }
 
   async function fingerprint(secretBytes, value) {
-    const key = await globalScope.crypto.subtle.importKey(
-      'raw', secretBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-    );
+    let keyPromise = hmacKeyPromises.get(secretBytes);
+    if (!keyPromise) {
+      keyPromise = globalScope.crypto.subtle.importKey(
+        'raw', secretBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+      ).catch((error) => {
+        if (hmacKeyPromises.get(secretBytes) === keyPromise) hmacKeyPromises.delete(secretBytes);
+        throw error;
+      });
+      hmacKeyPromises.set(secretBytes, keyPromise);
+    }
+    const key = await keyPromise;
     const signature = await globalScope.crypto.subtle.sign(
       'HMAC', key, new TextEncoder().encode(String(value || ''))
     );
@@ -151,59 +160,59 @@
     };
   }
 
-  async function persistRun(chromeApi, run) {
-    const operation = storageMutation.catch(() => {}).then(async () => {
-      const storage = chromeApi.storage.local;
-      const stored = await storage.get(null);
-      const previousIds = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
-      const runId = String(run.runId || '');
-      const ids = [runId, ...previousIds.filter((id) => id !== runId)].slice(0, MAX_RUNS);
-      const sanitized = exportDiagnostics([run]).runs[0];
-      await storage.set({ [INDEX_KEY]: ids, [`${RUN_PREFIX}${runId}`]: sanitized });
-      const removal = Object.keys(stored).filter((key) =>
-        key === 'inlineTranslationLogs' ||
-        key.startsWith('inlineTranslationLogs:') ||
-        (key.startsWith(RUN_PREFIX) && !ids.includes(key.slice(RUN_PREFIX.length)))
-      );
-      if (removal.length && storage.remove) await storage.remove(removal);
-      return { persisted: true };
-    }).catch(() => ({ persisted: false }));
+  function serializeStorageMutation(work, fallback) {
+    const operation = storageMutation.catch(() => {}).then(work).catch(() => fallback);
     storageMutation = operation;
     return operation;
   }
 
-  async function persistRunIdempotent(chromeApi, run) {
-    const operation = storageMutation.catch(() => {}).then(async () => {
+  function getRunWrite(stored, run) {
+    const runId = String(run.runId || '');
+    const previousIds = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
+    const ids = [runId, ...previousIds.filter((id) => id !== runId)].slice(0, MAX_RUNS);
+    const removal = Object.keys(stored).filter((key) =>
+      key === 'inlineTranslationLogs' ||
+      key.startsWith('inlineTranslationLogs:') ||
+      (key.startsWith(RUN_PREFIX) && !ids.includes(key.slice(RUN_PREFIX.length)))
+    );
+    return {
+      ids,
+      removal,
+      runId,
+      runKey: `${RUN_PREFIX}${runId}`,
+      sanitized: exportDiagnostics([run]).runs[0],
+    };
+  }
+
+  async function writeRun(storage, write) {
+    await storage.set({ [INDEX_KEY]: write.ids, [write.runKey]: write.sanitized });
+    if (write.removal.length && storage.remove) await storage.remove(write.removal);
+  }
+
+  async function persistRun(chromeApi, run) {
+    return serializeStorageMutation(async () => {
       const storage = chromeApi.storage.local;
-      const runId = String(run.runId || '');
-      const runKey = `${RUN_PREFIX}${runId}`;
       const stored = await storage.get(null);
-      const existing = stored[runKey];
-      const previousIds = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
-      const ids = [runId, ...previousIds.filter((id) => id !== runId)].slice(0, MAX_RUNS);
+      await writeRun(storage, getRunWrite(stored, run));
+      return { persisted: true };
+    }, { persisted: false });
+  }
+
+  async function persistRunIdempotent(chromeApi, run) {
+    return serializeStorageMutation(async () => {
+      const storage = chromeApi.storage.local;
+      const stored = await storage.get(null);
+      const write = getRunWrite(stored, run);
+      const existing = stored[write.runKey];
       const validExistingFingerprint = /^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(
         existing?.idempotencyFingerprint || ''
       );
       if (existing && validExistingFingerprint && existing.idempotencyFingerprint !== run.idempotencyFingerprint) {
         return { persisted: false, conflict: true };
       }
-      const removal = Object.keys(stored).filter((key) =>
-        key === 'inlineTranslationLogs' ||
-        key.startsWith('inlineTranslationLogs:') ||
-        (key.startsWith(RUN_PREFIX) && !ids.includes(key.slice(RUN_PREFIX.length)))
-      );
-      const sanitized = exportDiagnostics([run]).runs[0];
-      if (existing && validExistingFingerprint) {
-        await storage.set({ [INDEX_KEY]: ids, [runKey]: sanitized });
-        if (removal.length && storage.remove) await storage.remove(removal);
-        return { persisted: true, duplicate: true };
-      }
-      await storage.set({ [INDEX_KEY]: ids, [runKey]: sanitized });
-      if (removal.length && storage.remove) await storage.remove(removal);
-      return { persisted: true, duplicate: false };
-    }).catch(() => ({ persisted: false }));
-    storageMutation = operation;
-    return operation;
+      await writeRun(storage, write);
+      return { persisted: true, duplicate: Boolean(existing && validExistingFingerprint) };
+    }, { persisted: false });
   }
 
   async function discardRun(chromeApi, runId) {

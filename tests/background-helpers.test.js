@@ -485,6 +485,7 @@ exports.tests = [
     fn() {
       assert.deepEqual(helpers.getInlineContentScriptFiles(), [
         'inline-block.js',
+        'inline-diagnostics-protocol.js',
         'content.js',
       ]);
     },
@@ -622,7 +623,7 @@ exports.tests = [
           {
             id: 'inline-translator-auto-show',
             matches: ['http://*/*', 'https://*/*'],
-            js: ['inline-block.js', 'content.js'],
+            js: ['inline-block.js', 'inline-diagnostics-protocol.js', 'content.js'],
             runAt: 'document_idle',
           }
         );
@@ -686,7 +687,7 @@ exports.tests = [
           {
             id: 'inline-translator-auto-show',
             matches: ['http://*/*', 'https://*/*'],
-            js: ['inline-block.js', 'content.js'],
+            js: ['inline-block.js', 'inline-diagnostics-protocol.js', 'content.js'],
             runAt: 'document_idle',
           }
         );

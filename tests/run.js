@@ -3,6 +3,7 @@ const suites = [
   require('./translation-validation.test'),
   require('./translation-policy.test'),
   require('./translation-diagnostics.test'),
+  require('./inline-diagnostics-controller.test'),
   require('./content-helpers.test'),
   require('./background-helpers.test'),
   require('./options-helpers.test'),
