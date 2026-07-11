@@ -2136,7 +2136,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           return;
         }
         if (msg?.type === 'RECORD_INLINE_RUNTIME_DIAGNOSTIC') {
-          const outcomes = Array.isArray(msg.outcomes) ? msg.outcomes.slice(0, 100) : [];
+          const outcomes = Array.isArray(msg.outcomes) ? msg.outcomes.slice(0, INLINE_MAX_RECORDS) : [];
           const releaseTokens = Array.isArray(msg.releaseTokens) ? msg.releaseTokens.slice(0, 500) : [];
           const startedAt = Date.now();
           const runtimeRunId = createRuntimeDiagnosticId(startedAt);

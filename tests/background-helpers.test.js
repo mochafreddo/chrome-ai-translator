@@ -1293,6 +1293,39 @@ exports.tests = [
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
         assert.deepEqual(replayResponses, [{ ok: false }]);
+
+        const bulkEntries = {};
+        const bulkOutcomes = [];
+        for (let index = 0; index < 500; index += 1) {
+          const token = `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
+          bulkEntries[token] = {
+            expiresAt: Date.now() + 60000,
+            runId: 'run-123-bulk',
+            diagnosticId: `run-123-bulk/b${index}`,
+            sourceFingerprint: `hmac-sha256:${'A'.repeat(43)}`,
+            contractFingerprint: `hmac-sha256:${'B'.repeat(43)}`,
+            model: 'gpt-5.4-mini',
+            targetLanguageCode: 'ko',
+            extensionVersion: 'test',
+            tabId: 7,
+            operationId: 99,
+          };
+          bulkOutcomes.push({ code: 'runtime.apply_failed', correlationToken: token });
+        }
+        sessionStored['inlineRuntimeCorrelations:v1'] = bulkEntries;
+        const bulkResponses = [];
+        messageListener({
+          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+          operationId: 99,
+          outcomes: bulkOutcomes,
+        }, { tab: { id: 7 } }, (response) => bulkResponses.push(response));
+        for (let index = 0; index < 10 && !bulkResponses.length; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        assert.deepEqual(bulkResponses, [{ ok: true }]);
+        const bulkRun = Object.values(stored).find((value) => value?.summary?.failed === 500);
+        assert.equal(bulkRun.blocks.length, 100);
+        assert.equal(Object.keys(sessionStored['inlineRuntimeCorrelations:v1']).length, 0);
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;
