@@ -1224,25 +1224,9 @@ function sanitizeLogError(error) {
 }
 
 async function appendInlineTranslationLog(entry) {
-  if (
-    !entry ||
-    typeof chrome === 'undefined' ||
-    !chrome.storage?.local?.get ||
-    !chrome.storage?.local?.set
-  ) {
-    return;
-  }
-
-  try {
-    await chrome.storage.local.set({
-      [getInlineTranslationLogStorageKey(entry.id)]: entry,
-    });
-    const stored = await chrome.storage.local.get(null);
-    const keysToRemove = getInlineTranslationLogRemovalKeys(stored);
-    if (keysToRemove.length && chrome.storage.local.remove) {
-      await chrome.storage.local.remove(keysToRemove);
-    }
-  } catch {}
+  // Schema-2 diagnostics are persisted by translation-diagnostics.js.
+  // Keep this awaitable shim until legacy text-batch callers are removed.
+  void entry;
 }
 
 async function sendInlineTranslationProgress(tabId, operationId, progress) {

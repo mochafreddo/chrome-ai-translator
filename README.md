@@ -93,7 +93,9 @@ the toolbar click. Starting inline translation still requires choosing
 - Protected visible labels such as model names, commands, and API names are sent
   as translation context. Link destinations, DOM attributes, hidden text, and
   event state are not sent.
-- Inline status separates page-change conflicts from request failures. `Changed`
+- Inline status separates complete, partial, page-change, and failed results.
+  `Partial` means structurally safe output was applied after one quality repair
+  still left a conservative quality warning. `Changed`
   means the page modified a block or replaced its owned DOM nodes before the
   extension could safely apply a returned translation. Page changes and invalid
   token output are retried at most once each. `Failed` means the request,
@@ -103,9 +105,15 @@ the toolbar click. Starting inline translation still requires choosing
   current page instance. The cache is reused only when target language, tone,
   model, reasoning effort, semantic template, and protected-token context still
   match, and it is cleared by reloads, navigations, or browser restarts.
-- Options shows the 20 most recent inline translation runs with status, model,
-  block/cost counts, timings, and redacted errors. Source text, translations,
-  protected labels, URLs, and request bodies are not persisted in diagnostics.
+- Options shows the 20 most recent inline translation runs and can copy or save
+  schema-2 diagnostic JSON for RCA with Codex or another agent. Problem records
+  include stable validation codes, attempt counts, bounded evidence, and
+  installation-scoped HMAC fingerprints. Each run retains at most 100 problem
+  blocks. Source text, translations, matched words, protected labels, URLs,
+  request bodies, response bodies, and API keys are never persisted or exported.
+- Model-output validation gets at most one repair attempt. Structurally unsafe
+  output is never applied. A structurally safe result that remains incomplete
+  after repair is applied explicitly as `Partial` rather than discarded.
 
 ## Related docs
 - [Inline changed text retry design](docs/design/inline-changed-text-retry-design.md)
