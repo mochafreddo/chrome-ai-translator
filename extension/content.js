@@ -587,6 +587,16 @@ function getInlineBlockRecordCost(record) {
 }
 
 function getInlineBlockReservedRecordCost(record) {
+  function requestPayloadCost(candidate) {
+    return JSON.stringify({
+      records: [{
+        id: candidate.id,
+        template: candidate.template,
+        atoms: candidate.atoms,
+        repair: candidate.repair ?? null,
+      }],
+    }).length;
+  }
   const repairRecord = {
     ...record,
     repair: {
@@ -594,7 +604,9 @@ function getInlineBlockReservedRecordCost(record) {
       previousErrorCode: 'x'.repeat(INLINE_BLOCK_MAX_DIAGNOSTIC_CODE_CHARS),
     },
   };
-  return getInlineBlockRecordCost(record) + getInlineBlockRecordCost(repairRecord);
+  // Counting each record as its own request intentionally over-reserves the
+  // shared wrapper, guaranteeing the real batched JSON is no larger.
+  return requestPayloadCost(record) + requestPayloadCost(repairRecord);
 }
 
 function createInlineViewportBlockRecord(store, blockElement, values = {}) {
@@ -731,18 +743,24 @@ function takeInlineViewportBlockBatch(
       continue;
     }
     const reservedCost = getInlineBlockReservedRecordCost(record);
+    if (reservedCost > limit) {
+      store.queue.shift();
+      record.state = 'failed';
+      record.errorCode = 'block_too_large';
+      continue;
+    }
     if (store.sessionRecordCost + reservedCost > INLINE_BLOCK_SESSION_MAX_CHARS) {
       store.queue.shift();
       record.state = 'failed';
       record.errorCode = 'session_too_large';
       continue;
     }
-    if (batch.length && batchCost + cost > limit) break;
+    if (batch.length && batchCost + reservedCost > limit) break;
 
     store.queue.shift();
     record.state = 'translating';
     batch.push(record);
-    batchCost += cost;
+    batchCost += reservedCost;
     store.sessionRecordCost += reservedCost;
     if (batchCost >= limit) break;
   }

@@ -3300,15 +3300,22 @@ exports.tests = [
           helpers.getInlineBlockReservedRecordCost(second)
       );
       for (const record of [first, second]) {
+        const modelRecord = (candidate) => ({
+          id: candidate.id,
+          template: candidate.template,
+          atoms: candidate.atoms,
+          repair: candidate.repair ?? null,
+        });
+        const repaired = {
+          ...record,
+          repair: {
+            attempt: 1,
+            previousErrorCode: 'quality.target_language_uncertain',
+          },
+        };
         const actualInitialAndRepairCost =
-          helpers.getInlineBlockRecordCost(record) +
-          helpers.getInlineBlockRecordCost({
-            ...record,
-            repair: {
-              attempt: 1,
-              previousErrorCode: 'quality.target_language_uncertain',
-            },
-          });
+          JSON.stringify({ records: [modelRecord(record)] }).length +
+          JSON.stringify({ records: [modelRecord(repaired)] }).length;
         assert.equal(
           actualInitialAndRepairCost <=
             helpers.getInlineBlockReservedRecordCost(record),
@@ -3334,12 +3341,20 @@ exports.tests = [
       const batch = helpers.takeInlineViewportBlockBatch(store, 12000);
 
       assert.equal(batch.length <= 500, true);
+      assert.equal(
+        batch.reduce(
+          (sum, record) => sum + helpers.getInlineBlockReservedRecordCost(record),
+          0
+        ) <= 12000,
+        true
+      );
       assert.equal(store.sessionRecordCost <= 60000, true);
       assert.equal(
         store.records.filter((record) => record.state === 'failed').length,
-        501 - batch.length
+        0
       );
-      assert.equal(store.queue.length, 0);
+      assert.equal(store.queue.length, 501 - batch.length);
+      assert.equal(store.queue.every((record) => record.state === 'queued'), true);
     },
   },
   {
