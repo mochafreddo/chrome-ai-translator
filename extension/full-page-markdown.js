@@ -9,6 +9,94 @@
     return Array.from(node?.childNodes || []);
   }
 
+  const EXCLUDED_TAGS = new Set([
+    'SCRIPT',
+    'STYLE',
+    'NOSCRIPT',
+    'SVG',
+    'CANVAS',
+    'IFRAME',
+    'NAV',
+    'FOOTER',
+    'FORM',
+    'BUTTON',
+    'INPUT',
+    'TEXTAREA',
+    'SELECT',
+    'OPTION',
+  ]);
+  const EXCLUDED_ROLES = new Set([
+    'navigation',
+    'banner',
+    'contentinfo',
+    'complementary',
+    'form',
+    'search',
+    'button',
+    'menu',
+    'menubar',
+    'tablist',
+    'toolbar',
+  ]);
+
+  function hasAttribute(node, name) {
+    return Boolean(node?.hasAttribute?.(name));
+  }
+
+  function getAttribute(node, name) {
+    return String(node?.getAttribute?.(name) || '');
+  }
+
+  function isEffectivelyEditable(node) {
+    if (node?.isContentEditable === true) return true;
+    for (let current = node; current?.nodeType === 1; current = current.parentElement) {
+      if (!hasAttribute(current, 'contenteditable')) continue;
+      return getAttribute(current, 'contenteditable').toLowerCase() !== 'false';
+    }
+    return false;
+  }
+
+  function hasHiddenComputedStyle(node) {
+    const view = node?.ownerDocument?.defaultView;
+    if (typeof view?.getComputedStyle !== 'function') return false;
+    try {
+      const style = view.getComputedStyle(node);
+      const display = String(style?.display || '').toLowerCase();
+      const visibility = String(style?.visibility || '').toLowerCase();
+      const contentVisibility = String(
+        style?.contentVisibility ||
+          style?.getPropertyValue?.('content-visibility') ||
+          ''
+      ).toLowerCase();
+      return (
+        display === 'none' ||
+        visibility === 'hidden' ||
+        visibility === 'collapse' ||
+        contentVisibility === 'hidden' ||
+        Number.parseFloat(style?.opacity) === 0
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  function isExcludedElement(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (EXCLUDED_TAGS.has(getTagName(node))) return true;
+    if (node.hidden === true || hasAttribute(node, 'hidden')) return true;
+    if (getAttribute(node, 'aria-hidden').toLowerCase() === 'true') return true;
+    if (EXCLUDED_ROLES.has(getAttribute(node, 'role').toLowerCase())) return true;
+    if (isEffectivelyEditable(node)) return true;
+    if (
+      hasAttribute(node, 'tabindex') &&
+      Number(getAttribute(node, 'tabindex')) >= 0
+    ) {
+      return true;
+    }
+    if (hasAttribute(node, 'onclick')) return true;
+    return hasHiddenComputedStyle(node);
+  }
+
   function normalizeInlineText(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
@@ -152,6 +240,7 @@
       };
     }
 
+    if (isExcludedElement(node)) return { template: '', original: '' };
     const tagName = getTagName(node);
     if (options.skipLists && (tagName === 'OL' || tagName === 'UL')) {
       return { template: '', original: '' };
@@ -314,12 +403,24 @@
   function serializeList(list, context, blocks, depth, options) {
     const ordered = getTagName(list) === 'OL';
     const items = getDirectChildren(list, 'LI');
-    items.forEach((item, index) => {
+    let ordinal = ordered
+      ? Number.parseInt(getAttribute(list, 'start'), 10)
+      : 1;
+    if (!Number.isInteger(ordinal)) ordinal = 1;
+    items.forEach((item) => {
+      if (ordered && hasAttribute(item, 'value')) {
+        const itemValue = Number.parseInt(getAttribute(item, 'value'), 10);
+        if (Number.isInteger(itemValue)) ordinal = itemValue;
+      }
+      if (isExcludedElement(item)) {
+        if (ordered) ordinal += 1;
+        return;
+      }
       const entryStart = context.entries.length;
       const inline = normalizeInlineResult(
         serializeInlineChildren(item, context, { skipLists: true })
       );
-      const marker = ordered ? `${index + 1}. ` : '- ';
+      const marker = ordered ? `${ordinal}. ` : '- ';
       const prefix = `${'    '.repeat(depth)}${marker}`;
       const block = appendBlock(
         context,
@@ -329,10 +430,11 @@
           original: `${prefix}${inline.original}`,
           entryStart,
         },
-        ordered ? { depth, ordinal: index + 1 } : { depth },
+        ordered ? { depth, ordinal } : { depth },
         options
       );
       if (block) blocks.push(block);
+      if (ordered) ordinal += 1;
       for (const child of getChildNodes(item)) {
         const childTag = getTagName(child);
         if (childTag === 'OL' || childTag === 'UL') {
@@ -428,6 +530,7 @@
   }
 
   function serializeElementBlocks(element, context, options = {}) {
+    if (isExcludedElement(element)) return [];
     const tagName = getTagName(element);
     if (/^H[1-6]$/.test(tagName)) {
       const level = Number(tagName.slice(1));
@@ -488,7 +591,29 @@
       root?.ownerDocument?.baseURI || root?.baseURI || metadata.url || ''
     );
     const context = createSerializationContext(namespace, baseUrl);
-    const blocks = serializeChildBlocks(root, context);
+    let blocks = isExcludedElement(root)
+      ? []
+      : serializeChildBlocks(root, context);
+    const title = normalizeInlineText(metadata.title);
+    if (title) {
+      const equivalentTitle = (block) =>
+        block?.kind === 'heading' &&
+        block?.level === 1 &&
+        normalizeInlineText(
+          String(block.originalMarkdown || '').replace(/^#\s+/, '')
+        ) === title;
+      if (!equivalentTitle(blocks[0])) {
+        blocks = blocks.filter((block) => !equivalentTitle(block));
+        blocks.unshift({
+          id: `m${(context.nextBlockId += 1)}`,
+          kind: 'heading',
+          level: 1,
+          template: `# ${title}`,
+          originalMarkdown: `# ${title}`,
+          entries: [],
+        });
+      }
+    }
     return {
       title: String(metadata.title || ''),
       url: String(metadata.url || ''),
@@ -562,7 +687,11 @@
     for (const token of expectedTokens) {
       withoutExpected = withoutExpected.split(token.value).join('');
     }
-    if (withoutExpected.includes('⟦') || withoutExpected.includes('⟧')) {
+    const activeNamespace = String(chunk?.contract?.namespace || '');
+    if (
+      activeNamespace &&
+      withoutExpected.includes(`⟦${activeNamespace}:`)
+    ) {
       throw createValidationError('markdown.token_unknown');
     }
     for (const token of expectedTokens) {

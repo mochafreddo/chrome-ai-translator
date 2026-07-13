@@ -228,13 +228,20 @@ test('uses merged settings when production completeness validation is enabled', 
         settingsSnapshot,
         { validateTranslationCompleteness: true }
       );
-      assert.deepEqual(results, [
-        {
-          id: record.id,
-          ok: false,
-          errorCode: 'translation_incomplete',
-        },
-      ]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, record.id);
+      assert.equal(results[0].disposition, 'reject');
+      assert.equal(
+        results[0].terminalCode,
+        'quality.target_language_missing'
+      );
+      assert.equal(results[0].messageKey, 'wrong_target_language_rejected');
+      assert.equal(results[0].attemptCount, 2);
+      assert.match(
+        results[0].correlationToken,
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      );
+      assert.equal(Object.hasOwn(results[0], 'template'), false);
     }
   } finally {
     global.chrome = previousChrome;
@@ -242,7 +249,7 @@ test('uses merged settings when production completeness validation is enabled', 
   }
 });
 
-test('queues one translation-incomplete repair and then terminates', () => {
+test('does not requeue a terminal repaired wrong-language rejection', () => {
   const { block } = createReasoningFixture();
   const store = content.createInlineViewportStore(303);
   content.queueInlineViewportBlock(store, block);
@@ -253,30 +260,21 @@ test('queues one translation-incomplete repair and then terminates', () => {
     [
       {
         id: firstBatch[0].id,
-        ok: false,
-        errorCode: 'translation_incomplete',
+        disposition: 'reject',
+        terminalCode: 'quality.target_language_missing',
+        attemptCount: 2,
       },
     ],
     303,
     store
   );
-  assert.equal(firstSummary.retried, 1);
-  assert.equal(store.queue[0].repair.previousErrorCode, 'translation_incomplete');
-
-  const repairBatch = content.takeInlineViewportBlockBatch(store);
-  const repairSummary = content.applyInlineViewportBlockResults(
-    repairBatch,
-    [
-      {
-        id: repairBatch[0].id,
-        ok: false,
-        errorCode: 'translation_incomplete',
-      },
-    ],
-    303,
-    store
-  );
-  assert.equal(repairSummary.retried, 0);
-  assert.equal(repairSummary.failed, 1);
+  assert.equal(firstSummary.retried, 0);
+  assert.equal(firstSummary.failed, 1);
   assert.equal(store.queue.length, 0);
+  assert.equal(firstBatch[0].state, 'failed');
+  assert.equal(
+    firstBatch[0].terminalCode,
+    'quality.target_language_missing'
+  );
+  assert.equal(firstBatch[0].attemptCount, 2);
 });

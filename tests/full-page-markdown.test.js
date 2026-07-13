@@ -44,6 +44,10 @@ function createTestDocument() {
       return this.attributes.get(String(name).toLowerCase()) ?? null;
     }
 
+    hasAttribute(name) {
+      return this.attributes.has(String(name).toLowerCase());
+    }
+
     setAttribute(name, value) {
       this.attributes.set(String(name).toLowerCase(), String(value));
     }
@@ -435,6 +439,10 @@ exports.tests = [
       const chunk = {
         blocks: [linkBlock, codeBlock],
         entries: [link, code],
+        contract: {
+          namespace: documentModel.namespace,
+          entries: [link, code],
+        },
       };
       const validOutput = `읽기 ${link.openToken}가이드${link.closeToken}.\n\n지금 ${code.token} 실행.`;
 
@@ -466,6 +474,137 @@ exports.tests = [
           (error) => error.code === codeValue
         );
       }
+    },
+  },
+  {
+    name: 'allows foreign token-shaped source literals but rejects active-namespace injection',
+    fn() {
+      const { element, text } = createTestDocument();
+      const foreignLiteral = '⟦FOREIGN_SOURCE:ATOM:C9⟧';
+      const documentModel = markdown.serializeMarkdownDocument(
+        element('main', {}, element('p', {}, text(`Keep ${foreignLiteral}.`))),
+        {},
+        { namespace: 'CAT_ACTIVE' }
+      );
+      const block = documentModel.blocks[0];
+      const chunkEntries = createChunk(documentModel, block).entries;
+      const chunk = {
+        blocks: [block],
+        entries: chunkEntries,
+        contract: {
+          namespace: documentModel.namespace,
+          entries: chunkEntries,
+        },
+      };
+
+      assert.equal(
+        markdown.validateAndRehydrateChunk(block.template, chunk),
+        `Keep ${foreignLiteral}.`
+      );
+      for (const injected of [
+        `${block.template} ⟦CAT_ACTIVE:ATOM:C999⟧`,
+        `${block.template} ⟦CAT_ACTIVE:ATOM:C999`,
+      ]) {
+        assert.throws(
+          () => markdown.validateAndRehydrateChunk(injected, chunk),
+          (error) => error.code === 'markdown.token_unknown'
+        );
+      }
+    },
+  },
+  {
+    name: 'excludes hidden navigation form-control and editable subtrees before serialization',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.defaultView = {
+        getComputedStyle(node) {
+          return {
+            display: node.getAttribute?.('data-display') || 'block',
+            visibility: node.getAttribute?.('data-visibility') || 'visible',
+            contentVisibility:
+              node.getAttribute?.('data-content-visibility') || 'visible',
+            opacity: node.getAttribute?.('data-opacity') || '1',
+          };
+        },
+      };
+      const root = element(
+        'main',
+        {},
+        element('p', {}, text('Visible prose.')),
+        element('nav', {}, element('p', {}, text('Private navigation prose.'))),
+        element('section', { hidden: '' }, element('p', {}, text('Hidden prose.'))),
+        element(
+          'section',
+          { 'aria-hidden': 'true' },
+          element('p', {}, text('ARIA hidden prose.'))
+        ),
+        element('form', {}, element('p', {}, text('Form prose.'))),
+        element('button', {}, element('p', {}, text('Control prose.'))),
+        element('footer', {}, element('p', {}, text('Footer prose.'))),
+        element('svg', {}, element('p', {}, text('SVG prose.'))),
+        element(
+          'section',
+          { tabindex: '0' },
+          element('p', {}, text('Interactive prose.'))
+        ),
+        element(
+          'section',
+          { contenteditable: 'true' },
+          element('p', {}, text('Draft prose.'))
+        ),
+        element(
+          'section',
+          { 'data-display': 'none' },
+          element('p', {}, text('Computed hidden prose.'))
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_EXCLUSION' }
+      );
+      const original = markdown.renderOriginalMarkdown(documentModel);
+      const modelInput = documentModel.blocks.map((block) => block.template).join('\n\n');
+
+      assert.equal(original, 'Visible prose.');
+      assert.equal(modelInput, 'Visible prose.');
+    },
+  },
+  {
+    name: 'preserves ordered-list start and item values and emits the title once as the first H1',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element('p', {}, text('Introduction.')),
+        element('h1', {}, text('Guide')),
+        element(
+          'ol',
+          { start: '3' },
+          element('li', {}, text('Third')),
+          element('li', { hidden: '' }, text('Hidden fourth')),
+          element('li', {}, text('Fifth')),
+          element('li', { value: '7' }, text('Seventh')),
+          element('li', {}, text('Eighth'))
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        { title: 'Guide' },
+        { namespace: 'CAT_LIST_TITLE' }
+      );
+      const original = markdown.renderOriginalMarkdown(documentModel);
+
+      assert.equal(
+        original,
+        '# Guide\n\nIntroduction.\n\n3. Third\n\n5. Fifth\n\n7. Seventh\n\n8. Eighth'
+      );
+      assert.equal((original.match(/^# Guide$/gm) || []).length, 1);
+      assert.equal(documentModel.blocks[0].kind, 'heading');
+      assert.equal(documentModel.blocks[0].level, 1);
     },
   },
   {

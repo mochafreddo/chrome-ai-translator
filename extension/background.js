@@ -74,6 +74,24 @@ const DEFAULT_SETTINGS = {
   cacheTtlDays: 7,
   inlineAutoShow: false,
 };
+const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULT_SETTINGS));
+const PUBLIC_SETTINGS_USED_KEYS = Object.freeze([
+  'model',
+  'reasoningEffort',
+  'targetLanguage',
+  'tone',
+  'viewMode',
+  'chunkMaxChars',
+]);
+const PUBLIC_TAB_STATE_KEYS = Object.freeze([
+  'status',
+  'error',
+  'extracted',
+  'translated',
+  'progress',
+  'settingsUsed',
+  'updatedAt',
+]);
 
 const MIN_CHUNK_MAX_CHARS = 2000;
 const MAX_CHUNK_MAX_CHARS = 60000;
@@ -167,7 +185,12 @@ function getFullPageMaxOutputTokens(markdownChunk) {
 }
 
 function mergeSettings(partial) {
-  const merged = { ...DEFAULT_SETTINGS, ...(partial || {}) };
+  const merged = { ...DEFAULT_SETTINGS };
+  for (const key of SETTINGS_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(partial || {}, key)) {
+      merged[key] = partial[key];
+    }
+  }
   merged.chunkMaxChars = normalizeChunkMaxChars(merged.chunkMaxChars);
   return merged;
 }
@@ -206,12 +229,57 @@ async function getSettings() {
 }
 
 async function saveSettings(settings) {
-  await chrome.storage.local.set({ settings });
+  await chrome.storage.local.set({ settings: mergeSettings(settings) });
+}
+
+function copyAllowedFields(value, keys) {
+  const result = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) result[key] = value[key];
+  }
+  return result;
+}
+
+function sanitizePublicTabState(state) {
+  const publicState = copyAllowedFields(state, PUBLIC_TAB_STATE_KEYS);
+  if (publicState.error != null) {
+    publicState.error = copyAllowedFields(publicState.error, ['message', 'name']);
+  }
+  if (publicState.extracted != null) {
+    publicState.extracted = copyAllowedFields(publicState.extracted, [
+      'title',
+      'url',
+      'langHint',
+      'contentMarkdown',
+    ]);
+  }
+  if (publicState.progress != null) {
+    publicState.progress = copyAllowedFields(publicState.progress, [
+      'current',
+      'total',
+    ]);
+  }
+  if (publicState.settingsUsed != null) {
+    publicState.settingsUsed = copyAllowedFields(
+      publicState.settingsUsed,
+      PUBLIC_SETTINGS_USED_KEYS
+    );
+  }
+  return publicState;
+}
+
+function createPublicSettingsUsed(settings) {
+  return copyAllowedFields(settings, PUBLIC_SETTINGS_USED_KEYS);
 }
 
 function setTabState(tabId, patch) {
   const prev = stateByTab.get(tabId) || { status: 'idle' };
-  const next = { ...prev, ...patch, updatedAt: nowIso() };
+  const next = sanitizePublicTabState({
+    ...prev,
+    ...patch,
+    updatedAt: nowIso(),
+  });
   stateByTab.set(tabId, next);
   chrome.runtime
     .sendMessage({ type: 'STATE_UPDATED', tabId, state: next })
@@ -2045,7 +2113,7 @@ async function translateTab(tabId, overrideSettings = null) {
       status: 'translating',
       extracted: displayExtraction,
       translated: null,
-      settingsUsed: { ...settings, apiKey: '***' },
+      settingsUsed: createPublicSettingsUsed(settings),
     });
 
     try {
@@ -2123,7 +2191,9 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           const tabId = msg.tabId;
           sendResponse({
             ok: true,
-            state: stateByTab.get(tabId) || { status: 'idle' },
+            state: sanitizePublicTabState(
+              stateByTab.get(tabId) || { status: 'idle' }
+            ),
           });
           return;
         }
@@ -2327,6 +2397,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     mergeSettingsWithExisting,
+    sanitizePublicTabState,
     mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,
     assertFullPageTranslationBudget,

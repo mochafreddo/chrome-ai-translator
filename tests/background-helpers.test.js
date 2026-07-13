@@ -246,7 +246,13 @@ exports.tests = [
         storage: {
           local: {
             async get() {
-              return { settings: { apiKey: 'sk-test', chunkMaxChars: 2000 } };
+              return {
+                settings: {
+                  apiKey: 'sk-test',
+                  chunkMaxChars: 2000,
+                  arbitraryStoredSibling: 'stored-state-secret',
+                },
+              };
             },
             async set() {},
           },
@@ -293,8 +299,35 @@ exports.tests = [
 
         assert.deepEqual(responses, [{ ok: true }]);
         assert.equal(stateMessages.at(-1)?.state?.status, 'done');
+        const publicStateKeys = new Set([
+          'status',
+          'error',
+          'extracted',
+          'translated',
+          'progress',
+          'settingsUsed',
+          'updatedAt',
+        ]);
+        const settingsUsedKeys = [
+          'model',
+          'reasoningEffort',
+          'targetLanguage',
+          'tone',
+          'viewMode',
+          'chunkMaxChars',
+        ];
         for (const message of stateMessages) {
           const serialized = JSON.stringify(message);
+          assert.equal(
+            Object.keys(message.state).every((key) => publicStateKeys.has(key)),
+            true
+          );
+          if (message.state.settingsUsed) {
+            assert.deepEqual(
+              Object.keys(message.state.settingsUsed),
+              settingsUsedKeys
+            );
+          }
           assert.equal(serialized.includes('translationDocument'), false);
           assert.equal(
             serialized.includes('unexpected-contract-sentinel'),
@@ -308,6 +341,26 @@ exports.tests = [
             assert.equal(serialized.includes('private-command --secret'), false);
           }
         }
+        const stateResponses = [];
+        messageListener(
+          { type: 'GET_STATE', tabId: 20 },
+          {},
+          (response) => stateResponses.push(response)
+        );
+        for (let i = 0; i < 10 && stateResponses.length < 1; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        assert.equal(stateResponses.length, 1);
+        assert.equal(
+          Object.keys(stateResponses[0].state).every((key) =>
+            publicStateKeys.has(key)
+          ),
+          true
+        );
+        assert.equal(
+          JSON.stringify(stateResponses[0]).includes('stored-state-secret'),
+          false
+        );
         assert.equal(requestBodies.length, 1);
         assert.equal(
           JSON.stringify(requestBodies).includes('token=secret'),
@@ -576,6 +629,64 @@ exports.tests = [
     },
   },
   {
+    name: 'exact-allowlists public tab state and settings used fields',
+    fn() {
+      const state = helpers.sanitizePublicTabState({
+        status: 'done',
+        error: { message: 'bounded', name: 'Error', secret: 'error-secret' },
+        extracted: {
+          title: 'Article',
+          url: 'https://example.test',
+          langHint: 'en',
+          contentMarkdown: '# Article',
+          contract: 'private-contract',
+        },
+        translated: '# 번역',
+        progress: { current: 1, total: 1, privateCounter: 99 },
+        settingsUsed: {
+          model: 'gpt-5.4-mini',
+          reasoningEffort: 'none',
+          targetLanguage: 'Korean',
+          tone: 'technical',
+          viewMode: 'translation',
+          chunkMaxChars: 12000,
+          apiKey: 'sk-private',
+          arbitraryStoredSibling: 'settings-secret',
+        },
+        updatedAt: '2026-07-13T00:00:00.000Z',
+        arbitraryPatchSibling: 'state-secret',
+      });
+
+      assert.deepEqual(Object.keys(state), [
+        'status',
+        'error',
+        'extracted',
+        'translated',
+        'progress',
+        'settingsUsed',
+        'updatedAt',
+      ]);
+      assert.deepEqual(Object.keys(state.settingsUsed), [
+        'model',
+        'reasoningEffort',
+        'targetLanguage',
+        'tone',
+        'viewMode',
+        'chunkMaxChars',
+      ]);
+      assert.deepEqual(Object.keys(state.error), ['message', 'name']);
+      assert.deepEqual(Object.keys(state.extracted), [
+        'title',
+        'url',
+        'langHint',
+        'contentMarkdown',
+      ]);
+      assert.deepEqual(Object.keys(state.progress), ['current', 'total']);
+      assert.equal(JSON.stringify(state).includes('secret'), false);
+      assert.equal(JSON.stringify(state).includes('private-contract'), false);
+    },
+  },
+  {
     name: 'clamps unsafe chunk sizes from saved settings',
     fn() {
       assert.equal(
@@ -634,6 +745,27 @@ exports.tests = [
       assert.equal(next.tone, 'formal');
       assert.equal(next.model, 'gpt-5');
       assert.equal(next.viewMode, 'bilingual');
+    },
+  },
+  {
+    name: 'drops arbitrary stored and patch siblings when merging settings',
+    fn() {
+      const next = helpers.mergeSettingsWithExisting(
+        {
+          apiKey: 'sk-existing',
+          targetLanguage: 'Korean',
+          arbitraryStoredSibling: 'stored-secret',
+        },
+        {
+          tone: 'formal',
+          arbitraryPatchSibling: 'patch-secret',
+        }
+      );
+
+      assert.equal(next.apiKey, 'sk-existing');
+      assert.equal(next.tone, 'formal');
+      assert.equal(Object.hasOwn(next, 'arbitraryStoredSibling'), false);
+      assert.equal(Object.hasOwn(next, 'arbitraryPatchSibling'), false);
     },
   },
   {
