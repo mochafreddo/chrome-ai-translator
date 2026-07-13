@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const helpers = require('../extension/background.js');
+const fullPageMarkdown = require('../extension/full-page-markdown.js');
 const { createReasoningFixture } = require('./inline-block.test');
 
 function createCompletedResponse(outputText) {
@@ -10,6 +11,53 @@ function createCompletedResponse(outputText) {
       content: [{ type: 'output_text', text: outputText }],
     }],
   };
+}
+
+function createIncompleteResponse() {
+  return {
+    status: 'incomplete',
+    incomplete_details: { reason: 'max_output_tokens' },
+    output: [],
+  };
+}
+
+function createProtectedFullPageChunk() {
+  const namespace = 'CAT_RECOVERY';
+  const link = {
+    id: 'L1',
+    kind: 'link',
+    openToken: `⟦${namespace}:LINK_OPEN:L1⟧`,
+    closeToken: `⟦${namespace}:LINK_CLOSE:L1⟧`,
+    destination: 'https://private.test/path?token=secret',
+  };
+  const code = {
+    id: 'C1',
+    kind: 'code',
+    token: `⟦${namespace}:ATOM:C1⟧`,
+    display: 'inline',
+    value: 'private-command --secret',
+    language: '',
+  };
+  const documentModel = {
+    namespace,
+    entries: [link, code],
+    blocks: [
+      {
+        id: 'm1',
+        kind: 'paragraph',
+        template: `Read ${link.openToken}the guide${link.closeToken}.`,
+        entries: [link.id],
+      },
+      {
+        id: 'm2',
+        kind: 'paragraph',
+        template: `Run ${code.token} now.`,
+        entries: [code.id],
+      },
+    ],
+  };
+  const [chunk] = fullPageMarkdown.createTranslationChunks(documentModel, 200);
+  return { chunk, link, code };
 }
 
 function createBlockApiRecord(id = 'b1') {
@@ -41,6 +89,105 @@ function createTestPlainBlockRecord(id = 'b1') {
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'recovers one incomplete full-page chunk with ordered protected children',
+    async fn() {
+      const previousFetch = global.fetch;
+      const { chunk, link, code } = createProtectedFullPageChunk();
+      const requestBodies = [];
+      const responses = [
+        createIncompleteResponse(),
+        createCompletedResponse(
+          `읽기 ${link.openToken}안내${link.closeToken}.`
+        ),
+        createCompletedResponse(`지금 ${code.token} 실행.`),
+      ];
+      global.fetch = async (_url, options) => {
+        requestBodies.push(JSON.parse(options.body));
+        const response = responses.shift();
+        return { ok: true, async json() { return response; } };
+      };
+
+      try {
+        const translated = await helpers.translateFullPageChunk(chunk, {
+          apiKey: 'sk-test',
+          model: 'gpt-5.4-mini',
+          reasoningEffort: 'none',
+          targetLanguage: 'Korean',
+          tone: 'technical',
+        });
+
+        assert.equal(requestBodies.length, 3);
+        assert.equal(
+          translated,
+          '읽기 [안내](<https://private.test/path?token=secret>).\n\n지금 ```private-command --secret``` 실행.'
+        );
+        assert.deepEqual(
+          requestBodies.map((body) => body.input),
+          [chunk.template, chunk.blocks[0].template, chunk.blocks[1].template]
+        );
+        for (const body of requestBodies) {
+          const request = JSON.stringify(body);
+          assert.equal(request.includes(link.destination), false);
+          assert.equal(request.includes(code.value), false);
+        }
+      } finally {
+        global.fetch = previousFetch;
+      }
+    },
+  },
+  {
+    name: 'stops after an incomplete recovery child without publishing success',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const { chunk, link } = createProtectedFullPageChunk();
+      const states = [];
+      let requestCount = 0;
+      const responses = [
+        createIncompleteResponse(),
+        createCompletedResponse(
+          `읽기 ${link.openToken}안내${link.closeToken}.`
+        ),
+        createIncompleteResponse(),
+      ];
+      global.chrome = {
+        runtime: {
+          sendMessage(message) {
+            states.push(message);
+            return Promise.resolve();
+          },
+        },
+      };
+      global.fetch = async () => {
+        requestCount += 1;
+        const response = responses.shift();
+        return { ok: true, async json() { return response; } };
+      };
+
+      try {
+        await assert.rejects(
+          () =>
+            helpers.translateFullPageChunk(chunk, {
+              apiKey: 'sk-test',
+              model: 'gpt-5.4-mini',
+              reasoningEffort: 'none',
+              targetLanguage: 'Korean',
+              tone: 'technical',
+            }),
+          (error) => error.code === 'response.incomplete.max_output_tokens'
+        );
+        assert.equal(requestCount, 3);
+        assert.equal(
+          states.some((message) => message?.state?.status === 'done'),
+          false
+        );
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+      }
+    },
+  },
   {
     name: 'defaults to GPT-5.4 mini with no reasoning effort',
     fn() {

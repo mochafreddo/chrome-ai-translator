@@ -23,6 +23,17 @@ const openAiResponse =
   (typeof module !== 'undefined' && module.exports
     ? require('./openai-response.js')
     : null);
+if (
+  typeof importScripts === 'function' &&
+  !globalThis.ChromeAiTranslatorFullPageMarkdown
+) {
+  importScripts('full-page-markdown.js');
+}
+const fullPageMarkdown =
+  globalThis.ChromeAiTranslatorFullPageMarkdown ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./full-page-markdown.js')
+    : null);
 if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorValidation) {
     importScripts('translation-validation.js');
@@ -1013,6 +1024,33 @@ async function openaiTranslateChunk({
   }
 
   return openAiResponse.parseCompletedResponse(json);
+}
+
+async function translateFullPageChunk(chunk, settings) {
+  try {
+    const output = await openaiTranslateChunk({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      reasoningEffort: settings.reasoningEffort,
+      instructions: buildInstructions(settings),
+      input: chunk.template,
+      maxOutputTokens: getFullPageMaxOutputTokens(chunk.template),
+    });
+    return fullPageMarkdown.validateAndRehydrateChunk(output, chunk);
+  } catch (error) {
+    if (
+      error?.code !== 'response.incomplete.max_output_tokens' ||
+      (Number(chunk.recoveryDepth) || 0) >= 1
+    ) {
+      throw error;
+    }
+    const children = fullPageMarkdown.splitChunkForRecovery(chunk);
+    const translated = [];
+    for (const child of children) {
+      translated.push(await translateFullPageChunk(child, settings));
+    }
+    return translated.join('\n\n');
+  }
 }
 
 function getTextRecordStats(records) {
@@ -2320,6 +2358,7 @@ if (typeof module !== 'undefined' && module.exports) {
     parseAndValidateTextNodeTranslations,
     assertTextRecordBudget,
     openaiTranslateChunk,
+    translateFullPageChunk,
     syncInlineAutoShowRegistration,
     syncInlineAutoShowRegistrationSafely,
     translateVisibleBlockBatch,

@@ -179,6 +179,143 @@ function createProtectedNaturalLinkTest(tagName) {
 exports.name = 'full-page Markdown contract';
 exports.tests = [
   {
+    name: 'groups protected blocks into source-ordered bounded chunks',
+    fn() {
+      const documentModel = markdown.serializeMarkdownDocument(
+        createProtectedFixture(),
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+
+      const chunks = markdown.createTranslationChunks(documentModel, 120);
+
+      assert.equal(chunks.length > 1, true);
+      for (const chunk of chunks) {
+        assert.equal(chunk.template.length <= 120, true);
+        assert.equal(chunk.contract.namespace, documentModel.namespace);
+        for (const entry of chunk.contract.entries) {
+          const tokens = [entry.token, entry.openToken, entry.closeToken].filter(
+            Boolean
+          );
+          for (const token of tokens) {
+            assert.equal(chunk.template.includes(token), true);
+          }
+        }
+      }
+      assert.deepEqual(
+        chunks.flatMap((chunk) => chunk.blocks),
+        documentModel.blocks
+      );
+    },
+  },
+  {
+    name: 'splits oversized prose only at sentence or whitespace boundaries',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          text(
+            'First sentence has several carefully chosen words and continues well beyond the character limit without ending early. Second sentence finishes the paragraph.'
+          )
+        )
+      );
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+      const source = documentModel.blocks[0].template;
+
+      const chunks = markdown.createTranslationChunks(documentModel, 52);
+
+      assert.equal(chunks.length >= 3, true);
+      assert.equal(
+        chunks.every((chunk) => chunk.template.length <= 52),
+        true
+      );
+      assert.equal(
+        chunks.some((chunk, index) => chunk.template === source.slice(index * 52, (index + 1) * 52)),
+        false
+      );
+      assert.equal(
+        chunks.map((chunk) => chunk.template).join(' '),
+        source
+      );
+      assert.equal(
+        chunks.every((chunk) => !/^\s|\s$/u.test(chunk.template)),
+        true
+      );
+    },
+  },
+  {
+    name: 'rejects an indivisible oversized prose segment before chunking',
+    fn() {
+      const { element, text } = createTestDocument();
+      const documentModel = markdown.serializeMarkdownDocument(
+        element('main', {}, element('p', {}, text('x'.repeat(121)))),
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+
+      assert.throws(
+        () => markdown.createTranslationChunks(documentModel, 60),
+        (error) => error.code === 'markdown.segment_too_large'
+      );
+    },
+  },
+  {
+    name: 'splits a chunk once for recovery at half its original limit',
+    fn() {
+      const { element, text } = createTestDocument();
+      const documentModel = markdown.serializeMarkdownDocument(
+        element(
+          'main',
+          {},
+          element('p', {}, text('First short paragraph.')),
+          element('p', {}, text('Second short paragraph.')),
+          element('p', {}, text('Third short paragraph.'))
+        ),
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+      const [chunk] = markdown.createTranslationChunks(documentModel, 120);
+
+      const recovery = markdown.splitChunkForRecovery(chunk);
+
+      assert.equal(recovery.length >= 2, true);
+      assert.equal(recovery.every((child) => child.maxChars === 60), true);
+      assert.equal(
+        recovery.every((child) => child.recoveryDepth === 1),
+        true
+      );
+      assert.throws(
+        () => markdown.splitChunkForRecovery(recovery[0]),
+        (error) => error.code === 'response.recovery_exhausted'
+      );
+    },
+  },
+  {
+    name: 'reports unavailable recovery when the half limit cannot split safely',
+    fn() {
+      const { element, text } = createTestDocument();
+      const documentModel = markdown.serializeMarkdownDocument(
+        element('main', {}, element('p', {}, text('x'.repeat(80)))),
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+      const [chunk] = markdown.createTranslationChunks(documentModel, 120);
+
+      assert.throws(
+        () => markdown.splitChunkForRecovery(chunk),
+        (error) => error.code === 'response.recovery_unavailable'
+      );
+    },
+  },
+  {
     name: 'protects destinations and code while preserving document structure',
     fn() {
       const documentModel = markdown.serializeMarkdownDocument(
