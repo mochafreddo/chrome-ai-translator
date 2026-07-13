@@ -144,7 +144,12 @@
     if (!node) return { template: '', original: '' };
     if (node.nodeType === 3) {
       const value = String(node.nodeValue || '');
-      return { template: value, original: value };
+      return {
+        template: value,
+        original: options.escapeMarkdownLinkText
+          ? escapeMarkdownLinkLabel(value)
+          : value,
+      };
     }
 
     const tagName = getTagName(node);
@@ -169,12 +174,15 @@
         };
       }
       const entry = addLinkEntry(context, destination);
-      const labelResult = serializeInlineChildren(node, context, options);
+      const labelResult = serializeInlineChildren(node, context, {
+        ...options,
+        escapeMarkdownLinkText: true,
+      });
       return {
         template: `${entry.openToken}${labelResult.template}${entry.closeToken}`,
-        original: `[${escapeMarkdownLinkLabel(
-          labelResult.original
-        )}](${renderDestination(entry.destination)})`,
+        original: `[${labelResult.original}](${renderDestination(
+          entry.destination
+        )})`,
       };
     }
     return serializeInlineChildren(node, context, options);

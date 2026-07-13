@@ -128,6 +128,54 @@ function createChunk(documentModel, block) {
   };
 }
 
+function createProtectedNaturalLinkTest(tagName) {
+  return {
+    name: `preserves exact ${tagName} contents inside a natural link`,
+    fn() {
+      const { element, text } = createTestDocument();
+      const protectedValue = `${tagName}[x]\\tail`;
+      const destination = `https://safe.test/${tagName}`;
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          element(
+            'a',
+            { href: destination },
+            text('Before [raw]\\ '),
+            element(tagName, {}, text(protectedValue)),
+            text(' after')
+          )
+        )
+      );
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+      const block = documentModel.blocks[0];
+      const expected = `[Before \\[raw\\]\\\\ \`\`\`${protectedValue}\`\`\` after](<${destination}>)`;
+
+      assert.equal(markdown.renderOriginalMarkdown(documentModel), expected);
+      assert.equal(
+        markdown.validateAndRehydrateChunk(
+          block.template,
+          createChunk(documentModel, block)
+        ),
+        expected
+      );
+      assert.deepEqual(
+        documentModel.entries
+          .filter((entry) => entry.kind === 'code')
+          .map((entry) => entry.value),
+        [protectedValue]
+      );
+    },
+  };
+}
+
 exports.name = 'full-page Markdown contract';
 exports.tests = [
   {
@@ -574,4 +622,5 @@ exports.tests = [
       assert.equal(Boolean(atomic?.destination), true);
     },
   },
+  ...['code', 'kbd', 'samp'].map(createProtectedNaturalLinkTest),
 ];
