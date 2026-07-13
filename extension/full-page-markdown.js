@@ -17,6 +17,8 @@
     'CANVAS',
     'IFRAME',
     'NAV',
+    'HEADER',
+    'ASIDE',
     'FOOTER',
     'FORM',
     'BUTTON',

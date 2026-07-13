@@ -572,6 +572,30 @@ exports.tests = [
     },
   },
   {
+    name: 'excludes header and aside site chrome before serialization',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element('header', {}, element('p', {}, text('Header chrome.'))),
+        element('aside', {}, element('p', {}, text('Sidebar chrome.'))),
+        element('p', {}, text('Article body.'))
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_SITE_CHROME' }
+      );
+      const original = markdown.renderOriginalMarkdown(documentModel);
+      const modelInput = documentModel.blocks.map((block) => block.template).join('\n\n');
+
+      assert.equal(original, 'Article body.');
+      assert.equal(modelInput, 'Article body.');
+    },
+  },
+  {
     name: 'excludes hidden table sections rows and cells from original and model Markdown',
     fn() {
       const { document, element, text } = createTestDocument();
