@@ -1975,7 +1975,13 @@ async function translateTab(tabId, overrideSettings = null) {
       return { skipped: true, reason: 'missing_api_key' };
     }
 
-    setTabState(tabId, { status: 'extracting', error: null });
+    setTabState(tabId, {
+      status: 'extracting',
+      error: null,
+      extracted: null,
+      translated: null,
+      progress: null,
+    });
     await ensureSidePanel(tabId);
 
     try {
@@ -1991,15 +1997,50 @@ async function translateTab(tabId, overrideSettings = null) {
       return { skipped: true, reason: 'content_script_unavailable' };
     }
 
-    let extracted;
+    let translationDocument;
+    let displayExtraction;
+    let chunks;
     try {
-      extracted = await extractArticle(tabId);
+      const extracted = await extractArticle(tabId);
+      if (
+        !extracted ||
+        typeof extracted !== 'object' ||
+        Array.isArray(extracted)
+      ) {
+        throw new Error('Article extraction is malformed.');
+      }
+      const { title, url, langHint, contentMarkdown } = extracted;
+      if (
+        typeof title !== 'string' ||
+        typeof url !== 'string' ||
+        typeof langHint !== 'string' ||
+        typeof contentMarkdown !== 'string'
+      ) {
+        throw new Error('Article extraction is malformed.');
+      }
+      translationDocument = extracted.translationDocument;
+      if (!translationDocument || !Array.isArray(translationDocument.blocks)) {
+        throw new Error(
+          'Article extraction did not include a translation document.'
+        );
+      }
+      assertFullPageTranslationBudget(contentMarkdown);
+      chunks = fullPageMarkdown.createTranslationChunks(
+        translationDocument,
+        settings.chunkMaxChars
+      );
+      displayExtraction = { title, url, langHint, contentMarkdown };
     } catch (e) {
-      setTabState(tabId, { status: 'error', error: safeError(e) });
+      setTabState(tabId, {
+        status: 'error',
+        error: safeError(e),
+        extracted: null,
+        translated: null,
+        progress: null,
+      });
       return { skipped: true, reason: 'extract_failed' };
     }
 
-    const { translationDocument, ...displayExtraction } = extracted;
     setTabState(tabId, {
       status: 'translating',
       extracted: displayExtraction,
@@ -2008,16 +2049,6 @@ async function translateTab(tabId, overrideSettings = null) {
     });
 
     try {
-      if (!translationDocument || !Array.isArray(translationDocument.blocks)) {
-        throw new Error(
-          'Article extraction did not include a translation document.'
-        );
-      }
-      assertFullPageTranslationBudget(displayExtraction.contentMarkdown);
-      const chunks = fullPageMarkdown.createTranslationChunks(
-        translationDocument,
-        settings.chunkMaxChars
-      );
       const translatedChunks = [];
 
       for (let i = 0; i < chunks.length; i++) {
@@ -2037,7 +2068,12 @@ async function translateTab(tabId, overrideSettings = null) {
       });
       return { skipped: false };
     } catch (e) {
-      setTabState(tabId, { status: 'error', error: safeError(e) });
+      setTabState(tabId, {
+        status: 'error',
+        error: safeError(e),
+        translated: null,
+        progress: null,
+      });
       return { skipped: true, reason: 'translate_failed' };
     }
   } finally {

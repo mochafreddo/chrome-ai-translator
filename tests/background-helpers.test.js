@@ -266,6 +266,10 @@ exports.tests = [
                     entries: chunk.contract.entries,
                     blocks: chunk.blocks,
                   },
+                  contract: 'unexpected-contract-sentinel',
+                  destination: 'https://unexpected.test/private-destination',
+                  body: 'unexpected-body-sentinel',
+                  apiKey: 'unexpected-key-sentinel',
                 },
               };
             }
@@ -292,6 +296,13 @@ exports.tests = [
         for (const message of stateMessages) {
           const serialized = JSON.stringify(message);
           assert.equal(serialized.includes('translationDocument'), false);
+          assert.equal(
+            serialized.includes('unexpected-contract-sentinel'),
+            false
+          );
+          assert.equal(serialized.includes('private-destination'), false);
+          assert.equal(serialized.includes('unexpected-body-sentinel'), false);
+          assert.equal(serialized.includes('unexpected-key-sentinel'), false);
           if (message.state.status !== 'done') {
             assert.equal(serialized.includes('token=secret'), false);
             assert.equal(serialized.includes('private-command --secret'), false);
@@ -412,7 +423,141 @@ exports.tests = [
         assert.equal(states.some((state) => state.status === 'done'), false);
         assert.equal(states.at(-1)?.status, 'error');
         assert.equal(states.at(-1)?.translated, null);
+        assert.equal(states.at(-1)?.progress, null);
         assert.equal(requestCount, 3);
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
+  {
+    name: 'owns malformed and oversized extraction failures without publishing display state',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const modulePath = require.resolve('../extension/background.js');
+      const originalModule = require.cache[modulePath];
+      const extractionByTab = new Map([
+        [30, null],
+        [31, undefined],
+        [32, 'malformed extraction'],
+        [
+          33,
+          {
+            title: 'Missing document',
+            url: 'https://example.test/missing',
+            langHint: 'en',
+            contentMarkdown: 'Visible but invalid.',
+          },
+        ],
+        [
+          34,
+          {
+            title: 'Malformed document',
+            url: 'https://example.test/malformed',
+            langHint: 'en',
+            contentMarkdown: 'Visible but invalid.',
+            translationDocument: { blocks: null },
+          },
+        ],
+        [
+          35,
+          {
+            title: 'Oversized',
+            url: 'https://example.test/oversized',
+            langHint: 'en',
+            contentMarkdown: `oversized-display-sentinel${'x'.repeat(60000)}`,
+            translationDocument:
+              createPlainTranslationDocument('safe template'),
+          },
+        ],
+      ]);
+      const statesByTab = new Map();
+      let fetchCount = 0;
+      let messageListener = null;
+
+      global.fetch = async () => {
+        fetchCount += 1;
+        throw new Error('model request must not run');
+      };
+      global.chrome = {
+        runtime: {
+          onInstalled: { addListener() {} },
+          onStartup: { addListener() {} },
+          onMessage: { addListener(listener) { messageListener = listener; } },
+          sendMessage(message) {
+            if (message.type === 'STATE_UPDATED') {
+              const states = statesByTab.get(message.tabId) || [];
+              states.push(message.state);
+              statesByTab.set(message.tabId, states);
+            }
+            return Promise.resolve();
+          },
+        },
+        action: { onClicked: { addListener() {} } },
+        commands: { onCommand: { addListener() {} } },
+        sidePanel: {
+          async setPanelBehavior() {},
+          async setOptions() {},
+          async open() {},
+        },
+        scripting: { async executeScript() {} },
+        storage: {
+          local: {
+            async get() {
+              return { settings: { apiKey: 'sk-test', chunkMaxChars: 2000 } };
+            },
+            async set() {},
+          },
+        },
+        tabs: {
+          async sendMessage(tabId, message) {
+            if (message.type === 'EXTRACT_ARTICLE') {
+              return { ok: true, data: extractionByTab.get(tabId) };
+            }
+            return { ok: true };
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/background.js');
+
+        for (const tabId of extractionByTab.keys()) {
+          const responses = [];
+          messageListener(
+            { type: 'TRANSLATE_TAB', tabId },
+            {},
+            (response) => responses.push(response)
+          );
+          for (let i = 0; i < 20 && responses.length < 1; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+          assert.deepEqual(responses, [{
+            ok: true,
+            skipped: true,
+            reason: 'extract_failed',
+          }]);
+        }
+
+        assert.equal(fetchCount, 0);
+        for (const states of statesByTab.values()) {
+          assert.equal(states.at(-1)?.status, 'error');
+          assert.equal(states.at(-1)?.progress, null);
+          assert.equal(states.at(-1)?.translated, null);
+          assert.equal(
+            states.some((state) => Boolean(state.extracted)),
+            false
+          );
+          assert.equal(
+            JSON.stringify(states).includes('oversized-display-sentinel'),
+            false
+          );
+        }
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;
@@ -1374,6 +1519,7 @@ exports.tests = [
                 data: {
                   title: 'Article',
                   url: 'https://example.test',
+                  langHint: 'en',
                   contentMarkdown: 'Hello world.',
                   translationDocument:
                     createPlainTranslationDocument('Hello world.'),
@@ -1489,6 +1635,7 @@ exports.tests = [
                 data: {
                   title: 'Article',
                   url: 'https://example.test',
+                  langHint: 'en',
                   contentMarkdown: markdown,
                   translationDocument:
                     createPlainTranslationDocument(markdown),
