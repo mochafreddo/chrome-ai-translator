@@ -30,6 +30,9 @@ The saved key is never shown back in the Options input. Leaving the key field
 blank preserves the current key; **Clear key** removes the saved key and the
 legacy `openai_api_key` value.
 
+OpenAI Responses requests set `store: false`. Page text is still transmitted to
+OpenAI and remains subject to the applicable OpenAI data controls.
+
 ## Use
 - Click the extension toolbar icon, or use the Chrome extension shortcut if it
   is assigned:
@@ -78,6 +81,11 @@ the toolbar click. Starting inline translation still requires choosing
   extracted characters.
 - Full-page translation reserves at least 8,192 output tokens for each request
   and scales that cap up for larger chunks to reduce truncation.
+- Full-page link destinations and code contents are protected locally and
+  restored after translation; they are not included in model input.
+- A full-page chunk that reaches its output-token limit is split and retried
+  once. If recovery does not complete, the extension reports an error and does
+  not publish a partial translation as complete.
 - `Chunk max chars` defaults to `12000` and is clamped between `2000` and
   `60000`.
 - Inline translation translates only visible article text while active and
