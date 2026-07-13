@@ -38,4 +38,29 @@ exports.tests = [
       }
     },
   },
+  {
+    name: 'rejects a repaired translation that still misses the target language',
+    fn() {
+      const stillWrongLanguage = {
+        structure: { status: 'safe', codes: [] },
+        quality: {
+          status: 'partial',
+          codes: ['quality.target_language_missing'],
+        },
+      };
+      assert.equal(
+        decideBlockDisposition(stillWrongLanguage, 1).disposition,
+        'retry'
+      );
+      assert.deepEqual(
+        decideBlockDisposition(stillWrongLanguage, 2),
+        {
+          disposition: 'reject',
+          repairKind: null,
+          terminalCode: 'quality.target_language_missing',
+          messageKey: 'wrong_target_language_rejected',
+        }
+      );
+    },
+  },
 ];

@@ -25,8 +25,9 @@
     const allowed = {};
     for (const key of [
       'sourceChars', 'outputChars', 'sharedEnglishSequenceLength',
-      'sharedEnglishSequenceCount', 'expectedTokenCount', 'returnedTokenCount',
-      'recordCost', 'sessionCost', 'limit',
+      'sharedEnglishSequenceCount', 'sourceProseWordCount', 'outputLetterCount',
+      'outputHangulCount', 'expectedTokenCount', 'returnedTokenCount', 'recordCost',
+      'sessionCost', 'limit',
     ]) {
       if (Number.isFinite(value[key])) allowed[key] = Math.max(0, Number(value[key]));
     }

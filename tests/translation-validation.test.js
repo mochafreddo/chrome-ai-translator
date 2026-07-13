@@ -41,7 +41,7 @@ exports.tests = [
           translations: [{ id: record.id, template: 'This is source prose.' }],
         }),
         [record],
-        { targetLanguage: 'Korean' }
+        { targetLanguage: 'Japanese' }
       );
       assert.equal(result.records[0].structure.status, 'safe');
       assert.equal(result.records[0].quality.status, 'partial');
@@ -92,10 +92,46 @@ exports.tests = [
       const result = validation.assessTranslationQuality(
         prose,
         prose,
-        'Korean'
+        'Japanese'
       );
       assert.equal(result.status, 'partial');
       assert.deepEqual(result.codes, ['quality.english_residue']);
+    },
+  },
+  {
+    name: 'rejects clearly non-Korean output for a Korean target',
+    fn() {
+      for (const translated of [
+        'Ceci est une phrase traduite.',
+        'Completely different English prose.',
+      ]) {
+        const result = validation.assessTranslationQuality(
+          'This is source prose.',
+          translated,
+          'Korean'
+        );
+        assert.equal(result.status, 'partial');
+        assert.deepEqual(result.codes, ['quality.target_language_missing']);
+        assert.equal(result.evidence.outputHangulCount, 0);
+      }
+    },
+  },
+  {
+    name: 'accepts Korean evidence and avoids technical-only false positives',
+    fn() {
+      assert.equal(
+        validation.assessTranslationQuality(
+          'This is source prose.',
+          '이것은 번역된 문장입니다.',
+          'Korean'
+        ).status,
+        'complete'
+      );
+      assert.notEqual(
+        validation.assessTranslationQuality('GPT API', 'GPT API', 'Korean')
+          .codes[0],
+        'quality.target_language_missing'
+      );
     },
   },
 ];

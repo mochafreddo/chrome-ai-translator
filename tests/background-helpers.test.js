@@ -380,13 +380,12 @@ exports.tests = [
     },
   },
   {
-    name: 'sends semantic block payloads without token contracts or attributes',
+    name: 'rejects repaired non-Korean output without exposing block internals',
     async fn() {
       const previousChrome = global.chrome;
       const previousFetch = global.fetch;
       const record = createBlockApiRecord();
-      let requestBody = null;
-      let requestCount = 0;
+      const requestBodies = [];
       global.chrome = {
         storage: {
           session: {
@@ -413,8 +412,7 @@ exports.tests = [
         },
       };
       global.fetch = async (_url, options) => {
-        requestCount += 1;
-        requestBody = JSON.parse(options.body);
+        requestBodies.push(JSON.parse(options.body));
         return {
           ok: true,
           async json() {
@@ -427,25 +425,19 @@ exports.tests = [
 
       try {
         const results = await helpers.translateVisibleBlockBatch([record]);
-        const input = JSON.parse(requestBody.input);
+        const input = JSON.parse(requestBodies[1].input);
 
         assert.equal(results[0].correlationToken, undefined);
-
-        assert.deepEqual(results, [{
-          id: record.id,
-          disposition: 'apply_with_warning',
-          template: record.template,
-          terminalCode: 'quality.english_residue',
-          messageKey: 'partial_translation_applied',
-          attemptCount: 2,
-          diagnosticsUnavailable: true,
-        }]);
-        assert.equal(requestCount, 2);
+        const result = results[0];
+        assert.equal(result.disposition, 'reject');
+        assert.equal('template' in result, false);
+        assert.equal(result.terminalCode, 'quality.target_language_missing');
+        assert.equal(requestBodies.length, 2);
         assert.equal(input.records[0].contract, undefined);
         assert.equal(input.records[0].atoms[0].href, undefined);
-        assert.equal(requestBody.text.format.name, 'inline_block_translations');
+        assert.equal(requestBodies[1].text.format.name, 'inline_block_translations');
         assert.equal(
-          requestBody.max_output_tokens,
+          requestBodies[1].max_output_tokens,
           helpers.getBlockBatchMaxOutputTokens(
             helpers.getBlockRecordCost(record)
           )

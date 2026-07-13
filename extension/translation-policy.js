@@ -27,6 +27,14 @@
       record?.quality?.codes,
       'quality.target_language_uncertain'
     );
+    if (attempt === 2 && code === 'quality.target_language_missing') {
+      return decision(
+        'reject',
+        null,
+        code,
+        'wrong_target_language_rejected'
+      );
+    }
     return attempt === 1
       ? decision('retry', 'quality', code, 'repairing_quality')
       : decision(

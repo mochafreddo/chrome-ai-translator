@@ -16,6 +16,7 @@
   const QUALITY_CODES = Object.freeze({
     ENGLISH_RESIDUE: 'quality.english_residue',
     EMPTY_PROSE: 'quality.empty_prose',
+    TARGET_LANGUAGE_MISSING: 'quality.target_language_missing',
   });
   const ENGLISH_MARKERS = new Set([
     'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'in',
@@ -86,6 +87,21 @@
     return text;
   }
 
+  function isKoreanTarget(targetLanguage) {
+    const value = String(targetLanguage || '').normalize('NFKC').trim();
+    return /^ko(?:[-_][a-z0-9]+)*$/i.test(value) ||
+      /^(?:korean|south korean|north korean)\b/i.test(value) ||
+      /^(?:한국어|한국말|조선어|조선말)(?:\s|$|\()/.test(value);
+  }
+
+  function countUnicodeLetters(value) {
+    return Array.from(String(value || '').matchAll(/\p{L}/gu)).length;
+  }
+
+  function countHangulSyllables(value) {
+    return Array.from(String(value || '').matchAll(/[가-힣]/g)).length;
+  }
+
   function assessTranslationQuality(sourceText, translatedText, targetLanguage, contract = null) {
     const source = removeContractTokens(sourceText, contract);
     const output = removeContractTokens(translatedText, contract);
@@ -97,6 +113,28 @@
     };
     if (!output.trim()) {
       return { status: 'partial', codes: [QUALITY_CODES.EMPTY_PROSE], evidence };
+    }
+    const sourceProseWordCount = words(source).filter(
+      (word) => !/^[A-Z0-9_]{2,}$/.test(word)
+    ).length;
+    const outputLetterCount = countUnicodeLetters(output);
+    const outputHangulCount = countHangulSyllables(output);
+    Object.assign(evidence, {
+      sourceProseWordCount,
+      outputLetterCount,
+      outputHangulCount,
+    });
+    if (
+      isKoreanTarget(targetLanguage) &&
+      sourceProseWordCount >= 2 &&
+      outputLetterCount >= 2 &&
+      outputHangulCount === 0
+    ) {
+      return {
+        status: 'partial',
+        codes: [QUALITY_CODES.TARGET_LANGUAGE_MISSING],
+        evidence,
+      };
     }
     if (!/^en(?:glish)?\b/i.test(String(targetLanguage || '').trim())) {
       const shared = sharedEnglishEvidence(source, output);

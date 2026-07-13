@@ -12,7 +12,17 @@ exports.tests = [
         terminalDisposition: 'reject',
         attemptCount: 2,
         structure: { status: 'unsafe', codes: ['structure.token_missing'] },
-        quality: { status: 'uncertain', codes: [], evidence: { sourceChars: 10 } },
+        quality: {
+          status: 'uncertain',
+          codes: [],
+          evidence: {
+            sourceChars: 10,
+            sourceProseWordCount: 4,
+            outputLetterCount: 24,
+            outputHangulCount: 0,
+            translatedText: 'translated evidence sentinel',
+          },
+        },
         source: 'source prose', template: 'translated prose',
         url: 'https://example.com/private', apiKey: 'sk-test-secret',
       });
@@ -21,6 +31,10 @@ exports.tests = [
         assert.equal(json.includes(secret), false);
       }
       assert.equal(block.terminalCode, 'structure.token_missing');
+      assert.equal(block.quality.evidence.sourceProseWordCount, 4);
+      assert.equal(block.quality.evidence.outputLetterCount, 24);
+      assert.equal(block.quality.evidence.outputHangulCount, 0);
+      assert.equal('translatedText' in block.quality.evidence, false);
     },
   },
   {
