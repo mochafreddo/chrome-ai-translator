@@ -40,6 +40,20 @@
     'tablist',
     'toolbar',
   ]);
+  const DECORATIVE_BLOCK_TAGS = new Set([
+    'ADDRESS',
+    'ARTICLE',
+    'DETAILS',
+    'DIV',
+    'DL',
+    'DT',
+    'DD',
+    'FIGCAPTION',
+    'FIGURE',
+    'MAIN',
+    'SECTION',
+    'SUMMARY',
+  ]);
 
   function hasAttribute(node, name) {
     return Boolean(node?.hasAttribute?.(name));
@@ -355,6 +369,19 @@
     );
   }
 
+  function hasSupportedBlockDescendant(node) {
+    for (const child of getChildNodes(node)) {
+      if (child.nodeType !== 1 || isExcludedElement(child)) continue;
+      if (
+        isSupportedBlockTag(getTagName(child)) ||
+        hasSupportedBlockDescendant(child)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function serializeBlockquoteBody(node, context) {
     const sections = [];
     let pending = { template: '', original: '' };
@@ -593,11 +620,55 @@
 
   function serializeChildBlocks(node, context, options) {
     const blocks = [];
+    let pending = null;
+
+    function appendInline(child) {
+      if (!pending) {
+        pending = {
+          template: '',
+          original: '',
+          entryStart: context.entries.length,
+        };
+      }
+      const inline = serializeInline(child, context);
+      pending.template += inline.template;
+      pending.original += inline.original;
+    }
+
+    function flushPending() {
+      if (!pending) return;
+      const normalized = normalizeInlineResult(pending);
+      const block = appendBlock(
+        context,
+        'paragraph',
+        { ...normalized, entryStart: pending.entryStart },
+        {},
+        options
+      );
+      if (block) blocks.push(block);
+      pending = null;
+    }
+
     for (const child of getChildNodes(node)) {
-      if (child.nodeType === 1) {
+      if (child.nodeType === 3) {
+        appendInline(child);
+        continue;
+      }
+      if (child.nodeType !== 1 || isExcludedElement(child)) continue;
+
+      const tagName = getTagName(child);
+      if (
+        isSupportedBlockTag(tagName) ||
+        DECORATIVE_BLOCK_TAGS.has(tagName) ||
+        hasSupportedBlockDescendant(child)
+      ) {
+        flushPending();
         blocks.push(...serializeElementBlocks(child, context, options));
+      } else {
+        appendInline(child);
       }
     }
+    flushPending();
     return blocks;
   }
 

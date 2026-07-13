@@ -596,6 +596,42 @@ exports.tests = [
     },
   },
   {
+    name: 'preserves decorative-container prose around supported blocks',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element('div', {}, text('Generic div prose.')),
+        element(
+          'section',
+          {},
+          text('Before nested block.'),
+          element('p', {}, text('Nested paragraph.')),
+          text('After nested block.')
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_DECORATIVE' }
+      );
+      const expected = [
+        'Generic div prose.',
+        'Before nested block.',
+        'Nested paragraph.',
+        'After nested block.',
+      ].join('\n\n');
+
+      assert.equal(markdown.renderOriginalMarkdown(documentModel), expected);
+      assert.equal(
+        documentModel.blocks.map((block) => block.template).join('\n\n'),
+        expected
+      );
+    },
+  },
+  {
     name: 'excludes hidden table sections rows and cells from original and model Markdown',
     fn() {
       const { document, element, text } = createTestDocument();
