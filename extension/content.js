@@ -10,6 +10,11 @@ var inlineDiagnosticsProtocol =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-diagnostics-protocol.js')
     : null);
+var fullPageMarkdown =
+  globalThis.ChromeAiTranslatorFullPageMarkdown ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./full-page-markdown.js')
+    : null);
 
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
@@ -1518,94 +1523,6 @@ function applyInlineTranslationRecords(records) {
   return { applied, skipped };
 }
 
-function cleanupRoot(root) {
-  const clone = root.cloneNode(true);
-
-  // Remove noisy elements
-  const selectors = [
-    'script',
-    'style',
-    'noscript',
-    'nav',
-    'footer',
-    'header',
-    'aside',
-    'form',
-    'button',
-    'input',
-    'textarea',
-    'select',
-    'svg',
-    'canvas',
-  ];
-  for (const sel of selectors) {
-    clone.querySelectorAll(sel).forEach((n) => n.remove());
-  }
-  return clone;
-}
-
-function detectCodeLang(codeEl) {
-  // Typical patterns: class="language-js" or "lang-js" etc.
-  const cls =
-    (codeEl.getAttribute('class') || '') +
-    ' ' +
-    (codeEl.parentElement?.getAttribute('class') || '');
-  const m =
-    cls.match(/language-([a-z0-9_-]+)/i) || cls.match(/lang-([a-z0-9_-]+)/i);
-  return m ? m[1] : '';
-}
-
-function normalizeMarkdownInlineText(text) {
-  return String(text || '').replace(/\s+/g, ' ').trim();
-}
-
-function wrapMarkdownInlineCode(text) {
-  const code = normalizeMarkdownInlineText(text);
-  if (!code) return '';
-  const maxBacktickRun = (code.match(/`+/g) || []).reduce(
-    (max, run) => Math.max(max, run.length),
-    0
-  );
-  const delimiter = '`'.repeat(maxBacktickRun + 1);
-  if (maxBacktickRun > 0) return `${delimiter} ${code} ${delimiter}`;
-  return `${delimiter}${code}${delimiter}`;
-}
-
-function getMarkdownTextWithInlineCode(node) {
-  const parts = [];
-
-  function walk(current) {
-    if (!current) return;
-    if (current.nodeType === 3) {
-      parts.push(current.nodeValue || '');
-      return;
-    }
-
-    const tag = String(current.tagName || '').toLowerCase();
-    if (tag === 'br') {
-      parts.push(' ');
-      return;
-    }
-    if (tag === 'code' || tag === 'kbd' || tag === 'samp') {
-      parts.push(wrapMarkdownInlineCode(current.textContent));
-      return;
-    }
-
-    const children = Array.from(current.childNodes || []);
-    if (children.length) {
-      for (const child of children) walk(child);
-      return;
-    }
-
-    if (typeof current.textContent === 'string') {
-      parts.push(current.textContent);
-    }
-  }
-
-  walk(node);
-  return normalizeMarkdownInlineText(parts.join(''));
-}
-
 function pickArticleRoot() {
   const candidates = [
     document.querySelector('article'),
@@ -1632,97 +1549,17 @@ function pickArticleRoot() {
   return best;
 }
 
-function toMarkdown(root) {
-  const title = (document.title || '').trim();
-  const url = location.href;
-  const langHint = document.documentElement?.lang || '';
-
-  const clean = cleanupRoot(root);
-
-  // Walk in DOM order and capture a subset of block-level elements
-  const walker = document.createTreeWalker(clean, NodeFilter.SHOW_ELEMENT);
-
-  const out = [];
-
-  function pushPara(text) {
-    const t = (text || '').replace(/\s+/g, ' ').trim();
-    if (t) out.push(t);
-  }
-
-  // Title (always include once)
-  if (title) out.push(`# ${title}`);
-  out.push('');
-
-  while (walker.nextNode()) {
-    const el = walker.currentNode;
-    if (!(el instanceof HTMLElement)) continue;
-
-    const tag = el.tagName.toLowerCase();
-
-    // Avoid common duplicates. Example: <li><p>Text</p></li>
-    // We emit the <li> and skip nested <p>.
-    if (tag === 'p' && el.closest('li')) {
-      continue;
-    }
-
-    // Skip nested list-items (rare, but can cause repeats)
-    if (tag === 'li') {
-      const parentLi = el.parentElement?.closest?.('li');
-      if (parentLi && parentLi !== el) continue;
-    }
-
-    // Headings
-    if (/^h[1-6]$/.test(tag)) {
-      const level = Number(tag.slice(1));
-      const text = el.innerText?.trim();
-      if (text) out.push(`${'#'.repeat(Math.min(level + 1, 6))} ${text}`);
-      out.push('');
-      continue;
-    }
-
-    // Code blocks
-    if (tag === 'pre') {
-      const code = el.querySelector('code');
-      const codeText = (code ? code.textContent : el.textContent) || '';
-      const trimmed = codeText.replace(/\n+$/g, '');
-      if (trimmed.trim()) {
-        const lang = code ? detectCodeLang(code) : '';
-        out.push('```' + lang);
-        out.push(trimmed);
-        out.push('```');
-        out.push('');
-      }
-      continue;
-    }
-
-    // Paragraphs
-    if (tag === 'p') {
-      const text = getMarkdownTextWithInlineCode(el);
-      pushPara(text);
-      out.push('');
-      continue;
-    }
-
-    // List items (simple)
-    if (tag === 'li') {
-      const t = getMarkdownTextWithInlineCode(el);
-      if (t) out.push(`- ${t}`);
-      continue;
-    }
-  }
-
-  // Collapse multiple blank lines
-  const md =
-    out
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim() + '\n';
-
+function buildArticleExtraction(root, metadata) {
+  const translationDocument = fullPageMarkdown.serializeMarkdownDocument(
+    root,
+    metadata
+  );
   return {
-    title,
-    url,
-    langHint,
-    contentMarkdown: md,
+    ...metadata,
+    contentMarkdown: fullPageMarkdown.renderOriginalMarkdown(
+      translationDocument
+    ),
+    translationDocument,
   };
 }
 
@@ -2431,11 +2268,16 @@ async function initInlineTranslator() {
 function handleExtractArticle(sendResponse) {
   try {
     const root = pickArticleRoot();
-    const data = toMarkdown(root);
+    const metadata = {
+      title: (document.title || '').trim(),
+      url: location.href,
+      langHint: document.documentElement?.lang || '',
+    };
+    const data = buildArticleExtraction(root, metadata);
 
     // Basic sanity check: if too small, fall back to body
     if ((data.contentMarkdown || '').length < 300 && root !== document.body) {
-      const data2 = toMarkdown(document.body);
+      const data2 = buildArticleExtraction(document.body, metadata);
       sendResponse({ ok: true, data: data2 });
       return;
     }
@@ -2491,7 +2333,7 @@ if (typeof module !== 'undefined' && module.exports) {
     isInlineTranslationExcludedElement,
     isCodeLikeInlineText,
     isTranslatableInlineText,
-    getMarkdownTextWithInlineCode,
+    buildArticleExtraction,
     isTrustedInlineUiEvent,
     resetInlineTranslationAfterFailure,
     getInlineTextRecordBudgetError,

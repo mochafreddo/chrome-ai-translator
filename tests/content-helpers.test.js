@@ -227,70 +227,41 @@ exports.tests = [
     },
   },
   {
-    name: 'preserves inline code markers when serializing paragraph text',
+    name: 'builds display Markdown and a protected translation document',
     fn() {
-      const paragraph = {
-        nodeType: 1,
-        tagName: 'P',
-        childNodes: [
-          { nodeType: 3, nodeValue: 'Use ' },
-          {
-            nodeType: 1,
-            tagName: 'CODE',
-            textContent: 'chrome.storage.local',
-            childNodes: [{ nodeType: 3, nodeValue: 'chrome.storage.local' }],
-          },
-          { nodeType: 3, nodeValue: ' for settings.' },
-        ],
-      };
-
-      assert.equal(
-        helpers.getMarkdownTextWithInlineCode(paragraph),
-        'Use `chrome.storage.local` for settings.'
+      const { element, text } = createTestDocument();
+      const link = element('a', text('private guide'));
+      link.setAttribute('href', 'https://private.test/path?token=secret');
+      const root = element(
+        'main',
+        element(
+          'p',
+          text('Read '),
+          link,
+          text(' and run '),
+          element('code', text('private-command --secret')),
+          text('.')
+        )
       );
-    },
-  },
-  {
-    name: 'uses longer inline code delimiters for backtick runs',
-    fn() {
-      const paragraph = {
-        nodeType: 1,
-        tagName: 'P',
-        childNodes: [
-          { nodeType: 3, nodeValue: 'Use ' },
-          {
-            nodeType: 1,
-            tagName: 'CODE',
-            textContent: 'a``b',
-            childNodes: [{ nodeType: 3, nodeValue: 'a``b' }],
-          },
-          { nodeType: 3, nodeValue: ' now.' },
-        ],
-      };
 
-      assert.equal(
-        helpers.getMarkdownTextWithInlineCode(paragraph),
-        'Use ``` a``b ``` now.'
-      );
-    },
-  },
-  {
-    name: 'preserves line breaks when serializing paragraph text',
-    fn() {
-      const paragraph = {
-        nodeType: 1,
-        tagName: 'P',
-        childNodes: [
-          { nodeType: 3, nodeValue: 'First line' },
-          { nodeType: 1, tagName: 'BR', childNodes: [], textContent: '' },
-          { nodeType: 3, nodeValue: 'Second line' },
-        ],
-      };
+      const extraction = helpers.buildArticleExtraction(root, {
+        title: 'Guide',
+        url: 'https://page.test/article',
+        langHint: 'en',
+      });
 
-      assert.equal(
-        helpers.getMarkdownTextWithInlineCode(paragraph),
-        'First line Second line'
+      assert.equal(extraction.title, 'Guide');
+      assert.equal(extraction.langHint, 'en');
+      assert.match(
+        extraction.contentMarkdown,
+        /\[private guide\]\(<https:\/\/private\.test\/path\?token=secret>\)/
       );
+      assert.match(extraction.contentMarkdown, /```private-command --secret```/);
+      const templates = extraction.translationDocument.blocks
+        .map((block) => block.template)
+        .join('\n');
+      assert.equal(templates.includes('token=secret'), false);
+      assert.equal(templates.includes('private-command --secret'), false);
     },
   },
   {

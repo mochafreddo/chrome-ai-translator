@@ -114,4 +114,30 @@ exports.tests = [
       );
     },
   },
+  {
+    name: 'loads the full-page Markdown codec before the content script',
+    fn() {
+      const backgroundJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'background.js'),
+        'utf8'
+      );
+      const filesMatch = backgroundJs.match(
+        /function getInlineContentScriptFiles\(\) \{\s*return \[([^\]]+)\]/s
+      );
+
+      assert.equal(
+        fs.existsSync(
+          path.join(__dirname, '..', 'extension', 'full-page-markdown.js')
+        ),
+        true
+      );
+      assert.ok(filesMatch);
+      assert.notEqual(filesMatch[1].indexOf("'full-page-markdown.js'"), -1);
+      assert.equal(
+        filesMatch[1].indexOf("'full-page-markdown.js'") <
+          filesMatch[1].indexOf("'content.js'"),
+        true
+      );
+    },
+  },
 ];

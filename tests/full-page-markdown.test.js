@@ -252,6 +252,39 @@ exports.tests = [
     },
   },
   {
+    name: 'keeps a protected link wrapper atomic during forced whitespace splitting',
+    fn() {
+      const namespace = 'CAT_ATOMIC';
+      const entry = {
+        id: 'L1',
+        kind: 'link',
+        openToken: `⟦${namespace}:LINK_OPEN:L1⟧`,
+        closeToken: `⟦${namespace}:LINK_CLOSE:L1⟧`,
+        destination: 'https://private.test/path?token=secret',
+      };
+      const protectedLink = `${entry.openToken}one two three four${entry.closeToken}`;
+      const documentModel = {
+        namespace,
+        entries: [entry],
+        blocks: [{
+          id: 'm1',
+          kind: 'paragraph',
+          template: `prefix ${protectedLink} suffix words`,
+          entries: [entry.id],
+        }],
+      };
+
+      assert.throws(
+        () =>
+          markdown.createTranslationChunks(
+            documentModel,
+            protectedLink.length - 1
+          ),
+        (error) => error.code === 'markdown.segment_too_large'
+      );
+    },
+  },
+  {
     name: 'rejects an indivisible oversized prose segment before chunking',
     fn() {
       const { element, text } = createTestDocument();

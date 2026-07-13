@@ -60,6 +60,20 @@ function createProtectedFullPageChunk() {
   return { chunk, link, code };
 }
 
+function createPlainTranslationDocument(markdown) {
+  return {
+    namespace: 'CAT_TAB',
+    entries: [],
+    blocks: [{
+      id: 'm1',
+      kind: 'paragraph',
+      template: markdown,
+      originalMarkdown: markdown,
+      entries: [],
+    }],
+  };
+}
+
 function createBlockApiRecord(id = 'b1') {
   const { serialized } = createReasoningFixture();
   return {
@@ -185,6 +199,225 @@ exports.tests = [
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;
+      }
+    },
+  },
+  {
+    name: 'keeps extraction contracts out of tab state while translating protected Markdown',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const modulePath = require.resolve('../extension/background.js');
+      const originalModule = require.cache[modulePath];
+      const { chunk, link, code } = createProtectedFullPageChunk();
+      const stateMessages = [];
+      const requestBodies = [];
+      let messageListener = null;
+
+      global.fetch = async (_url, options) => {
+        requestBodies.push(JSON.parse(options.body));
+        return {
+          ok: true,
+          async json() {
+            return createCompletedResponse(
+              `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
+            );
+          },
+        };
+      };
+      global.chrome = {
+        runtime: {
+          onInstalled: { addListener() {} },
+          onStartup: { addListener() {} },
+          onMessage: { addListener(listener) { messageListener = listener; } },
+          sendMessage(message) {
+            if (message.type === 'STATE_UPDATED') stateMessages.push(message);
+            return Promise.resolve();
+          },
+        },
+        action: { onClicked: { addListener() {} } },
+        commands: { onCommand: { addListener() {} } },
+        sidePanel: {
+          async setPanelBehavior() {},
+          async setOptions() {},
+          async open() {},
+        },
+        scripting: { async executeScript() {} },
+        storage: {
+          local: {
+            async get() {
+              return { settings: { apiKey: 'sk-test', chunkMaxChars: 2000 } };
+            },
+            async set() {},
+          },
+        },
+        tabs: {
+          async sendMessage(_tabId, message) {
+            if (message.type === 'EXTRACT_ARTICLE') {
+              return {
+                ok: true,
+                data: {
+                  title: 'Article',
+                  url: 'https://example.test',
+                  langHint: 'en',
+                  contentMarkdown: 'Read the guide and run the command.',
+                  translationDocument: {
+                    namespace: chunk.contract.namespace,
+                    entries: chunk.contract.entries,
+                    blocks: chunk.blocks,
+                  },
+                },
+              };
+            }
+            return { ok: true };
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/background.js');
+        const responses = [];
+        messageListener(
+          { type: 'TRANSLATE_TAB', tabId: 20 },
+          {},
+          (response) => responses.push(response)
+        );
+        for (let i = 0; i < 20 && responses.length < 1; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        assert.deepEqual(responses, [{ ok: true }]);
+        assert.equal(stateMessages.at(-1)?.state?.status, 'done');
+        for (const message of stateMessages) {
+          const serialized = JSON.stringify(message);
+          assert.equal(serialized.includes('translationDocument'), false);
+          if (message.state.status !== 'done') {
+            assert.equal(serialized.includes('token=secret'), false);
+            assert.equal(serialized.includes('private-command --secret'), false);
+          }
+        }
+        assert.equal(requestBodies.length, 1);
+        assert.equal(
+          JSON.stringify(requestBodies).includes('token=secret'),
+          false
+        );
+        assert.equal(
+          JSON.stringify(requestBodies).includes('private-command --secret'),
+          false
+        );
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
+  {
+    name: 'does not publish done when a real tab translation recovery child is incomplete',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const modulePath = require.resolve('../extension/background.js');
+      const originalModule = require.cache[modulePath];
+      const namespace = 'CAT_TAB_RECOVERY';
+      const blocks = [1, 2, 3].map((index) => ({
+        id: `m${index}`,
+        kind: 'paragraph',
+        template: `Paragraph ${index} ${'word '.repeat(115)}`.trim(),
+        originalMarkdown: `Paragraph ${index} ${'word '.repeat(115)}`.trim(),
+        entries: [],
+      }));
+      const translationDocument = { namespace, entries: [], blocks };
+      const responsesFromApi = [
+        createIncompleteResponse(),
+        createCompletedResponse(blocks[0].template),
+        createIncompleteResponse(),
+      ];
+      const states = [];
+      let requestCount = 0;
+      let messageListener = null;
+
+      global.fetch = async () => {
+        requestCount += 1;
+        return {
+          ok: true,
+          async json() { return responsesFromApi.shift(); },
+        };
+      };
+      global.chrome = {
+        runtime: {
+          onInstalled: { addListener() {} },
+          onStartup: { addListener() {} },
+          onMessage: { addListener(listener) { messageListener = listener; } },
+          sendMessage(message) {
+            if (message.type === 'STATE_UPDATED') states.push(message.state);
+            return Promise.resolve();
+          },
+        },
+        action: { onClicked: { addListener() {} } },
+        commands: { onCommand: { addListener() {} } },
+        sidePanel: {
+          async setPanelBehavior() {},
+          async setOptions() {},
+          async open() {},
+        },
+        scripting: { async executeScript() {} },
+        storage: {
+          local: {
+            async get() {
+              return { settings: { apiKey: 'sk-test', chunkMaxChars: 2000 } };
+            },
+            async set() {},
+          },
+        },
+        tabs: {
+          async sendMessage(_tabId, message) {
+            if (message.type === 'EXTRACT_ARTICLE') {
+              return {
+                ok: true,
+                data: {
+                  title: 'Article',
+                  url: 'https://example.test',
+                  langHint: 'en',
+                  contentMarkdown: 'Original display Markdown.',
+                  translationDocument,
+                },
+              };
+            }
+            return { ok: true };
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/background.js');
+        const responses = [];
+        messageListener(
+          { type: 'TRANSLATE_TAB', tabId: 21 },
+          {},
+          (response) => responses.push(response)
+        );
+        for (let i = 0; i < 20 && responses.length < 1; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        assert.deepEqual(responses, [{
+          ok: true,
+          skipped: true,
+          reason: 'translate_failed',
+        }]);
+        assert.equal(states.some((state) => state.status === 'done'), false);
+        assert.equal(states.at(-1)?.status, 'error');
+        assert.equal(states.at(-1)?.translated, null);
+        assert.equal(requestCount, 3);
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
       }
     },
   },
@@ -634,6 +867,7 @@ exports.tests = [
       assert.deepEqual(helpers.getInlineContentScriptFiles(), [
         'inline-block.js',
         'inline-diagnostics-protocol.js',
+        'full-page-markdown.js',
         'content.js',
       ]);
     },
@@ -771,7 +1005,12 @@ exports.tests = [
           {
             id: 'inline-translator-auto-show',
             matches: ['http://*/*', 'https://*/*'],
-            js: ['inline-block.js', 'inline-diagnostics-protocol.js', 'content.js'],
+            js: [
+              'inline-block.js',
+              'inline-diagnostics-protocol.js',
+              'full-page-markdown.js',
+              'content.js',
+            ],
             runAt: 'document_idle',
           }
         );
@@ -835,7 +1074,12 @@ exports.tests = [
           {
             id: 'inline-translator-auto-show',
             matches: ['http://*/*', 'https://*/*'],
-            js: ['inline-block.js', 'inline-diagnostics-protocol.js', 'content.js'],
+            js: [
+              'inline-block.js',
+              'inline-diagnostics-protocol.js',
+              'full-page-markdown.js',
+              'content.js',
+            ],
             runAt: 'document_idle',
           }
         );
@@ -1131,6 +1375,8 @@ exports.tests = [
                   title: 'Article',
                   url: 'https://example.test',
                   contentMarkdown: 'Hello world.',
+                  translationDocument:
+                    createPlainTranslationDocument('Hello world.'),
                 },
               };
             }
@@ -1244,6 +1490,8 @@ exports.tests = [
                   title: 'Article',
                   url: 'https://example.test',
                   contentMarkdown: markdown,
+                  translationDocument:
+                    createPlainTranslationDocument(markdown),
                 },
               };
             }

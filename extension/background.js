@@ -255,7 +255,12 @@ async function ensureSidePanel(tabId) {
 }
 
 function getInlineContentScriptFiles() {
-  return ['inline-block.js', 'inline-diagnostics-protocol.js', 'content.js'];
+  return [
+    'inline-block.js',
+    'inline-diagnostics-protocol.js',
+    'full-page-markdown.js',
+    'content.js',
+  ];
 }
 
 async function ensureContentScript(tabId) {
@@ -287,51 +292,6 @@ async function extractArticle(tabId) {
     throw new Error(resp?.error?.message || 'Failed to extract article');
   }
   return resp.data;
-}
-
-function splitMarkdownIntoChunks(md, maxChars) {
-  if (!md || md.length <= maxChars) return [md];
-
-  // Prefer splitting by headings, then paragraphs.
-  const lines = md.split(/\n/);
-  const chunks = [];
-  let buf = [];
-  let bufLen = 0;
-
-  function flush() {
-    if (!buf.length) return;
-    chunks.push(buf.join('\n').trim());
-    buf = [];
-    bufLen = 0;
-  }
-
-  for (const line of lines) {
-    const isHeading = /^#{1,6}\s+/.test(line);
-    const isHardBreak = line.trim() === '';
-
-    // If we are crossing a heading and buffer is already sizeable, flush.
-    if (isHeading && bufLen > Math.floor(maxChars * 0.6)) flush();
-
-    buf.push(line);
-    bufLen += line.length + 1;
-
-    // If too big, flush on paragraph boundaries if possible.
-    if (bufLen >= maxChars && isHardBreak) flush();
-  }
-  flush();
-
-  // Last resort: if any chunk is still too large, hard-split.
-  const hard = [];
-  for (const c of chunks) {
-    if (c.length <= maxChars) {
-      hard.push(c);
-      continue;
-    }
-    for (let i = 0; i < c.length; i += maxChars) {
-      hard.push(c.slice(i, i + maxChars));
-    }
-  }
-  return hard;
 }
 
 function assertFullPageTranslationBudget(
@@ -2039,18 +1999,23 @@ async function translateTab(tabId, overrideSettings = null) {
       return { skipped: true, reason: 'extract_failed' };
     }
 
+    const { translationDocument, ...displayExtraction } = extracted;
     setTabState(tabId, {
       status: 'translating',
-      extracted,
+      extracted: displayExtraction,
       translated: null,
       settingsUsed: { ...settings, apiKey: '***' },
     });
 
     try {
-      const instructions = buildInstructions(settings);
-      assertFullPageTranslationBudget(extracted.contentMarkdown);
-      const chunks = splitMarkdownIntoChunks(
-        extracted.contentMarkdown,
+      if (!translationDocument || !Array.isArray(translationDocument.blocks)) {
+        throw new Error(
+          'Article extraction did not include a translation document.'
+        );
+      }
+      assertFullPageTranslationBudget(displayExtraction.contentMarkdown);
+      const chunks = fullPageMarkdown.createTranslationChunks(
+        translationDocument,
         settings.chunkMaxChars
       );
       const translatedChunks = [];
@@ -2060,14 +2025,7 @@ async function translateTab(tabId, overrideSettings = null) {
           status: 'translating',
           progress: { current: i + 1, total: chunks.length },
         });
-        const out = await openaiTranslateChunk({
-          apiKey: settings.apiKey,
-          model: settings.model,
-          reasoningEffort: settings.reasoningEffort,
-          instructions,
-          input: chunks[i],
-          maxOutputTokens: getFullPageMaxOutputTokens(chunks[i]),
-        });
+        const out = await translateFullPageChunk(chunks[i], settings);
         translatedChunks.push(out.trim());
       }
 
