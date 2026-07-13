@@ -120,6 +120,14 @@ function createProtectedFixture() {
   return article;
 }
 
+function createChunk(documentModel, block) {
+  const entryIds = new Set(block.entries);
+  return {
+    blocks: [block],
+    entries: documentModel.entries.filter((entry) => entryIds.has(entry.id)),
+  };
+}
+
 exports.name = 'full-page Markdown contract';
 exports.tests = [
   {
@@ -272,6 +280,147 @@ exports.tests = [
         result,
         '### Details\n\n> Quoted text\n\n| Name | Value |\n| --- | --- |\n| One |  |'
       );
+    },
+  },
+  {
+    name: 'rehydrates an empty-destination code-like link as a link',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'p',
+        {},
+        element('a', { href: '' }, text('https://visible.test'))
+      );
+      const documentModel = markdown.serializeMarkdownDocument(
+        element('main', {}, root),
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+      const block = documentModel.blocks[0];
+
+      assert.equal(
+        markdown.validateAndRehydrateChunk(
+          block.template,
+          createChunk(documentModel, block)
+        ),
+        '[https://visible.test](<>)'
+      );
+    },
+  },
+  {
+    name: 'keeps a natural OpenAI API link label translatable',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          element('a', { href: 'https://example.test/api' }, text('OpenAI API'))
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+
+      assert.equal(documentModel.blocks[0].template.includes('OpenAI API'), true);
+      assert.equal(documentModel.entries[0].kind, 'link');
+    },
+  },
+  {
+    name: 'preserves paragraph separation inside a blockquote',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element(
+          'blockquote',
+          {},
+          element('p', {}, text('First')),
+          element('p', {}, text('Second'))
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+
+      assert.equal(documentModel.blocks[0].template, '> First\n>\n> Second');
+      assert.equal(
+        markdown.renderOriginalMarkdown(documentModel),
+        '> First\n>\n> Second'
+      );
+    },
+  },
+  {
+    name: 'escapes translated wrapper text that could create another link',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          element('a', { href: 'https://safe.test' }, text('safe label'))
+        )
+      );
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+      const block = documentModel.blocks[0];
+      const link = documentModel.entries[0];
+      const output = `${link.openToken}](https://evil.test)[x${link.closeToken}`;
+
+      assert.equal(
+        markdown.validateAndRehydrateChunk(
+          output,
+          createChunk(documentModel, block)
+        ),
+        '[\\](https://evil.test)\\[x](<https://safe.test>)'
+      );
+    },
+  },
+  {
+    name: 'resolves relative and fragment destinations against the page URL',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          element('a', { href: '../guide' }, text('Relative guide')),
+          text(' and '),
+          element('a', { href: '#part' }, text('Page section'))
+        )
+      );
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        { url: 'https://page.test/docs/current/index.html?private=1' },
+        { namespace: 'CAT_TEST' }
+      );
+
+      assert.deepEqual(
+        documentModel.entries.map((entry) => entry.destination),
+        [
+          'https://page.test/docs/guide',
+          'https://page.test/docs/current/index.html?private=1#part',
+        ]
+      );
+      const modelInput = documentModel.blocks[0].template;
+      assert.equal(modelInput.includes('../guide'), false);
+      assert.equal(modelInput.includes('#part'), false);
     },
   },
 ];

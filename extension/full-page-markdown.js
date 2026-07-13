@@ -38,32 +38,7 @@
 
   function isProtectedAtomicLinkLabel(label) {
     const value = normalizeInlineText(label);
-    if (!value) return false;
-    if (isCodeLikeInlineText(value)) return true;
-    const words = value.split(' ');
-    if (
-      value.length <= 80 &&
-      words.length <= 4 &&
-      /(?:[\p{L}]\d|\d[\p{L}]|[\p{L}\p{N}][._+/#-]\d|\d[._+/#-][\p{L}\p{N}])/u.test(
-        value
-      ) &&
-      /^[\p{L}\p{N} ._+/#-]+$/u.test(value)
-    ) {
-      return true;
-    }
-    if (
-      value.length <= 80 &&
-      words.length <= 4 &&
-      /^(API|SDK|CLI|IDE)$/.test(words[words.length - 1])
-    ) {
-      return true;
-    }
-    return (
-      value.length <= 40 &&
-      !value.includes(' ') &&
-      /^[\p{L}\p{N}._+-]+$/u.test(value) &&
-      /\p{Ll}\p{Lu}/u.test(value)
-    );
+    return Boolean(value && isCodeLikeInlineText(value));
   }
 
   function longestBacktickRun(value) {
@@ -114,9 +89,20 @@
     return match ? match[1] : '';
   }
 
-  function createSerializationContext(namespace) {
+  function resolveDestination(value, baseUrl) {
+    const destination = String(value || '');
+    if (!destination || !baseUrl) return destination;
+    try {
+      return new URL(destination, baseUrl).href;
+    } catch {
+      return destination;
+    }
+  }
+
+  function createSerializationContext(namespace, baseUrl) {
     return {
       namespace,
+      baseUrl,
       entries: [],
       nextLinkId: 0,
       nextCodeId: 0,
@@ -131,7 +117,7 @@
       kind: 'link',
       openToken: `⟦${context.namespace}:LINK_OPEN:${id}⟧`,
       closeToken: `⟦${context.namespace}:LINK_CLOSE:${id}⟧`,
-      destination: String(destination || ''),
+      destination: resolveDestination(destination, context.baseUrl),
     };
     context.entries.push(entry);
     return entry;
@@ -147,7 +133,9 @@
       value: String(value || ''),
       language: String(language || ''),
     };
-    if (destination != null) entry.destination = String(destination);
+    if (destination != null) {
+      entry.destination = resolveDestination(destination, context.baseUrl);
+    }
     context.entries.push(entry);
     return entry;
   }
@@ -233,6 +221,94 @@
       },
       extra
     );
+  }
+
+  function quoteMarkdown(value) {
+    return String(value || '')
+      .split('\n')
+      .map((line) => (line ? `> ${line}` : '>'))
+      .join('\n');
+  }
+
+  function serializeBlockquoteBody(node, context) {
+    const sections = [];
+    let pending = { template: '', original: '' };
+
+    function flushPending() {
+      const normalized = normalizeInlineResult(pending);
+      if (normalized.template || normalized.original) sections.push(normalized);
+      pending = { template: '', original: '' };
+    }
+
+    for (const child of getChildNodes(node)) {
+      const tagName = getTagName(child);
+      const isBlockChild =
+        tagName === 'P' ||
+        tagName === 'BLOCKQUOTE' ||
+        tagName === 'PRE' ||
+        tagName === 'OL' ||
+        tagName === 'UL' ||
+        tagName === 'TABLE' ||
+        /^H[1-6]$/.test(tagName);
+      if (!isBlockChild) {
+        const inline = serializeInline(child, context);
+        pending.template += inline.template;
+        pending.original += inline.original;
+        continue;
+      }
+
+      flushPending();
+      if (tagName === 'BLOCKQUOTE') {
+        const nested = serializeBlockquoteBody(child, context);
+        sections.push({
+          template: quoteMarkdown(nested.template),
+          original: quoteMarkdown(nested.original),
+        });
+      } else if (tagName === 'PRE') {
+        const code = getChildNodes(child).find(
+          (descendant) => getTagName(descendant) === 'CODE'
+        );
+        const source = String((code || child).textContent || '').replace(
+          /\n+$/g,
+          ''
+        );
+        if (source.trim()) {
+          const entry = addCodeEntry(
+            context,
+            source,
+            'block',
+            code ? detectCodeLanguage(code) : ''
+          );
+          sections.push({ template: entry.token, original: renderCode(entry) });
+        }
+      } else {
+        const inline = normalizeInlineResult(
+          serializeInlineChildren(child, context)
+        );
+        if (/^H[1-6]$/.test(tagName)) {
+          const prefix = `${'#'.repeat(Number(tagName.slice(1)))} `;
+          inline.template = `${prefix}${inline.template}`;
+          inline.original = `${prefix}${inline.original}`;
+        }
+        if (inline.template || inline.original) sections.push(inline);
+      }
+    }
+    flushPending();
+    return {
+      template: sections.map((section) => section.template).join('\n\n'),
+      original: sections.map((section) => section.original).join('\n\n'),
+    };
+  }
+
+  function serializeBlockquote(node, context) {
+    const entryStart = context.entries.length;
+    const body = serializeBlockquoteBody(node, context);
+    if (!body.template && !body.original) return null;
+    return appendBlock(context, 'blockquote', {
+      template: quoteMarkdown(body.template),
+      original: quoteMarkdown(body.original),
+      entryStart,
+    });
   }
 
   function getDirectChildren(node, tagName) {
@@ -359,7 +435,7 @@
       } else if (tagName === 'P') {
         block = serializeTextBlock(child, context, 'paragraph', '');
       } else if (tagName === 'BLOCKQUOTE') {
-        block = serializeTextBlock(child, context, 'blockquote', '> ');
+        block = serializeBlockquote(child, context);
       } else if (tagName === 'PRE') {
         block = serializeCodeBlock(child, context);
       } else if (tagName === 'OL' || tagName === 'UL') {
@@ -377,7 +453,10 @@
 
   function serializeMarkdownDocument(root, metadata = {}, options = {}) {
     const namespace = createNamespace(root, options);
-    const context = createSerializationContext(namespace);
+    const baseUrl = String(
+      metadata.url || root?.ownerDocument?.baseURI || root?.baseURI || ''
+    );
+    const context = createSerializationContext(namespace, baseUrl);
     const blocks = [];
     walkBlocks(root, context, blocks);
     return {
@@ -429,6 +508,22 @@
     return String(value).split(needle).length - 1;
   }
 
+  function escapeMarkdownLinkLabel(value) {
+    return String(value || '')
+      .replace(/\\/g, '\\\\')
+      .replace(/\[/g, '\\[')
+      .replace(/\]/g, '\\]');
+  }
+
+  function escapeLinkWrapperContent(value, entry) {
+    const openIndex = value.indexOf(entry.openToken);
+    const contentStart = openIndex + entry.openToken.length;
+    const closeIndex = value.indexOf(entry.closeToken, contentStart);
+    return `${value.slice(0, contentStart)}${escapeMarkdownLinkLabel(
+      value.slice(contentStart, closeIndex)
+    )}${value.slice(closeIndex)}`;
+  }
+
   function validateAndRehydrateChunk(output, chunk) {
     const value = String(output || '');
     const entries = getChunkEntries(chunk);
@@ -465,8 +560,16 @@
 
     let result = value;
     for (const entry of entries) {
+      if (entry.kind === 'link') {
+        result = escapeLinkWrapperContent(result, entry);
+      }
+    }
+    for (const entry of entries) {
       if (entry.kind === 'code') {
-        const replacement = entry.destination
+        const replacement = Object.prototype.hasOwnProperty.call(
+          entry,
+          'destination'
+        )
           ? `[${entry.value}](${renderDestination(entry.destination)})`
           : renderCode(entry);
         result = result.split(entry.token).join(replacement);
