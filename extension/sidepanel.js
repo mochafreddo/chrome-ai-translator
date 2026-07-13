@@ -7,6 +7,7 @@ const elStatus = hasDocument ? document.getElementById('status') : null;
 const elError = hasDocument ? document.getElementById('errorBox') : null;
 const elProgress = hasDocument ? document.getElementById('progress') : null;
 const btnTranslate = hasDocument ? document.getElementById('btnTranslate') : null;
+const btnSave = hasDocument ? document.getElementById('btnSave') : null;
 
 const elTargetLanguage = hasDocument
   ? document.getElementById('targetLanguage')
@@ -109,22 +110,71 @@ async function loadSettings() {
   elViewMode.value = s.viewMode || 'translation';
 }
 
-async function saveSettings() {
-  const settings = {
+function createSettingsSaveController({ sendMessage, readSettings, render }) {
+  let inFlight = null;
+
+  return {
+    isSaving() {
+      return Boolean(inFlight);
+    },
+    save() {
+      if (inFlight) return inFlight;
+
+      render({ saving: true, status: 'Saving...', error: '' });
+      inFlight = Promise.resolve()
+        .then(() =>
+          sendMessage({
+            type: 'SAVE_SETTINGS',
+            settings: readSettings(),
+          })
+        )
+        .then((response) => {
+          if (!response?.ok) {
+            throw new Error(
+              response?.error?.message || 'Failed to save settings'
+            );
+          }
+          render({ saving: false, status: 'Saved.', error: '' });
+          return true;
+        })
+        .catch((error) => {
+          render({
+            saving: false,
+            status: '',
+            error: String(error?.message || error).slice(0, 300),
+          });
+          return false;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+      return inFlight;
+    },
+  };
+}
+
+function readSettings() {
+  return {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
     model: elModel.value.trim() || 'gpt-5.4-mini',
     viewMode: elViewMode.value,
   };
-  const resp = await chrome.runtime.sendMessage({
-    type: 'SAVE_SETTINGS',
-    settings,
-  });
-  if (!resp?.ok) {
-    setError(resp?.error?.message || 'Failed to save settings');
-    return;
-  }
 }
+
+function renderSettingsSave({ saving, status, error }) {
+  btnSave.disabled = saving;
+  setStatus(status);
+  setError(error);
+}
+
+const settingsSaveController = hasDocument
+  ? createSettingsSaveController({
+      sendMessage: (message) => chrome.runtime.sendMessage(message),
+      readSettings,
+      render: renderSettingsSave,
+    })
+  : null;
 
 function renderTranslateFailure(error) {
   const message = error?.message || String(error);
@@ -217,7 +267,9 @@ if (hasDocument) {
   document
     .getElementById('btnTranslate')
     .addEventListener('click', handleTranslateClick);
-  document.getElementById('btnSave').addEventListener('click', saveSettings);
+  btnSave.addEventListener('click', () => {
+    settingsSaveController.save();
+  });
   document
     .getElementById('btnOpenOptions')
     .addEventListener('click', () => chrome.runtime.openOptionsPage());
@@ -243,6 +295,7 @@ if (hasDocument) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    createSettingsSaveController,
     formatOriginalPanelText,
     formatTranslatedPanelText,
     getSidepanelDisplayState,

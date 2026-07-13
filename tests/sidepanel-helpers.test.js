@@ -4,6 +4,121 @@ const helpers = require('../extension/sidepanel.js');
 exports.name = 'sidepanel helpers';
 exports.tests = [
   {
+    name: 'saves settings and renders success',
+    async fn() {
+      const sent = [];
+      const rendered = [];
+      const settings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        viewMode: 'translation',
+      };
+      const controller = helpers.createSettingsSaveController({
+        async sendMessage(message) {
+          sent.push(message);
+          return { ok: true };
+        },
+        readSettings: () => settings,
+        render: (state) => rendered.push(state),
+      });
+
+      assert.equal(await controller.save(), true);
+      assert.deepEqual(sent, [{ type: 'SAVE_SETTINGS', settings }]);
+      assert.deepEqual(rendered, [
+        { saving: true, status: 'Saving...', error: '' },
+        { saving: false, status: 'Saved.', error: '' },
+      ]);
+      assert.equal(controller.isSaving(), false);
+    },
+  },
+  {
+    name: 'renders a bounded error when saving settings is rejected',
+    async fn() {
+      const rendered = [];
+      const longMessage = 'x'.repeat(350);
+      const controller = helpers.createSettingsSaveController({
+        sendMessage: async () => {
+          throw new Error(longMessage);
+        },
+        readSettings: () => ({ targetLanguage: 'Korean' }),
+        render: (state) => rendered.push(state),
+      });
+
+      assert.equal(await controller.save(), false);
+      assert.deepEqual(rendered[0], {
+        saving: true,
+        status: 'Saving...',
+        error: '',
+      });
+      assert.deepEqual(rendered[1], {
+        saving: false,
+        status: '',
+        error: 'x'.repeat(300),
+      });
+      assert.equal(controller.isSaving(), false);
+    },
+  },
+  {
+    name: 'renders the runtime error when saving settings is unsuccessful',
+    async fn() {
+      const rendered = [];
+      const controller = helpers.createSettingsSaveController({
+        sendMessage: async () => ({
+          ok: false,
+          error: { message: 'Settings could not be saved.' },
+        }),
+        readSettings: () => ({ targetLanguage: 'Korean' }),
+        render: (state) => rendered.push(state),
+      });
+
+      assert.equal(await controller.save(), false);
+      assert.deepEqual(rendered[1], {
+        saving: false,
+        status: '',
+        error: 'Settings could not be saved.',
+      });
+      assert.equal(controller.isSaving(), false);
+    },
+  },
+  {
+    name: 'shares one in-flight save across duplicate clicks',
+    async fn() {
+      const sent = [];
+      const rendered = [];
+      let resolveRequest;
+      const request = new Promise((resolve) => {
+        resolveRequest = resolve;
+      });
+      const controller = helpers.createSettingsSaveController({
+        sendMessage(message) {
+          sent.push(message);
+          return request;
+        },
+        readSettings: () => ({ targetLanguage: 'Korean' }),
+        render: (state) => rendered.push(state),
+      });
+
+      const first = controller.save();
+      const second = controller.save();
+
+      assert.equal(first, second);
+      assert.equal(controller.isSaving(), true);
+      assert.equal(sent.length, 0);
+      assert.deepEqual(rendered[0], {
+        saving: true,
+        status: 'Saving...',
+        error: '',
+      });
+
+      await Promise.resolve();
+      assert.equal(sent.length, 1);
+      resolveRequest({ ok: true });
+      assert.equal(await first, true);
+      assert.equal(controller.isSaving(), false);
+    },
+  },
+  {
     name: 'formats bilingual panel with original and translated text',
     fn() {
       const output = helpers.formatTranslatedPanelText(
