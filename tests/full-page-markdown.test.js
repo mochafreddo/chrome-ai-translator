@@ -421,6 +421,157 @@ exports.tests = [
       const modelInput = documentModel.blocks[0].template;
       assert.equal(modelInput.includes('../guide'), false);
       assert.equal(modelInput.includes('#part'), false);
+      const original = markdown.renderOriginalMarkdown(documentModel);
+      assert.equal(original.includes('../guide'), false);
+      assert.equal(
+        original.includes('https://page.test/docs/guide'),
+        true
+      );
+      assert.equal(
+        original.includes(
+          'https://page.test/docs/current/index.html?private=1#part'
+        ),
+        true
+      );
+    },
+  },
+  {
+    name: 'prefers the effective document base over metadata URL',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.baseURI = 'https://assets.test/base/current/';
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          element('a', { href: '../guide' }, text('Relative guide'))
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        { url: 'https://page.test/fallback/index.html' },
+        { namespace: 'CAT_TEST' }
+      );
+
+      assert.equal(
+        documentModel.entries[0].destination,
+        'https://assets.test/base/guide'
+      );
+      assert.equal(
+        markdown
+          .renderOriginalMarkdown(documentModel)
+          .includes('https://assets.test/base/guide'),
+        true
+      );
+    },
+  },
+  {
+    name: 'preserves nested lists and tables inside blockquotes',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element(
+          'blockquote',
+          {},
+          element('p', {}, text('Intro')),
+          element(
+            'ol',
+            {},
+            element(
+              'li',
+              {},
+              text('First'),
+              element('ul', {}, element('li', {}, text('Nested')))
+            )
+          ),
+          element(
+            'table',
+            {},
+            element(
+              'tr',
+              {},
+              element('th', {}, text('Name')),
+              element('th', {}, text('Value'))
+            ),
+            element(
+              'tr',
+              {},
+              element('td', {}, text('One')),
+              element('td', {}, text('1'))
+            )
+          )
+        )
+      );
+      const expected = [
+        '> Intro',
+        '>',
+        '> 1. First',
+        '>     - Nested',
+        '>',
+        '> | Name | Value |',
+        '> | --- | --- |',
+        '> | One | 1 |',
+      ].join('\n');
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+
+      assert.equal(documentModel.blocks[0].template, expected);
+      assert.equal(markdown.renderOriginalMarkdown(documentModel), expected);
+    },
+  },
+  {
+    name: 'escapes malicious visible labels in original and atomic links',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          element(
+            'a',
+            { href: 'https://safe.test/natural' },
+            text('read ](https://evil.test)[ this')
+          ),
+          text(' and '),
+          element(
+            'a',
+            { href: 'https://safe.test/atomic' },
+            text('https://visible.test/](https://evil.test)[x')
+          )
+        )
+      );
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_TEST' }
+      );
+      const block = documentModel.blocks[0];
+      const atomic = documentModel.entries.find((entry) => entry.kind === 'code');
+      const original = markdown.renderOriginalMarkdown(documentModel);
+
+      assert.equal(
+        original,
+        '[read \\](https://evil.test)\\[ this](<https://safe.test/natural>) and [https://visible.test/\\](https://evil.test)\\[x](<https://safe.test/atomic>)'
+      );
+      assert.equal(
+        markdown.validateAndRehydrateChunk(
+          block.template,
+          createChunk(documentModel, block)
+        ),
+        '[read \\](https://evil.test)\\[ this](<https://safe.test/natural>) and [https://visible.test/\\](https://evil.test)\\[x](<https://safe.test/atomic>)'
+      );
+      assert.equal(Boolean(atomic?.destination), true);
     },
   },
 ];

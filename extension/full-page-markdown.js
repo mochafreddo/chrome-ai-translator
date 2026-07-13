@@ -163,14 +163,18 @@
         const entry = addCodeEntry(context, label, 'inline', '', destination);
         return {
           template: entry.token,
-          original: `[${label}](${renderDestination(destination)})`,
+          original: `[${escapeMarkdownLinkLabel(label)}](${renderDestination(
+            entry.destination
+          )})`,
         };
       }
       const entry = addLinkEntry(context, destination);
       const labelResult = serializeInlineChildren(node, context, options);
       return {
         template: `${entry.openToken}${labelResult.template}${entry.closeToken}`,
-        original: `[${labelResult.original}](${renderDestination(destination)})`,
+        original: `[${escapeMarkdownLinkLabel(
+          labelResult.original
+        )}](${renderDestination(entry.destination)})`,
       };
     }
     return serializeInlineChildren(node, context, options);
@@ -193,11 +197,13 @@
     };
   }
 
-  function appendBlock(context, kind, values, extra = {}) {
+  function appendBlock(context, kind, values, extra = {}, options = {}) {
     if (!values.template && !values.original) return null;
     const entryStart = Number(values.entryStart) || 0;
     const block = {
-      id: `m${(context.nextBlockId += 1)}`,
+      ...(options.allocateId === false
+        ? {}
+        : { id: `m${(context.nextBlockId += 1)}` }),
       kind,
       template: values.template,
       originalMarkdown: values.original,
@@ -207,7 +213,7 @@
     return block;
   }
 
-  function serializeTextBlock(node, context, kind, prefix, extra) {
+  function serializeTextBlock(node, context, kind, prefix, extra, options) {
     const entryStart = context.entries.length;
     const inline = normalizeInlineResult(serializeInlineChildren(node, context));
     if (!inline.template) return null;
@@ -219,7 +225,8 @@
         original: `${prefix}${inline.original}`,
         entryStart,
       },
-      extra
+      extra,
+      options
     );
   }
 
@@ -228,6 +235,18 @@
       .split('\n')
       .map((line) => (line ? `> ${line}` : '>'))
       .join('\n');
+  }
+
+  function isSupportedBlockTag(tagName) {
+    return (
+      tagName === 'P' ||
+      tagName === 'BLOCKQUOTE' ||
+      tagName === 'PRE' ||
+      tagName === 'OL' ||
+      tagName === 'UL' ||
+      tagName === 'TABLE' ||
+      /^H[1-6]$/.test(tagName)
+    );
   }
 
   function serializeBlockquoteBody(node, context) {
@@ -242,15 +261,7 @@
 
     for (const child of getChildNodes(node)) {
       const tagName = getTagName(child);
-      const isBlockChild =
-        tagName === 'P' ||
-        tagName === 'BLOCKQUOTE' ||
-        tagName === 'PRE' ||
-        tagName === 'OL' ||
-        tagName === 'UL' ||
-        tagName === 'TABLE' ||
-        /^H[1-6]$/.test(tagName);
-      if (!isBlockChild) {
+      if (!isSupportedBlockTag(tagName)) {
         const inline = serializeInline(child, context);
         pending.template += inline.template;
         pending.original += inline.original;
@@ -258,39 +269,16 @@
       }
 
       flushPending();
-      if (tagName === 'BLOCKQUOTE') {
-        const nested = serializeBlockquoteBody(child, context);
+      const childBlocks = serializeElementBlocks(child, context, {
+        allocateId: false,
+      });
+      if (childBlocks.length) {
         sections.push({
-          template: quoteMarkdown(nested.template),
-          original: quoteMarkdown(nested.original),
+          template: childBlocks.map((block) => block.template).join('\n'),
+          original: childBlocks
+            .map((block) => block.originalMarkdown)
+            .join('\n'),
         });
-      } else if (tagName === 'PRE') {
-        const code = getChildNodes(child).find(
-          (descendant) => getTagName(descendant) === 'CODE'
-        );
-        const source = String((code || child).textContent || '').replace(
-          /\n+$/g,
-          ''
-        );
-        if (source.trim()) {
-          const entry = addCodeEntry(
-            context,
-            source,
-            'block',
-            code ? detectCodeLanguage(code) : ''
-          );
-          sections.push({ template: entry.token, original: renderCode(entry) });
-        }
-      } else {
-        const inline = normalizeInlineResult(
-          serializeInlineChildren(child, context)
-        );
-        if (/^H[1-6]$/.test(tagName)) {
-          const prefix = `${'#'.repeat(Number(tagName.slice(1)))} `;
-          inline.template = `${prefix}${inline.template}`;
-          inline.original = `${prefix}${inline.original}`;
-        }
-        if (inline.template || inline.original) sections.push(inline);
       }
     }
     flushPending();
@@ -300,7 +288,7 @@
     };
   }
 
-  function serializeBlockquote(node, context) {
+  function serializeBlockquote(node, context, options) {
     const entryStart = context.entries.length;
     const body = serializeBlockquoteBody(node, context);
     if (!body.template && !body.original) return null;
@@ -308,14 +296,14 @@
       template: quoteMarkdown(body.template),
       original: quoteMarkdown(body.original),
       entryStart,
-    });
+    }, {}, options);
   }
 
   function getDirectChildren(node, tagName) {
     return getChildNodes(node).filter((child) => getTagName(child) === tagName);
   }
 
-  function serializeList(list, context, blocks, depth) {
+  function serializeList(list, context, blocks, depth, options) {
     const ordered = getTagName(list) === 'OL';
     const items = getDirectChildren(list, 'LI');
     items.forEach((item, index) => {
@@ -333,13 +321,14 @@
           original: `${prefix}${inline.original}`,
           entryStart,
         },
-        ordered ? { depth, ordinal: index + 1 } : { depth }
+        ordered ? { depth, ordinal: index + 1 } : { depth },
+        options
       );
       if (block) blocks.push(block);
       for (const child of getChildNodes(item)) {
         const childTag = getTagName(child);
         if (childTag === 'OL' || childTag === 'UL') {
-          serializeList(child, context, blocks, depth + 1);
+          serializeList(child, context, blocks, depth + 1, options);
         }
       }
     });
@@ -361,7 +350,7 @@
     return String(value || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
   }
 
-  function serializeTable(table, context) {
+  function serializeTable(table, context, options) {
     const rows = [];
     collectTableRows(table, rows, table);
     if (!rows.length) return null;
@@ -393,14 +382,20 @@
       templateLines.push(renderRow(row, 'template'));
       originalLines.push(renderRow(row, 'original'));
     }
-    return appendBlock(context, 'table', {
-      template: templateLines.join('\n'),
-      original: originalLines.join('\n'),
-      entryStart,
-    });
+    return appendBlock(
+      context,
+      'table',
+      {
+        template: templateLines.join('\n'),
+        original: originalLines.join('\n'),
+        entryStart,
+      },
+      {},
+      options
+    );
   }
 
-  function serializeCodeBlock(pre, context) {
+  function serializeCodeBlock(pre, context, options) {
     const code = getChildNodes(pre).find((child) => getTagName(child) === 'CODE');
     const source = String((code || pre).textContent || '').replace(/\n+$/g, '');
     if (!source.trim()) return null;
@@ -411,54 +406,81 @@
       'block',
       code ? detectCodeLanguage(code) : ''
     );
-    return appendBlock(context, 'code', {
-      template: entry.token,
-      original: renderCode(entry),
-      entryStart,
-    });
+    return appendBlock(
+      context,
+      'code',
+      {
+        template: entry.token,
+        original: renderCode(entry),
+        entryStart,
+      },
+      {},
+      options
+    );
   }
 
-  function walkBlocks(node, context, blocks) {
-    for (const child of getChildNodes(node)) {
-      if (child.nodeType !== 1) continue;
-      const tagName = getTagName(child);
-      let block = null;
-      if (/^H[1-6]$/.test(tagName)) {
-        const level = Number(tagName.slice(1));
-        block = serializeTextBlock(
-          child,
-          context,
-          'heading',
-          `${'#'.repeat(level)} `,
-          { level }
-        );
-      } else if (tagName === 'P') {
-        block = serializeTextBlock(child, context, 'paragraph', '');
-      } else if (tagName === 'BLOCKQUOTE') {
-        block = serializeBlockquote(child, context);
-      } else if (tagName === 'PRE') {
-        block = serializeCodeBlock(child, context);
-      } else if (tagName === 'OL' || tagName === 'UL') {
-        serializeList(child, context, blocks, 0);
-        continue;
-      } else if (tagName === 'TABLE') {
-        block = serializeTable(child, context);
-      } else {
-        walkBlocks(child, context, blocks);
-        continue;
-      }
-      if (block) blocks.push(block);
+  function serializeElementBlocks(element, context, options = {}) {
+    const tagName = getTagName(element);
+    if (/^H[1-6]$/.test(tagName)) {
+      const level = Number(tagName.slice(1));
+      const block = serializeTextBlock(
+        element,
+        context,
+        'heading',
+        `${'#'.repeat(level)} `,
+        { level },
+        options
+      );
+      return block ? [block] : [];
     }
+    if (tagName === 'P') {
+      const block = serializeTextBlock(
+        element,
+        context,
+        'paragraph',
+        '',
+        {},
+        options
+      );
+      return block ? [block] : [];
+    }
+    if (tagName === 'BLOCKQUOTE') {
+      const block = serializeBlockquote(element, context, options);
+      return block ? [block] : [];
+    }
+    if (tagName === 'PRE') {
+      const block = serializeCodeBlock(element, context, options);
+      return block ? [block] : [];
+    }
+    if (tagName === 'OL' || tagName === 'UL') {
+      const blocks = [];
+      serializeList(element, context, blocks, 0, options);
+      return blocks;
+    }
+    if (tagName === 'TABLE') {
+      const block = serializeTable(element, context, options);
+      return block ? [block] : [];
+    }
+    return serializeChildBlocks(element, context, options);
+  }
+
+  function serializeChildBlocks(node, context, options) {
+    const blocks = [];
+    for (const child of getChildNodes(node)) {
+      if (child.nodeType === 1) {
+        blocks.push(...serializeElementBlocks(child, context, options));
+      }
+    }
+    return blocks;
   }
 
   function serializeMarkdownDocument(root, metadata = {}, options = {}) {
     const namespace = createNamespace(root, options);
     const baseUrl = String(
-      metadata.url || root?.ownerDocument?.baseURI || root?.baseURI || ''
+      root?.ownerDocument?.baseURI || root?.baseURI || metadata.url || ''
     );
     const context = createSerializationContext(namespace, baseUrl);
-    const blocks = [];
-    walkBlocks(root, context, blocks);
+    const blocks = serializeChildBlocks(root, context);
     return {
       title: String(metadata.title || ''),
       url: String(metadata.url || ''),
@@ -570,7 +592,9 @@
           entry,
           'destination'
         )
-          ? `[${entry.value}](${renderDestination(entry.destination)})`
+          ? `[${escapeMarkdownLinkLabel(entry.value)}](${renderDestination(
+              entry.destination
+            )})`
           : renderCode(entry);
         result = result.split(entry.token).join(replacement);
       } else if (entry.kind === 'link') {
