@@ -108,6 +108,10 @@ exports.tests = [
         packageJson.scripts['check:syntax'],
         /node --check extension\/openai-response\.js/
       );
+      assert.match(
+        packageJson.scripts['check:syntax'],
+        /node --check extension\/full-page-markdown\.js/
+      );
     },
   },
 ];
