@@ -47,10 +47,23 @@
       </div>
 
       <div class="row">
-        <button id="btnSave" class="btn">Save as default</button>
+        <button
+          id="btnSave"
+          class="btn"
+          aria-describedby="saveStatus saveError"
+        >
+          Save as default
+        </button>
         <div id="progress" class="muted"></div>
       </div>
 
+      <div
+        id="saveStatus"
+        class="muted"
+        role="status"
+        aria-live="polite"
+      ></div>
+      <div id="saveError" class="error" role="alert" hidden></div>
       <div id="errorBox" class="error" hidden></div>
     </section>
 

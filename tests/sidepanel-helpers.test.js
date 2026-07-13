@@ -1,8 +1,29 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const helpers = require('../extension/sidepanel.js');
 
 exports.name = 'sidepanel helpers';
 exports.tests = [
+  {
+    name: 'provides an accessible save-owned feedback boundary',
+    fn() {
+      const html = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'sidepanel.html'),
+        'utf8'
+      );
+
+      assert.match(
+        html,
+        /id="btnSave"[^>]*aria-describedby="saveStatus saveError"/
+      );
+      assert.match(
+        html,
+        /id="saveStatus"[^>]*role="status"[^>]*aria-live="polite"/
+      );
+      assert.match(html, /id="saveError"[^>]*role="alert"[^>]*hidden/);
+    },
+  },
   {
     name: 'saves settings and renders success',
     async fn() {
@@ -33,15 +54,15 @@ exports.tests = [
     },
   },
   {
-    name: 'renders a bounded error when saving settings is rejected',
+    name: 'renders a generic error when saving settings is rejected',
     async fn() {
       const rendered = [];
-      const longMessage = 'x'.repeat(350);
+      const reflectedSecret = 'sk-reflected-rejection-secret';
       const controller = helpers.createSettingsSaveController({
         sendMessage: async () => {
-          throw new Error(longMessage);
+          throw new Error(`Runtime rejected ${reflectedSecret}`);
         },
-        readSettings: () => ({ targetLanguage: 'Korean' }),
+        readSettings: () => ({ model: 'private-model-name' }),
         render: (state) => rendered.push(state),
       });
 
@@ -54,21 +75,28 @@ exports.tests = [
       assert.deepEqual(rendered[1], {
         saving: false,
         status: '',
-        error: 'x'.repeat(300),
+        error: 'Failed to save settings.',
       });
+      assert.doesNotMatch(
+        JSON.stringify(rendered),
+        /sk-reflected|private-model/
+      );
       assert.equal(controller.isSaving(), false);
     },
   },
   {
-    name: 'renders the runtime error when saving settings is unsuccessful',
+    name: 'renders a generic error when saving settings is unsuccessful',
     async fn() {
       const rendered = [];
       const controller = helpers.createSettingsSaveController({
         sendMessage: async () => ({
           ok: false,
-          error: { message: 'Settings could not be saved.' },
+          error: {
+            message:
+              'Settings could not be saved for sk-reflected-response-secret.',
+          },
         }),
-        readSettings: () => ({ targetLanguage: 'Korean' }),
+        readSettings: () => ({ targetLanguage: 'Private target' }),
         render: (state) => rendered.push(state),
       });
 
@@ -76,8 +104,12 @@ exports.tests = [
       assert.deepEqual(rendered[1], {
         saving: false,
         status: '',
-        error: 'Settings could not be saved.',
+        error: 'Failed to save settings.',
       });
+      assert.doesNotMatch(
+        JSON.stringify(rendered),
+        /sk-reflected|Private target/
+      );
       assert.equal(controller.isSaving(), false);
     },
   },
@@ -86,6 +118,7 @@ exports.tests = [
     async fn() {
       const sent = [];
       const rendered = [];
+      let settingsReads = 0;
       let resolveRequest;
       const request = new Promise((resolve) => {
         resolveRequest = resolve;
@@ -95,7 +128,10 @@ exports.tests = [
           sent.push(message);
           return request;
         },
-        readSettings: () => ({ targetLanguage: 'Korean' }),
+        readSettings() {
+          settingsReads += 1;
+          return { targetLanguage: 'Korean' };
+        },
         render: (state) => rendered.push(state),
       });
 
@@ -113,9 +149,33 @@ exports.tests = [
 
       await Promise.resolve();
       assert.equal(sent.length, 1);
+      assert.equal(settingsReads, 1);
       resolveRequest({ ok: true });
       assert.equal(await first, true);
       assert.equal(controller.isSaving(), false);
+    },
+  },
+  {
+    name: 'allows one new settings read and request after a save settles',
+    async fn() {
+      let settingsReads = 0;
+      let requests = 0;
+      const controller = helpers.createSettingsSaveController({
+        async sendMessage() {
+          requests += 1;
+          return { ok: requests > 1 };
+        },
+        readSettings() {
+          settingsReads += 1;
+          return { targetLanguage: 'Korean' };
+        },
+        render() {},
+      });
+
+      assert.equal(await controller.save(), false);
+      assert.equal(await controller.save(), true);
+      assert.equal(requests, 2);
+      assert.equal(settingsReads, 2);
     },
   },
   {
@@ -190,7 +250,7 @@ exports.tests = [
     },
   },
   {
-    name: 'shows translation request failures from the click handler',
+    name: 'keeps save feedback and fields independent from translation state',
     async fn() {
       const previousChrome = global.chrome;
       const previousDocument = global.document;
@@ -198,6 +258,13 @@ exports.tests = [
       const modulePath = require.resolve('../extension/sidepanel.js');
       const originalModule = require.cache[modulePath];
       const elements = new Map();
+      const savedMessages = [];
+      let resolveFirstSave;
+      let refreshInterval;
+      let runtimeListener;
+      const firstSave = new Promise((resolve) => {
+        resolveFirstSave = resolve;
+      });
 
       function getElement(id) {
         if (!elements.has(id)) {
@@ -220,7 +287,10 @@ exports.tests = [
         return elements.get(id);
       }
 
-      global.setInterval = () => 0;
+      global.setInterval = (callback) => {
+        refreshInterval = callback;
+        return 0;
+      };
       global.document = {
         getElementById: getElement,
         querySelectorAll(selector) {
@@ -246,7 +316,11 @@ exports.tests = [
           },
         },
         runtime: {
-          onMessage: { addListener() {} },
+          onMessage: {
+            addListener(listener) {
+              runtimeListener = listener;
+            },
+          },
           openOptionsPage() {},
           async sendMessage(message) {
             if (message.type === 'GET_SETTINGS') {
@@ -269,6 +343,11 @@ exports.tests = [
                 error: { message: 'Cannot run on this page.' },
               };
             }
+            if (message.type === 'SAVE_SETTINGS') {
+              savedMessages.push(message);
+              if (savedMessages.length === 1) return firstSave;
+              return { ok: true };
+            }
             return { ok: true };
           },
         },
@@ -277,9 +356,95 @@ exports.tests = [
       try {
         delete require.cache[modulePath];
         require('../extension/sidepanel.js');
+        for (let i = 0; i < 8; i += 1) {
+          await Promise.resolve();
+        }
+
+        getElement('targetLanguage').value = 'Private target';
+        getElement('tone').value = 'natural';
+        getElement('model').value = 'private-model-name';
+        getElement('viewMode').value = 'bilingual';
+
+        const saveClick = getElement('btnSave').listeners.click;
+        assert.equal(typeof saveClick, 'function');
+        saveClick();
+        await Promise.resolve();
+
+        assert.equal(savedMessages.length, 1);
+        assert.equal(getElement('btnSave').disabled, true);
+        assert.equal(getElement('saveStatus').textContent, 'Saving...');
+        assert.equal(getElement('status').textContent, 'Idle');
+
+        refreshInterval();
         for (let i = 0; i < 4; i += 1) {
           await Promise.resolve();
         }
+        assert.equal(getElement('status').textContent, 'Idle');
+        assert.equal(getElement('saveStatus').textContent, 'Saving...');
+
+        runtimeListener({
+          type: 'STATE_UPDATED',
+          tabId: 77,
+          state: { status: 'translating' },
+        });
+        assert.equal(getElement('status').textContent, 'Translating');
+        assert.equal(getElement('saveStatus').textContent, 'Saving...');
+
+        resolveFirstSave({
+          ok: false,
+          error: {
+            message:
+              'Reflected sk-sidepanel-secret Private target private-model-name',
+          },
+        });
+        for (let i = 0; i < 8; i += 1) {
+          await Promise.resolve();
+        }
+
+        assert.equal(getElement('btnSave').disabled, false);
+        assert.equal(getElement('status').textContent, 'Translating');
+        assert.equal(getElement('saveStatus').textContent, '');
+        assert.equal(
+          getElement('saveError').textContent,
+          'Failed to save settings.'
+        );
+        assert.equal(getElement('saveError').hidden, false);
+        assert.equal(getElement('targetLanguage').value, 'Private target');
+        assert.equal(getElement('tone').value, 'natural');
+        assert.equal(getElement('model').value, 'private-model-name');
+        assert.equal(getElement('viewMode').value, 'bilingual');
+        assert.doesNotMatch(
+          `${getElement('saveStatus').textContent} ${
+            getElement('saveError').textContent
+          }`,
+          /sk-sidepanel|Private target|private-model/
+        );
+
+        saveClick();
+        for (let i = 0; i < 8; i += 1) {
+          await Promise.resolve();
+        }
+        assert.equal(savedMessages.length, 2);
+        assert.deepEqual(savedMessages[1], {
+          type: 'SAVE_SETTINGS',
+          settings: {
+            targetLanguage: 'Private target',
+            tone: 'natural',
+            model: 'private-model-name',
+            viewMode: 'bilingual',
+          },
+        });
+        assert.equal(getElement('saveStatus').textContent, 'Saved.');
+        assert.equal(getElement('saveError').hidden, true);
+        assert.equal(getElement('status').textContent, 'Translating');
+
+        refreshInterval();
+        for (let i = 0; i < 4; i += 1) {
+          await Promise.resolve();
+        }
+        assert.equal(getElement('status').textContent, 'Idle');
+        assert.equal(getElement('saveStatus').textContent, 'Saved.');
+
         const click = getElement('btnTranslate').listeners.click;
         assert.equal(typeof click, 'function');
 
@@ -291,6 +456,7 @@ exports.tests = [
         assert.equal(getElement('errorBox').hidden, false);
         assert.equal(getElement('errorBox').textContent, 'Cannot run on this page.');
         assert.equal(getElement('btnTranslate').disabled, false);
+        assert.equal(getElement('saveStatus').textContent, 'Saved.');
       } finally {
         global.chrome = previousChrome;
         global.document = previousDocument;

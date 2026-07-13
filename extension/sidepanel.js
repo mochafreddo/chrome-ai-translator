@@ -6,6 +6,8 @@ const hasDocument = typeof document !== 'undefined';
 const elStatus = hasDocument ? document.getElementById('status') : null;
 const elError = hasDocument ? document.getElementById('errorBox') : null;
 const elProgress = hasDocument ? document.getElementById('progress') : null;
+const elSaveStatus = hasDocument ? document.getElementById('saveStatus') : null;
+const elSaveError = hasDocument ? document.getElementById('saveError') : null;
 const btnTranslate = hasDocument ? document.getElementById('btnTranslate') : null;
 const btnSave = hasDocument ? document.getElementById('btnSave') : null;
 
@@ -31,6 +33,16 @@ function setError(message) {
   }
   elError.hidden = false;
   elError.textContent = message;
+}
+
+function setSaveError(message) {
+  if (!message) {
+    elSaveError.hidden = true;
+    elSaveError.textContent = '';
+    return;
+  }
+  elSaveError.hidden = false;
+  elSaveError.textContent = message;
 }
 
 function setProgress(p) {
@@ -130,18 +142,16 @@ function createSettingsSaveController({ sendMessage, readSettings, render }) {
         )
         .then((response) => {
           if (!response?.ok) {
-            throw new Error(
-              response?.error?.message || 'Failed to save settings'
-            );
+            throw new Error('Settings save failed');
           }
           render({ saving: false, status: 'Saved.', error: '' });
           return true;
         })
-        .catch((error) => {
+        .catch(() => {
           render({
             saving: false,
             status: '',
-            error: String(error?.message || error).slice(0, 300),
+            error: 'Failed to save settings.',
           });
           return false;
         })
@@ -164,8 +174,8 @@ function readSettings() {
 
 function renderSettingsSave({ saving, status, error }) {
   btnSave.disabled = saving;
-  setStatus(status);
-  setError(error);
+  elSaveStatus.textContent = status;
+  setSaveError(error);
 }
 
 const settingsSaveController = hasDocument
