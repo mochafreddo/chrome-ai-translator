@@ -572,6 +572,180 @@ exports.tests = [
     },
   },
   {
+    name: 'excludes hidden table sections rows and cells from original and model Markdown',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.defaultView = {
+        getComputedStyle(node) {
+          return {
+            display: node.getAttribute?.('data-display') || 'table-cell',
+            visibility: 'visible',
+            contentVisibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+      const root = element(
+        'main',
+        {},
+        element(
+          'table',
+          {},
+          element(
+            'thead',
+            {},
+            element('tr', {}, element('th', {}, text('Visible heading')))
+          ),
+          element(
+            'tbody',
+            {},
+            element('tr', {}, element('td', {}, text('Visible cell'))),
+            element(
+              'tr',
+              {},
+              element('td', { hidden: '' }, text('Hidden cell secret')),
+              element('td', {}, text('Visible sibling'))
+            ),
+            element(
+              'tr',
+              { 'aria-hidden': 'true' },
+              element('td', {}, text('Hidden row secret'))
+            )
+          ),
+          element(
+            'tbody',
+            { 'data-display': 'none' },
+            element('tr', {}, element('td', {}, text('Hidden section secret')))
+          )
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_TABLE_VISIBILITY' }
+      );
+      const original = markdown.renderOriginalMarkdown(documentModel);
+      const modelInput = documentModel.blocks.map((block) => block.template).join('\n\n');
+
+      assert.equal(
+        original,
+        '| Visible heading |\n| --- |\n| Visible cell |\n| Visible sibling |'
+      );
+      assert.equal(modelInput, original);
+      assert.doesNotMatch(`${original}\n${modelInput}`, /secret/i);
+    },
+  },
+  {
+    name: 'derives atomic link labels only from visible descendants',
+    fn() {
+      const { element, text } = createTestDocument();
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          element(
+            'a',
+            { href: 'https://destination.test/private' },
+            text('https://visible.test/guide'),
+            element('span', { 'aria-hidden': 'true' }, text('hidden-link-secret'))
+          )
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_ATOMIC_VISIBLE' }
+      );
+      const modelInput = documentModel.blocks[0].template;
+      const original = markdown.renderOriginalMarkdown(documentModel);
+
+      assert.equal(
+        original,
+        '[https://visible.test/guide](<https://destination.test/private>)'
+      );
+      assert.match(modelInput, /^⟦CAT_ATOMIC_VISIBLE:ATOM:C1⟧$/);
+      assert.equal(documentModel.entries[0].value, 'https://visible.test/guide');
+      assert.doesNotMatch(JSON.stringify(documentModel.entries), /hidden-link-secret/);
+      assert.doesNotMatch(`${original}\n${modelInput}`, /hidden-link-secret/);
+    },
+  },
+  {
+    name: 'derives inline and fenced code values only from visible descendants',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.defaultView = {
+        getComputedStyle(node) {
+          return {
+            display: node.getAttribute?.('data-display') || 'inline',
+            visibility: 'visible',
+            contentVisibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+      const root = element(
+        'main',
+        {},
+        element(
+          'p',
+          {},
+          text('Run '),
+          element(
+            'code',
+            {},
+            text('visible-command'),
+            element('span', { 'data-display': 'none' }, text('inline-secret'))
+          ),
+          text('.')
+        ),
+        element(
+          'pre',
+          {},
+          element(
+            'code',
+            { class: 'language-sh' },
+            text('echo visible'),
+            element(
+              'span',
+              { contenteditable: 'true' },
+              text('fenced-secret')
+            )
+          )
+        ),
+        element(
+          'pre',
+          {},
+          element('code', { hidden: '' }, text('hidden-code-element-secret')),
+          text('fallback visible')
+        )
+      );
+
+      const documentModel = markdown.serializeMarkdownDocument(
+        root,
+        {},
+        { namespace: 'CAT_CODE_VISIBLE' }
+      );
+      const original = markdown.renderOriginalMarkdown(documentModel);
+      const modelInput = documentModel.blocks.map((block) => block.template).join('\n\n');
+
+      assert.deepEqual(
+        documentModel.entries.map((entry) => entry.value),
+        ['visible-command', 'echo visible', 'fallback visible']
+      );
+      assert.equal(
+        original,
+        'Run ```visible-command```.\n\n```sh\necho visible\n```\n\n```\nfallback visible\n```'
+      );
+      assert.doesNotMatch(JSON.stringify(documentModel.entries), /secret/);
+      assert.doesNotMatch(`${original}\n${modelInput}`, /secret/);
+      assert.doesNotMatch(modelInput, /visible-command|echo visible/);
+    },
+  },
+  {
     name: 'preserves ordered-list start and item values and emits the title once as the first H1',
     fn() {
       const { element, text } = createTestDocument();
@@ -605,6 +779,32 @@ exports.tests = [
       assert.equal((original.match(/^# Guide$/gm) || []).length, 1);
       assert.equal(documentModel.blocks[0].kind, 'heading');
       assert.equal(documentModel.blocks[0].level, 1);
+    },
+  },
+  {
+    name: 'removes later equivalent H1 blocks when the first H1 already matches the title',
+    fn() {
+      const { element, text } = createTestDocument();
+      const documentModel = markdown.serializeMarkdownDocument(
+        element(
+          'main',
+          {},
+          element('h1', {}, text('Guide')),
+          element('p', {}, text('Introduction.')),
+          element('h1', {}, text('Guide')),
+          element('p', {}, text('Details.'))
+        ),
+        { title: 'Guide' },
+        { namespace: 'CAT_TITLE_DEDUP' }
+      );
+      const original = markdown.renderOriginalMarkdown(documentModel);
+
+      assert.equal(
+        original,
+        '# Guide\n\nIntroduction.\n\nDetails.'
+      );
+      assert.equal((original.match(/^# Guide$/gm) || []).length, 1);
+      assert.equal(documentModel.blocks[0].originalMarkdown, '# Guide');
     },
   },
   {

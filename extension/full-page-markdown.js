@@ -97,6 +97,13 @@
     return hasHiddenComputedStyle(node);
   }
 
+  function getVisibleText(node) {
+    if (!node) return '';
+    if (node.nodeType === 3) return String(node.nodeValue || '');
+    if (node.nodeType === 1 && isExcludedElement(node)) return '';
+    return getChildNodes(node).map(getVisibleText).join('');
+  }
+
   function normalizeInlineText(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
@@ -247,12 +254,12 @@
     }
     if (tagName === 'BR') return { template: ' ', original: ' ' };
     if (tagName === 'CODE' || tagName === 'KBD' || tagName === 'SAMP') {
-      const entry = addCodeEntry(context, node.textContent, 'inline', '');
+      const entry = addCodeEntry(context, getVisibleText(node), 'inline', '');
       return { template: entry.token, original: renderCode(entry) };
     }
     if (tagName === 'A') {
       const destination = String(node.getAttribute?.('href') || '');
-      const label = normalizeInlineText(node.textContent);
+      const label = normalizeInlineText(getVisibleText(node));
       if (isProtectedAtomicLinkLabel(label)) {
         const entry = addCodeEntry(context, label, 'inline', '', destination);
         return {
@@ -446,6 +453,7 @@
 
   function collectTableRows(node, rows, rootTable) {
     for (const child of getChildNodes(node)) {
+      if (isExcludedElement(child)) continue;
       const tagName = getTagName(child);
       if (tagName === 'TABLE' && child !== rootTable) continue;
       if (tagName === 'TR') {
@@ -467,9 +475,13 @@
     const entryStart = context.entries.length;
     const serializedRows = rows.map((row) =>
       getChildNodes(row)
-        .filter((cell) => ['TH', 'TD'].includes(getTagName(cell)))
+        .filter(
+          (cell) =>
+            ['TH', 'TD'].includes(getTagName(cell)) &&
+            !isExcludedElement(cell)
+        )
         .map((cell) => normalizeInlineResult(serializeInlineChildren(cell, context)))
-    );
+    ).filter((row) => row.length);
     const width = serializedRows.reduce(
       (maximum, row) => Math.max(maximum, row.length),
       0
@@ -506,8 +518,10 @@
   }
 
   function serializeCodeBlock(pre, context, options) {
-    const code = getChildNodes(pre).find((child) => getTagName(child) === 'CODE');
-    const source = String((code || pre).textContent || '').replace(/\n+$/g, '');
+    const code = getChildNodes(pre).find(
+      (child) => getTagName(child) === 'CODE' && !isExcludedElement(child)
+    );
+    const source = getVisibleText(code || pre).replace(/\n+$/g, '');
     if (!source.trim()) return null;
     const entryStart = context.entries.length;
     const entry = addCodeEntry(
@@ -602,7 +616,12 @@
         normalizeInlineText(
           String(block.originalMarkdown || '').replace(/^#\s+/, '')
         ) === title;
-      if (!equivalentTitle(blocks[0])) {
+      if (equivalentTitle(blocks[0])) {
+        blocks = [
+          blocks[0],
+          ...blocks.slice(1).filter((block) => !equivalentTitle(block)),
+        ];
+      } else {
         blocks = blocks.filter((block) => !equivalentTitle(block));
         blocks.unshift({
           id: `m${(context.nextBlockId += 1)}`,
