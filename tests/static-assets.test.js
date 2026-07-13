@@ -104,6 +104,10 @@ exports.tests = [
         packageJson.scripts['check:syntax'],
         /node --check extension\/inline-block\.js/
       );
+      assert.match(
+        packageJson.scripts['check:syntax'],
+        /node --check extension\/openai-response\.js/
+      );
     },
   },
 ];

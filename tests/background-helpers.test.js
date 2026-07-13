@@ -2,6 +2,16 @@ const assert = require('node:assert/strict');
 const helpers = require('../extension/background.js');
 const { createReasoningFixture } = require('./inline-block.test');
 
+function createCompletedResponse(outputText) {
+  return {
+    status: 'completed',
+    output: [{
+      type: 'message',
+      content: [{ type: 'output_text', text: outputText }],
+    }],
+  };
+}
+
 function createBlockApiRecord(id = 'b1') {
   const { serialized } = createReasoningFixture();
   return {
@@ -148,7 +158,7 @@ exports.tests = [
         return {
           ok: true,
           async json() {
-            return { output_text: '번역 결과' };
+            return createCompletedResponse('번역 결과');
           },
         };
       };
@@ -164,6 +174,7 @@ exports.tests = [
         assert.equal(output, '번역 결과');
         assert.deepEqual(requestBody.reasoning, { effort: 'none' });
         assert.equal(requestBody.max_output_tokens, 8192);
+        assert.equal(requestBody.store, false);
       } finally {
         global.fetch = previousFetch;
       }
@@ -180,7 +191,7 @@ exports.tests = [
         return {
           ok: true,
           async json() {
-            return { output_text: '번역 결과' };
+            return createCompletedResponse('번역 결과');
           },
         };
       };
@@ -407,11 +418,9 @@ exports.tests = [
         return {
           ok: true,
           async json() {
-            return {
-              output_text: JSON.stringify({
-                translations: [{ id: record.id, template: record.template }],
-              }),
-            };
+            return createCompletedResponse(JSON.stringify({
+              translations: [{ id: record.id, template: record.template }],
+            }));
           },
         };
       };
@@ -930,7 +939,7 @@ exports.tests = [
         return {
           ok: true,
           async json() {
-            return { output_text: '번역 결과' };
+            return createCompletedResponse('번역 결과');
           },
         };
       };
@@ -1043,7 +1052,7 @@ exports.tests = [
         return {
           ok: true,
           async json() {
-            return { output_text: '번역 결과' };
+            return createCompletedResponse('번역 결과');
           },
         };
       };
@@ -1161,11 +1170,9 @@ exports.tests = [
       global.fetch = async () => ({
         ok: true,
         async json() {
-          return {
-            output_text: JSON.stringify({
-              translations: [{ id: record.id, template: record.template }],
-            }),
-          };
+          return createCompletedResponse(JSON.stringify({
+            translations: [{ id: record.id, template: record.template }],
+          }));
         },
       });
       global.chrome = {
@@ -1430,11 +1437,9 @@ exports.tests = [
         return {
           ok: true,
           async json() {
-            return {
-              output_text: JSON.stringify({
-                translations: [{ id: 'n1', translation: '안녕하세요.' }],
-              }),
-            };
+            return createCompletedResponse(JSON.stringify({
+              translations: [{ id: 'n1', translation: '안녕하세요.' }],
+            }));
           },
         };
       };
@@ -1533,14 +1538,14 @@ exports.tests = [
       global.fetch = async () => {
         call += 1;
         if (call === 2) {
-          return { ok: true, async json() { return { output_text: '{invalid' }; } };
+          return { ok: true, async json() { return createCompletedResponse('{invalid'); } };
         }
-        return { ok: true, async json() { return { output_text: JSON.stringify({
+        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
           translations: [
             { id: first.id, template: firstTranslation },
             { id: second.id, template: second.template },
           ],
-        }) }; } };
+        })); } };
       };
       try {
         const results = await helpers.translateVisibleBlockBatch([first, second]);
@@ -1585,9 +1590,9 @@ exports.tests = [
       };
       global.fetch = async () => {
         call += 1;
-        return { ok: true, async json() { return { output_text: JSON.stringify({
+        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
           translations: [{ id: record.id, template: call === 1 ? record.template : '한국어 문장입니다.' }],
-        }) }; } };
+        })); } };
       };
       try {
         const detailedResults = await helpers.translateVisibleBlockBatch([record]);

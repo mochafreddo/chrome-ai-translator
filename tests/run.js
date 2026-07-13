@@ -1,5 +1,6 @@
 const suites = [
   require('./inline-block.test'),
+  require('./openai-response.test'),
   require('./translation-validation.test'),
   require('./translation-policy.test'),
   require('./translation-diagnostics.test'),

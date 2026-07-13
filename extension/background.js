@@ -12,6 +12,17 @@ const inlineBlockCodec =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-block.js')
     : null);
+if (
+  typeof importScripts === 'function' &&
+  !globalThis.ChromeAiTranslatorOpenAiResponse
+) {
+  importScripts('openai-response.js');
+}
+const openAiResponse =
+  globalThis.ChromeAiTranslatorOpenAiResponse ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./openai-response.js')
+    : null);
 if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorValidation) {
     importScripts('translation-validation.js');
@@ -977,6 +988,7 @@ async function openaiTranslateChunk({
     instructions,
     input,
     max_output_tokens: normalizeMaxOutputTokens(maxOutputTokens),
+    store: false,
   };
   if (reasoningEffort) {
     body.reasoning = { effort: reasoningEffort };
@@ -1000,28 +1012,7 @@ async function openaiTranslateChunk({
     throw new Error(msg);
   }
 
-  // Per docs, the SDK exposes response.output_text; API response also includes output_text.
-  const outputText = json?.output_text;
-  if (typeof outputText === 'string' && outputText.trim()) return outputText;
-
-  // Fallback: attempt to read from output array
-  try {
-    const outputs = json?.output || [];
-    const parts = [];
-    for (const o of outputs) {
-      const content = o?.content || [];
-      for (const c of content) {
-        if (c?.type === 'output_text' && typeof c.text === 'string')
-          parts.push(c.text);
-        if (c?.type === 'text' && typeof c.text === 'string')
-          parts.push(c.text);
-      }
-    }
-    const joined = parts.join('\n').trim();
-    if (joined) return joined;
-  } catch {}
-
-  throw new Error('Could not extract output_text from OpenAI response');
+  return openAiResponse.parseCompletedResponse(json);
 }
 
 function getTextRecordStats(records) {

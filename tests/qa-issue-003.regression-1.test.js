@@ -7,6 +7,16 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const background = require('../extension/background.js');
+
+function createCompletedResponse(outputText) {
+  return {
+    status: 'completed',
+    output: [{
+      type: 'message',
+      content: [{ type: 'output_text', text: outputText }],
+    }],
+  };
+}
 const content = require('../extension/content.js');
 const { createReasoningFixture } = require('./inline-block.test.js');
 
@@ -205,11 +215,9 @@ test('uses merged settings when production completeness validation is enabled', 
   global.fetch = async () => ({
     ok: true,
     async json() {
-      return {
-        output_text: JSON.stringify({
-          translations: [{ id: record.id, template: record.template }],
-        }),
-      };
+      return createCompletedResponse(JSON.stringify({
+        translations: [{ id: record.id, template: record.template }],
+      }));
     },
   });
 
