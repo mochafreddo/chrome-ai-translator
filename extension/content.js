@@ -31,7 +31,7 @@ var INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES = 1200;
 var INLINE_TRANSLATION_SETTINGS_DEFAULTS = {
   targetLanguage: 'Korean',
   tone: 'technical',
-  model: 'gpt-5.4-mini',
+  model: 'gpt-5.6-luna',
   reasoningEffort: 'none',
 };
 function isInlineTranslatedState(state) {

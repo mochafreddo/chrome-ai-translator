@@ -620,11 +620,11 @@ exports.tests = [
     },
   },
   {
-    name: 'defaults to GPT-5.4 mini with no reasoning effort',
+    name: 'defaults to the current small model with no reasoning effort',
     fn() {
       const settings = helpers.mergeSettingsWithExisting({}, {});
 
-      assert.equal(settings.model, 'gpt-5.4-mini');
+      assert.equal(settings.model, 'gpt-5.6-luna');
       assert.equal(settings.reasoningEffort, 'none');
     },
   },

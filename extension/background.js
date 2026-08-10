@@ -64,7 +64,7 @@ const inlineDiagnosticsController =
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
-  model: 'gpt-5.4-mini',
+  model: 'gpt-5.6-luna',
   reasoningEffort: 'none',
   targetLanguage: 'Korean',
   tone: 'technical',

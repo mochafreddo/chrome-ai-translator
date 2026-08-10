@@ -49,7 +49,7 @@ async function load() {
   elApiKey.value = '';
   elTargetLanguage.value = s.targetLanguage || 'Korean';
   elTone.value = s.tone || 'technical';
-  elModel.value = s.model || 'gpt-5.4-mini';
+  elModel.value = s.model || 'gpt-5.6-luna';
   elChunkMaxChars.value = s.chunkMaxChars || 12000;
   elInlineAutoShow.checked = Boolean(s.inlineAutoShow);
 }
@@ -180,7 +180,7 @@ async function save() {
     ...prev,
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || 'gpt-5.4-mini',
+    model: elModel.value.trim() || 'gpt-5.6-luna',
     chunkMaxChars: Number(elChunkMaxChars.value) || 12000,
     inlineAutoShow: elInlineAutoShow.checked,
   };

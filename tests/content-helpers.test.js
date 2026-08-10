@@ -1381,7 +1381,7 @@ exports.tests = [
       assert.deepEqual(helpers.createInlineTranslationSettingsSnapshot({}), {
         targetLanguage: 'Korean',
         tone: 'technical',
-        model: 'gpt-5.4-mini',
+        model: 'gpt-5.6-luna',
         reasoningEffort: 'none',
       });
     },

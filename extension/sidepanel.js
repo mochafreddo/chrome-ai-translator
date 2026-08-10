@@ -118,7 +118,7 @@ async function loadSettings() {
 
   elTargetLanguage.value = s.targetLanguage || 'Korean';
   elTone.value = s.tone || 'technical';
-  elModel.value = s.model || 'gpt-5.4-mini';
+  elModel.value = s.model || 'gpt-5.6-luna';
   elViewMode.value = s.viewMode || 'translation';
 }
 
@@ -167,7 +167,7 @@ function readSettings() {
   return {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || 'gpt-5.4-mini',
+    model: elModel.value.trim() || 'gpt-5.6-luna',
     viewMode: elViewMode.value,
   };
 }
@@ -232,7 +232,7 @@ async function translateNow() {
   const settingsOverride = {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || 'gpt-5.4-mini',
+    model: elModel.value.trim() || 'gpt-5.6-luna',
     viewMode: elViewMode.value,
   };
   const resp = await chrome.runtime.sendMessage({
