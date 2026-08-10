@@ -11,6 +11,7 @@ const suites = [
   require('./options-helpers.test'),
   require('./sidepanel-helpers.test'),
   require('./static-assets.test'),
+  require('./qa-issue-003.regression-1.test'),
 ];
 
 (async function run() {
