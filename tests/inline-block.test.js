@@ -827,6 +827,561 @@ exports.tests = [
     },
   },
   {
+    name: 'serializes a block that is only scrolled out of the viewport',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.defaultView.innerWidth = 500;
+      document.defaultView.innerHeight = 300;
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const block = element('p', text('Run '), element('code', text('npm i')), text(' now.'));
+      // Below the fold: still in the document, just not scrolled to yet.
+      block.rect = {
+        top: 613,
+        bottom: 637,
+        left: 10,
+        right: 300,
+        width: 290,
+        height: 24,
+      };
+      document.body.appendChild(block);
+
+      assert.equal(codec.serializeBlock(block).ok, true);
+
+      // Same block after scrolling past it: negative viewport top, but the
+      // page position is unchanged, so the verdict must not change either.
+      document.defaultView.scrollY = 2000;
+      block.rect = {
+        top: -1387,
+        bottom: -1363,
+        left: 10,
+        right: 300,
+        width: 290,
+        height: 24,
+      };
+
+      assert.equal(codec.serializeBlock(block).ok, true);
+    },
+  },
+  {
+    name: 'rejects transformed descendants beyond the document right edge',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 10100,
+        scrollHeight: 5000,
+        offsetWidth: 1000,
+        offsetHeight: 5000,
+      };
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const hidden = element('span', text('SECRET_TRANSLATE_RIGHT'));
+      hidden.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'matrix(1, 0, 0, 1, 10000, 0)',
+        fontSize: '16px',
+      };
+      hidden.rect = {
+        top: 20,
+        bottom: 44,
+        left: 10000,
+        right: 10100,
+        width: 100,
+        height: 24,
+      };
+      const code = element('code', text('public-'), hidden);
+      const block = element('p', text('Run '), code, text(' now.'));
+      document.body.appendChild(block);
+
+      assert.deepEqual(codec.serializeBlock(block), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'serializes normal content inside a horizontally scrollable document',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 3000,
+        scrollHeight: 5000,
+        offsetWidth: 1280,
+        offsetHeight: 5000,
+      };
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const block = element('p', text('Scrollable document content.'));
+      block.computedStyle = {
+        display: 'block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'matrix(1, 0, 0, 1, 0, 0)',
+        fontSize: '16px',
+      };
+      block.rect = {
+        top: 20,
+        bottom: 44,
+        left: 2000,
+        right: 2300,
+        width: 300,
+        height: 24,
+      };
+      document.body.appendChild(block);
+
+      assert.equal(codec.serializeBlock(block).ok, true);
+
+      document.defaultView.scrollX = 1720;
+      block.rect = {
+        top: 20,
+        bottom: 44,
+        left: 280,
+        right: 580,
+        width: 300,
+        height: 24,
+      };
+
+      assert.equal(codec.serializeBlock(block).ok, true);
+    },
+  },
+  {
+    name: 'rejects individual CSS translate beyond the document right edge',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 10100,
+        scrollHeight: 5000,
+        offsetWidth: 1000,
+        offsetHeight: 5000,
+      };
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const hidden = element('span', text('SECRET_INDIVIDUAL_RIGHT'));
+      hidden.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'none',
+        translate: '10000px',
+        fontSize: '16px',
+      };
+      hidden.rect = {
+        top: 20,
+        bottom: 44,
+        left: 10000,
+        right: 10100,
+        width: 100,
+        height: 24,
+      };
+      const code = element('code', text('public-'), hidden);
+      const block = element('p', text('Run '), code, text(' now.'));
+      document.body.appendChild(block);
+
+      assert.deepEqual(codec.serializeBlock(block), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'rejects transformed descendants beyond the document bottom edge',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 1000,
+        scrollHeight: 10024,
+        offsetWidth: 1000,
+        offsetHeight: 5000,
+      };
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const hidden = element('span', text('SECRET_TRANSLATE_BOTTOM'));
+      hidden.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'matrix(1, 0, 0, 1, 0, 10000)',
+        fontSize: '16px',
+      };
+      hidden.rect = {
+        top: 10000,
+        bottom: 10024,
+        left: 10,
+        right: 110,
+        width: 100,
+        height: 24,
+      };
+      const code = element('code', text('public-'), hidden);
+      const block = element('p', text('Run '), code, text(' now.'));
+      document.body.appendChild(block);
+
+      assert.deepEqual(codec.serializeBlock(block), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'rejects percentage translate beyond the document right edge',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 10100,
+        scrollHeight: 5000,
+        offsetWidth: 1280,
+        offsetHeight: 5000,
+      };
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const hidden = element('span', text('SECRET_PERCENT_RIGHT'));
+      hidden.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'none',
+        translate: '10000%',
+        fontSize: '16px',
+      };
+      hidden.rect = {
+        top: 20,
+        bottom: 44,
+        left: 10000,
+        right: 10100,
+        width: 100,
+        height: 24,
+      };
+      const code = element('code', text('public-'), hidden);
+      const block = element('p', text('Run '), code, text(' now.'));
+      document.body.appendChild(block);
+
+      assert.deepEqual(codec.serializeBlock(block), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'serializes normal content inside an RTL horizontal document',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        dir: 'rtl',
+        clientWidth: 1280,
+        scrollWidth: 3000,
+        scrollHeight: 5000,
+        offsetWidth: 1280,
+        offsetHeight: 5000,
+      };
+      document.defaultView.innerWidth = 1280;
+      document.defaultView.innerHeight = 577;
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const block = element('p', text('RTL scrollable document content.'));
+      block.rect = {
+        top: 20,
+        bottom: 44,
+        left: -1720,
+        right: -1499,
+        width: 221,
+        height: 24,
+      };
+      document.body.appendChild(block);
+
+      assert.equal(codec.serializeBlock(block).ok, true);
+
+      document.defaultView.scrollX = -1720;
+      block.rect = {
+        top: 20,
+        bottom: 44,
+        left: 0,
+        right: 221,
+        width: 221,
+        height: 24,
+      };
+
+      assert.equal(codec.serializeBlock(block).ok, true);
+    },
+  },
+  {
+    name: 'rejects individual CSS translate beyond the document bottom edge',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 1000,
+        scrollHeight: 10024,
+        offsetWidth: 1000,
+        offsetHeight: 5000,
+      };
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const hidden = element('span', text('SECRET_INDIVIDUAL_BOTTOM'));
+      hidden.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'none',
+        translate: '0px 10000px',
+        fontSize: '16px',
+      };
+      hidden.rect = {
+        top: 10000,
+        bottom: 10024,
+        left: 10,
+        right: 110,
+        width: 100,
+        height: 24,
+      };
+      const code = element('code', text('public-'), hidden);
+      const block = element('p', text('Run '), code, text(' now.'));
+      document.body.appendChild(block);
+
+      assert.deepEqual(codec.serializeBlock(block), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'rejects rightward transforms beyond an RTL document edge',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        dir: 'rtl',
+        clientWidth: 1280,
+        scrollWidth: 3000,
+        scrollHeight: 5000,
+        offsetWidth: 1280,
+        offsetHeight: 5000,
+      };
+      document.defaultView.innerWidth = 1280;
+      document.defaultView.innerHeight = 577;
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const hidden = element('span', text('SECRET_RTL_TRANSLATE_RIGHT'));
+      hidden.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'matrix(1, 0, 0, 1, 10000, 0)',
+        fontSize: '16px',
+      };
+      hidden.rect = {
+        top: 20,
+        bottom: 44,
+        left: 11218,
+        right: 11318,
+        width: 100,
+        height: 24,
+      };
+      const code = element('code', text('public-'), hidden);
+      const block = element('p', text('Run '), code, text(' now.'));
+      document.body.appendChild(block);
+
+      assert.deepEqual(codec.serializeBlock(block), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'rejects percentage translate beyond the document bottom edge',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 1280,
+        scrollHeight: 10100,
+        offsetWidth: 1280,
+        offsetHeight: 5000,
+      };
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const hidden = element('span', text('SECRET_PERCENT_BOTTOM'));
+      hidden.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'none',
+        translate: '0px 10000%',
+        fontSize: '16px',
+      };
+      hidden.rect = {
+        top: 10000,
+        bottom: 10100,
+        left: 10,
+        right: 110,
+        width: 100,
+        height: 100,
+      };
+      const code = element('code', text('public-'), hidden);
+      const block = element('p', text('Run '), code, text(' now.'));
+      document.body.appendChild(block);
+
+      assert.deepEqual(codec.serializeBlock(block), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'rejects fixed descendants outside the viewport after page scrolling',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 29984,
+        scrollHeight: 29984,
+        offsetWidth: 29984,
+        offsetHeight: 29984,
+      };
+      document.defaultView.innerWidth = 1280;
+      document.defaultView.innerHeight = 577;
+      document.defaultView.scrollX = 20000;
+      document.defaultView.scrollY = 20000;
+      const hidden = element('span', text('SECRET_FIXED_TRANSLATE'));
+      hidden.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'fixed',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'matrix(1, 0, 0, 1, -10000, -10000)',
+        fontSize: '16px',
+      };
+      hidden.rect = {
+        top: -10000,
+        bottom: -9976,
+        left: -10000,
+        right: -9900,
+        width: 100,
+        height: 24,
+      };
+      const code = element('code', text('public-'), hidden);
+      const block = element('p', text('Run '), code, text(' now.'));
+      document.body.appendChild(block);
+
+      assert.deepEqual(codec.serializeBlock(block), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'serializes fixed content that scrolls with a transformed ancestor',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      document.documentElement = {
+        scrollWidth: 1280,
+        scrollHeight: 5000,
+        offsetWidth: 1280,
+        offsetHeight: 5000,
+      };
+      document.defaultView.innerWidth = 1280;
+      document.defaultView.innerHeight = 577;
+      document.defaultView.scrollX = 0;
+      document.defaultView.scrollY = 0;
+      const fixed = element('span', text('Document-positioned fixed content.'));
+      fixed.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'fixed',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'none',
+        fontSize: '16px',
+      };
+      fixed.rect = {
+        top: 2000,
+        bottom: 2024,
+        left: 10,
+        right: 300,
+        width: 290,
+        height: 24,
+      };
+      const transformedAncestor = element('code', fixed);
+      transformedAncestor.computedStyle = {
+        display: 'inline-block',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+        position: 'static',
+        overflow: 'visible',
+        clip: 'auto',
+        clipPath: 'none',
+        transform: 'matrix(1, 0, 0, 1, 0, 0)',
+        fontSize: '16px',
+      };
+      fixed.offsetParent = transformedAncestor;
+      const block = element(
+        'p',
+        text('Read '),
+        transformedAncestor,
+        text(' later.')
+      );
+      document.body.appendChild(block);
+
+      assert.equal(codec.serializeBlock(block).ok, true);
+
+      document.defaultView.scrollY = 1800;
+      fixed.rect = {
+        top: 200,
+        bottom: 224,
+        left: 10,
+        right: 300,
+        width: 290,
+        height: 24,
+      };
+
+      assert.equal(codec.serializeBlock(block).ok, true);
+    },
+  },
+  {
     name: 'fails closed instead of overflowing on deeply nested blocks',
     fn() {
       const { document, element, text } = createTestDocument();

@@ -142,6 +142,42 @@
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
 
+  function getTransformTranslation(value) {
+    const match = String(value || '')
+      .trim()
+      .match(/^matrix(3d)?\(([^)]+)\)$/i);
+    if (!match) return { x: 0, y: 0 };
+    const values = match[2]
+      .split(',')
+      .map((part) => Number.parseFloat(part.trim()));
+    const xIndex = match[1] ? 12 : 4;
+    const yIndex = match[1] ? 13 : 5;
+    return {
+      x: Number.isFinite(values[xIndex]) ? values[xIndex] : 0,
+      y: Number.isFinite(values[yIndex]) ? values[yIndex] : 0,
+    };
+  }
+
+  function getIndividualTranslation(
+    value,
+    referenceWidth = 0,
+    referenceHeight = 0
+  ) {
+    const [x = '', y = '0px'] = String(value || '').trim().split(/\s+/);
+    const parseLength = (part, referenceSize) => {
+      const match = part.match(
+        /^(-?(?:\d+(?:\.\d+)?|\.\d+))(px|%)$/i
+      );
+      if (!match) return 0;
+      const amount = Number.parseFloat(match[1]);
+      return match[2] === '%' ? (amount * referenceSize) / 100 : amount;
+    };
+    return {
+      x: parseLength(x, referenceWidth),
+      y: parseLength(y, referenceHeight),
+    };
+  }
+
   function getTokenLikeLiterals(value) {
     const text = String(value || '');
     return [
@@ -191,6 +227,11 @@
         style?.clipPath || style?.getPropertyValue?.('clip-path') || ''
       ).toLowerCase();
       const fontSize = Number.parseFloat(style?.fontSize);
+      const position = String(style?.position || '').toLowerCase();
+      const transform = String(style?.transform || '').toLowerCase();
+      const individualTranslate = String(
+        style?.translate || style?.getPropertyValue?.('translate') || ''
+      ).toLowerCase();
       const rect = node?.getBoundingClientRect?.();
       const hasText = Boolean(normalizeVisibleLabel(node?.textContent));
       const clipsContent =
@@ -206,20 +247,76 @@
           Number(rect.height) <= 1
       );
       const view = node?.ownerDocument?.defaultView;
+      const scrollingElement =
+        node?.ownerDocument?.scrollingElement ||
+        node?.ownerDocument?.documentElement;
+      const scrollingStyle = scrollingElement
+        ? getComputedStyle.call(node.ownerDocument.defaultView, scrollingElement)
+        : null;
+      const documentDirection = String(
+        scrollingStyle?.direction || scrollingElement?.dir || ''
+      ).toLowerCase();
+      const pageWidth = Number(scrollingElement?.offsetWidth) || 0;
+      const pageHeight = Number(scrollingElement?.offsetHeight) || 0;
+      const viewportFixed = position === 'fixed' && node?.offsetParent == null;
+      const matrixTranslation = getTransformTranslation(transform);
+      const individualTranslation = getIndividualTranslation(
+        individualTranslate,
+        Number(rect?.width) || 0,
+        Number(rect?.height) || 0
+      );
+      const transformTranslation = {
+        x: matrixTranslation.x + individualTranslation.x,
+        y: matrixTranslation.y + individualTranslation.y,
+      };
+      const scrollX = Number(view?.scrollX) || 0;
+      const horizontalScrollRange = Math.max(
+        0,
+        (Number(scrollingElement?.scrollWidth) || 0) -
+          (Number(scrollingElement?.clientWidth) ||
+            Number(view?.innerWidth) ||
+            pageWidth)
+      );
+      const rightPageBoundary =
+        documentDirection === 'rtl'
+          ? horizontalScrollRange + pageWidth
+          : pageWidth;
+      const coordinateOffsetX = viewportFixed
+        ? 0
+        : documentDirection === 'rtl'
+          ? horizontalScrollRange + scrollX
+          : scrollX;
+      const coordinateOffsetY = viewportFixed
+        ? 0
+        : Number(view?.scrollY) || 0;
       const zeroArea = Boolean(
         hasText &&
           rect &&
           (Number(rect.width) <= 0 || Number(rect.height) <= 0)
       );
-      const whollyOutsideViewport = Boolean(
+      // Convert viewport-relative rects to page coordinates, except for fixed
+      // content whose coordinates stay relative to the viewport while scrolling.
+      const whollyOutsidePage = Boolean(
         hasText &&
           rect &&
-          Number(view?.innerWidth) > 0 &&
-          Number(view?.innerHeight) > 0 &&
-          (Number(rect.right) <= 0 ||
-            Number(rect.bottom) <= 0 ||
-            Number(rect.left) >= Number(view.innerWidth) ||
-            Number(rect.top) >= Number(view.innerHeight))
+          (Number(rect.right) + coordinateOffsetX <= 0 ||
+            Number(rect.bottom) + coordinateOffsetY <= 0 ||
+            (viewportFixed &&
+              Number(view?.innerWidth) > 0 &&
+              Number(rect.left) >= Number(view.innerWidth)) ||
+            (viewportFixed &&
+              Number(view?.innerHeight) > 0 &&
+              Number(rect.top) >= Number(view.innerHeight)) ||
+            (!viewportFixed &&
+              rightPageBoundary > 0 &&
+              Number(rect.left) + coordinateOffsetX >= rightPageBoundary &&
+              Number(rect.left) + coordinateOffsetX - transformTranslation.x <
+                rightPageBoundary) ||
+            (!viewportFixed &&
+              pageHeight > 0 &&
+              Number(rect.top) + coordinateOffsetY >= pageHeight &&
+              Number(rect.top) + coordinateOffsetY - transformTranslation.y <
+                pageHeight))
       );
       return (
         display === 'none' ||
@@ -230,7 +327,7 @@
         clipsContent ||
         tinyClippedBox ||
         zeroArea ||
-        whollyOutsideViewport ||
+        whollyOutsidePage ||
         (hasText && fontSize === 0)
       );
     } catch {
