@@ -8,7 +8,7 @@ Chrome offers `sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` as 
 
 - Opening the panel is now our responsibility. If `sidePanel.open()` throws, the toolbar icon does nothing at all — previously the panel opened regardless. This is the real cost of the decision.
 - `sidePanel.open()` may only be called while the user gesture is still live, so it must be the **first** call in the `onClicked` handler. Awaiting anything before it forfeits the gesture and the call fails.
-- The toolbar icon and the keyboard command now do the same thing, which is what a reader would have assumed all along.
+- The toolbar icon reaches the extension at all, which it never previously did. It is deliberately **not** identical to the keyboard command: the icon opens the panel and grants access without starting a Side Panel Translation, while the command — named "Translate current tab" — still starts one. Do not restore symmetry by making the icon translate; that reinstates a per-click API cost that was rejected on purpose.
 
 ## Do not revert this
 

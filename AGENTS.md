@@ -1,3 +1,7 @@
+## Tests
+
+`npm test` is the browser-free unit suite and is what "run the tests" means. `npm run test:integration` additionally drives a real Chrome and needs `agent-browser` plus network access. See `tests/README.md`.
+
 ## Agent skills
 
 ### Issue tracker

@@ -2297,4 +2297,122 @@ exports.tests = [
       assert.match(first, /^runtime-1234-/);
     },
   },
+  {
+    name: 'plans the side panel as the first step for both triggers',
+    fn() {
+      for (const trigger of ['action', 'command']) {
+        assert.equal(helpers.planInvocation({ trigger }).steps[0], 'openSidePanel');
+      }
+    },
+  },
+  {
+    name: 'runs the first plan step before awaiting anything',
+    async fn() {
+      // ADR-0001. The gesture that authorizes sidePanel.open() is spent by the first
+      // await on the path from the listener to the call, so the guard has to be that
+      // nothing awaits ahead of it — not merely that the plan lists it first. An await
+      // added above the loop in runInvocationPlan fails here and nowhere else in this
+      // suite. Deliberately not awaiting the returned promise before asserting.
+      let openedSynchronously = false;
+      const running = helpers.runInvocationPlan(
+        helpers.planInvocation({ trigger: 'action' }),
+        1,
+        {
+          openSidePanel: () => {
+            openedSynchronously = true;
+          },
+          prepareInlineTranslation: () => {},
+        }
+      );
+      assert.equal(openedSynchronously, true);
+      await running;
+    },
+  },
+  {
+    name: 'opens the side panel before reasserting its options',
+    async fn() {
+      // Same constraint one level down: setOptions only restates the manifest default,
+      // so awaiting it ahead of open() would spend the gesture for nothing.
+      const previousChrome = global.chrome;
+      const calls = [];
+      global.chrome = {
+        sidePanel: {
+          async open() {
+            calls.push('open');
+          },
+          async setOptions() {
+            calls.push('setOptions');
+          },
+        },
+      };
+      try {
+        await helpers.ensureSidePanel(11);
+        assert.deepEqual(calls, ['open', 'setOptions']);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'prepares inline translation from both the toolbar action and the command',
+    fn() {
+      for (const trigger of ['action', 'command']) {
+        assert.ok(
+          helpers.planInvocation({ trigger }).steps.includes('prepareInlineTranslation')
+        );
+      }
+    },
+  },
+  {
+    name: 'starts a side panel translation for the command but not the toolbar action',
+    fn() {
+      assert.deepEqual(helpers.planInvocation({ trigger: 'action' }).steps, [
+        'openSidePanel',
+        'prepareInlineTranslation',
+      ]);
+      assert.deepEqual(helpers.planInvocation({ trigger: 'command' }).steps, [
+        'openSidePanel',
+        'prepareInlineTranslation',
+        'startSidePanelTranslation',
+      ]);
+    },
+  },
+  {
+    name: 'runs plan steps in order and reports which ran',
+    async fn() {
+      const calls = [];
+      const handlers = {
+        openSidePanel: async (tabId) => calls.push(`openSidePanel:${tabId}`),
+        prepareInlineTranslation: async (tabId) => calls.push(`prepareInlineTranslation:${tabId}`),
+        startSidePanelTranslation: async (tabId) => calls.push(`startSidePanelTranslation:${tabId}`),
+      };
+
+      await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'command' }), 7, handlers);
+      assert.deepEqual(calls, [
+        'openSidePanel:7',
+        'prepareInlineTranslation:7',
+        'startSidePanelTranslation:7',
+      ]);
+
+      calls.length = 0;
+      await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'action' }), 7, handlers);
+      assert.deepEqual(calls, ['openSidePanel:7', 'prepareInlineTranslation:7']);
+    },
+  },
+  {
+    name: 'keeps running later steps when preparing inline translation fails',
+    async fn() {
+      // Injection legitimately fails on pages extensions cannot touch. The side panel is
+      // already open by then, and a command invocation should still translate.
+      const calls = [];
+      await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'command' }), 3, {
+        openSidePanel: async () => calls.push('openSidePanel'),
+        prepareInlineTranslation: async () => {
+          throw new Error('Cannot access contents of the page');
+        },
+        startSidePanelTranslation: async () => calls.push('startSidePanelTranslation'),
+      });
+      assert.deepEqual(calls, ['openSidePanel', 'startSidePanelTranslation']);
+    },
+  },
 ];

@@ -302,11 +302,20 @@ function createRuntimeDiagnosticId(startedAt, cryptoApi = globalThis.crypto) {
   return `runtime-${startedAt}-${suffix}`;
 }
 
-async function ensureSidePanel(tabId) {
-  // Allow clicking extension icon to open the side panel
-  // (Fails silently on older versions or if not supported)
+// ADR-0001. Applied on install and on startup, and never re-enabled from a translation path.
+async function releaseActionClickToExtension() {
   try {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+  } catch {}
+}
+
+async function ensureSidePanel(tabId) {
+  // ADR-0001: open() has to come before any other await. Chrome only honours it while
+  // the user gesture that started this invocation is still live, and awaiting anything
+  // first forfeits it. setOptions merely reasserts the manifest default, so it can wait.
+  // Both calls fail silently on older versions or where the panel is unsupported.
+  try {
+    await chrome.sidePanel.open({ tabId });
   } catch {}
 
   try {
@@ -315,10 +324,6 @@ async function ensureSidePanel(tabId) {
       path: 'sidepanel.html',
       enabled: true,
     });
-  } catch {}
-
-  try {
-    await chrome.sidePanel.open({ tabId });
   } catch {}
 }
 
@@ -350,6 +355,60 @@ async function showInlineTranslator(tabId, options = {}) {
     type: 'SHOW_INLINE_TRANSLATOR',
     allowInlineTranslation: Boolean(options.allowInlineTranslation),
   });
+}
+
+const INVOCATION_STEPS = Object.freeze({
+  OPEN_SIDE_PANEL: 'openSidePanel',
+  PREPARE_INLINE_TRANSLATION: 'prepareInlineTranslation',
+  START_SIDE_PANEL_TRANSLATION: 'startSidePanelTranslation',
+});
+
+// What one invocation of the extension should do, decided without touching any browser
+// API so the rules are testable. Two rules live here: the side panel is opened first
+// (ADR-0001), and reaching the panel does not itself spend tokens — only the explicit
+// "translate current tab" command starts a Side Panel Translation, which is why the icon
+// and the command deliberately differ.
+function planInvocation(context = {}) {
+  const trigger = context?.trigger;
+  const steps = [
+    INVOCATION_STEPS.OPEN_SIDE_PANEL,
+    INVOCATION_STEPS.PREPARE_INLINE_TRANSLATION,
+  ];
+  if (trigger === 'command') {
+    steps.push(INVOCATION_STEPS.START_SIDE_PANEL_TRANSLATION);
+  }
+  return Object.freeze({ trigger, steps: Object.freeze(steps) });
+}
+
+function getDefaultInvocationHandlers() {
+  return {
+    [INVOCATION_STEPS.OPEN_SIDE_PANEL]: ensureSidePanel,
+    [INVOCATION_STEPS.PREPARE_INLINE_TRANSLATION]: (tabId) =>
+      showInlineTranslator(tabId, { allowInlineTranslation: true }),
+    [INVOCATION_STEPS.START_SIDE_PANEL_TRANSLATION]: translateTab,
+  };
+}
+
+// Two properties matter here and both are covered by tests.
+//
+// The first step must run before this function awaits anything, because ADR-0001's
+// gesture window is spent by the first await on the path from the listener to
+// chrome.sidePanel.open(). Adding an await above the loop is the regression to fear.
+//
+// Steps are otherwise independent: content script injection legitimately fails on pages
+// extensions cannot touch, and that must not stop a command invocation from translating.
+async function runInvocationPlan(
+  plan,
+  tabId,
+  handlers = getDefaultInvocationHandlers()
+) {
+  for (const step of plan?.steps || []) {
+    const handler = handlers?.[step];
+    if (!handler) continue;
+    try {
+      await handler(tabId);
+    } catch {}
+  }
 }
 
 async function extractArticle(tabId) {
@@ -2156,21 +2215,19 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
     const settings = await getSettings();
     await saveSettings(settings);
     await syncInlineAutoShowRegistrationSafely(settings);
-    try {
-      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-    } catch {}
+    await releaseActionClickToExtension();
   });
 
   chrome.runtime.onStartup.addListener(async () => {
+    await releaseActionClickToExtension();
     await syncInlineAutoShowRegistrationSafely();
   });
 
-  chrome.action.onClicked.addListener(async (tab) => {
+  // Deliberately not async: the plan's first step opens the side panel, and awaiting
+  // anything before it would forfeit the user gesture Chrome requires (ADR-0001).
+  chrome.action.onClicked.addListener((tab) => {
     if (!tab?.id) return;
-    try {
-      await showInlineTranslator(tab.id, { allowInlineTranslation: true });
-    } catch {}
-    await translateTab(tab.id);
+    runInvocationPlan(planInvocation({ trigger: 'action' }), tab.id);
   });
 
   chrome.commands.onCommand.addListener(async (command) => {
@@ -2178,10 +2235,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tabId = tabs?.[0]?.id;
     if (!tabId) return;
-    try {
-      await showInlineTranslator(tabId, { allowInlineTranslation: true });
-    } catch {}
-    await translateTab(tabId);
+    await runInvocationPlan(planInvocation({ trigger: 'command' }), tabId);
   });
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -2411,6 +2465,9 @@ if (typeof module !== 'undefined' && module.exports) {
     getTextRecordChunkStats,
     getInlineTranslationConcurrency,
     getInlineContentScriptFiles,
+    ensureSidePanel,
+    planInvocation,
+    runInvocationPlan,
     getInlineTranslationLogStorageKey,
     collectInlineTranslationLogsFromStorage,
     getVisibleInlineBatchMaxChars,
