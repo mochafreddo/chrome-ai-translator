@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const helpers = require('../extension/background.js');
+const contentHelpers = require('../extension/content.js');
 const fullPageMarkdown = require('../extension/full-page-markdown.js');
 const { createReasoningFixture } = require('./inline-block.test');
 
@@ -2321,7 +2322,9 @@ exports.tests = [
           openSidePanel: () => {
             openedSynchronously = true;
           },
-          prepareInlineTranslation: () => {},
+          injectContentScripts: () => {},
+          grantInlineTranslationAuthorization: () => {},
+          mountFloatingTranslateButton: () => {},
         }
       );
       assert.equal(openedSynchronously, true);
@@ -2354,13 +2357,45 @@ exports.tests = [
     },
   },
   {
-    name: 'prepares inline translation from both the toolbar action and the command',
+    name: 'injects and authorizes inline translation from both the toolbar action and the command',
+    fn() {
+      for (const trigger of ['action', 'command']) {
+        const { steps } = helpers.planInvocation({ trigger });
+        assert.ok(steps.includes('injectContentScripts'));
+        assert.ok(steps.includes('grantInlineTranslationAuthorization'));
+      }
+    },
+  },
+  {
+    name: 'mounts the Floating Translate Button for every invocation trigger',
     fn() {
       for (const trigger of ['action', 'command']) {
         assert.ok(
-          helpers.planInvocation({ trigger }).steps.includes('prepareInlineTranslation')
+          helpers
+            .planInvocation({ trigger })
+            .steps.includes('mountFloatingTranslateButton')
         );
       }
+    },
+  },
+  {
+    name: 'mounts the Floating Translate Button on page load only where it shows on all pages',
+    fn() {
+      assert.deepEqual(
+        helpers.planInvocation({
+          trigger: 'pageLoad',
+          settings: { inlineAutoShow: true },
+        }).steps,
+        ['mountFloatingTranslateButton']
+      );
+      assert.deepEqual(
+        helpers.planInvocation({
+          trigger: 'pageLoad',
+          settings: { inlineAutoShow: false },
+        }).steps,
+        []
+      );
+      assert.deepEqual(helpers.planInvocation({ trigger: 'pageLoad' }).steps, []);
     },
   },
   {
@@ -2368,11 +2403,15 @@ exports.tests = [
     fn() {
       assert.deepEqual(helpers.planInvocation({ trigger: 'action' }).steps, [
         'openSidePanel',
-        'prepareInlineTranslation',
+        'injectContentScripts',
+        'grantInlineTranslationAuthorization',
+        'mountFloatingTranslateButton',
       ]);
       assert.deepEqual(helpers.planInvocation({ trigger: 'command' }).steps, [
         'openSidePanel',
-        'prepareInlineTranslation',
+        'injectContentScripts',
+        'grantInlineTranslationAuthorization',
+        'mountFloatingTranslateButton',
         'startSidePanelTranslation',
       ]);
     },
@@ -2383,32 +2422,99 @@ exports.tests = [
       const calls = [];
       const handlers = {
         openSidePanel: async (tabId) => calls.push(`openSidePanel:${tabId}`),
-        prepareInlineTranslation: async (tabId) => calls.push(`prepareInlineTranslation:${tabId}`),
+        injectContentScripts: async (tabId) => calls.push(`injectContentScripts:${tabId}`),
+        grantInlineTranslationAuthorization: async (tabId) =>
+          calls.push(`grantInlineTranslationAuthorization:${tabId}`),
+        mountFloatingTranslateButton: async (tabId) =>
+          calls.push(`mountFloatingTranslateButton:${tabId}`),
         startSidePanelTranslation: async (tabId) => calls.push(`startSidePanelTranslation:${tabId}`),
       };
 
       await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'command' }), 7, handlers);
       assert.deepEqual(calls, [
         'openSidePanel:7',
-        'prepareInlineTranslation:7',
+        'injectContentScripts:7',
+        'grantInlineTranslationAuthorization:7',
+        'mountFloatingTranslateButton:7',
         'startSidePanelTranslation:7',
       ]);
 
       calls.length = 0;
       await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'action' }), 7, handlers);
-      assert.deepEqual(calls, ['openSidePanel:7', 'prepareInlineTranslation:7']);
+      assert.deepEqual(calls, [
+        'openSidePanel:7',
+        'injectContentScripts:7',
+        'grantInlineTranslationAuthorization:7',
+        'mountFloatingTranslateButton:7',
+      ]);
     },
   },
   {
-    name: 'keeps running later steps when preparing inline translation fails',
+    name: 'only instructs the content script in steps the content script can carry out',
+    fn() {
+      // The instruction the worker sends is the plan step's own name, so the two sides
+      // share one vocabulary and nothing links them. A rename on either side would fail
+      // silently: the content script rejects the instruction, the worker never reads the
+      // response, and the plan runner swallows what is left.
+      const understood = Object.keys(
+        contentHelpers.getDefaultInlineInstructionHandlers({})
+      );
+      for (const trigger of ['action', 'command', 'pageLoad']) {
+        const instructions = helpers.getInlineInstructions(
+          helpers.planInvocation({ trigger, settings: { inlineAutoShow: true } })
+        );
+        for (const instruction of instructions) {
+          assert.ok(
+            understood.includes(instruction),
+            `content script cannot run ${instruction}`
+          );
+        }
+      }
+      assert.deepEqual(
+        helpers.getInlineInstructions(helpers.planInvocation({ trigger: 'action' })),
+        ['grantInlineTranslationAuthorization', 'mountFloatingTranslateButton']
+      );
+    },
+  },
+  {
+    name: 'injects and authorizes without mounting when the plan leaves the button out',
+    async fn() {
+      // The three concerns are separate steps precisely so a plan can carry the first two
+      // alone. Nothing in the extension yet produces such a plan for an invocation, but the
+      // runner must honour one when Button Visibility starts suppressing the button.
+      const calls = [];
+      await helpers.runInvocationPlan(
+        { steps: ['injectContentScripts', 'grantInlineTranslationAuthorization'] },
+        4,
+        {
+          injectContentScripts: async () => calls.push('injectContentScripts'),
+          grantInlineTranslationAuthorization: async () =>
+            calls.push('grantInlineTranslationAuthorization'),
+          mountFloatingTranslateButton: async () => calls.push('mountFloatingTranslateButton'),
+        }
+      );
+      assert.deepEqual(calls, [
+        'injectContentScripts',
+        'grantInlineTranslationAuthorization',
+      ]);
+    },
+  },
+  {
+    name: 'keeps running later steps when injecting the content scripts fails',
     async fn() {
       // Injection legitimately fails on pages extensions cannot touch. The side panel is
       // already open by then, and a command invocation should still translate.
       const calls = [];
       await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'command' }), 3, {
         openSidePanel: async () => calls.push('openSidePanel'),
-        prepareInlineTranslation: async () => {
+        injectContentScripts: async () => {
           throw new Error('Cannot access contents of the page');
+        },
+        grantInlineTranslationAuthorization: async () => {
+          throw new Error('Could not establish connection');
+        },
+        mountFloatingTranslateButton: async () => {
+          throw new Error('Could not establish connection');
         },
         startSidePanelTranslation: async () => calls.push('startSidePanelTranslation'),
       });

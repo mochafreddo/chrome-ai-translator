@@ -349,19 +349,47 @@ async function ensureContentScript(tabId) {
   }
 }
 
-async function showInlineTranslator(tabId, options = {}) {
-  await ensureContentScript(tabId);
+// Steps the content script carries out. The background worker decides; the content script
+// executes, so the step name is also the instruction sent over the wire.
+const INLINE_INSTRUCTION_MESSAGE = 'RUN_INLINE_INSTRUCTION';
+
+async function sendInlineInstruction(tabId, instruction) {
   await chrome.tabs.sendMessage(tabId, {
-    type: 'SHOW_INLINE_TRANSLATOR',
-    allowInlineTranslation: Boolean(options.allowInlineTranslation),
+    type: INLINE_INSTRUCTION_MESSAGE,
+    instruction,
   });
 }
 
 const INVOCATION_STEPS = Object.freeze({
   OPEN_SIDE_PANEL: 'openSidePanel',
-  PREPARE_INLINE_TRANSLATION: 'prepareInlineTranslation',
+  INJECT_CONTENT_SCRIPTS: 'injectContentScripts',
+  GRANT_INLINE_TRANSLATION_AUTHORIZATION: 'grantInlineTranslationAuthorization',
+  MOUNT_FLOATING_TRANSLATE_BUTTON: 'mountFloatingTranslateButton',
   START_SIDE_PANEL_TRANSLATION: 'startSidePanelTranslation',
 });
+
+const INLINE_INVOCATION_STEPS = Object.freeze([
+  INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION,
+  INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON,
+]);
+
+function isInvocationTrigger(trigger) {
+  return trigger === 'action' || trigger === 'command';
+}
+
+// Whether the Floating Translate Button should be on the page. This is the background
+// worker's call, not the content script's: injecting the content scripts and granting
+// Inline Translation Authorization are separate steps that must be able to happen without
+// the button appearing. An invocation always mounts it; a page load only mounts it where
+// the reader chose to see it on every page — `inlineAutoShow` is the stored key for that
+// choice.
+function shouldMountFloatingTranslateButton(context = {}) {
+  if (isInvocationTrigger(context.trigger)) return true;
+  if (context.trigger === 'pageLoad') {
+    return Boolean(context.settings?.inlineAutoShow);
+  }
+  return false;
+}
 
 // What one invocation of the extension should do, decided without touching any browser
 // API so the rules are testable. Two rules live here: the side panel is opened first
@@ -370,21 +398,46 @@ const INVOCATION_STEPS = Object.freeze({
 // and the command deliberately differ.
 function planInvocation(context = {}) {
   const trigger = context?.trigger;
-  const steps = [
-    INVOCATION_STEPS.OPEN_SIDE_PANEL,
-    INVOCATION_STEPS.PREPARE_INLINE_TRANSLATION,
-  ];
+  const steps = [];
+  if (isInvocationTrigger(trigger)) {
+    steps.push(
+      INVOCATION_STEPS.OPEN_SIDE_PANEL,
+      INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS,
+      INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION
+    );
+  }
+  if (shouldMountFloatingTranslateButton(context)) {
+    steps.push(INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON);
+  }
   if (trigger === 'command') {
     steps.push(INVOCATION_STEPS.START_SIDE_PANEL_TRANSLATION);
   }
   return Object.freeze({ trigger, steps: Object.freeze(steps) });
 }
 
+// The steps of a plan that the content script, rather than this worker, carries out — the
+// boundary of what may be sent over the wire. The page-load path hands them over in one
+// answer, having no invocation to push them from.
+function getInlineInstructions(plan) {
+  return (plan?.steps || []).filter((step) =>
+    INLINE_INVOCATION_STEPS.includes(step)
+  );
+}
+
 function getDefaultInvocationHandlers() {
   return {
     [INVOCATION_STEPS.OPEN_SIDE_PANEL]: ensureSidePanel,
-    [INVOCATION_STEPS.PREPARE_INLINE_TRANSLATION]: (tabId) =>
-      showInlineTranslator(tabId, { allowInlineTranslation: true }),
+    [INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS]: ensureContentScript,
+    [INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION]: (tabId) =>
+      sendInlineInstruction(
+        tabId,
+        INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION
+      ),
+    [INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON]: (tabId) =>
+      sendInlineInstruction(
+        tabId,
+        INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON
+      ),
     [INVOCATION_STEPS.START_SIDE_PANEL_TRANSLATION]: translateTab,
   };
 }
@@ -2422,6 +2475,19 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           sendResponse({ ok: persistence.persisted });
           return;
         }
+        if (msg?.type === 'GET_INLINE_STARTUP_INSTRUCTIONS') {
+          // A content script that loaded on its own asks what it should do. The answer is
+          // decided here so the content script never reads settings to decide whether its
+          // own UI belongs on the page.
+          const settings = await getSettings();
+          sendResponse({
+            ok: true,
+            instructions: getInlineInstructions(
+              planInvocation({ trigger: 'pageLoad', settings })
+            ),
+          });
+          return;
+        }
         if (msg?.type === 'GET_SETTINGS') {
           const settings = await getSettings();
           settings.apiKey = settings.apiKey ? '***' : '';
@@ -2467,6 +2533,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineContentScriptFiles,
     ensureSidePanel,
     planInvocation,
+    getInlineInstructions,
     runInvocationPlan,
     getInlineTranslationLogStorageKey,
     collectInlineTranslationLogsFromStorage,

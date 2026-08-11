@@ -245,10 +245,45 @@ function hasInlineSettingsApiKey(settings) {
   return Boolean(settings?.apiKey);
 }
 
-async function getInlineAutoShowEnabled(chromeApi = globalThis.chrome) {
-  if (!chromeApi?.runtime?.sendMessage) return false;
-  const response = await chromeApi.runtime.sendMessage({ type: 'GET_SETTINGS' });
-  return Boolean(response?.ok && response.settings?.inlineAutoShow);
+// The background worker decides what should happen on this page; this script carries the
+// decision out. It deliberately does not read settings to work out whether the Floating
+// Translate Button belongs here — that judgment lives in the worker's planning function so
+// that injecting this script and granting Inline Translation Authorization can happen
+// without the button being mounted.
+function getDefaultInlineInstructionHandlers(state = inlineState) {
+  return {
+    grantInlineTranslationAuthorization: () => authorizeInlineTranslation(state),
+    mountFloatingTranslateButton: () => ensureInlineTranslatorUi(),
+  };
+}
+
+function runInlineInstruction(
+  instruction,
+  handlers = getDefaultInlineInstructionHandlers()
+) {
+  const handler = handlers?.[instruction];
+  if (!handler) return false;
+  handler();
+  return true;
+}
+
+// Instructions are independent of one another, as the worker's own plan steps are: one
+// that cannot be carried out must not cost the page the rest of them.
+function runInlineInstructions(instructions = [], handlers) {
+  for (const instruction of instructions) {
+    try {
+      runInlineInstruction(instruction, handlers);
+    } catch {}
+  }
+}
+
+async function requestInlineStartupInstructions(chromeApi = globalThis.chrome) {
+  if (!chromeApi?.runtime?.sendMessage) return [];
+  const response = await chromeApi.runtime.sendMessage({
+    type: 'GET_INLINE_STARTUP_INSTRUCTIONS',
+  });
+  if (!response?.ok || !Array.isArray(response.instructions)) return [];
+  return response.instructions;
 }
 
 function getInlineTranslationCacheSignature(settings = {}) {
@@ -2259,9 +2294,7 @@ function restoreInlineOriginal() {
 
 async function initInlineTranslator() {
   try {
-    if (await getInlineAutoShowEnabled()) {
-      ensureInlineTranslatorUi();
-    }
+    runInlineInstructions(await requestInlineStartupInstructions());
   } catch {}
 }
 
@@ -2300,12 +2333,11 @@ if (
       return true;
     }
 
-    if (msg?.type === 'SHOW_INLINE_TRANSLATOR') {
+    if (msg?.type === 'RUN_INLINE_INSTRUCTION') {
       try {
-        if (msg.allowInlineTranslation) {
-          authorizeInlineTranslation();
+        if (!runInlineInstruction(msg.instruction)) {
+          throw new Error(`Unknown inline instruction: ${msg.instruction}`);
         }
-        ensureInlineTranslatorUi();
         sendResponse({ ok: true });
       } catch (e) {
         sendResponse({
@@ -2357,7 +2389,10 @@ if (typeof module !== 'undefined' && module.exports) {
     stopInlineViewportTranslation,
     canRestartInlineViewportTranslation,
     hasInlineSettingsApiKey,
-    getInlineAutoShowEnabled,
+    getDefaultInlineInstructionHandlers,
+    runInlineInstruction,
+    runInlineInstructions,
+    requestInlineStartupInstructions,
     refreshInlineTranslatorSettings,
     createInlineTranslationSettingsSnapshot,
     getInlineTranslationCacheSignature,

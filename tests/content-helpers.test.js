@@ -375,14 +375,17 @@ exports.tests = [
     },
   },
   {
-    name: 'loads inline auto-show through masked runtime settings',
+    name: 'asks the background worker what to do on startup instead of reading settings',
     async fn() {
       let message = null;
       const fakeChrome = {
         runtime: {
           async sendMessage(value) {
             message = value;
-            return { ok: true, settings: { inlineAutoShow: true, apiKey: '***' } };
+            if (value?.type === 'GET_SETTINGS') {
+              throw new Error('the mount decision is not the content script to make');
+            }
+            return { ok: true, instructions: ['mountFloatingTranslateButton'] };
           },
         },
         storage: {
@@ -394,8 +397,89 @@ exports.tests = [
         },
       };
 
-      assert.equal(await helpers.getInlineAutoShowEnabled(fakeChrome), true);
-      assert.deepEqual(message, { type: 'GET_SETTINGS' });
+      assert.deepEqual(await helpers.requestInlineStartupInstructions(fakeChrome), [
+        'mountFloatingTranslateButton',
+      ]);
+      assert.deepEqual(message, { type: 'GET_INLINE_STARTUP_INSTRUCTIONS' });
+    },
+  },
+  {
+    name: 'treats an unusable startup answer as no instructions',
+    async fn() {
+      const answers = [
+        { ok: false, error: { message: 'Unknown message' } },
+        { ok: true },
+        undefined,
+      ];
+      for (const answer of answers) {
+        const fakeChrome = {
+          runtime: {
+            async sendMessage() {
+              return answer;
+            },
+          },
+        };
+        assert.deepEqual(
+          await helpers.requestInlineStartupInstructions(fakeChrome),
+          []
+        );
+      }
+      assert.deepEqual(await helpers.requestInlineStartupInstructions({}), []);
+    },
+  },
+  {
+    name: 'grants inline translation authorization when instructed to',
+    fn() {
+      const state = {};
+      assert.equal(
+        helpers.runInlineInstruction(
+          'grantInlineTranslationAuthorization',
+          helpers.getDefaultInlineInstructionHandlers(state)
+        ),
+        true
+      );
+      assert.equal(helpers.hasInlineTranslationAuthorization(state), true);
+    },
+  },
+  {
+    name: 'runs inline instructions in order and ignores ones it does not know',
+    fn() {
+      const calls = [];
+      const handlers = {
+        grantInlineTranslationAuthorization: () =>
+          calls.push('grantInlineTranslationAuthorization'),
+        mountFloatingTranslateButton: () => calls.push('mountFloatingTranslateButton'),
+      };
+
+      helpers.runInlineInstructions(
+        [
+          'grantInlineTranslationAuthorization',
+          'startSidePanelTranslation',
+          'mountFloatingTranslateButton',
+        ],
+        handlers
+      );
+      assert.deepEqual(calls, [
+        'grantInlineTranslationAuthorization',
+        'mountFloatingTranslateButton',
+      ]);
+      assert.equal(helpers.runInlineInstruction('openSidePanel', handlers), false);
+    },
+  },
+  {
+    name: 'carries out the remaining inline instructions when one of them fails',
+    fn() {
+      const calls = [];
+      helpers.runInlineInstructions(
+        ['grantInlineTranslationAuthorization', 'mountFloatingTranslateButton'],
+        {
+          grantInlineTranslationAuthorization: () => {
+            throw new Error('no page to authorize');
+          },
+          mountFloatingTranslateButton: () => calls.push('mountFloatingTranslateButton'),
+        }
+      );
+      assert.deepEqual(calls, ['mountFloatingTranslateButton']);
     },
   },
   {
