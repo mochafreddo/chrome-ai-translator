@@ -6,6 +6,7 @@ const suites = [
   require('./button-visibility.test'),
   require('./inline-translation-controls.test'),
   require('./translation-policy.test'),
+  require('./default-model.test'),
   require('./translation-diagnostics.test'),
   require('./inline-diagnostics-controller.test'),
   require('./content-helpers.test'),

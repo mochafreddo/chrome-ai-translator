@@ -3,6 +3,7 @@ const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
 const fullPageMarkdown = require('../extension/full-page-markdown.js');
 const { createReasoningFixture } = require('./inline-block.test');
+const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
 function createCompletedResponse(outputText) {
   return {
@@ -625,7 +626,7 @@ exports.tests = [
     fn() {
       const settings = helpers.mergeSettingsWithExisting({}, {});
 
-      assert.equal(settings.model, 'gpt-5.6-luna');
+      assert.equal(settings.model, DEFAULT_MODEL);
       assert.equal(settings.reasoningEffort, 'none');
     },
   },
@@ -1174,6 +1175,7 @@ exports.tests = [
     name: 'loads the semantic block codec before the content script',
     fn() {
       assert.deepEqual(helpers.getInlineContentScriptFiles(), [
+        'default-model.js',
         'inline-block.js',
         'inline-diagnostics-protocol.js',
         'inline-translation-controls.js',
@@ -1316,6 +1318,7 @@ exports.tests = [
             id: 'inline-translator-auto-show',
             matches: ['http://*/*', 'https://*/*'],
             js: [
+              'default-model.js',
               'inline-block.js',
               'inline-diagnostics-protocol.js',
               'inline-translation-controls.js',
@@ -1386,6 +1389,7 @@ exports.tests = [
             id: 'inline-translator-auto-show',
             matches: ['http://*/*', 'https://*/*'],
             js: [
+              'default-model.js',
               'inline-block.js',
               'inline-diagnostics-protocol.js',
               'inline-translation-controls.js',

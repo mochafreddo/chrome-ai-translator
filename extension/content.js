@@ -20,6 +20,11 @@ var inlineTranslationControls =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-translation-controls.js')
     : null);
+var { DEFAULT_MODEL } =
+  globalThis.ChromeAiTranslatorDefaultModel ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./default-model.js')
+    : {});
 
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
@@ -36,7 +41,7 @@ var INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES = 1200;
 var INLINE_TRANSLATION_SETTINGS_DEFAULTS = {
   targetLanguage: 'Korean',
   tone: 'technical',
-  model: 'gpt-5.6-luna',
+  model: DEFAULT_MODEL,
   reasoningEffort: 'none',
 };
 function isInlineTranslatedState(state) {

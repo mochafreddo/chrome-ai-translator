@@ -59,6 +59,9 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorInlineDiagnosticsController) {
     importScripts('inline-diagnostics-controller.js');
   }
+  if (!globalThis.ChromeAiTranslatorDefaultModel) {
+    importScripts('default-model.js');
+  }
 }
 const translationValidation =
   globalThis.ChromeAiTranslatorValidation || require('./translation-validation.js');
@@ -80,10 +83,12 @@ const inlineDiagnosticsProtocol =
   globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol || require('./inline-diagnostics-protocol.js');
 const inlineDiagnosticsController =
   globalThis.ChromeAiTranslatorInlineDiagnosticsController || require('./inline-diagnostics-controller.js');
+const { DEFAULT_MODEL } =
+  globalThis.ChromeAiTranslatorDefaultModel || require('./default-model.js');
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
-  model: 'gpt-5.6-luna',
+  model: DEFAULT_MODEL,
   reasoningEffort: 'none',
   targetLanguage: 'Korean',
   tone: 'technical',
@@ -353,6 +358,7 @@ async function ensureSidePanel(tabId) {
 
 function getInlineContentScriptFiles() {
   return [
+    'default-model.js',
     'inline-block.js',
     'inline-diagnostics-protocol.js',
     'inline-translation-controls.js',

@@ -27,6 +27,11 @@ const { ALL_SITES_ORIGINS, BUTTON_VISIBILITY, readButtonVisibility } =
   (typeof module !== 'undefined' && module.exports
     ? require('./button-visibility.js')
     : {});
+const { DEFAULT_MODEL } =
+  globalThis.ChromeAiTranslatorDefaultModel ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./default-model.js')
+    : {});
 
 const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
@@ -54,7 +59,7 @@ async function load() {
   elApiKey.value = '';
   elTargetLanguage.value = s.targetLanguage || 'Korean';
   elTone.value = s.tone || 'technical';
-  elModel.value = s.model || 'gpt-5.6-luna';
+  elModel.value = s.model || DEFAULT_MODEL;
   elChunkMaxChars.value = s.chunkMaxChars || 12000;
   checkChoice(elButtonVisibility, readButtonVisibility(s));
 }
@@ -215,7 +220,7 @@ async function save() {
     ...prev,
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || 'gpt-5.6-luna',
+    model: elModel.value.trim() || DEFAULT_MODEL,
     chunkMaxChars: Number(elChunkMaxChars.value) || 12000,
     buttonVisibility,
   };
@@ -272,6 +277,10 @@ function handleSaveClick() {
 }
 
 if (hasDocument) {
+  // The markup names no model of its own: a placeholder still naming the model the
+  // extension defaulted to yesterday is the same quiet lie as a stale fallback.
+  elModel.placeholder = DEFAULT_MODEL;
+
   document.getElementById('btnSave').addEventListener('click', handleSaveClick);
   document.getElementById('btnClear').addEventListener('click', clearKey);
   btnCopyDiagnostics.addEventListener('click', () => copyDiagnostics().catch((error) => setError(error?.message || String(error))));

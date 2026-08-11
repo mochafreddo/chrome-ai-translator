@@ -5,6 +5,7 @@ const {
   createTestDocument,
 } = require('./inline-block.test');
 const inlineBlockCodec = require('../extension/inline-block.js');
+const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
 function getReasoningTranslatedTemplate(record) {
   const wrapper = record.contract.entries.find(
@@ -1605,7 +1606,7 @@ exports.tests = [
       assert.deepEqual(helpers.createInlineTranslationSettingsSnapshot({}), {
         targetLanguage: 'Korean',
         tone: 'technical',
-        model: 'gpt-5.6-luna',
+        model: DEFAULT_MODEL,
         reasoningEffort: 'none',
       });
     },

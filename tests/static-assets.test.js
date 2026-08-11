@@ -126,6 +126,77 @@ exports.tests = [
     },
   },
   {
+    name: 'loads the one home of the default model into all four contexts that fall back to it',
+    fn() {
+      // A shared value is only shared where it is actually loaded: the worker imports it,
+      // the content script gets it from the injected file list ahead of content.js, and
+      // both extension pages take their own tag ahead of the script that reads it.
+      const backgroundJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'background.js'),
+        'utf8'
+      );
+      const filesMatch = backgroundJs.match(
+        /function getInlineContentScriptFiles\(\) \{\s*return \[([^\]]+)\]/s
+      );
+
+      assert.equal(
+        fs.existsSync(path.join(__dirname, '..', 'extension', 'default-model.js')),
+        true
+      );
+      assert.match(backgroundJs, /importScripts\('default-model\.js'\)/);
+      assert.ok(filesMatch);
+      assert.equal(
+        filesMatch[1].indexOf("'default-model.js'") <
+          filesMatch[1].indexOf("'content.js'"),
+        true
+      );
+
+      for (const [page, pageScript] of [
+        ['options.html', 'options.js'],
+        ['sidepanel.html', 'sidepanel.js'],
+      ]) {
+        const html = fs.readFileSync(
+          path.join(__dirname, '..', 'extension', page),
+          'utf8'
+        );
+
+        assert.notEqual(html.indexOf('src="default-model.js"'), -1);
+        assert.equal(
+          html.indexOf('src="default-model.js"') <
+            html.indexOf(`src="${pageScript}"`),
+          true
+        );
+      }
+    },
+  },
+  {
+    name: 'leaves both model placeholders to the shared default',
+    fn() {
+      // A placeholder still naming the model the extension defaulted to yesterday is the
+      // same quiet lie as a stale fallback, so the markup carries no model name of its own.
+      for (const [page, pageScript] of [
+        ['options.html', 'options.js'],
+        ['sidepanel.html', 'sidepanel.js'],
+      ]) {
+        const html = fs.readFileSync(
+          path.join(__dirname, '..', 'extension', page),
+          'utf8'
+        );
+        const input = html.match(/<input id="model"[^>]*>/);
+
+        assert.ok(input);
+        assert.equal(/placeholder=/.test(input[0]), false);
+        assert.match(
+          fs.readFileSync(
+            path.join(__dirname, '..', 'extension', pageScript),
+            'utf8'
+          ),
+          /elModel\.placeholder = DEFAULT_MODEL/
+        );
+      }
+    },
+  },
+  {
     name: 'loads the shared missing-access wording into both places that say it',
     fn() {
       // The panel and the background worker only agree on what to tell the reader about a
@@ -255,6 +326,10 @@ exports.tests = [
       assert.match(
         packageJson.scripts['check:syntax'],
         /node --check extension\/page-access\.js/
+      );
+      assert.match(
+        packageJson.scripts['check:syntax'],
+        /node --check extension\/default-model\.js/
       );
     },
   },

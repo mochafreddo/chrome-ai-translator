@@ -8,6 +8,11 @@ const { MISSING_PAGE_ACCESS_MESSAGES } =
   (typeof module !== 'undefined' && module.exports
     ? require('./page-access.js')
     : {});
+const { DEFAULT_MODEL } =
+  globalThis.ChromeAiTranslatorDefaultModel ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./default-model.js')
+    : {});
 
 let activeTabId = null;
 let panelErrorMessage = '';
@@ -287,7 +292,7 @@ async function loadSettings() {
 
   elTargetLanguage.value = s.targetLanguage || 'Korean';
   elTone.value = s.tone || 'technical';
-  elModel.value = s.model || 'gpt-5.6-luna';
+  elModel.value = s.model || DEFAULT_MODEL;
   elViewMode.value = s.viewMode || 'translation';
 }
 
@@ -336,7 +341,7 @@ function readSettings() {
   return {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || 'gpt-5.6-luna',
+    model: elModel.value.trim() || DEFAULT_MODEL,
     viewMode: elViewMode.value,
   };
 }
@@ -401,7 +406,7 @@ async function translateNow() {
   const settingsOverride = {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || 'gpt-5.6-luna',
+    model: elModel.value.trim() || DEFAULT_MODEL,
     viewMode: elViewMode.value,
   };
   const resp = await chrome.runtime.sendMessage({
@@ -470,6 +475,9 @@ if (hasDocument) {
   });
 
   (async function init() {
+    // The markup names no model of its own: a placeholder still naming the model the
+    // extension defaulted to yesterday is the same quiet lie as a stale fallback.
+    elModel.placeholder = DEFAULT_MODEL;
     setupTabs();
     renderInlineTranslation();
     await loadSettings();
