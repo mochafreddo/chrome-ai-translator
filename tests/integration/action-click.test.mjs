@@ -34,6 +34,11 @@
 //            `/json/list` are page targets.
 //   Fix:     `Target.getTargets` with `{ filter: [{ type: 'tab' }] }`.
 //
+//   Symptom: the side panel check fails while the panel is plainly open on screen.
+//   Cause:   the same two target types again — a side panel is hosted as a `page` target,
+//            so a `tab`-filtered listing never contains it.
+//   Fix:     list targets unfiltered and match on the sidepanel URL.
+//
 //   Symptom: `Runtime.evaluate` returns undefined for everything, even `typeof x`.
 //   Cause:   it was attached to the `tab` target, which has no page execution context.
 //   Fix:     the two target types are needed for different things — evaluate against the
@@ -148,6 +153,14 @@ async function main() {
   check('page execution context is reachable', (await evaluate('1 + 1')) === 2);
   const buttonPresent = async () =>
     (await evaluate("Boolean(document.getElementById('chrome-ai-translator-inline'))")) === true;
+  // Unfiltered, for the target-type reason in the header. Asserted before the click as well
+  // as after: the session is reused by name, so a run interrupted with the panel open would
+  // otherwise satisfy the after-check without the click having done anything.
+  const sidePanelOpen = async () => {
+    const targets = await cdp.send('Target.getTargets');
+    return (targets.targetInfos || []).some(
+      (target) => target.url === `chrome-extension://${extension.id}/sidepanel.html`);
+  };
   const triggerAction = async (name) => {
     const triggered = await cdp.send('Extensions.triggerAction', { id: extension.id, targetId: tab.targetId });
     check(`action can be triggered ${name}`, !triggered.__timeout && !triggered.__error,
@@ -156,16 +169,15 @@ async function main() {
   };
 
   check('Floating Translate Button is absent before the click', (await buttonPresent()) === false);
+  check('side panel is closed before the click', (await sidePanelOpen()) === false,
+    'a leftover session would make the check below pass on its own');
 
   await triggerAction('on a fresh install');
 
   check('Floating Translate Button stays absent on a fresh install', (await buttonPresent()) === false,
     'Button Visibility defaults to never, so an invocation must mount nothing');
 
-  const after = await cdp.send('Target.getTargets', { filter: [{ type: 'tab' }] });
-  const panel = (after.targetInfos || []).find((target) =>
-    target.url === `chrome-extension://${extension.id}/sidepanel.html`);
-  check('side panel opens after the click', Boolean(panel));
+  check('side panel opens after the click', await sidePanelOpen());
 
   // Choosing on-invocation through the real options page, rather than writing the setting
   // directly, is also the only check that the control saves what the worker reads.
