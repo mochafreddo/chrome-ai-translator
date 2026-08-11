@@ -126,6 +126,34 @@ exports.tests = [
     },
   },
   {
+    name: 'loads the shared missing-access wording into both places that say it',
+    fn() {
+      // The panel and the background worker only agree on what to tell the reader about a
+      // tab out of reach if both actually load the words. The worker imports them; the side
+      // panel takes its own tag, ahead of the script that reads them.
+      const backgroundJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'background.js'),
+        'utf8'
+      );
+      const sidepanelHtml = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'sidepanel.html'),
+        'utf8'
+      );
+
+      assert.equal(
+        fs.existsSync(path.join(__dirname, '..', 'extension', 'page-access.js')),
+        true
+      );
+      assert.match(backgroundJs, /importScripts\('page-access\.js'\)/);
+      assert.notEqual(sidepanelHtml.indexOf('src="page-access.js"'), -1);
+      assert.equal(
+        sidepanelHtml.indexOf('src="page-access.js"') <
+          sidepanelHtml.indexOf('src="sidepanel.js"'),
+        true
+      );
+    },
+  },
+  {
     name: 'keeps Inline Translation progress and errors out of the Floating Translate Button',
     fn() {
       // Single-sourced in the panel: the button carries the controls and nothing else.
@@ -223,6 +251,10 @@ exports.tests = [
       assert.match(
         packageJson.scripts['check:syntax'],
         /node --check extension\/full-page-markdown\.js/
+      );
+      assert.match(
+        packageJson.scripts['check:syntax'],
+        /node --check extension\/page-access\.js/
       );
     },
   },

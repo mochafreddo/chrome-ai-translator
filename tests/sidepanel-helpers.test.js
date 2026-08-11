@@ -2,6 +2,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const helpers = require('../extension/sidepanel.js');
+const background = require('../extension/background.js');
+
+// The one thing the reader has to do to put a tab within reach, in the words both the panel
+// and a failed injection are expected to use.
+const MISSING_ACCESS_VOCABULARY =
+  'The extension does not have access to this tab. Click the extension icon on this tab';
 
 exports.name = 'sidepanel helpers';
 exports.tests = [
@@ -68,6 +74,46 @@ exports.tests = [
       });
       assert.equal(original.stopDisabled, true);
       assert.equal(original.restoreDisabled, true);
+    },
+  },
+  {
+    name: 'offers no Inline Translation control on a tab it cannot reach',
+    fn() {
+      // Page access is granted per tab and the panel outlives the tab it opened on. None of
+      // the three controls can reach a tab the extension has not been invoked on, so the
+      // section dims all three and says what to do instead of taking a click that cannot
+      // succeed.
+      const model = helpers.getInlineTranslationPanelViewModel({
+        hasPageAccess: false,
+        // Whatever the panel last heard was about a tab it can still reach; this one has
+        // told it nothing, and the guidance is the whole account of why.
+        error: 'Inline translation did not answer on this tab.',
+      });
+
+      assert.equal(model.startDisabled, true);
+      assert.equal(model.stopDisabled, true);
+      assert.equal(model.restoreDisabled, true);
+      assert.match(model.statusText, /Click the extension icon on this tab/);
+      assert.equal(model.errorText, '');
+    },
+  },
+  {
+    name: 'asks for access in the words a failed injection already uses',
+    fn() {
+      // The reader meets one missing grant from two directions — dimmed controls before any
+      // gesture, an injection failure after one. Two accounts of it would read as two
+      // problems.
+      const guidance = helpers.getInlineTranslationPanelViewModel({
+        hasPageAccess: false,
+      }).statusText;
+      const failure = background.classifyContentScriptFailure(
+        new Error('Cannot access contents of the page at url "https://example.com/".'),
+        'https://example.com/'
+      );
+
+      assert.equal(failure.reason, 'missing_access');
+      assert.equal(guidance.startsWith(MISSING_ACCESS_VOCABULARY), true);
+      assert.equal(failure.message.startsWith(MISSING_ACCESS_VOCABULARY), true);
     },
   },
   {
@@ -543,8 +589,9 @@ exports.tests = [
   {
     name: 'drives Inline Translation from the panel without the Floating Translate Button',
     async fn() {
-      // The whole section, exercised the way a reader would: the three controls, and the
-      // progress and errors the tab reports back. Nothing here touches the button.
+      // The whole section, exercised the way a reader would: the three controls, the
+      // progress and errors the tab reports back, and a switch to a tab that has never
+      // heard of the extension. Nothing here touches the button.
       const previousChrome = global.chrome;
       const previousDocument = global.document;
       const previousSetInterval = global.setInterval;
@@ -553,6 +600,8 @@ exports.tests = [
       const elements = new Map();
       const controls = [];
       let refreshInterval;
+      let activeTabId = 77;
+      let tabIsReachable = true;
       let snapshot = { status: 'original', progress: '', error: '' };
       let controlResponse = { ok: true };
 
@@ -594,7 +643,7 @@ exports.tests = [
       global.chrome = {
         tabs: {
           async query() {
-            return [{ id: 77 }];
+            return [{ id: activeTabId }];
           },
         },
         runtime: {
@@ -608,6 +657,9 @@ exports.tests = [
               return { ok: true, state: { status: 'idle' } };
             }
             if (message.type === 'GET_INLINE_TRANSLATION_STATE') {
+              // Nothing answers in a tab the extension has never been invoked on, which is
+              // how the worker reports one.
+              if (!tabIsReachable) return { ok: false, snapshot: null };
               return { ok: true, snapshot };
             }
             if (message.type === 'RUN_INLINE_TRANSLATION_CONTROL') {
@@ -689,6 +741,55 @@ exports.tests = [
         assert.equal(controls.length, 4);
         assert.match(getElement('inlineError').textContent, /Click the extension icon/);
         assert.equal(getElement('inlineError').hidden, false);
+
+        // The reader switches to a tab the extension has never been invoked on. The panel
+        // stays open across the switch; the access does not come with it.
+        activeTabId = 78;
+        tabIsReachable = false;
+        refreshInterval();
+        await settle();
+
+        assert.equal(getElement('btnInlineTranslate').disabled, true);
+        assert.equal(getElement('btnInlineStop').disabled, true);
+        assert.equal(getElement('btnInlineRestore').disabled, true);
+        assert.match(getElement('inlineStatus').textContent, /Click the extension icon on this tab/);
+        assert.equal(getElement('inlineError').hidden, true);
+
+        // Which is what clicking the extension icon on that tab puts right.
+        tabIsReachable = true;
+        snapshot = { status: 'original', progress: '', error: '' };
+        refreshInterval();
+        await settle();
+
+        assert.equal(getElement('btnInlineTranslate').disabled, false);
+        assert.equal(getElement('inlineStatus').textContent, '');
+        assert.equal(controls.length, 4);
+
+        // Losing and regaining access on one tab: the reader is told about the tab as it is
+        // now, not reminded of what was wrong with it before they fixed it.
+        controlResponse = {
+          ok: false,
+          error: {
+            message:
+              'The extension does not have access to this tab. Click the extension icon on this tab, then try again.',
+          },
+        };
+        getElement('btnInlineTranslate').listeners.click();
+        await settle();
+        assert.equal(getElement('inlineError').hidden, false);
+
+        tabIsReachable = false;
+        refreshInterval();
+        await settle();
+        assert.equal(getElement('inlineError').hidden, true);
+
+        tabIsReachable = true;
+        refreshInterval();
+        await settle();
+
+        assert.equal(getElement('inlineError').hidden, true);
+        assert.equal(getElement('inlineError').textContent, '');
+        assert.equal(getElement('btnInlineTranslate').disabled, false);
       } finally {
         global.chrome = previousChrome;
         global.document = previousDocument;

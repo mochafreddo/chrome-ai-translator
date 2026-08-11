@@ -47,6 +47,9 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorInlineTranslationControls) {
     importScripts('inline-translation-controls.js');
   }
+  if (!globalThis.ChromeAiTranslatorPageAccess) {
+    importScripts('page-access.js');
+  }
   if (!globalThis.ChromeAiTranslatorDiagnostics) {
     importScripts('translation-diagnostics.js');
   }
@@ -69,6 +72,8 @@ const {
 } =
   globalThis.ChromeAiTranslatorInlineTranslationControls ||
   require('./inline-translation-controls.js');
+const { MISSING_PAGE_ACCESS_MESSAGES } =
+  globalThis.ChromeAiTranslatorPageAccess || require('./page-access.js');
 const translationDiagnostics =
   globalThis.ChromeAiTranslatorDiagnostics || require('./translation-diagnostics.js');
 const inlineDiagnosticsProtocol =
@@ -373,8 +378,7 @@ const REFUSED_ACCESS_FAILURE_PATTERN =
   /cannot access contents of|must request permission/i;
 
 const CONTENT_SCRIPT_FAILURE_MESSAGES = Object.freeze({
-  missing_access:
-    'The extension does not have access to this tab. Click the extension icon on this tab, then try again.',
+  missing_access: MISSING_PAGE_ACCESS_MESSAGES.afterFailedAttempt,
   unsupported_page:
     'Chrome does not allow extensions to run on this page. Open an ordinary web page and try again.',
   file_access:

@@ -3,12 +3,22 @@ const { INLINE_TRANSLATION_CONTROLS, getInlineTranslationControlAvailability } =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-translation-controls.js')
     : {});
+const { MISSING_PAGE_ACCESS_MESSAGES } =
+  globalThis.ChromeAiTranslatorPageAccess ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./page-access.js')
+    : {});
 
 let activeTabId = null;
 let panelErrorMessage = '';
 let inlineTranslationSnapshot = null;
 let inlineTranslationError = '';
 let inlineTranslationErrorTabId = null;
+// The panel opens on a tab the reader just invoked the extension on, and asks that tab
+// about itself straight away. Until it answers, offering the controls is the better guess
+// of the two — and the wrong one costs a single click, where dimming them on a tab that is
+// in reach would tell the reader to do something they have already done.
+let inlineTranslationPageAccess = true;
 
 const hasDocument = typeof document !== 'undefined';
 
@@ -138,17 +148,38 @@ function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
 function getInlineTranslationPanelViewModel({
   snapshot = null,
   error = '',
+  hasPageAccess = true,
 } = {}) {
   const status = snapshot?.status || 'original';
   const { isActive, isTranslating, canStart, canStop, canRestore } =
     getInlineTranslationControlAvailability(status);
+  const startText = isTranslating
+    ? 'Translating...'
+    : isActive
+    ? 'Scan visible text'
+    : 'Translate visible text';
+
+  // Page access is granted per tab, and the panel stays open across tab switches, so the
+  // reader can arrive here on a tab the extension has never been invoked on. None of the
+  // three controls can reach it, and Inline Translation Authorization would not help — it
+  // is a separate axis, and holding it on one tab grants nothing on another. So the
+  // section dims all three and asks for the one thing that does help, rather than taking a
+  // click and reporting the failure afterwards.
+  if (!hasPageAccess) {
+    return {
+      startText,
+      startDisabled: true,
+      stopDisabled: true,
+      restoreDisabled: true,
+      statusText: MISSING_PAGE_ACCESS_MESSAGES.beforeAnyAttempt,
+      // A tab out of reach reports nothing of its own, and what the panel last heard was
+      // either about another tab or about an attempt this guidance already accounts for.
+      errorText: '',
+    };
+  }
 
   return {
-    startText: isTranslating
-      ? 'Translating...'
-      : isActive
-      ? 'Scan visible text'
-      : 'Translate visible text',
+    startText,
     startDisabled: !canStart,
     stopDisabled: !canStop,
     restoreDisabled: !canRestore,
@@ -163,6 +194,7 @@ function renderInlineTranslation() {
   const model = getInlineTranslationPanelViewModel({
     snapshot: inlineTranslationSnapshot,
     error: inlineTranslationError,
+    hasPageAccess: inlineTranslationPageAccess,
   });
 
   btnInlineTranslate.textContent = model.startText;
@@ -199,6 +231,18 @@ async function refreshInlineTranslationState() {
     type: 'GET_INLINE_TRANSLATION_STATE',
     tabId: activeTabId,
   });
+  // Whether the tab answered at all is what tells the panel it is in reach: the content
+  // script answers this one whatever Inline Translation is doing, and only a tab the
+  // extension has not been invoked on has nothing there to answer with.
+  const wasOutOfReach = !inlineTranslationPageAccess;
+  inlineTranslationPageAccess = resp?.ok === true;
+  // An error recorded while the tab was out of reach was about exactly that, and the reader
+  // has since done what the guidance asked. Letting it back out now would tell them the tab
+  // is unreachable in the same breath as re-enabling the controls.
+  if (wasOutOfReach && inlineTranslationPageAccess) {
+    inlineTranslationError = '';
+    inlineTranslationErrorTabId = null;
+  }
   inlineTranslationSnapshot = resp?.ok ? resp.snapshot || null : null;
   renderInlineTranslation();
 }
