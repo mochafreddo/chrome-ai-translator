@@ -1,5 +1,14 @@
+const { INLINE_TRANSLATION_CONTROLS, getInlineTranslationControlAvailability } =
+  globalThis.ChromeAiTranslatorInlineTranslationControls ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./inline-translation-controls.js')
+    : {});
+
 let activeTabId = null;
 let panelErrorMessage = '';
+let inlineTranslationSnapshot = null;
+let inlineTranslationError = '';
+let inlineTranslationErrorTabId = null;
 
 const hasDocument = typeof document !== 'undefined';
 
@@ -20,6 +29,22 @@ const elViewMode = hasDocument ? document.getElementById('viewMode') : null;
 
 const elOriginal = hasDocument ? document.getElementById('original') : null;
 const elTranslated = hasDocument ? document.getElementById('translated') : null;
+
+const btnInlineTranslate = hasDocument
+  ? document.getElementById('btnInlineTranslate')
+  : null;
+const btnInlineStop = hasDocument
+  ? document.getElementById('btnInlineStop')
+  : null;
+const btnInlineRestore = hasDocument
+  ? document.getElementById('btnInlineRestore')
+  : null;
+const elInlineStatus = hasDocument
+  ? document.getElementById('inlineStatus')
+  : null;
+const elInlineError = hasDocument
+  ? document.getElementById('inlineError')
+  : null;
 
 function setStatus(text) {
   elStatus.textContent = text;
@@ -104,6 +129,106 @@ function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
         ? 'Extracting article text...'
         : 'No original text yet.\n\nRun Translate current tab to extract the source article.'),
   };
+}
+
+// Inline Translation runs in the tab, and the tab keeps its own state; this decides what
+// the Inline Translation Section makes of it. Everything it needs is an argument, so the
+// section's behaviour is settled without a browser or a DOM. Which controls are on offer
+// is the rule both homes share; only the labels below are this one's own.
+function getInlineTranslationPanelViewModel({
+  snapshot = null,
+  error = '',
+} = {}) {
+  const status = snapshot?.status || 'original';
+  const { isActive, isTranslating, canStart, canStop, canRestore } =
+    getInlineTranslationControlAvailability(status);
+
+  return {
+    startText: isTranslating
+      ? 'Translating...'
+      : isActive
+      ? 'Scan visible text'
+      : 'Translate visible text',
+    startDisabled: !canStart,
+    stopDisabled: !canStop,
+    restoreDisabled: !canRestore,
+    statusText: snapshot?.progress || '',
+    // The panel's own account of the click it just made comes first: a control the tab
+    // never received leaves no page state behind to report it.
+    errorText: error || snapshot?.error || '',
+  };
+}
+
+function renderInlineTranslation() {
+  const model = getInlineTranslationPanelViewModel({
+    snapshot: inlineTranslationSnapshot,
+    error: inlineTranslationError,
+  });
+
+  btnInlineTranslate.textContent = model.startText;
+  btnInlineTranslate.disabled = model.startDisabled;
+  btnInlineStop.disabled = model.stopDisabled;
+  btnInlineRestore.disabled = model.restoreDisabled;
+  elInlineStatus.textContent = model.statusText;
+
+  if (model.errorText) {
+    elInlineError.hidden = false;
+    elInlineError.textContent = model.errorText;
+    return;
+  }
+  elInlineError.hidden = true;
+  elInlineError.textContent = '';
+}
+
+// What a control did is only ever true of the tab it was aimed at, and the panel stays
+// open across tab switches.
+function setInlineTranslationError(message, tabId) {
+  inlineTranslationError = message || '';
+  inlineTranslationErrorTabId = message ? tabId : null;
+  renderInlineTranslation();
+}
+
+async function refreshInlineTranslationState() {
+  activeTabId = await getActiveTabId();
+  if (!activeTabId) return;
+  if (inlineTranslationErrorTabId !== activeTabId) {
+    inlineTranslationError = '';
+    inlineTranslationErrorTabId = null;
+  }
+  const resp = await chrome.runtime.sendMessage({
+    type: 'GET_INLINE_TRANSLATION_STATE',
+    tabId: activeTabId,
+  });
+  inlineTranslationSnapshot = resp?.ok ? resp.snapshot || null : null;
+  renderInlineTranslation();
+}
+
+async function sendInlineTranslationControl(control) {
+  const tabId = await getActiveTabId();
+  if (!tabId) return;
+  activeTabId = tabId;
+
+  setInlineTranslationError('', tabId);
+
+  const resp = await chrome.runtime.sendMessage({
+    type: 'RUN_INLINE_TRANSLATION_CONTROL',
+    tabId,
+    control,
+  });
+  if (!resp?.ok) {
+    setInlineTranslationError(
+      resp?.error?.message || 'Inline translation did not answer on this tab.',
+      tabId
+    );
+    return;
+  }
+  await refreshInlineTranslationState();
+}
+
+function handleInlineTranslationControlClick(control) {
+  sendInlineTranslationControl(control).catch((error) => {
+    setInlineTranslationError(error?.message || String(error), activeTabId);
+  });
 }
 
 async function getActiveTabId() {
@@ -284,6 +409,15 @@ if (hasDocument) {
     .getElementById('btnOpenOptions')
     .addEventListener('click', () => chrome.runtime.openOptionsPage());
   elViewMode.addEventListener('change', () => refreshState().catch(() => {}));
+  btnInlineTranslate.addEventListener('click', () =>
+    handleInlineTranslationControlClick(INLINE_TRANSLATION_CONTROLS.START)
+  );
+  btnInlineStop.addEventListener('click', () =>
+    handleInlineTranslationControlClick(INLINE_TRANSLATION_CONTROLS.STOP)
+  );
+  btnInlineRestore.addEventListener('click', () =>
+    handleInlineTranslationControlClick(INLINE_TRANSLATION_CONTROLS.RESTORE)
+  );
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type !== 'STATE_UPDATED') return;
@@ -293,12 +427,17 @@ if (hasDocument) {
 
   (async function init() {
     setupTabs();
+    renderInlineTranslation();
     await loadSettings();
     await refreshState();
+    await refreshInlineTranslationState().catch(() => {});
 
-    // Keep UI in sync when user switches tabs while the panel is open.
+    // Keep UI in sync when user switches tabs while the panel is open. Inline Translation
+    // is polled on the same beat: the tab owns that state, and it moves on without the
+    // panel — a translation may already be under way by the time the panel opens.
     setInterval(() => {
       refreshState().catch(() => {});
+      refreshInlineTranslationState().catch(() => {});
     }, 1000);
   })();
 }
@@ -308,6 +447,7 @@ if (typeof module !== 'undefined' && module.exports) {
     createSettingsSaveController,
     formatOriginalPanelText,
     formatTranslatedPanelText,
+    getInlineTranslationPanelViewModel,
     getSidepanelDisplayState,
   };
 }

@@ -59,6 +59,85 @@ exports.tests = [
     },
   },
   {
+    name: 'ships an Inline translation section of its own in the side panel',
+    fn() {
+      // The view model decides what the section says, but nothing there would notice if
+      // the controls the reader reaches for stopped being rendered — or if the section
+      // were folded into the Side Panel Translation row, which translates something else,
+      // puts it somewhere else, and needs different permissions.
+      const html = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'sidepanel.html'),
+        'utf8'
+      );
+
+      assert.match(html, /<section id="inlineTranslation"[^>]*>/);
+      assert.match(html, />\s*Inline translation\s*</);
+      for (const id of ['btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore']) {
+        assert.match(html, new RegExp(`<button[^>]*id="${id}"`));
+      }
+      assert.match(html, /id="inlineStatus"[^>]*role="status"[^>]*aria-live="polite"/);
+      assert.match(html, /id="inlineError"[^>]*role="alert"[^>]*hidden/);
+
+      const inlineSection = html.slice(html.indexOf('id="inlineTranslation"'));
+      assert.equal(inlineSection.includes('id="btnTranslate"'), false);
+      assert.equal(inlineSection.includes('id="viewMode"'), false);
+    },
+  },
+  {
+    name: 'loads the shared Inline Translation control rules into both of their homes',
+    fn() {
+      // The rules are only shared if both homes actually load them. The content script
+      // reads them through the injected file list; the side panel through its own tag,
+      // ahead of the script that calls them.
+      const backgroundJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'background.js'),
+        'utf8'
+      );
+      const sidepanelHtml = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'sidepanel.html'),
+        'utf8'
+      );
+      const filesMatch = backgroundJs.match(
+        /function getInlineContentScriptFiles\(\) \{\s*return \[([^\]]+)\]/s
+      );
+
+      assert.equal(
+        fs.existsSync(
+          path.join(
+            __dirname,
+            '..',
+            'extension',
+            'inline-translation-controls.js'
+          )
+        ),
+        true
+      );
+      assert.ok(filesMatch);
+      assert.equal(
+        filesMatch[1].indexOf("'inline-translation-controls.js'") <
+          filesMatch[1].indexOf("'content.js'"),
+        true
+      );
+      assert.equal(
+        sidepanelHtml.indexOf('src="inline-translation-controls.js"') <
+          sidepanelHtml.indexOf('src="sidepanel.js"'),
+        true
+      );
+    },
+  },
+  {
+    name: 'keeps Inline Translation progress and errors out of the Floating Translate Button',
+    fn() {
+      // Single-sourced in the panel: the button carries the controls and nothing else.
+      const contentJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'content.js'),
+        'utf8'
+      );
+
+      assert.equal(/data-role="message"/.test(contentJs), false);
+    },
+  },
+  {
     name: 'ships the three exclusive Button Visibility choices on the options page',
     fn() {
       // The choice is unit-tested on the options helpers, but nothing there would notice if

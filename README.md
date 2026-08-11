@@ -2,7 +2,8 @@
 
 A **personal-only** Chrome extension that translates article pages with OpenAI
 Responses API. It keeps the translated Markdown in a **Side Panel** and can also
-translate page text inline with a floating page button.
+translate page text inline, driven from that panel or from a floating page
+button.
 
 ## Requirements
 - Chrome 116 or newer.
@@ -27,9 +28,9 @@ requests access to normal `http://` and `https://` pages, which is what lets Chr
 inject the floating button before you open the extension; the other two give that
 access back.
 
-Inline translation is started from that button and nowhere else for now, so
-**never** turns inline translation off entirely — pick one of the other two to use
-it. Side panel translation is reached from the panel and is unaffected.
+**Never** removes the button only. The Side Panel has its own **Inline
+translation** section carrying the same controls, so inline translation stays
+fully usable with the button switched off.
 
 The saved key is never shown back in the Options input. Leaving the key field
 blank preserves the current key; **Clear key** removes the saved key and the
@@ -48,8 +49,9 @@ If the shortcut does not work, check `chrome://extensions/shortcuts`. Chrome can
 leave a suggested shortcut unassigned when it conflicts with another shortcut or
 has been changed locally.
 
-The Side Panel should open and show the translated Markdown. The same action also
-shows a floating **Translate** button on the page.
+The Side Panel opens on either action, and the keyboard shortcut also starts a
+Side Panel Translation. A floating **Translate** button appears on the page where
+the chosen visibility allows it.
 
 In the Side Panel:
 
@@ -64,22 +66,26 @@ In the Side Panel:
   translation, so the model can keep snippets like API names and commands
   unchanged.
 
-For inline page translation:
+For inline page translation, from the Side Panel's **Inline translation**
+section:
 
-1. Open the floating **Translate** button.
-2. Choose **Page in Korean** to start viewport-first inline translation.
-3. As you scroll, newly visible article blocks are translated in place. Inline
+1. Choose **Translate visible text** to start viewport-first inline translation.
+2. As you scroll, newly visible article blocks are translated in place. Inline
    links, emphasis, and code keep their existing DOM objects and can move to
    match the translated word order.
-4. Choose **Stop** to stop translating newly visible text while keeping current
+3. Choose **Stop** to stop translating newly visible text while keeping current
    translations.
-5. Choose **Original text** to restore the original text and inline-node order.
-6. Choose **Page in Korean** again on the same page to reuse matching in-memory
+4. Choose **Original text** to restore the original text and inline-node order.
+5. Choose **Scan visible text** on the same page to reuse matching in-memory
    translations instead of sending the same visible text again.
 
-If automatic inline display is enabled, the floating button can appear without
-the toolbar click. Starting inline translation still requires choosing
-**Page in Korean** before page text is sent for translation.
+Progress and errors for inline translation are reported in that section, whether
+the run was started there or from the page.
+
+The floating **Translate** button, where the chosen visibility allows it, carries
+the same three controls under **Page in Korean**, **Stop**, and **Original
+text**. Page text is sent for translation only after one of these controls, or
+one in the Side Panel, has been chosen.
 
 ## Limits and diagnostics
 - Full-page Side Panel translation stops before sending more than 60,000

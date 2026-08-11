@@ -44,6 +44,9 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorButtonVisibility) {
     importScripts('button-visibility.js');
   }
+  if (!globalThis.ChromeAiTranslatorInlineTranslationControls) {
+    importScripts('inline-translation-controls.js');
+  }
   if (!globalThis.ChromeAiTranslatorDiagnostics) {
     importScripts('translation-diagnostics.js');
   }
@@ -60,6 +63,12 @@ const translationPolicy =
   globalThis.ChromeAiTranslatorPolicy || require('./translation-policy.js');
 const { ALL_SITES_ORIGINS, BUTTON_VISIBILITY, readButtonVisibility } =
   globalThis.ChromeAiTranslatorButtonVisibility || require('./button-visibility.js');
+const {
+  INLINE_TRANSLATION_CONTROLS,
+  getInlineTranslationControlStep,
+} =
+  globalThis.ChromeAiTranslatorInlineTranslationControls ||
+  require('./inline-translation-controls.js');
 const translationDiagnostics =
   globalThis.ChromeAiTranslatorDiagnostics || require('./translation-diagnostics.js');
 const inlineDiagnosticsProtocol =
@@ -341,6 +350,7 @@ function getInlineContentScriptFiles() {
   return [
     'inline-block.js',
     'inline-diagnostics-protocol.js',
+    'inline-translation-controls.js',
     'full-page-markdown.js',
     'content.js',
   ];
@@ -457,11 +467,19 @@ async function ensureContentScript(tabId) {
 // executes, so the step name is also the instruction sent over the wire.
 const INLINE_INSTRUCTION_MESSAGE = 'RUN_INLINE_INSTRUCTION';
 
+// The content script answers whether it carried the instruction out, and an instruction it
+// refused is as much a failure as one that never arrived — a caller told otherwise would
+// report a gesture that did nothing as done.
 async function sendInlineInstruction(tabId, instruction) {
-  await chrome.tabs.sendMessage(tabId, {
+  const response = await chrome.tabs.sendMessage(tabId, {
     type: INLINE_INSTRUCTION_MESSAGE,
     instruction,
   });
+  if (!response?.ok) {
+    throw new Error(
+      response?.error?.message || `The page could not carry out ${instruction}`
+    );
+  }
 }
 
 const INVOCATION_STEPS = Object.freeze({
@@ -479,6 +497,48 @@ const INLINE_INVOCATION_STEPS = Object.freeze([
 
 function isInvocationTrigger(trigger) {
   return trigger === 'action' || trigger === 'command';
+}
+
+// Every control in the Inline Translation Section grants Inline Translation Authorization
+// before it runs. The section is extension-owned UI a page cannot forge, and the
+// authorization exists to stop a page from triggering translation, not to stop the reader
+// — so a panel left open past the expiry keeps answering its own controls.
+function planInlineTranslationControl(control) {
+  const step = getInlineTranslationControlStep(control);
+  const steps = step
+    ? [INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION, step]
+    : [];
+  return Object.freeze({ control, steps: Object.freeze(steps) });
+}
+
+// Unlike an invocation, whose steps are independent, a control is a single gesture: a
+// refused step stops the rest, because carrying on would run the control unauthorized and
+// leave the reader with a click that silently did nothing.
+async function runInlineTranslationControl(
+  tabId,
+  control,
+  send = sendInlineInstruction
+) {
+  const { steps } = planInlineTranslationControl(control);
+  if (!steps.length) {
+    throw new Error(`Unknown inline translation control: ${control}`);
+  }
+  for (const step of steps) {
+    await send(tabId, step);
+  }
+}
+
+const UNREACHABLE_CONTENT_SCRIPT_PATTERN =
+  /receiving end does not exist|could not establish connection|message port closed/i;
+
+// Chrome's answer when nothing in the tab is listening names no action the reader can
+// take, and the action they need is the one the missing-access failure already asks for.
+function describeInlineTranslationControlFailure(failure) {
+  const message = getFailureMessage(failure);
+  if (UNREACHABLE_CONTENT_SCRIPT_PATTERN.test(message)) {
+    return CONTENT_SCRIPT_FAILURE_MESSAGES.missing_access;
+  }
+  return message || 'Inline translation could not be reached on this tab.';
 }
 
 // Whether the Floating Translate Button should be on the page. This is the background
@@ -522,9 +582,11 @@ function planInvocation(context = {}) {
   return Object.freeze({ trigger, steps: Object.freeze(steps) });
 }
 
-// The steps of a plan that the content script, rather than this worker, carries out — the
-// boundary of what may be sent over the wire. The page-load path hands them over in one
-// answer, having no invocation to push them from.
+// The steps of an invocation plan that the content script, rather than this worker,
+// carries out — the boundary of what an invocation may send over the wire. The Inline
+// Translation Section's controls travel the same wire, but they are the reader's own
+// gestures rather than steps of an invocation, so they are planned separately. The
+// page-load path hands these over in one answer, having no invocation to push them from.
 function getInlineInstructions(plan) {
   return (plan?.steps || []).filter((step) =>
     INLINE_INVOCATION_STEPS.includes(step)
@@ -2472,6 +2534,35 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           });
           return;
         }
+        if (msg?.type === 'RUN_INLINE_TRANSLATION_CONTROL') {
+          try {
+            await runInlineTranslationControl(msg.tabId, msg.control);
+            sendResponse({ ok: true });
+          } catch (e) {
+            sendResponse({
+              ok: false,
+              error: { message: describeInlineTranslationControlFailure(e) },
+            });
+          }
+          return;
+        }
+        if (msg?.type === 'GET_INLINE_TRANSLATION_STATE') {
+          // A tab with no content script has no Inline Translation state to report. That
+          // is not a failure worth showing: the panel polls, and only a control the reader
+          // pressed has an outcome they are waiting on.
+          try {
+            const resp = await chrome.tabs.sendMessage(msg.tabId, {
+              type: 'GET_INLINE_TRANSLATION_STATE',
+            });
+            sendResponse({
+              ok: Boolean(resp?.ok),
+              snapshot: resp?.snapshot || null,
+            });
+          } catch {
+            sendResponse({ ok: false, snapshot: null });
+          }
+          return;
+        }
         if (msg?.type === 'TRANSLATE_VISIBLE_TEXT_BATCH') {
           const translations = await translateVisibleTextBatch(
             msg.records || [],
@@ -2691,6 +2782,10 @@ if (typeof module !== 'undefined' && module.exports) {
     classifyContentScriptFailure,
     ensureSidePanel,
     planInvocation,
+    planInlineTranslationControl,
+    runInlineTranslationControl,
+    sendInlineInstruction,
+    describeInlineTranslationControlFailure,
     getInlineInstructions,
     runInvocation,
     runInvocationPlan,

@@ -25,6 +25,76 @@ exports.tests = [
     },
   },
   {
+    name: 'offers Inline Translation from a state the panel has not heard about yet',
+    fn() {
+      // The panel opens before it has asked the tab anything, and the reader may press a
+      // control in that gap. Nothing is under way, so starting is the only thing on offer.
+      const model = helpers.getInlineTranslationPanelViewModel();
+
+      assert.equal(model.startText, 'Translate visible text');
+      assert.equal(model.startDisabled, false);
+      assert.equal(model.stopDisabled, true);
+      assert.equal(model.restoreDisabled, true);
+      assert.equal(model.statusText, '');
+      assert.equal(model.errorText, '');
+    },
+  },
+  {
+    name: 'offers stopping and restoring only once Inline Translation has run',
+    fn() {
+      const active = helpers.getInlineTranslationPanelViewModel({
+        snapshot: { status: 'active', progress: 'Translated 3 blocks.' },
+      });
+      assert.equal(active.startText, 'Scan visible text');
+      assert.equal(active.startDisabled, false);
+      assert.equal(active.stopDisabled, false);
+      assert.equal(active.restoreDisabled, false);
+      assert.equal(active.statusText, 'Translated 3 blocks.');
+
+      const translating = helpers.getInlineTranslationPanelViewModel({
+        snapshot: { status: 'translating', progress: 'Chunk 1/3' },
+      });
+      assert.equal(translating.startText, 'Translating...');
+      assert.equal(translating.startDisabled, true);
+
+      const stopped = helpers.getInlineTranslationPanelViewModel({
+        snapshot: { status: 'stopped' },
+      });
+      assert.equal(stopped.stopDisabled, true);
+      assert.equal(stopped.restoreDisabled, false);
+
+      const original = helpers.getInlineTranslationPanelViewModel({
+        snapshot: { status: 'original' },
+      });
+      assert.equal(original.stopDisabled, true);
+      assert.equal(original.restoreDisabled, true);
+    },
+  },
+  {
+    name: 'shows the page its own Inline Translation errors, latest gesture first',
+    fn() {
+      assert.equal(
+        helpers.getInlineTranslationPanelViewModel({
+          snapshot: {
+            status: 'original',
+            error: 'Open Options and paste your OpenAI API key.',
+          },
+        }).errorText,
+        'Open Options and paste your OpenAI API key.'
+      );
+
+      // A control the tab never received has no page state to report it, so the panel's
+      // own account of the click it just made takes precedence.
+      assert.equal(
+        helpers.getInlineTranslationPanelViewModel({
+          snapshot: { status: 'original', error: 'Stale page error.' },
+          error: 'Click the extension icon on this tab, then try again.',
+        }).errorText,
+        'Click the extension icon on this tab, then try again.'
+      );
+    },
+  },
+  {
     name: 'saves settings and renders success',
     async fn() {
       const sent = [];
@@ -356,9 +426,13 @@ exports.tests = [
       try {
         delete require.cache[modulePath];
         require('../extension/sidepanel.js');
-        for (let i = 0; i < 8; i += 1) {
+        // Wait for the panel to finish starting up rather than for a fixed number of
+        // ticks: the last thing it does is register the refresh interval, and letting the
+        // fakes be torn down before then leaves a real one-second timer running.
+        for (let i = 0; i < 64 && !refreshInterval; i += 1) {
           await Promise.resolve();
         }
+        assert.equal(typeof refreshInterval, 'function');
 
         getElement('targetLanguage').value = 'Private target';
         getElement('tone').value = 'natural';
@@ -457,6 +531,164 @@ exports.tests = [
         assert.equal(getElement('errorBox').textContent, 'Cannot run on this page.');
         assert.equal(getElement('btnTranslate').disabled, false);
         assert.equal(getElement('saveStatus').textContent, 'Saved.');
+      } finally {
+        global.chrome = previousChrome;
+        global.document = previousDocument;
+        global.setInterval = previousSetInterval;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
+  {
+    name: 'drives Inline Translation from the panel without the Floating Translate Button',
+    async fn() {
+      // The whole section, exercised the way a reader would: the three controls, and the
+      // progress and errors the tab reports back. Nothing here touches the button.
+      const previousChrome = global.chrome;
+      const previousDocument = global.document;
+      const previousSetInterval = global.setInterval;
+      const modulePath = require.resolve('../extension/sidepanel.js');
+      const originalModule = require.cache[modulePath];
+      const elements = new Map();
+      const controls = [];
+      let refreshInterval;
+      let snapshot = { status: 'original', progress: '', error: '' };
+      let controlResponse = { ok: true };
+
+      function getElement(id) {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id,
+            value: '',
+            textContent: '',
+            hidden: false,
+            disabled: false,
+            dataset: {},
+            listeners: {},
+            addEventListener(event, listener) {
+              this.listeners[event] = listener;
+            },
+            setAttribute(name, value) {
+              this[name] = value;
+            },
+          });
+        }
+        return elements.get(id);
+      }
+
+      async function settle() {
+        for (let i = 0; i < 32; i += 1) {
+          await Promise.resolve();
+        }
+      }
+
+      global.setInterval = (callback) => {
+        refreshInterval = callback;
+        return 0;
+      };
+      global.document = {
+        getElementById: getElement,
+        querySelectorAll: () => [],
+      };
+      global.chrome = {
+        tabs: {
+          async query() {
+            return [{ id: 77 }];
+          },
+        },
+        runtime: {
+          onMessage: { addListener() {} },
+          openOptionsPage() {},
+          async sendMessage(message) {
+            if (message.type === 'GET_SETTINGS') {
+              return { ok: true, settings: { targetLanguage: 'Korean' } };
+            }
+            if (message.type === 'GET_STATE') {
+              return { ok: true, state: { status: 'idle' } };
+            }
+            if (message.type === 'GET_INLINE_TRANSLATION_STATE') {
+              return { ok: true, snapshot };
+            }
+            if (message.type === 'RUN_INLINE_TRANSLATION_CONTROL') {
+              controls.push(message);
+              return controlResponse;
+            }
+            return { ok: true };
+          },
+        },
+      };
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/sidepanel.js');
+        for (let i = 0; i < 64 && !refreshInterval; i += 1) {
+          await Promise.resolve();
+        }
+
+        assert.equal(getElement('btnInlineTranslate').textContent, 'Translate visible text');
+        assert.equal(getElement('btnInlineStop').disabled, true);
+        assert.equal(getElement('btnInlineRestore').disabled, true);
+
+        snapshot = { status: 'active', progress: 'Translated 3 blocks.', error: '' };
+        getElement('btnInlineTranslate').listeners.click();
+        await settle();
+
+        assert.deepEqual(controls, [
+          { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 77, control: 'start' },
+        ]);
+        assert.equal(getElement('inlineStatus').textContent, 'Translated 3 blocks.');
+        assert.equal(getElement('btnInlineTranslate').textContent, 'Scan visible text');
+        assert.equal(getElement('btnInlineStop').disabled, false);
+        assert.equal(getElement('btnInlineRestore').disabled, false);
+        assert.equal(getElement('inlineError').hidden, true);
+
+        snapshot = { status: 'stopped', progress: 'Stopped after 3 blocks.', error: '' };
+        getElement('btnInlineStop').listeners.click();
+        await settle();
+
+        assert.equal(controls[1].control, 'stop');
+        assert.equal(getElement('inlineStatus').textContent, 'Stopped after 3 blocks.');
+        assert.equal(getElement('btnInlineStop').disabled, true);
+        assert.equal(getElement('btnInlineRestore').disabled, false);
+
+        snapshot = { status: 'original', progress: '', error: '' };
+        getElement('btnInlineRestore').listeners.click();
+        await settle();
+
+        assert.equal(controls[2].control, 'restore');
+        assert.equal(getElement('inlineStatus').textContent, '');
+        assert.equal(getElement('btnInlineRestore').disabled, true);
+
+        // An error the page reports for itself reaches the panel on the next poll, which
+        // is the only place either side shows it.
+        snapshot = {
+          status: 'original',
+          progress: '',
+          error: 'Open Options and paste your OpenAI API key.',
+        };
+        refreshInterval();
+        await settle();
+        assert.equal(getElement('inlineError').hidden, false);
+        assert.equal(
+          getElement('inlineError').textContent,
+          'Open Options and paste your OpenAI API key.'
+        );
+
+        // A control the tab never received leaves no page state behind to report it.
+        controlResponse = {
+          ok: false,
+          error: {
+            message:
+              'The extension does not have access to this tab. Click the extension icon on this tab, then try again.',
+          },
+        };
+        getElement('btnInlineTranslate').listeners.click();
+        await settle();
+
+        assert.equal(controls.length, 4);
+        assert.match(getElement('inlineError').textContent, /Click the extension icon/);
+        assert.equal(getElement('inlineError').hidden, false);
       } finally {
         global.chrome = previousChrome;
         global.document = previousDocument;

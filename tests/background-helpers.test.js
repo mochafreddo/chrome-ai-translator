@@ -1176,6 +1176,7 @@ exports.tests = [
       assert.deepEqual(helpers.getInlineContentScriptFiles(), [
         'inline-block.js',
         'inline-diagnostics-protocol.js',
+        'inline-translation-controls.js',
         'full-page-markdown.js',
         'content.js',
       ]);
@@ -1317,6 +1318,7 @@ exports.tests = [
             js: [
               'inline-block.js',
               'inline-diagnostics-protocol.js',
+              'inline-translation-controls.js',
               'full-page-markdown.js',
               'content.js',
             ],
@@ -1386,6 +1388,7 @@ exports.tests = [
             js: [
               'inline-block.js',
               'inline-diagnostics-protocol.js',
+              'inline-translation-controls.js',
               'full-page-markdown.js',
               'content.js',
             ],
@@ -2814,6 +2817,156 @@ exports.tests = [
           })
         ),
         ['grantInlineTranslationAuthorization', 'mountFloatingTranslateButton']
+      );
+    },
+  },
+  {
+    name: 'authorizes Inline Translation ahead of every control in the section',
+    fn() {
+      // A control in the Inline Translation Section is a deliberate reader gesture through
+      // extension-owned UI a page cannot forge, so it grants the authorization rather than
+      // requiring one. That is also what keeps a panel left open past the expiry working.
+      assert.deepEqual(helpers.planInlineTranslationControl('start').steps, [
+        'grantInlineTranslationAuthorization',
+        'startInlineTranslation',
+      ]);
+      assert.deepEqual(helpers.planInlineTranslationControl('stop').steps, [
+        'grantInlineTranslationAuthorization',
+        'stopInlineTranslation',
+      ]);
+      assert.deepEqual(helpers.planInlineTranslationControl('restore').steps, [
+        'grantInlineTranslationAuthorization',
+        'restoreInlineOriginal',
+      ]);
+      assert.deepEqual(helpers.planInlineTranslationControl('translateTab').steps, []);
+      assert.deepEqual(helpers.planInlineTranslationControl().steps, []);
+    },
+  },
+  {
+    name: 'only asks the content script for section controls it can carry out',
+    fn() {
+      const understood = Object.keys(
+        contentHelpers.getDefaultInlineInstructionHandlers({})
+      );
+      for (const control of ['start', 'stop', 'restore']) {
+        for (const step of helpers.planInlineTranslationControl(control).steps) {
+          assert.ok(
+            understood.includes(step),
+            `content script cannot run ${step}`
+          );
+        }
+      }
+    },
+  },
+  {
+    name: 'stops a section control at the first step the tab refuses',
+    async fn() {
+      // Unlike an invocation, whose steps are independent, a control is one gesture: if
+      // the authorization did not land, carrying on would run it unauthorized, and the
+      // reader has to be told their click did nothing.
+      const sent = [];
+      await assert.rejects(
+        helpers.runInlineTranslationControl(9, 'start', async (tabId, step) => {
+          sent.push(`${step}:${tabId}`);
+          throw new Error('Could not establish connection.');
+        }),
+        /Could not establish connection/
+      );
+      assert.deepEqual(sent, ['grantInlineTranslationAuthorization:9']);
+
+      await assert.rejects(
+        helpers.runInlineTranslationControl(9, 'nonsense', async () => {}),
+        /nonsense/
+      );
+    },
+  },
+  {
+    name: 'treats an instruction the page refused as a failure, not a success',
+    async fn() {
+      // The content script answers whether it carried the instruction out, and it catches
+      // its own throw to do so. A sender that read only the transport would report a
+      // gesture the page declined as done, and the panel would render success.
+      const previousChrome = global.chrome;
+      global.chrome = {
+        tabs: {
+          async sendMessage() {
+            return { ok: false, error: { message: 'no page to authorize' } };
+          },
+        },
+      };
+      try {
+        await assert.rejects(
+          helpers.sendInlineInstruction(5, 'grantInlineTranslationAuthorization'),
+          /no page to authorize/
+        );
+      } finally {
+        global.chrome = previousChrome;
+      }
+
+      const silentChrome = { tabs: { async sendMessage() {} } };
+      global.chrome = silentChrome;
+      try {
+        await assert.rejects(
+          helpers.sendInlineInstruction(5, 'startInlineTranslation'),
+          /startInlineTranslation/
+        );
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'stops a control at the step the page refuses, before it runs unauthorized',
+    async fn() {
+      const previousChrome = global.chrome;
+      const sent = [];
+      global.chrome = {
+        tabs: {
+          async sendMessage(tabId, message) {
+            sent.push(message.instruction);
+            return message.instruction === 'grantInlineTranslationAuthorization'
+              ? { ok: false, error: { message: 'no page to authorize' } }
+              : { ok: true };
+          },
+        },
+      };
+      try {
+        await assert.rejects(
+          helpers.runInlineTranslationControl(5, 'start'),
+          /no page to authorize/
+        );
+        assert.deepEqual(sent, ['grantInlineTranslationAuthorization']);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'tells the reader what to do when no content script answers a control',
+    fn() {
+      // Chrome's own answer names no action the reader can take, and the action they need
+      // is the one the missing-access failure already asks for.
+      const missingAccess = helpers.classifyContentScriptFailure(
+        new Error('Cannot access contents of the page at url "https://example.com/"'),
+        'https://example.com/'
+      ).message;
+
+      assert.equal(
+        helpers.describeInlineTranslationControlFailure(
+          new Error(
+            'Could not establish connection. Receiving end does not exist.'
+          )
+        ),
+        missingAccess
+      );
+      assert.match(
+        helpers.describeInlineTranslationControlFailure(
+          new Error('Unknown inline translation control: nonsense')
+        ),
+        /nonsense/
+      );
+      assert.ok(
+        helpers.describeInlineTranslationControlFailure(null).length > 0
       );
     },
   },

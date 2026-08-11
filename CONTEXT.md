@@ -13,8 +13,12 @@ Translation of a page's text in place, replacing the visible text on the page it
 _Avoid_: in-page translation, overlay translation, live translation
 
 **Floating Translate Button**:
-The control anchored to the page's bottom-right corner that is the entry point to Inline Translation. It is rendered over the host page and belongs to the extension, not to the site.
+The control anchored to the page's bottom-right corner that is one of the two entry points to Inline Translation, the other being the Inline Translation Section. It is rendered over the host page and belongs to the extension, not to the site. It carries the controls alone: progress and errors are reported in the Inline Translation Section.
 _Avoid_: FAB, inline button, page button, widget
+
+**Inline Translation Section**:
+The side panel's own home for Inline Translation, carrying the same start, stop, and restore controls as the Floating Translate Button, and the only place Inline Translation reports progress and errors. It is separate from the Side Panel Translation controls beside it, which translate something else, put the result somewhere else, and need different permissions.
+_Avoid_: inline panel, panel controls, inline pane
 
 **Button Visibility**:
 The reader's standing choice about when the Floating Translate Button may appear: never, only once the extension has been invoked on that page, or on every ordinary web page. The last of these grants the extension access to all sites; the others revoke it.

@@ -15,6 +15,11 @@ var fullPageMarkdown =
   (typeof module !== 'undefined' && module.exports
     ? require('./full-page-markdown.js')
     : null);
+var inlineTranslationControls =
+  globalThis.ChromeAiTranslatorInlineTranslationControls ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./inline-translation-controls.js')
+    : null);
 
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
@@ -250,10 +255,18 @@ function hasInlineSettingsApiKey(settings) {
 // Translate Button belongs here — that judgment lives in the worker's planning function so
 // that injecting this script and granting Inline Translation Authorization can happen
 // without the button being mounted.
+//
+// Inline Translation has two homes — the Floating Translate Button and the Inline
+// Translation Section in the side panel — and the section reaches this script the same way
+// the worker does. So the three controls are instructions too, and each has one
+// implementation here whatever pressed it.
 function getDefaultInlineInstructionHandlers(state = inlineState) {
   return {
     grantInlineTranslationAuthorization: () => authorizeInlineTranslation(state),
     mountFloatingTranslateButton: () => ensureInlineTranslatorUi(),
+    startInlineTranslation: () => startInlineTranslationRun(),
+    stopInlineTranslation: () => stopInlineTranslationRun(),
+    restoreInlineOriginal: () => restoreInlineOriginal(),
   };
 }
 
@@ -443,6 +456,7 @@ var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   records: [],
   menuOpen: false,
   message: '',
+  error: '',
   operationId: 0,
   authorizedUntil: 0,
   restorableRecords: [],
@@ -1365,6 +1379,9 @@ function getInlineTerminalReason(records) {
   return 'Translation failed: The translation request could not be completed.';
 }
 
+// What the Floating Translate Button shows. Progress and errors are deliberately absent:
+// they are single-sourced in the Inline Translation Section, so the button carries the
+// controls alone and there is no two-way synchronisation to maintain.
 function getInlineTranslatorUiModel(
   state = inlineState,
   settings = state?.translationSettings || INLINE_TRANSLATION_SETTINGS_DEFAULTS
@@ -1373,9 +1390,9 @@ function getInlineTranslatorUiModel(
   const targetLanguage =
     settings?.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage;
   const menuOpen = Boolean(state?.menuOpen);
-  const isActive = status === 'active';
-  const isTranslating = status === 'translating';
-  const canRestore = isActive || status === 'translated' || status === 'stopped';
+  // Which controls are on offer is the shared rule; only the labels are this home's own.
+  const { isActive, isTranslating, canStart, canStop, canRestore } =
+    inlineTranslationControls.getInlineTranslationControlAvailability(status);
 
   return {
     toggleText: isActive
@@ -1386,11 +1403,10 @@ function getInlineTranslatorUiModel(
       ? 'Stopped'
       : 'Translate',
     menuOpen,
-    message: state?.message || '',
     translateText: isActive ? 'Scan visible text' : `Page in ${targetLanguage}`,
-    stopDisabled: !isActive,
+    stopDisabled: !canStop,
     restoreDisabled: !canRestore,
-    translateDisabled: isTranslating,
+    translateDisabled: !canStart,
     expanded: String(menuOpen),
   };
 }
@@ -1860,11 +1876,47 @@ function collectVisibleInlineBlocks(
   return queued;
 }
 
-function setInlineMessage(message) {
+// Progress and errors are kept apart because the side panel, which is now the only place
+// either is shown, has a line for each: one string would leave it guessing which it held.
+function setInlineProgressMessage(message) {
   inlineState.message = message || '';
   updateInlineTranslatorUi();
 }
 
+function setInlineErrorMessage(message) {
+  inlineState.error = message || '';
+  updateInlineTranslatorUi();
+}
+
+function clearInlineFeedback() {
+  inlineState.message = '';
+  inlineState.error = '';
+  updateInlineTranslatorUi();
+}
+
+// What the side panel reads to decide what the Inline Translation Section shows. This
+// script keeps the state; the section's own view model decides how it reads.
+function getInlineTranslationStatusSnapshot(state = inlineState) {
+  return {
+    status: state?.status || 'original',
+    progress: state?.message || '',
+    error: state?.error || '',
+  };
+}
+
+// Why part of a run will not finish. This is an error, not progress: it belongs on the
+// line the panel raises rather than the one it keeps muted, which is what telling the two
+// apart in the state was for.
+function formatInlineViewportErrorText(records, diagnosticsUnavailable = false) {
+  const reasons = [];
+  const terminalReason = getInlineTerminalReason(records);
+  if (terminalReason) reasons.push(terminalReason);
+  if (diagnosticsUnavailable) reasons.push('Diagnostics could not be saved.');
+  return reasons.join('\n');
+}
+
+// The counts are progress. A reason that has been reached is not withdrawn by a later
+// scan, so this only ever sets one — the reader's next attempt is what clears it.
 function updateInlineViewportMessage() {
   const records = inlineState.viewport?.records || [];
   const counts = getInlineViewportStatusCounts(records);
@@ -1872,11 +1924,11 @@ function updateInlineViewportMessage() {
     counts,
     inlineState.status
   );
-  const terminalReason = getInlineTerminalReason(records);
-  if (terminalReason) inlineState.message += `\n${terminalReason}`;
-  if (inlineState.viewport?.diagnosticsUnavailable) {
-    inlineState.message += '\nDiagnostics could not be saved.';
-  }
+  const errorText = formatInlineViewportErrorText(
+    records,
+    Boolean(inlineState.viewport?.diagnosticsUnavailable)
+  );
+  if (errorText) inlineState.error = errorText;
   updateInlineTranslatorUi();
 }
 
@@ -1939,11 +1991,6 @@ function ensureInlineTranslatorUi() {
     [hidden] {
       display: none !important;
     }
-    [data-role="message"] {
-      max-width: 220px;
-      color: #b91c1c;
-      font-size: 12px;
-    }
     </style>
     <div data-role="container">
       <button type="button" data-role="toggle" aria-expanded="false">Translate</button>
@@ -1952,7 +1999,6 @@ function ensureInlineTranslatorUi() {
         <button type="button" data-action="stop">Stop</button>
         <button type="button" data-action="restore">Original text</button>
         <button type="button" data-action="close">Hide this button</button>
-        <div data-role="message"></div>
       </div>
     </div>
   `;
@@ -1965,17 +2011,13 @@ function ensureInlineTranslatorUi() {
     .querySelector('[data-action="translate"]')
     .addEventListener('click', (event) => {
       if (!authorizeInlineTranslationFromUiEvent(event)) return;
-      translateInlinePage().catch((error) =>
-        setInlineMessage(error?.message || String(error))
-      );
+      startInlineTranslationRun();
     });
   inlineUiRoot
     .querySelector('[data-action="stop"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
-      stopInlineViewportTranslation();
-      detachInlineViewportWatchers();
-      updateInlineViewportMessage();
+      stopInlineTranslationRun();
     });
   inlineUiRoot
     .querySelector('[data-action="restore"]')
@@ -2004,7 +2046,6 @@ function updateInlineTranslatorUi() {
   if (!inlineUiRoot) return;
   const toggle = inlineUiRoot.querySelector('[data-role="toggle"]');
   const menu = inlineUiRoot.querySelector('[data-role="menu"]');
-  const message = inlineUiRoot.querySelector('[data-role="message"]');
   const translate = inlineUiRoot.querySelector('[data-action="translate"]');
   const stop = inlineUiRoot.querySelector('[data-action="stop"]');
   const restore = inlineUiRoot.querySelector('[data-action="restore"]');
@@ -2013,7 +2054,6 @@ function updateInlineTranslatorUi() {
   toggle.textContent = model.toggleText;
   toggle.setAttribute('aria-expanded', model.expanded);
   menu.hidden = !model.menuOpen;
-  message.textContent = model.message;
   translate.textContent = model.translateText;
   translate.disabled = model.translateDisabled;
   stop.disabled = model.stopDisabled;
@@ -2025,7 +2065,7 @@ function runInlineViewportScan() {
   if (!store || store.stopped || inlineState.status !== 'active') return;
   const root = store.root || pickArticleRoot();
   if (!root) {
-    setInlineMessage('No article content found.');
+    setInlineErrorMessage('No article content found.');
     return;
   }
   store.root = root;
@@ -2035,7 +2075,7 @@ function runInlineViewportScan() {
   }
   updateInlineViewportMessage();
   drainInlineViewportQueue().catch((error) =>
-    setInlineMessage(error?.message || String(error))
+    setInlineErrorMessage(error?.message || String(error))
   );
 }
 
@@ -2245,7 +2285,7 @@ async function drainInlineViewportQueue() {
         store.inFlight = Math.max(0, store.inFlight - 1);
         updateInlineViewportMessage();
         drainInlineViewportQueue().catch((error) =>
-          setInlineMessage(error?.message || String(error))
+          setInlineErrorMessage(error?.message || String(error))
         );
       });
   }
@@ -2261,7 +2301,7 @@ async function translateInlinePage() {
     return;
   }
   if (!hasInlineTranslationAuthorization()) {
-    setInlineMessage(
+    setInlineErrorMessage(
       'Use the extension toolbar or shortcut first to authorize inline translation.'
     );
     return;
@@ -2275,7 +2315,7 @@ async function translateInlinePage() {
     );
   }
   if (!hasInlineSettingsApiKey(settingsResponse.settings)) {
-    setInlineMessage('Open Options and paste your OpenAI API key.');
+    setInlineErrorMessage('Open Options and paste your OpenAI API key.');
     return;
   }
 
@@ -2318,8 +2358,24 @@ async function translateInlinePage() {
 function restoreInlineOriginal() {
   detachInlineViewportWatchers();
   restoreInlineViewportRecords(inlineState);
-  setInlineMessage('');
+  clearInlineFeedback();
   updateInlineTranslatorUi();
+}
+
+// The three Inline Translation controls, each with one body whichever of its two homes
+// pressed it. Starting clears what the last attempt reported: the reader is asking again,
+// so the previous answer is no longer the current one.
+function startInlineTranslationRun() {
+  setInlineErrorMessage('');
+  translateInlinePage().catch((error) =>
+    setInlineErrorMessage(error?.message || String(error))
+  );
+}
+
+function stopInlineTranslationRun() {
+  stopInlineViewportTranslation();
+  detachInlineViewportWatchers();
+  updateInlineViewportMessage();
 }
 
 async function initInlineTranslator() {
@@ -2378,9 +2434,14 @@ if (
       return true;
     }
 
+    if (msg?.type === 'GET_INLINE_TRANSLATION_STATE') {
+      sendResponse({ ok: true, snapshot: getInlineTranslationStatusSnapshot() });
+      return true;
+    }
+
     if (msg?.type === 'INLINE_TRANSLATION_PROGRESS') {
       if (isCurrentInlineOperation(inlineState, msg.operationId)) {
-        setInlineMessage(formatInlineProgressMessage(msg.progress));
+        setInlineProgressMessage(formatInlineProgressMessage(msg.progress));
       }
       return false;
     }
@@ -2447,7 +2508,9 @@ if (typeof module !== 'undefined' && module.exports) {
     markInlineViewportBatchFailed,
     getInlineViewportStatusCounts,
     formatInlineViewportStatusMessage,
+    formatInlineViewportErrorText,
     getInlineTerminalReason,
+    getInlineTranslationStatusSnapshot,
     getInlineTranslatorUiModel,
     toggleInlineTranslatorMenu,
     runInlineViewportScan,

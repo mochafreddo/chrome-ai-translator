@@ -467,6 +467,99 @@ exports.tests = [
     },
   },
   {
+    name: 'carries out the panel Inline Translation controls as instructions',
+    fn() {
+      // The side panel drives Inline Translation through the same channel the worker uses,
+      // so a control has one implementation whatever pressed it.
+      const handlers = helpers.getDefaultInlineInstructionHandlers();
+
+      for (const control of [
+        'startInlineTranslation',
+        'stopInlineTranslation',
+        'restoreInlineOriginal',
+      ]) {
+        assert.equal(typeof handlers[control], 'function', control);
+      }
+    },
+  },
+  {
+    name: 'reports Inline Translation progress and errors as separate fields',
+    fn() {
+      // The panel is the only place either is shown, and it has a line for each: mixing
+      // them into one string would leave the panel guessing which it had been handed.
+      assert.deepEqual(
+        helpers.getInlineTranslationStatusSnapshot({
+          status: 'active',
+          message: 'Translated 3 blocks.',
+          error: '',
+        }),
+        { status: 'active', progress: 'Translated 3 blocks.', error: '' }
+      );
+
+      assert.deepEqual(
+        helpers.getInlineTranslationStatusSnapshot({
+          status: 'original',
+          error: 'Open Options and paste your OpenAI API key.',
+        }),
+        {
+          status: 'original',
+          progress: '',
+          error: 'Open Options and paste your OpenAI API key.',
+        }
+      );
+
+      assert.deepEqual(helpers.getInlineTranslationStatusSnapshot({}), {
+        status: 'original',
+        progress: '',
+        error: '',
+      });
+    },
+  },
+  {
+    name: 'reports a run that will not finish as an error, not as progress',
+    fn() {
+      // The panel keeps its progress line muted and raises its error line. A translation
+      // that failed reaching the reader as muted status was what the split was for.
+      const failed = [
+        { state: 'failed', errorCode: 'runtime.request_failed' },
+      ];
+
+      assert.match(
+        helpers.formatInlineViewportErrorText(failed),
+        /Translation failed/
+      );
+      assert.equal(
+        helpers.formatInlineViewportErrorText(failed, true),
+        `${helpers.getInlineTerminalReason(failed)}\nDiagnostics could not be saved.`
+      );
+      assert.equal(
+        helpers.formatInlineViewportErrorText([{ state: 'translated' }], true),
+        'Diagnostics could not be saved.'
+      );
+      assert.equal(
+        helpers.formatInlineViewportErrorText([{ state: 'translated' }]),
+        ''
+      );
+      assert.equal(helpers.formatInlineViewportErrorText([]), '');
+    },
+  },
+  {
+    name: 'leaves Inline Translation progress and errors to the side panel',
+    fn() {
+      // Single-sourced in the panel: the Floating Translate Button carries the controls
+      // and nothing else, so there is no two-way synchronisation to maintain.
+      const model = helpers.getInlineTranslatorUiModel({
+        status: 'active',
+        menuOpen: true,
+        message: 'Translated 3 blocks.',
+        error: 'Translation failed.',
+      });
+
+      assert.equal('message' in model, false);
+      assert.doesNotMatch(JSON.stringify(model), /Translated 3 blocks|failed/);
+    },
+  },
+  {
     name: 'brings the Floating Translate Button back with its menu down, not open',
     fn() {
       // The re-mount half of the cycle: mounting renders whatever the state says, so a
@@ -3102,7 +3195,6 @@ exports.tests = [
         {
           toggleText: 'Translate',
           menuOpen: true,
-          message: '',
           translateText: 'Page in Japanese',
           stopDisabled: true,
           restoreDisabled: true,
@@ -3119,7 +3211,6 @@ exports.tests = [
         {
           toggleText: 'Translated',
           menuOpen: false,
-          message: 'Visible translation on',
           translateText: 'Scan visible text',
           stopDisabled: false,
           restoreDisabled: false,

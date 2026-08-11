@@ -67,6 +67,33 @@
       <div id="errorBox" class="error" hidden></div>
     </section>
 
+    <section id="inlineTranslation" class="controls section">
+      <h2 class="section-title">Inline translation</h2>
+      <p class="muted section-hint">
+        Replaces the page's own text in the tab beside this panel, as you scroll.
+      </p>
+
+      <div class="row">
+        <button
+          id="btnInlineTranslate"
+          class="btn primary"
+          aria-describedby="inlineStatus inlineError"
+        >
+          Translate visible text
+        </button>
+        <button id="btnInlineStop" class="btn">Stop</button>
+        <button id="btnInlineRestore" class="btn">Original text</button>
+      </div>
+
+      <div
+        id="inlineStatus"
+        class="muted"
+        role="status"
+        aria-live="polite"
+      ></div>
+      <div id="inlineError" class="error" role="alert" hidden></div>
+    </section>
+
     <main class="main">
       <div class="tabs">
         <button class="tab" data-tab="translated" aria-selected="true">
@@ -84,6 +111,7 @@
       </section>
     </main>
 
+    <script src="inline-translation-controls.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>
