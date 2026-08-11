@@ -2521,4 +2521,133 @@ exports.tests = [
       assert.deepEqual(calls, ['openSidePanel', 'startSidePanelTranslation']);
     },
   },
+  {
+    name: 'tells a reader without tab access to click the extension icon',
+    fn() {
+      // Chrome's wording when neither activeTab nor a host permission covers the tab.
+      const classified = helpers.classifyContentScriptFailure(
+        new Error(
+          'Cannot access contents of the page. Extension manifest must request permission to access the respective host.'
+        ),
+        'https://example.com/article'
+      );
+      assert.equal(classified.reason, 'missing_access');
+      assert.match(classified.message, /extension icon/i);
+      assert.doesNotMatch(classified.message, /chrome:\/\//i);
+    },
+  },
+  {
+    name: 'tells a reader on a page extensions cannot run on that the page is the problem',
+    fn() {
+      for (const [failure, url] of [
+        [new Error('Cannot access a chrome:// URL'), ''],
+        [
+          new Error('Cannot access contents of url "chrome://settings/".'),
+          '',
+        ],
+        [new Error('The extensions gallery cannot be scripted.'), ''],
+        [
+          new Error('Cannot access contents of the page.'),
+          'https://chromewebstore.google.com/detail/abc',
+        ],
+        [new Error('Cannot access contents of the page.'), 'about:blank'],
+      ]) {
+        const classified = helpers.classifyContentScriptFailure(failure, url);
+        assert.equal(
+          classified.reason,
+          'unsupported_page',
+          `expected an unsupported page for: ${failure.message} @ ${url || '(unknown)'}`
+        );
+        assert.match(classified.message, /this page/i);
+      }
+    },
+  },
+  {
+    name: 'does not read a refused scheme it has never heard of as missing access',
+    fn() {
+      // Chrome gives one generic sentence for nearly every page it refuses, so the scheme
+      // it names is what separates them. Enumerating the refused schemes would mis-sort
+      // every one left off the list; only the grantable shape — an ordinary web page — is
+      // enumerable, and these are not it. An SSL interstitial is the everyday case.
+      for (const refused of [
+        'chrome-error://chromewebdata/',
+        'data:text/html,hello',
+        'blob:https://example.com/9a1f',
+        'devtools://devtools/bundled/devtools_app.html',
+      ]) {
+        const classified = helpers.classifyContentScriptFailure(
+          new Error(
+            `Cannot access contents of url "${refused}". Extension manifest must request permission to access this host.`
+          ),
+          ''
+        );
+        assert.equal(
+          classified.reason,
+          'unsupported_page',
+          `expected an unsupported page for ${refused}`
+        );
+      }
+    },
+  },
+  {
+    name: 'sends a reader blocked on a local file to the switch that unblocks it',
+    fn() {
+      // Neither of the two reasons fits: file access is grantable, but not by invoking the
+      // extension on the page, so both other messages would send the reader nowhere.
+      const classified = helpers.classifyContentScriptFailure(
+        new Error(
+          'Cannot access contents of the page. Extension manifest must request permission to access this host.'
+        ),
+        'file:///Users/reader/article.html'
+      );
+      assert.equal(classified.reason, 'file_access');
+      assert.match(classified.message, /Allow access to file URLs/i);
+    },
+  },
+  {
+    name: 'never blames the page when access is the actual problem',
+    fn() {
+      // The message this replaces blamed chrome:// pages for every failure, which is what
+      // sent the diagnosis behind the parent spec down the wrong path for two symptoms.
+      const missingAccess = helpers.classifyContentScriptFailure(
+        new Error(
+          'Cannot access contents of url "https://example.com/". Extension manifest must request permission to access this host.'
+        ),
+        'https://example.com/'
+      );
+      const unsupported = helpers.classifyContentScriptFailure(
+        new Error('Cannot access a chrome:// URL'),
+        'chrome://settings/'
+      );
+      assert.equal(missingAccess.reason, 'missing_access');
+      assert.equal(unsupported.reason, 'unsupported_page');
+      assert.notEqual(missingAccess.message, unsupported.message);
+    },
+  },
+  {
+    name: 'reports a failure it cannot classify as itself',
+    fn() {
+      // Guessing between the two known reasons is how the old message misled. An
+      // unrecognised failure says what happened instead of picking one.
+      const classified = helpers.classifyContentScriptFailure(
+        new Error('Frame with ID 0 is showing error page'),
+        'https://example.com/'
+      );
+      assert.equal(classified.reason, 'unknown');
+      assert.match(classified.message, /Frame with ID 0 is showing error page/);
+
+      // The address can be a navigation behind the failure, so it is only ever read once
+      // Chrome has said it refused the page. On its own it settles nothing.
+      const stale = helpers.classifyContentScriptFailure(
+        new Error('The tab was closed.'),
+        'about:blank'
+      );
+      assert.equal(stale.reason, 'unknown');
+
+      const empty = helpers.classifyContentScriptFailure(null, '');
+      assert.equal(empty.reason, 'unknown');
+      assert.ok(empty.message.length > 0);
+      assert.doesNotMatch(empty.message, /\[object Object\]/);
+    },
+  },
 ];

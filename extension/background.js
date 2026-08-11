@@ -336,6 +336,100 @@ function getInlineContentScriptFiles() {
   ];
 }
 
+// The only pages this extension can ever be granted are the ones its optional host
+// permissions name. Recognising that one shape is what keeps the classification honest:
+// enumerating refused schemes instead would quietly mis-sort every scheme left off the
+// list, and Chrome has many (chrome-error:, data:, blob:, and more).
+const ORDINARY_WEB_PAGE_URL_PATTERN = /^https?:\/\//i;
+const WEB_STORE_URL_PATTERN =
+  /^https?:\/\/(?:chromewebstore\.google\.com|chrome\.google\.com\/webstore)(?:[/?#]|$)/i;
+const LOCAL_FILE_URL_PATTERN = /^file:/i;
+// Chrome's own phrasing, taken from the failures executeScript throws. The first names a
+// page it will not script whatever the extension holds; the second is the generic refusal
+// it gives for everything else, which is why the address decides what that one means.
+const UNSUPPORTED_PAGE_FAILURE_PATTERN =
+  /cannot be scripted|extensions gallery|cannot access a [a-z-]+:\/\/ url/i;
+const REFUSED_ACCESS_FAILURE_PATTERN =
+  /cannot access contents of|must request permission/i;
+
+const CONTENT_SCRIPT_FAILURE_MESSAGES = Object.freeze({
+  missing_access:
+    'The extension does not have access to this tab. Click the extension icon on this tab, then try again.',
+  unsupported_page:
+    'Chrome does not allow extensions to run on this page. Open an ordinary web page and try again.',
+  file_access:
+    'Chrome keeps extensions out of local files. Turn on "Allow access to file URLs" for this extension on chrome://extensions, then try again.',
+});
+
+function getFailureMessage(failure) {
+  if (typeof failure === 'string') return failure.trim();
+  return typeof failure?.message === 'string' ? failure.message.trim() : '';
+}
+
+// Chrome names the page it refused in most of these failures, and that name is better
+// evidence than the address we were passed — which is blank exactly when access is missing,
+// and can be a navigation behind by the time the failure arrives.
+function getRefusedUrl(message) {
+  return /url "([^"]+)"/i.exec(message)?.[1] || '';
+}
+
+// Why the content scripts could not be injected, in the reader's terms. One message used
+// to blame chrome:// pages for every failure, which cost the parent spec's diagnosis two
+// symptoms and an afternoon. Guessing would repeat that, so a failure Chrome has not told
+// us is a refusal is reported as itself rather than assigned to a reason.
+function classifyContentScriptFailure(failure, url = '') {
+  const message = getFailureMessage(failure);
+  const refusesAccess =
+    UNSUPPORTED_PAGE_FAILURE_PATTERN.test(message) ||
+    REFUSED_ACCESS_FAILURE_PATTERN.test(message);
+
+  if (!refusesAccess) {
+    return {
+      reason: 'unknown',
+      message: message
+        ? `Could not reach this page: ${message}`
+        : 'Could not reach this page.',
+    };
+  }
+
+  const address = getRefusedUrl(message) || String(url || '').trim();
+
+  // A local file is neither of the two: the reader can grant it, but not by invoking the
+  // extension on the page, so both other messages would send them somewhere useless.
+  if (LOCAL_FILE_URL_PATTERN.test(address)) {
+    return {
+      reason: 'file_access',
+      message: CONTENT_SCRIPT_FAILURE_MESSAGES.file_access,
+    };
+  }
+
+  if (
+    UNSUPPORTED_PAGE_FAILURE_PATTERN.test(message) ||
+    (address &&
+      (!ORDINARY_WEB_PAGE_URL_PATTERN.test(address) ||
+        WEB_STORE_URL_PATTERN.test(address)))
+  ) {
+    return {
+      reason: 'unsupported_page',
+      message: CONTENT_SCRIPT_FAILURE_MESSAGES.unsupported_page,
+    };
+  }
+
+  return {
+    reason: 'missing_access',
+    message: CONTENT_SCRIPT_FAILURE_MESSAGES.missing_access,
+  };
+}
+
+async function getTabUrl(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return typeof tab?.url === 'string' ? tab.url : '';
+  } catch {
+    return '';
+  }
+}
+
 async function ensureContentScript(tabId) {
   // Programmatic injection: requires "scripting" + "activeTab" (or host permissions)
   try {
@@ -2167,12 +2261,10 @@ async function translateTab(tabId, overrideSettings = null) {
     try {
       await ensureContentScript(tabId);
     } catch (e) {
+      const failure = classifyContentScriptFailure(e, await getTabUrl(tabId));
       setTabState(tabId, {
         status: 'error',
-        error: {
-          message:
-            'Cannot run on this page (e.g., chrome:// pages). Open a normal website tab.',
-        },
+        error: { message: failure.message },
       });
       return { skipped: true, reason: 'content_script_unavailable' };
     }
@@ -2531,6 +2623,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getTextRecordChunkStats,
     getInlineTranslationConcurrency,
     getInlineContentScriptFiles,
+    classifyContentScriptFailure,
     ensureSidePanel,
     planInvocation,
     getInlineInstructions,
