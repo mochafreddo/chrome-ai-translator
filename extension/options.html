@@ -52,10 +52,21 @@
         </label>
       </div>
 
-      <label class="checkbox-label">
-        <input id="inlineAutoShow" type="checkbox" />
-        Show inline translation button automatically on normal web pages
-      </label>
+      <fieldset class="choice-group">
+        <legend>When the floating translate button may appear</legend>
+        <label class="choice-label">
+          <input type="radio" name="buttonVisibility" value="never" />
+          Never — keep it off every page
+        </label>
+        <label class="choice-label">
+          <input type="radio" name="buttonVisibility" value="onInvocation" />
+          Once I have opened this extension on the page
+        </label>
+        <label class="choice-label">
+          <input type="radio" name="buttonVisibility" value="allPages" />
+          On every web page — asks for access to all sites
+        </label>
+      </fieldset>
 
       <div class="row">
         <button id="btnSave" class="btn primary">Save</button>
@@ -79,6 +90,7 @@
       </section>
     </main>
 
+    <script src="button-visibility.js"></script>
     <script src="translation-diagnostics.js"></script>
     <script src="options.js"></script>
   </body>

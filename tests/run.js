@@ -3,6 +3,7 @@ const suites = [
   require('./full-page-markdown.test'),
   require('./openai-response.test'),
   require('./translation-validation.test'),
+  require('./button-visibility.test'),
   require('./translation-policy.test'),
   require('./translation-diagnostics.test'),
   require('./inline-diagnostics-controller.test'),

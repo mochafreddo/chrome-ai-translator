@@ -59,7 +59,27 @@ exports.tests = [
     },
   },
   {
-    name: 'keeps checkbox labels visually attached to their control',
+    name: 'ships the three exclusive Button Visibility choices on the options page',
+    fn() {
+      // The choice is unit-tested on the options helpers, but nothing there would notice if
+      // one of the three controls the reader picks from stopped being rendered.
+      const optionsHtml = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'options.html'),
+        'utf8'
+      );
+      const choices = Array.from(
+        optionsHtml.matchAll(
+          /<input type="radio" name="buttonVisibility" value="([a-zA-Z]+)"/g
+        )
+      ).map((match) => match[1]);
+
+      assert.deepEqual(choices, ['never', 'onInvocation', 'allPages']);
+      assert.equal(optionsHtml.includes('inlineAutoShow'), false);
+      assert.match(optionsHtml, /<script src="button-visibility\.js"><\/script>/);
+    },
+  },
+  {
+    name: 'keeps choice labels visually attached to their control',
     fn() {
       const optionsHtml = fs.readFileSync(
         path.join(__dirname, '..', 'extension', 'options.html'),
@@ -72,12 +92,12 @@ exports.tests = [
 
       assert.match(
         optionsHtml,
-        /<label class="checkbox-label">\s*<input id="inlineAutoShow"/
+        /<label class="choice-label">\s*<input type="radio"/
       );
-      assert.match(css, /\.checkbox-label\s*\{[^}]*display:\s*flex/s);
+      assert.match(css, /\.choice-label\s*\{[^}]*display:\s*flex/s);
       assert.match(
         css,
-        /\.checkbox-label input\[type="checkbox"\]\s*\{[^}]*width:\s*44px/s
+        /\.choice-label input\[type="radio"\]\s*\{[^}]*width:\s*44px/s
       );
     },
   },

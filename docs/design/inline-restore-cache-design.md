@@ -120,7 +120,7 @@ The content script sends a non-secret `settingsSnapshot` with each
 
 `extension/background.js` merges that snapshot into the current settings for the
 visible inline batch, but preserves the current stored `apiKey` and ignores other
-settings such as `chunkMaxChars`, `inlineAutoShow`, and `viewMode`.
+settings such as `chunkMaxChars`, `buttonVisibility`, and `viewMode`.
 
 This keeps a run consistent with the settings used to choose the cache bucket,
 without allowing the content script to provide or override secrets.

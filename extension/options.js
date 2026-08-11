@@ -9,9 +9,9 @@ const elModel = hasDocument ? document.getElementById('model') : null;
 const elChunkMaxChars = hasDocument
   ? document.getElementById('chunkMaxChars')
   : null;
-const elInlineAutoShow = hasDocument
-  ? document.getElementById('inlineAutoShow')
-  : null;
+const elButtonVisibility = hasDocument
+  ? Array.from(document.querySelectorAll('input[name="buttonVisibility"]'))
+  : [];
 
 const elStatus = hasDocument ? document.getElementById('status') : null;
 const elError = hasDocument ? document.getElementById('errorBox') : null;
@@ -22,6 +22,11 @@ const diagnosticsApi = globalThis.ChromeAiTranslatorDiagnostics ||
   (typeof module !== 'undefined' && module.exports
     ? require('./translation-diagnostics.js')
     : null);
+const { ALL_SITES_ORIGINS, BUTTON_VISIBILITY, readButtonVisibility } =
+  globalThis.ChromeAiTranslatorButtonVisibility ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./button-visibility.js')
+    : {});
 
 const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
@@ -51,7 +56,35 @@ async function load() {
   elTone.value = s.tone || 'technical';
   elModel.value = s.model || 'gpt-5.6-luna';
   elChunkMaxChars.value = s.chunkMaxChars || 12000;
-  elInlineAutoShow.checked = Boolean(s.inlineAutoShow);
+  checkChoice(elButtonVisibility, readButtonVisibility(s));
+}
+
+function readCheckedChoice(inputs, fallback) {
+  const checked = (inputs || []).find((input) => input?.checked);
+  return checked ? checked.value : fallback;
+}
+
+function checkChoice(inputs, value) {
+  for (const input of inputs || []) {
+    input.checked = input.value === value;
+  }
+}
+
+// Only the all-pages choice needs access to every site. Choosing either of the others gives
+// that access back, which is what unchecking the old checkbox did.
+//
+// The answer is whether the save may go ahead, which is not the same as whether the access
+// changed. A refused request stops it, because the choice cannot be honoured. A revocation
+// that reports otherwise does not: the worker unregisters the content script for both of
+// those choices regardless, so the button stays off the page either way.
+async function applyButtonVisibilityAccess(chromeApi, visibility) {
+  if (visibility === BUTTON_VISIBILITY.ALL_PAGES) {
+    return Boolean(
+      await chromeApi.permissions.request({ origins: ALL_SITES_ORIGINS })
+    );
+  }
+  await chromeApi.permissions.remove({ origins: ALL_SITES_ORIGINS });
+  return true;
 }
 
 function formatDuration(ms) {
@@ -157,24 +190,26 @@ async function save() {
   setError(null);
   setStatus('Saving...');
 
-  if (elInlineAutoShow.checked) {
-    const granted = await chrome.permissions.request({
-      origins: ['http://*/*', 'https://*/*'],
-    });
-    if (!granted) {
-      elInlineAutoShow.checked = false;
-      setError('Automatic inline button display needs website access permission.');
-      setStatus('');
-      return;
-    }
-  } else {
-    await chrome.permissions.remove({
-      origins: ['http://*/*', 'https://*/*'],
-    });
-  }
+  // Asking for access to all sites needs the reader's gesture, which the first await would
+  // spend — the same constraint ADR-0001 records for opening the side panel. So the request
+  // is started before anything is awaited, and its answer is collected further down.
+  const buttonVisibility = readCheckedChoice(
+    elButtonVisibility,
+    BUTTON_VISIBILITY.NEVER
+  );
+  const accessApplied = applyButtonVisibilityAccess(chrome, buttonVisibility);
 
   const stored = await chrome.storage.local.get(['settings']);
   const prev = stored.settings || {};
+
+  if (!(await accessApplied)) {
+    checkChoice(elButtonVisibility, readButtonVisibility(prev));
+    setError(
+      'Showing the floating translate button on every web page needs access to all sites. Nothing was saved.'
+    );
+    setStatus('');
+    return;
+  }
 
   const next = {
     ...prev,
@@ -182,7 +217,7 @@ async function save() {
     tone: elTone.value,
     model: elModel.value.trim() || 'gpt-5.6-luna',
     chunkMaxChars: Number(elChunkMaxChars.value) || 12000,
-    inlineAutoShow: elInlineAutoShow.checked,
+    buttonVisibility,
   };
 
   const key = elApiKey.value.trim();
@@ -249,7 +284,10 @@ if (hasDocument) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    applyButtonVisibilityAccess,
+    checkChoice,
     clearStoredApiKey,
+    readCheckedChoice,
     collectInlineTranslationLogsFromStorage,
     formatInlineLog,
     formatDiagnosticRun,

@@ -41,6 +41,9 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorPolicy) {
     importScripts('translation-policy.js');
   }
+  if (!globalThis.ChromeAiTranslatorButtonVisibility) {
+    importScripts('button-visibility.js');
+  }
   if (!globalThis.ChromeAiTranslatorDiagnostics) {
     importScripts('translation-diagnostics.js');
   }
@@ -55,6 +58,8 @@ const translationValidation =
   globalThis.ChromeAiTranslatorValidation || require('./translation-validation.js');
 const translationPolicy =
   globalThis.ChromeAiTranslatorPolicy || require('./translation-policy.js');
+const { ALL_SITES_ORIGINS, BUTTON_VISIBILITY, readButtonVisibility } =
+  globalThis.ChromeAiTranslatorButtonVisibility || require('./button-visibility.js');
 const translationDiagnostics =
   globalThis.ChromeAiTranslatorDiagnostics || require('./translation-diagnostics.js');
 const inlineDiagnosticsProtocol =
@@ -72,7 +77,7 @@ const DEFAULT_SETTINGS = {
   chunkMaxChars: 12000,
   cacheEnabled: false,
   cacheTtlDays: 7,
-  inlineAutoShow: false,
+  buttonVisibility: BUTTON_VISIBILITY.NEVER,
 };
 const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULT_SETTINGS));
 const PUBLIC_SETTINGS_USED_KEYS = Object.freeze([
@@ -96,8 +101,9 @@ const PUBLIC_TAB_STATE_KEYS = Object.freeze([
 const MIN_CHUNK_MAX_CHARS = 2000;
 const MAX_CHUNK_MAX_CHARS = 60000;
 const FULL_PAGE_TRANSLATION_MAX_TOTAL_CHARS = 60000;
+// Named after the setting that used to govern it. Chrome keeps a registration under this id
+// across restarts, so renaming it would strand the old one on installs that already have it.
 const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
-const INLINE_ORIGINS = ['http://*/*', 'https://*/*'];
 const INLINE_MAX_RECORDS = 500;
 const INLINE_MAX_TOTAL_CHARS = 60000;
 const INLINE_VISIBLE_BATCH_MAX_CHARS = 2000;
@@ -154,7 +160,7 @@ const TONE_INSTRUCTIONS = {
 // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
 const stateByTab = new Map();
 const activeTranslationsByTab = new Map();
-let inlineAutoShowRegistrationSync = Promise.resolve();
+let buttonVisibilityRegistrationSync = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -192,6 +198,10 @@ function mergeSettings(partial) {
     }
   }
   merged.chunkMaxChars = normalizeChunkMaxChars(merged.chunkMaxChars);
+  // Reading settings is the one place the older `inlineAutoShow` boolean can still arrive
+  // from storage, so it is the place it stops being visible: nothing downstream, and
+  // nothing written back, knows about it.
+  merged.buttonVisibility = readButtonVisibility(partial);
   return merged;
 }
 
@@ -474,15 +484,18 @@ function isInvocationTrigger(trigger) {
 // Whether the Floating Translate Button should be on the page. This is the background
 // worker's call, not the content script's: injecting the content scripts and granting
 // Inline Translation Authorization are separate steps that must be able to happen without
-// the button appearing. An invocation always mounts it; a page load only mounts it where
-// the reader chose to see it on every page — `inlineAutoShow` is the stored key for that
-// choice.
+// the button appearing — which is exactly what the never choice asks for.
+//
+// The reader's Button Visibility choice decides it: never keeps the button off an invoked
+// page too, on invocation mounts it only where the reader invoked the extension, and all
+// pages mounts it on a plain page load as well.
 function shouldMountFloatingTranslateButton(context = {}) {
+  const visibility = readButtonVisibility(context.settings);
+  if (visibility === BUTTON_VISIBILITY.NEVER) return false;
   if (isInvocationTrigger(context.trigger)) return true;
-  if (context.trigger === 'pageLoad') {
-    return Boolean(context.settings?.inlineAutoShow);
-  }
-  return false;
+  return (
+    context.trigger === 'pageLoad' && visibility === BUTTON_VISIBILITY.ALL_PAGES
+  );
 }
 
 // What one invocation of the extension should do, decided without touching any browser
@@ -541,6 +554,8 @@ function getDefaultInvocationHandlers() {
 // The first step must run before this function awaits anything, because ADR-0001's
 // gesture window is spent by the first await on the path from the listener to
 // chrome.sidePanel.open(). Adding an await above the loop is the regression to fear.
+// `runInvocation` below now starts that step itself, and holds the same line; keeping the
+// property here as well costs nothing and keeps a plan run on its own honest.
 //
 // Steps are otherwise independent: content script injection legitimately fails on pages
 // extensions cannot touch, and that must not stop a command invocation from translating.
@@ -556,6 +571,35 @@ async function runInvocationPlan(
       await handler(tabId);
     } catch {}
   }
+}
+
+// An invocation's plan needs the reader's Button Visibility choice, which only storage can
+// answer and only asynchronously — yet ADR-0001's gesture is spent by the first await ahead
+// of chrome.sidePanel.open(). So the panel-opening step is started here, in the event's own
+// task, and the plan that follows adopts it instead of opening a second panel.
+//
+// Only the two invocation triggers belong here, because the panel opens before the plan is
+// known. A page load has no gesture to spend and asks the worker for its instructions.
+async function runInvocation(
+  trigger,
+  tabId,
+  handlers = getDefaultInvocationHandlers()
+) {
+  const openedSidePanel = startSidePanelStep(handlers, tabId);
+  const settings = await getSettings();
+  return runInvocationPlan(planInvocation({ trigger, settings }), tabId, {
+    ...handlers,
+    [INVOCATION_STEPS.OPEN_SIDE_PANEL]: () => openedSidePanel,
+  });
+}
+
+function startSidePanelStep(handlers, tabId) {
+  const handler = handlers?.[INVOCATION_STEPS.OPEN_SIDE_PANEL];
+  const started = (async () => handler?.(tabId))();
+  // The plan observes the failure a moment later, when it reaches the step. Marking the
+  // promise handled now keeps that gap from being reported as an unhandled rejection.
+  started.catch(() => {});
+  return started;
 }
 
 async function extractArticle(tabId) {
@@ -2127,15 +2171,15 @@ async function translateVisibleBlockBatch(
   }
 }
 
-async function hasInlineAutoShowPermission() {
+async function hasAllSitesAccess() {
   if (!chrome.permissions?.contains) return false;
-  return chrome.permissions.contains({ origins: INLINE_ORIGINS });
+  return chrome.permissions.contains({ origins: ALL_SITES_ORIGINS });
 }
 
-function getInlineAutoShowContentScript() {
+function getAllPagesContentScript() {
   return {
     id: INLINE_CONTENT_SCRIPT_ID,
-    matches: INLINE_ORIGINS,
+    matches: ALL_SITES_ORIGINS,
     js: getInlineContentScriptFiles(),
     runAt: 'document_idle',
   };
@@ -2147,7 +2191,7 @@ function isDuplicateInlineContentScriptError(error) {
   );
 }
 
-async function getRegisteredInlineAutoShowContentScript() {
+async function getRegisteredAllPagesContentScript() {
   if (!chrome.scripting.getRegisteredContentScripts) return null;
   const scripts = await chrome.scripting.getRegisteredContentScripts({
     ids: [INLINE_CONTENT_SCRIPT_ID],
@@ -2155,7 +2199,7 @@ async function getRegisteredInlineAutoShowContentScript() {
   return (scripts || []).find((script) => script?.id === INLINE_CONTENT_SCRIPT_ID);
 }
 
-async function updateInlineAutoShowContentScript(script) {
+async function updateAllPagesContentScript(script) {
   if (!chrome.scripting.updateContentScripts) return false;
   try {
     await chrome.scripting.updateContentScripts([script]);
@@ -2166,58 +2210,79 @@ async function updateInlineAutoShowContentScript(script) {
   }
 }
 
-async function syncInlineAutoShowRegistration(settings = null) {
-  const previousSync = inlineAutoShowRegistrationSync.catch(() => {});
+async function syncButtonVisibilityRegistration(settings = null) {
+  const previousSync = buttonVisibilityRegistrationSync.catch(() => {});
   const nextSync = previousSync.then(() =>
-    syncInlineAutoShowRegistrationNow(settings)
+    syncButtonVisibilityRegistrationNow(settings)
   );
-  inlineAutoShowRegistrationSync = nextSync;
+  buttonVisibilityRegistrationSync = nextSync;
   return nextSync;
 }
 
-async function syncInlineAutoShowRegistrationSafely(settings = null) {
+async function syncButtonVisibilityRegistrationSafely(settings = null) {
   try {
-    await syncInlineAutoShowRegistration(settings);
+    await syncButtonVisibilityRegistration(settings);
     return true;
   } catch {
     return false;
   }
 }
 
-async function syncInlineAutoShowRegistrationNow(settings = null) {
-  const effective = settings || (await getSettings());
-  const canAutoShow =
-    effective.inlineAutoShow && (await hasInlineAutoShowPermission());
+async function unregisterAllPagesContentScript() {
+  try {
+    await chrome.scripting.unregisterContentScripts({
+      ids: [INLINE_CONTENT_SCRIPT_ID],
+    });
+  } catch {}
+}
 
-  if (!canAutoShow) {
+// Brings both things the all-pages choice needs — access to every site and a content script
+// registered across pages — into line with the choice the reader has made.
+async function syncButtonVisibilityRegistrationNow(settings = null) {
+  const effective = settings || (await getSettings());
+  const visibility = readButtonVisibility(effective);
+
+  if (visibility !== BUTTON_VISIBILITY.ALL_PAGES) {
+    await unregisterAllPagesContentScript();
+    // Giving the access back belongs here as well as on the options page: an install
+    // migrating off the old checkbox reaches never without the reader opening options at
+    // all, and the access that checkbox asked for would otherwise outlive it.
     try {
-      await chrome.scripting.unregisterContentScripts({
-        ids: [INLINE_CONTENT_SCRIPT_ID],
-      });
+      if (chrome.permissions?.remove) {
+        await chrome.permissions.remove({ origins: ALL_SITES_ORIGINS });
+      }
     } catch {}
     return;
   }
 
-  const inlineContentScript = getInlineAutoShowContentScript();
+  // Registering the content script across pages is what lets the button appear without the
+  // reader invoking the extension. It needs the access the choice asked for, which Chrome's
+  // own UI can revoke without the options page ever hearing about it.
+  if (!(await hasAllSitesAccess())) {
+    await unregisterAllPagesContentScript();
+    return;
+  }
+
+  const allPagesContentScript = getAllPagesContentScript();
   try {
     if (
       chrome.scripting.updateContentScripts &&
-      (await getRegisteredInlineAutoShowContentScript())
+      (await getRegisteredAllPagesContentScript())
     ) {
-      if (await updateInlineAutoShowContentScript(inlineContentScript)) return;
+      if (await updateAllPagesContentScript(allPagesContentScript)) return;
     }
   } catch {}
 
   try {
-    await chrome.scripting.registerContentScripts([inlineContentScript]);
+    await chrome.scripting.registerContentScripts([allPagesContentScript]);
   } catch (error) {
     if (isDuplicateInlineContentScriptError(error)) {
-      if (await updateInlineAutoShowContentScript(inlineContentScript)) return;
+      if (await updateAllPagesContentScript(allPagesContentScript)) return;
       try {
         await chrome.scripting.unregisterContentScripts({
           ids: [INLINE_CONTENT_SCRIPT_ID],
         });
-        await chrome.scripting.registerContentScripts([inlineContentScript]);
+        await chrome.scripting.registerContentScripts([allPagesContentScript]);
       } catch {}
       return;
     }
@@ -2359,20 +2424,20 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onInstalled.addListener(async () => {
     const settings = await getSettings();
     await saveSettings(settings);
-    await syncInlineAutoShowRegistrationSafely(settings);
+    await syncButtonVisibilityRegistrationSafely(settings);
     await releaseActionClickToExtension();
   });
 
   chrome.runtime.onStartup.addListener(async () => {
     await releaseActionClickToExtension();
-    await syncInlineAutoShowRegistrationSafely();
+    await syncButtonVisibilityRegistrationSafely();
   });
 
-  // Deliberately not async: the plan's first step opens the side panel, and awaiting
-  // anything before it would forfeit the user gesture Chrome requires (ADR-0001).
+  // Deliberately not async: the first step opens the side panel, and awaiting anything
+  // before it would forfeit the user gesture Chrome requires (ADR-0001).
   chrome.action.onClicked.addListener((tab) => {
     if (!tab?.id) return;
-    runInvocationPlan(planInvocation({ trigger: 'action' }), tab.id);
+    runInvocation('action', tab.id);
   });
 
   chrome.commands.onCommand.addListener(async (command) => {
@@ -2380,7 +2445,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tabId = tabs?.[0]?.id;
     if (!tabId) return;
-    await runInvocationPlan(planInvocation({ trigger: 'command' }), tabId);
+    await runInvocation('command', tabId);
   });
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -2590,7 +2655,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           const current = await getSettings();
           const next = mergeSettingsWithExisting(current, msg.settings || {});
           await saveSettings(next);
-          await syncInlineAutoShowRegistrationSafely(next);
+          await syncButtonVisibilityRegistrationSafely(next);
           sendResponse({ ok: true });
           return;
         }
@@ -2627,6 +2692,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ensureSidePanel,
     planInvocation,
     getInlineInstructions,
+    runInvocation,
     runInvocationPlan,
     getInlineTranslationLogStorageKey,
     collectInlineTranslationLogsFromStorage,
@@ -2641,8 +2707,8 @@ if (typeof module !== 'undefined' && module.exports) {
     assertTextRecordBudget,
     openaiTranslateChunk,
     translateFullPageChunk,
-    syncInlineAutoShowRegistration,
-    syncInlineAutoShowRegistrationSafely,
+    syncButtonVisibilityRegistration,
+    syncButtonVisibilityRegistrationSafely,
     translateVisibleBlockBatch,
     createRuntimeDiagnosticId,
   };

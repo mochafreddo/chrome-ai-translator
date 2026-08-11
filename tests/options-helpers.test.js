@@ -1,8 +1,116 @@
 const assert = require('node:assert/strict');
 const helpers = require('../extension/options.js');
+const { readButtonVisibility } = require('../extension/button-visibility.js');
+
+const ALL_SITES = ['http://*/*', 'https://*/*'];
+
+function createPermissionsChrome({ granted = true } = {}) {
+  const calls = [];
+  return {
+    calls,
+    permissions: {
+      async request(filter) {
+        calls.push(['request', filter.origins]);
+        return granted;
+      },
+      async remove(filter) {
+        calls.push(['remove', filter.origins]);
+        return true;
+      },
+    },
+  };
+}
+
+function createChoiceInputs(checkedValue = null) {
+  return ['never', 'onInvocation', 'allPages'].map((value) => ({
+    value,
+    checked: value === checkedValue,
+  }));
+}
 
 exports.name = 'options helpers';
 exports.tests = [
+  {
+    name: 'asks for access to all sites only for the all-pages choice',
+    async fn() {
+      const fakeChrome = createPermissionsChrome();
+
+      assert.equal(
+        await helpers.applyButtonVisibilityAccess(fakeChrome, 'allPages'),
+        true
+      );
+      assert.deepEqual(fakeChrome.calls, [['request', ALL_SITES]]);
+    },
+  },
+  {
+    name: 'gives access to all sites back for the other two choices',
+    async fn() {
+      const fakeChrome = createPermissionsChrome();
+
+      for (const visibility of ['never', 'onInvocation']) {
+        assert.equal(
+          await helpers.applyButtonVisibilityAccess(fakeChrome, visibility),
+          true
+        );
+      }
+      assert.deepEqual(fakeChrome.calls, [
+        ['remove', ALL_SITES],
+        ['remove', ALL_SITES],
+      ]);
+    },
+  },
+  {
+    name: 'reports a refused request for access to all sites',
+    async fn() {
+      const fakeChrome = createPermissionsChrome({ granted: false });
+
+      assert.equal(
+        await helpers.applyButtonVisibilityAccess(fakeChrome, 'allPages'),
+        false
+      );
+    },
+  },
+  {
+    name: 'reads the chosen Button Visibility from the three controls',
+    fn() {
+      assert.equal(
+        helpers.readCheckedChoice(createChoiceInputs('onInvocation'), 'never'),
+        'onInvocation'
+      );
+      assert.equal(
+        helpers.readCheckedChoice(createChoiceInputs(), 'never'),
+        'never'
+      );
+      assert.equal(helpers.readCheckedChoice(undefined, 'never'), 'never');
+    },
+  },
+  {
+    name: 'shows a migrated install its all-pages choice',
+    fn() {
+      // The options page reads storage itself, so it has to see the same migration the
+      // worker does — otherwise it would offer never to a reader who had the old checkbox on
+      // and quietly revoke their access on the next save.
+      const inputs = createChoiceInputs();
+      helpers.checkChoice(inputs, readButtonVisibility({ inlineAutoShow: true }));
+
+      assert.deepEqual(
+        inputs.filter((input) => input.checked).map((input) => input.value),
+        ['allPages']
+      );
+    },
+  },
+  {
+    name: 'leaves exactly one Button Visibility choice checked',
+    fn() {
+      const inputs = createChoiceInputs('allPages');
+      helpers.checkChoice(inputs, 'never');
+
+      assert.deepEqual(
+        inputs.filter((input) => input.checked).map((input) => input.value),
+        ['never']
+      );
+    },
+  },
   {
     name: 'clears current and legacy API key storage',
     async fn() {

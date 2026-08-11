@@ -725,7 +725,7 @@ exports.tests = [
         {
           apiKey: 'sk-existing',
           chunkMaxChars: 9000,
-          inlineAutoShow: true,
+          buttonVisibility: 'allPages',
           targetLanguage: 'Korean',
           tone: 'technical',
           model: 'gpt-5-mini',
@@ -741,11 +741,42 @@ exports.tests = [
 
       assert.equal(next.apiKey, 'sk-existing');
       assert.equal(next.chunkMaxChars, 9000);
-      assert.equal(next.inlineAutoShow, true);
+      assert.equal(next.buttonVisibility, 'allPages');
       assert.equal(next.targetLanguage, 'Japanese');
       assert.equal(next.tone, 'formal');
       assert.equal(next.model, 'gpt-5');
       assert.equal(next.viewMode, 'bilingual');
+    },
+  },
+  {
+    name: 'migrates the old inline button checkbox to a Button Visibility choice',
+    fn() {
+      // Settings saved before the three states still hold the boolean. Merging is where
+      // storage is read, so it is where the older shape stops being visible — and the
+      // boolean is not written back.
+      const migrated = helpers.mergeSettingsWithExisting(
+        { inlineAutoShow: true, targetLanguage: 'Korean' },
+        {}
+      );
+      assert.equal(migrated.buttonVisibility, 'allPages');
+      assert.equal(Object.hasOwn(migrated, 'inlineAutoShow'), false);
+
+      assert.equal(
+        helpers.mergeSettingsWithExisting({ inlineAutoShow: false }, {})
+          .buttonVisibility,
+        'never'
+      );
+      assert.equal(helpers.mergeSettingsWithExisting({}, {}).buttonVisibility, 'never');
+    },
+  },
+  {
+    name: 'lets a saved Button Visibility choice replace the migrated one',
+    fn() {
+      const next = helpers.mergeSettingsWithExisting(
+        { inlineAutoShow: true },
+        { buttonVisibility: 'onInvocation' }
+      );
+      assert.equal(next.buttonVisibility, 'onInvocation');
     },
   },
   {
@@ -776,7 +807,7 @@ exports.tests = [
         {
           apiKey: 'sk-current',
           chunkMaxChars: 9000,
-          inlineAutoShow: true,
+          buttonVisibility: 'allPages',
           targetLanguage: 'Korean',
           tone: 'technical',
           model: 'gpt-5.4-mini',
@@ -786,7 +817,7 @@ exports.tests = [
         {
           apiKey: 'sk-from-content',
           chunkMaxChars: 24000,
-          inlineAutoShow: false,
+          buttonVisibility: 'never',
           targetLanguage: 'Japanese',
           tone: 'natural',
           model: 'gpt-5.4',
@@ -797,7 +828,7 @@ exports.tests = [
 
       assert.equal(settings.apiKey, 'sk-current');
       assert.equal(settings.chunkMaxChars, 9000);
-      assert.equal(settings.inlineAutoShow, true);
+      assert.equal(settings.buttonVisibility, 'allPages');
       assert.equal(settings.viewMode, 'translation');
       assert.equal(settings.targetLanguage, 'Japanese');
       assert.equal(settings.tone, 'natural');
@@ -1184,7 +1215,7 @@ exports.tests = [
     },
   },
   {
-    name: 'serializes concurrent inline auto-show content script registration',
+    name: 'serializes concurrent all-pages content script registration',
     async fn() {
       const previousChrome = global.chrome;
       const registered = new Map();
@@ -1217,8 +1248,8 @@ exports.tests = [
 
       try {
         await Promise.all([
-          helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true }),
-          helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true }),
+          helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' }),
+          helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' }),
         ]);
 
         assert.equal(registered.size, 1);
@@ -1232,7 +1263,7 @@ exports.tests = [
     },
   },
   {
-    name: 'updates existing inline auto-show content script after duplicate registration',
+    name: 'updates existing all-pages content script after duplicate registration',
     async fn() {
       const previousChrome = global.chrome;
       const registered = new Map([
@@ -1276,7 +1307,7 @@ exports.tests = [
       };
 
       try {
-        await helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true });
+        await helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
 
         assert.deepEqual(
           registered.get('inline-translator-auto-show'),
@@ -1298,7 +1329,7 @@ exports.tests = [
     },
   },
   {
-    name: 'updates registered inline auto-show content script without duplicate registration',
+    name: 'updates registered all-pages content script without duplicate registration',
     async fn() {
       const previousChrome = global.chrome;
       const registered = new Map([
@@ -1345,7 +1376,7 @@ exports.tests = [
       };
 
       try {
-        await helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true });
+        await helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
 
         assert.deepEqual(
           registered.get('inline-translator-auto-show'),
@@ -1367,7 +1398,7 @@ exports.tests = [
     },
   },
   {
-    name: 'does not throw when inline auto-show duplicate recovery fails',
+    name: 'does not throw when all-pages duplicate recovery fails',
     async fn() {
       const previousChrome = global.chrome;
 
@@ -1394,14 +1425,14 @@ exports.tests = [
       };
 
       try {
-        await helpers.syncInlineAutoShowRegistration({ inlineAutoShow: true });
+        await helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
       } finally {
         global.chrome = previousChrome;
       }
     },
   },
   {
-    name: 'safely ignores inline auto-show registration failures from runtime events',
+    name: 'safely ignores all-pages registration failures from runtime events',
     async fn() {
       const previousChrome = global.chrome;
 
@@ -1423,11 +1454,169 @@ exports.tests = [
 
       try {
         assert.equal(
-          await helpers.syncInlineAutoShowRegistrationSafely({
-            inlineAutoShow: true,
+          await helpers.syncButtonVisibilityRegistrationSafely({
+            buttonVisibility: 'allPages',
           }),
           false
         );
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'registers the content script across pages for the all-pages choice alone',
+    async fn() {
+      // Registering it is what lets the button appear without the reader invoking the
+      // extension. The other two choices must leave no registration behind, or a reader who
+      // moved away from all pages would keep getting the button on every page.
+      const previousChrome = global.chrome;
+
+      for (const [visibility, expected] of [
+        ['allPages', ['inline-translator-auto-show']],
+        ['onInvocation', []],
+        ['never', []],
+      ]) {
+        const registered = new Map([
+          ['inline-translator-auto-show', { id: 'inline-translator-auto-show' }],
+        ]);
+
+        global.chrome = {
+          permissions: {
+            async contains() {
+              return true;
+            },
+          },
+          scripting: {
+            async getRegisteredContentScripts({ ids }) {
+              return Array.from(registered.values()).filter((script) =>
+                ids.includes(script.id)
+              );
+            },
+            async unregisterContentScripts({ ids }) {
+              for (const id of ids || []) registered.delete(id);
+            },
+            async updateContentScripts(scripts) {
+              for (const script of scripts || []) registered.set(script.id, script);
+            },
+            async registerContentScripts(scripts) {
+              for (const script of scripts || []) registered.set(script.id, script);
+            },
+          },
+        };
+
+        try {
+          await helpers.syncButtonVisibilityRegistration({
+            buttonVisibility: visibility,
+          });
+          assert.deepEqual(Array.from(registered.keys()), expected, visibility);
+        } finally {
+          global.chrome = previousChrome;
+        }
+      }
+    },
+  },
+  {
+    name: 'gives back access to all sites for the two choices that do not need it',
+    async fn() {
+      // An install migrating off the old checkbox reaches never without the reader opening
+      // the options page, so the access the checkbox asked for has to be given back here.
+      const previousChrome = global.chrome;
+      const removed = [];
+
+      global.chrome = {
+        permissions: {
+          async contains() {
+            return true;
+          },
+          async remove({ origins }) {
+            removed.push(origins);
+            return true;
+          },
+        },
+        scripting: {
+          async unregisterContentScripts() {},
+        },
+      };
+
+      try {
+        await helpers.syncButtonVisibilityRegistration({ inlineAutoShow: false });
+        await helpers.syncButtonVisibilityRegistration({
+          buttonVisibility: 'onInvocation',
+        });
+        assert.deepEqual(removed, [
+          ['http://*/*', 'https://*/*'],
+          ['http://*/*', 'https://*/*'],
+        ]);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'keeps access to all sites for the all-pages choice',
+    async fn() {
+      const previousChrome = global.chrome;
+      let removed = false;
+
+      global.chrome = {
+        permissions: {
+          async contains() {
+            return true;
+          },
+          async remove() {
+            removed = true;
+            return true;
+          },
+        },
+        scripting: {
+          async getRegisteredContentScripts() {
+            return [];
+          },
+          async registerContentScripts() {},
+          async unregisterContentScripts() {},
+        },
+      };
+
+      try {
+        await helpers.syncButtonVisibilityRegistration({
+          buttonVisibility: 'allPages',
+        });
+        assert.equal(removed, false);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'keeps the content script unregistered without access to all sites',
+    async fn() {
+      // The choice and the permission can disagree: Chrome lets the reader revoke access
+      // from its own UI, which no longer reaches the options page.
+      const previousChrome = global.chrome;
+      const unregistered = [];
+
+      global.chrome = {
+        permissions: {
+          async contains() {
+            return false;
+          },
+        },
+        scripting: {
+          async unregisterContentScripts({ ids }) {
+            unregistered.push(...(ids || []));
+          },
+          async registerContentScripts() {
+            throw new Error('registered without access to all sites');
+          },
+        },
+      };
+
+      try {
+        await helpers.syncButtonVisibilityRegistration({
+          buttonVisibility: 'allPages',
+        });
+        assert.deepEqual(unregistered, ['inline-translator-auto-show']);
       } finally {
         global.chrome = previousChrome;
       }
@@ -2367,15 +2556,41 @@ exports.tests = [
     },
   },
   {
-    name: 'mounts the Floating Translate Button for every invocation trigger',
+    name: 'never mounts the Floating Translate Button where the reader chose never',
+    fn() {
+      // The invocation still injects the content scripts and grants Inline Translation
+      // Authorization. Mounting the button is a separate step, which is the whole reason
+      // never can be honoured without switching the rest of an invocation off with it.
+      for (const trigger of ['action', 'command', 'pageLoad']) {
+        assert.equal(
+          helpers
+            .planInvocation({ trigger, settings: { buttonVisibility: 'never' } })
+            .steps.includes('mountFloatingTranslateButton'),
+          false
+        );
+      }
+    },
+  },
+  {
+    name: 'mounts the Floating Translate Button on invocation where the reader chose on invocation',
     fn() {
       for (const trigger of ['action', 'command']) {
         assert.ok(
           helpers
-            .planInvocation({ trigger })
+            .planInvocation({
+              trigger,
+              settings: { buttonVisibility: 'onInvocation' },
+            })
             .steps.includes('mountFloatingTranslateButton')
         );
       }
+      assert.deepEqual(
+        helpers.planInvocation({
+          trigger: 'pageLoad',
+          settings: { buttonVisibility: 'onInvocation' },
+        }).steps,
+        []
+      );
     },
   },
   {
@@ -2384,9 +2599,30 @@ exports.tests = [
       assert.deepEqual(
         helpers.planInvocation({
           trigger: 'pageLoad',
-          settings: { inlineAutoShow: true },
+          settings: { buttonVisibility: 'allPages' },
         }).steps,
         ['mountFloatingTranslateButton']
+      );
+      assert.deepEqual(
+        helpers.planInvocation({
+          trigger: 'pageLoad',
+          settings: { buttonVisibility: 'never' },
+        }).steps,
+        []
+      );
+      assert.deepEqual(helpers.planInvocation({ trigger: 'pageLoad' }).steps, []);
+    },
+  },
+  {
+    name: 'plans an invocation from a migrated install as the old checkbox did',
+    fn() {
+      assert.ok(
+        helpers
+          .planInvocation({
+            trigger: 'pageLoad',
+            settings: { buttonVisibility: 'allPages' },
+          })
+          .steps.includes('mountFloatingTranslateButton')
       );
       assert.deepEqual(
         helpers.planInvocation({
@@ -2395,25 +2631,116 @@ exports.tests = [
         }).steps,
         []
       );
-      assert.deepEqual(helpers.planInvocation({ trigger: 'pageLoad' }).steps, []);
     },
   },
   {
     name: 'starts a side panel translation for the command but not the toolbar action',
     fn() {
-      assert.deepEqual(helpers.planInvocation({ trigger: 'action' }).steps, [
-        'openSidePanel',
-        'injectContentScripts',
-        'grantInlineTranslationAuthorization',
-        'mountFloatingTranslateButton',
-      ]);
-      assert.deepEqual(helpers.planInvocation({ trigger: 'command' }).steps, [
-        'openSidePanel',
-        'injectContentScripts',
-        'grantInlineTranslationAuthorization',
-        'mountFloatingTranslateButton',
-        'startSidePanelTranslation',
-      ]);
+      const settings = { buttonVisibility: 'onInvocation' };
+      assert.deepEqual(
+        helpers.planInvocation({ trigger: 'action', settings }).steps,
+        [
+          'openSidePanel',
+          'injectContentScripts',
+          'grantInlineTranslationAuthorization',
+          'mountFloatingTranslateButton',
+        ]
+      );
+      assert.deepEqual(
+        helpers.planInvocation({ trigger: 'command', settings }).steps,
+        [
+          'openSidePanel',
+          'injectContentScripts',
+          'grantInlineTranslationAuthorization',
+          'mountFloatingTranslateButton',
+          'startSidePanelTranslation',
+        ]
+      );
+    },
+  },
+  {
+    name: 'opens the side panel before reading the settings the rest of the plan needs',
+    async fn() {
+      // ADR-0001: the panel opens only from inside the click's own task, and Button
+      // Visibility can only be read asynchronously. Reading it first would forfeit the
+      // gesture — silently, since Chrome simply refuses to open the panel.
+      const previousChrome = global.chrome;
+      const calls = [];
+      let releaseSettings = null;
+
+      global.chrome = {
+        storage: {
+          local: {
+            get() {
+              calls.push('readSettings');
+              return new Promise((resolve) => {
+                releaseSettings = () =>
+                  resolve({ settings: { buttonVisibility: 'onInvocation' } });
+              });
+            },
+          },
+        },
+      };
+
+      try {
+        const running = helpers.runInvocation('action', 9, {
+          openSidePanel: async (tabId) => calls.push(`openSidePanel:${tabId}`),
+          injectContentScripts: async () => calls.push('injectContentScripts'),
+          grantInlineTranslationAuthorization: async () =>
+            calls.push('grantInlineTranslationAuthorization'),
+          mountFloatingTranslateButton: async () =>
+            calls.push('mountFloatingTranslateButton'),
+        });
+
+        assert.deepEqual(calls, ['openSidePanel:9', 'readSettings']);
+        releaseSettings();
+        await running;
+        assert.deepEqual(calls, [
+          'openSidePanel:9',
+          'readSettings',
+          'injectContentScripts',
+          'grantInlineTranslationAuthorization',
+          'mountFloatingTranslateButton',
+        ]);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'opens the side panel exactly once per invocation',
+    async fn() {
+      // The step is started before the plan runs, so the plan must adopt what is already
+      // running rather than open a second panel.
+      const previousChrome = global.chrome;
+      const calls = [];
+
+      global.chrome = {
+        storage: {
+          local: {
+            async get() {
+              return { settings: { buttonVisibility: 'never' } };
+            },
+          },
+        },
+      };
+
+      try {
+        await helpers.runInvocation('action', 2, {
+          openSidePanel: async () => calls.push('openSidePanel'),
+          injectContentScripts: async () => calls.push('injectContentScripts'),
+          grantInlineTranslationAuthorization: async () =>
+            calls.push('grantInlineTranslationAuthorization'),
+        });
+
+        assert.deepEqual(calls, [
+          'openSidePanel',
+          'injectContentScripts',
+          'grantInlineTranslationAuthorization',
+        ]);
+      } finally {
+        global.chrome = previousChrome;
+      }
     },
   },
   {
@@ -2430,7 +2757,12 @@ exports.tests = [
         startSidePanelTranslation: async (tabId) => calls.push(`startSidePanelTranslation:${tabId}`),
       };
 
-      await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'command' }), 7, handlers);
+      const settings = { buttonVisibility: 'onInvocation' };
+      await helpers.runInvocationPlan(
+        helpers.planInvocation({ trigger: 'command', settings }),
+        7,
+        handlers
+      );
       assert.deepEqual(calls, [
         'openSidePanel:7',
         'injectContentScripts:7',
@@ -2440,7 +2772,11 @@ exports.tests = [
       ]);
 
       calls.length = 0;
-      await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'action' }), 7, handlers);
+      await helpers.runInvocationPlan(
+        helpers.planInvocation({ trigger: 'action', settings }),
+        7,
+        handlers
+      );
       assert.deepEqual(calls, [
         'openSidePanel:7',
         'injectContentScripts:7',
@@ -2461,7 +2797,7 @@ exports.tests = [
       );
       for (const trigger of ['action', 'command', 'pageLoad']) {
         const instructions = helpers.getInlineInstructions(
-          helpers.planInvocation({ trigger, settings: { inlineAutoShow: true } })
+          helpers.planInvocation({ trigger, settings: { buttonVisibility: 'allPages' } })
         );
         for (const instruction of instructions) {
           assert.ok(
@@ -2471,7 +2807,12 @@ exports.tests = [
         }
       }
       assert.deepEqual(
-        helpers.getInlineInstructions(helpers.planInvocation({ trigger: 'action' })),
+        helpers.getInlineInstructions(
+          helpers.planInvocation({
+            trigger: 'action',
+            settings: { buttonVisibility: 'onInvocation' },
+          })
+        ),
         ['grantInlineTranslationAuthorization', 'mountFloatingTranslateButton']
       );
     },
@@ -2505,19 +2846,27 @@ exports.tests = [
       // Injection legitimately fails on pages extensions cannot touch. The side panel is
       // already open by then, and a command invocation should still translate.
       const calls = [];
-      await helpers.runInvocationPlan(helpers.planInvocation({ trigger: 'command' }), 3, {
-        openSidePanel: async () => calls.push('openSidePanel'),
-        injectContentScripts: async () => {
-          throw new Error('Cannot access contents of the page');
-        },
-        grantInlineTranslationAuthorization: async () => {
-          throw new Error('Could not establish connection');
-        },
-        mountFloatingTranslateButton: async () => {
-          throw new Error('Could not establish connection');
-        },
-        startSidePanelTranslation: async () => calls.push('startSidePanelTranslation'),
-      });
+      await helpers.runInvocationPlan(
+        helpers.planInvocation({
+          trigger: 'command',
+          settings: { buttonVisibility: 'onInvocation' },
+        }),
+        3,
+        {
+          openSidePanel: async () => calls.push('openSidePanel'),
+          injectContentScripts: async () => {
+            throw new Error('Cannot access contents of the page');
+          },
+          grantInlineTranslationAuthorization: async () => {
+            throw new Error('Could not establish connection');
+          },
+          mountFloatingTranslateButton: async () => {
+            throw new Error('Could not establish connection');
+          },
+          startSidePanelTranslation: async () =>
+            calls.push('startSidePanelTranslation'),
+        }
+      );
       assert.deepEqual(calls, ['openSidePanel', 'startSidePanelTranslation']);
     },
   },

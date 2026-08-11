@@ -55,13 +55,25 @@ label {
   margin: 10px 0;
 }
 
-.checkbox-label {
+.choice-group {
+  margin: 12px 0;
+  padding: 4px 12px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+.choice-group legend {
+  padding: 0 4px;
+  color: #6b7280;
+}
+
+.choice-label {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.checkbox-label input[type="checkbox"] {
+.choice-label input[type="radio"] {
   flex: 0 0 auto;
   width: 44px;
   min-width: 44px;

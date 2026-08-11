@@ -19,12 +19,17 @@ translate page text inline with a floating page button.
 1. Open extension **Options**
 2. Paste your **OpenAI API Key**
 3. (Optional) change default target language, tone, model, and chunk size
-4. (Optional) enable **Show inline translation button automatically on normal
-   web pages**
+4. (Optional) choose **When the floating translate button may appear**
 
-The automatic inline button option requests access to normal `http://` and
-`https://` pages so Chrome can inject the floating button without first clicking
-the extension. It is off by default.
+The three choices are exclusive: never, once you have opened the extension on the
+page, or on every web page. **Never** is the default. Only the every-page choice
+requests access to normal `http://` and `https://` pages, which is what lets Chrome
+inject the floating button before you open the extension; the other two give that
+access back.
+
+Inline translation is started from that button and nowhere else for now, so
+**never** turns inline translation off entirely — pick one of the other two to use
+it. Side panel translation is reached from the panel and is unaffected.
 
 The saved key is never shown back in the Options input. Leaving the key field
 blank preserves the current key; **Clear key** removes the saved key and the

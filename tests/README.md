@@ -18,4 +18,6 @@ Requires `agent-browser` on `PATH` and network access. Slower and flakier than `
 
 It guards ADR-0001. If `setPanelBehavior({ openPanelOnActionClick: true })` ever comes back, Chrome consumes the action click, `chrome.action.onClicked` never fires, and this check goes red — which is the whole point, because the symptoms in a browser are indirect enough to cost an afternoon.
 
+The Floating Translate Button appearing is what it watches for, so it drives the real options page to choose on-invocation Button Visibility first: the default is never, under which a click correctly mounts nothing. That makes it the one check that the options control saves what the background worker reads.
+
 The CDP gotchas involved are written up in that file's header comment. Read them before concluding the harness is broken; several of the failures look like something other than what they are.

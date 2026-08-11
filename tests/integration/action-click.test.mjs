@@ -10,6 +10,11 @@
 // injected and no Inline Translation Authorization is granted. Restoring that setting
 // looks like a simplification, so this check exists to turn it back into a red test.
 //
+// The Floating Translate Button appearing is the page-side proof that the click arrived,
+// and Button Visibility defaults to never, so the check chooses on-invocation from the real
+// options page first. Note that the panel opening proves nothing on its own: under the
+// broken configuration Chrome opens it without the extension being involved at all.
+//
 // Requires: `agent-browser` on PATH, and network access (it drives a real page).
 //
 // Gotchas, all of which look like something other than what they are:
@@ -130,30 +135,62 @@ async function main() {
 
   const page = await cdp.send('Target.attachToTarget', { targetId: pageTarget.id, flatten: true });
   const evaluate = async (expression) => {
-    const evaluated = await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, page.sessionId);
+    const evaluated = await cdp.send('Runtime.evaluate',
+      { expression, returnByValue: true, awaitPromise: true }, page.sessionId);
     return evaluated.result?.value;
+  };
+  const navigate = async (url) => {
+    await cdp.send('Page.navigate', { url }, page.sessionId);
+    await wait(2500);
   };
   // A tab target has no page execution context, so guard against silently evaluating
   // into nothing — that would turn every DOM assertion below into a false negative.
   check('page execution context is reachable', (await evaluate('1 + 1')) === 2);
   const buttonPresent = async () =>
     (await evaluate("Boolean(document.getElementById('chrome-ai-translator-inline'))")) === true;
+  const triggerAction = async (name) => {
+    const triggered = await cdp.send('Extensions.triggerAction', { id: extension.id, targetId: tab.targetId });
+    check(`action can be triggered ${name}`, !triggered.__timeout && !triggered.__error,
+      triggered.__error || (triggered.__timeout ? 'no response' : ''));
+    await wait(3000);
+  };
 
   check('Floating Translate Button is absent before the click', (await buttonPresent()) === false);
 
-  const triggered = await cdp.send('Extensions.triggerAction', { id: extension.id, targetId: tab.targetId });
-  check('action can be triggered', !triggered.__timeout && !triggered.__error,
-    triggered.__error || (triggered.__timeout ? 'no response' : ''));
+  await triggerAction('on a fresh install');
 
-  await wait(3000);
-
-  check('Floating Translate Button appears after the click', await buttonPresent(),
-    'the click never reached the extension — see ADR-0001');
+  check('Floating Translate Button stays absent on a fresh install', (await buttonPresent()) === false,
+    'Button Visibility defaults to never, so an invocation must mount nothing');
 
   const after = await cdp.send('Target.getTargets', { filter: [{ type: 'tab' }] });
   const panel = (after.targetInfos || []).find((target) =>
     target.url === `chrome-extension://${extension.id}/sidepanel.html`);
   check('side panel opens after the click', Boolean(panel));
+
+  // Choosing on-invocation through the real options page, rather than writing the setting
+  // directly, is also the only check that the control saves what the worker reads.
+  await cdp.send('Page.enable', {}, page.sessionId);
+  await navigate(`chrome-extension://${extension.id}/options.html`);
+  const chosen = await evaluate(`(async () => {
+    const choice = document.querySelector('input[name="buttonVisibility"][value="onInvocation"]');
+    if (!choice) return 'options page has no on-invocation choice';
+    choice.checked = true;
+    document.getElementById('btnSave').click();
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const stored = await chrome.storage.local.get(['settings']);
+    return document.getElementById('errorBox').textContent ||
+      stored.settings?.buttonVisibility || 'nothing saved';
+  })()`);
+  check('options page saves the on-invocation choice', chosen === 'onInvocation', String(chosen));
+
+  await navigate(PAGE_URL);
+  check('page execution context survives the options round trip', (await evaluate('1 + 1')) === 2);
+  check('Floating Translate Button is absent on a fresh page load', (await buttonPresent()) === false);
+
+  await triggerAction('with on-invocation chosen');
+
+  check('Floating Translate Button appears after the click', await buttonPresent(),
+    'the click never reached the extension — see ADR-0001');
 
   cdp.close();
 }
