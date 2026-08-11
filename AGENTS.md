@@ -2,6 +2,29 @@
 
 `npm test` is the browser-free unit suite and is what "run the tests" means. `npm run test:integration` additionally drives a real Chrome and needs `agent-browser` plus network access. See `tests/README.md`.
 
+`npm run check:syntax` parses every extension script outside a browser. There is no linter, formatter, or type checker — those two commands are the whole verification story.
+
+## Layout
+
+No bundler and no build step: `extension/` is loaded unpacked as-is and every file there is a classic script. Four runtimes share it. `background.js` is the MV3 service worker and pulls its dependencies in with `importScripts`. `content.js` runs in the page and is injected programmatically by the worker — the manifest declares no `content_scripts` — from the list in `getInlineContentScriptFiles()`. `sidepanel.js` and `options.js` run in extension pages and get their dependencies from `<script>` tags in `sidepanel.html` and `options.html`.
+
+Every module in `extension/` publishes itself twice: onto `globalThis` under a `ChromeAiTranslator*` name for the browser, and as `module.exports` when a CommonJS loader is present. That second half is what lets the unit suite `require()` extension code directly and hand it a fake `chrome`. Keep both when adding a module — converting one to an ES module puts it out of reach of the service worker and the tests at the same time.
+
+## Adding an extension file
+
+Four hand-maintained lists decide whether a new `extension/*.js` file is loaded and checked, and none of them is derived from the directory:
+
+- `check:syntax` in `package.json`.
+- `getInlineContentScriptFiles()` in `extension/background.js`, if it runs in the page. Order matters — dependencies come before `content.js`.
+- The `<script>` tags in `extension/sidepanel.html` or `options.html`, if it runs in the side panel or the options page.
+- The suite list in `tests/run.js`, for its test file. See `tests/README.md`.
+
+`tests/static-assets.test.js` guards parts of this, but it spot-checks `check:syntax` against five named files rather than the whole directory, so an omission there passes.
+
+## Version
+
+`VERSION`, `version` in `package.json`, and `version` in `extension/manifest.json` all carry it, and nothing keeps them in sync.
+
 ## Agent skills
 
 ### Issue tracker
