@@ -467,6 +467,53 @@ exports.tests = [
     },
   },
   {
+    name: 'brings the Floating Translate Button back with its menu down, not open',
+    fn() {
+      // The re-mount half of the cycle: mounting renders whatever the state says, so a
+      // button closed with its menu open would come back mid-menu if closing left it that
+      // way. This is the whole of what closing has to remember.
+      const state = { status: 'original', menuOpen: true, message: '' };
+      helpers.closeFloatingTranslateButton(state);
+      const remounted = helpers.getInlineTranslatorUiModel(state);
+      assert.equal(remounted.menuOpen, false);
+      assert.equal(remounted.expanded, 'false');
+    },
+  },
+  {
+    name: 'keeps a running Inline Translation running when the button is closed',
+    fn() {
+      const inFlight = {
+        status: 'translating',
+        menuOpen: true,
+        message: 'Translating...',
+        operationId: 7,
+        records: [{ id: 'a' }],
+      };
+      helpers.closeFloatingTranslateButton(inFlight);
+      assert.equal(inFlight.status, 'translating');
+      assert.equal(helpers.isCurrentInlineOperation(inFlight, 7), true);
+      assert.deepEqual(inFlight.records, [{ id: 'a' }]);
+
+      // The viewport run keeps scanning too — closing takes the UI, not the work.
+      const scanning = { status: 'active', menuOpen: true, operationId: 3 };
+      helpers.closeFloatingTranslateButton(scanning);
+      assert.equal(scanning.status, 'active');
+      assert.equal(scanning.operationId, 3);
+    },
+  },
+  {
+    name: 'records nothing about a closed button that could outlive the page view',
+    fn() {
+      // A reload brings the button back subject to the reader's visibility choice, so
+      // closing must leave nothing behind to restore from. It adds no state at all: the
+      // button is closed exactly while its UI is detached.
+      const state = { status: 'translating', menuOpen: true, operationId: 4 };
+      const before = Object.keys(state).sort();
+      helpers.closeFloatingTranslateButton(state);
+      assert.deepEqual(Object.keys(state).sort(), before);
+    },
+  },
+  {
     name: 'carries out the remaining inline instructions when one of them fails',
     fn() {
       const calls = [];

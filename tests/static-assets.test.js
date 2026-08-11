@@ -46,6 +46,19 @@ exports.tests = [
     },
   },
   {
+    name: 'ships a close control on the Floating Translate Button',
+    fn() {
+      // Closing is unit-tested on the state helpers, but nothing there would notice if the
+      // control the reader reaches for stopped being rendered.
+      const contentJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'content.js'),
+        'utf8'
+      );
+
+      assert.match(contentJs, /<button[^>]*data-action="close"[^>]*>[^<]+</);
+    },
+  },
+  {
     name: 'keeps checkbox labels visually attached to their control',
     fn() {
       const optionsHtml = fs.readFileSync(

@@ -277,6 +277,20 @@ function runInlineInstructions(instructions = [], handlers) {
   }
 }
 
+// Closing the Floating Translate Button is a "move this out of my way now" gesture, not a
+// preference. Nothing records it, and nothing needs to: the button is gone exactly while
+// its UI is detached, which is the same state the page is in before the reader ever
+// invokes the extension, and the same instruction ends both. Every render path runs
+// through updateInlineTranslatorUi, which does nothing without a UI, so page activity
+// cannot bring it back — only a mount instruction can.
+//
+// What does survive the gesture is the menu: leaving it open would re-mount the button
+// with its menu already down, which is not what the reader asked for.
+function closeFloatingTranslateButton(state = inlineState) {
+  state.menuOpen = false;
+  return state;
+}
+
 async function requestInlineStartupInstructions(chromeApi = globalThis.chrome) {
   if (!chromeApi?.runtime?.sendMessage) return [];
   const response = await chromeApi.runtime.sendMessage({
@@ -1866,6 +1880,12 @@ function updateInlineViewportMessage() {
   updateInlineTranslatorUi();
 }
 
+function detachInlineTranslatorUi() {
+  document.getElementById(INLINE_TRANSLATOR_ID)?.remove();
+  inlineUiRoot = null;
+  globalThis.__chromeAiTranslatorInlineUiRoot = null;
+}
+
 function ensureInlineTranslatorUi() {
   let host = document.getElementById(INLINE_TRANSLATOR_ID);
   if (host && inlineUiRoot) {
@@ -1931,6 +1951,7 @@ function ensureInlineTranslatorUi() {
         <button type="button" data-action="translate">Page in Korean</button>
         <button type="button" data-action="stop">Stop</button>
         <button type="button" data-action="restore">Original text</button>
+        <button type="button" data-action="close">Hide this button</button>
         <div data-role="message"></div>
       </div>
     </div>
@@ -1961,6 +1982,15 @@ function ensureInlineTranslatorUi() {
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
       restoreInlineOriginal();
+    });
+  inlineUiRoot
+    .querySelector('[data-action="close"]')
+    .addEventListener('click', (event) => {
+      if (!isTrustedInlineUiEvent(event)) return;
+      // Only the UI goes. A translation already under way keeps running and keeps its
+      // records, so the reader can bring the button back and pick it up where it is.
+      closeFloatingTranslateButton();
+      detachInlineTranslatorUi();
     });
 
   updateInlineTranslatorUi();
@@ -2390,6 +2420,7 @@ if (typeof module !== 'undefined' && module.exports) {
     canRestartInlineViewportTranslation,
     hasInlineSettingsApiKey,
     getDefaultInlineInstructionHandlers,
+    closeFloatingTranslateButton,
     runInlineInstruction,
     runInlineInstructions,
     requestInlineStartupInstructions,
