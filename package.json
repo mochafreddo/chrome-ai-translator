@@ -3,6 +3,7 @@
   "scripts": {
     "test": "node tests/run.js",
     "test:integration": "node tests/integration/action-click.test.mjs",
+    "verify:live": "node tests/integration/inline-translation.live.test.mjs",
     "check:syntax": "node --check extension/default-model.js && node --check extension/inline-block.js && node --check extension/button-visibility.js && node --check extension/inline-diagnostics-protocol.js && node --check extension/inline-diagnostics-controller.js && node --check extension/inline-translation-controls.js && node --check extension/page-access.js && node --check extension/translation-validation.js && node --check extension/translation-policy.js && node --check extension/translation-diagnostics.js && node --check extension/content.js && node --check extension/background.js && node --check extension/options.js && node --check extension/sidepanel.js && node --check extension/openai-response.js && node --check extension/full-page-markdown.js"
   },
   "version": "0.2.0.0"

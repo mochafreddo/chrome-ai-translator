@@ -1,6 +1,6 @@
 # Tests
 
-Two entry points, deliberately separate.
+Three entry points, deliberately separate: one needs nothing, one needs a browser, one needs a browser and spends money. Each line is a wall, not a gradient — the reason a check lives in one tier is the reason it must not creep into the one below.
 
 ## `npm test` — the suite you run constantly
 
@@ -20,4 +20,22 @@ It guards ADR-0001. If `setPanelBehavior({ openPanelOnActionClick: true })` ever
 
 The Floating Translate Button appearing is what it watches for, so it drives the real options page to choose on-invocation Button Visibility first: the default is never, under which a click correctly mounts nothing. That makes it the one check that the options control saves what the background worker reads.
 
-The CDP gotchas involved are written up in that file's header comment. Read them before concluding the harness is broken; several of the failures look like something other than what they are.
+It stops short of asserting on translation output on purpose. Doing that needs an API key, which would turn a structural check into a billed one — that is `npm run verify:live` below.
+
+The CDP gotchas involved are written up in and handled by `tests/integration/harness.mjs`. Read that header before concluding the driver is broken; several of the failures look like something other than what they are.
+
+## `npm run verify:live` — the check that spends money
+
+`node tests/integration/inline-translation.live.test.mjs`. The only check that bills. It drives a real Chrome with a real OpenAI key and asserts that Inline Translation really translates a page, and that Stop and Restore really behave.
+
+Requires `agent-browser` on `PATH`, network access, and an OpenAI key in `.env.local` (gitignored). **A missing key fails the run; it does not skip it.** A check that quietly passes when it did not run is the failure mode this repo has already paid for once — see the `qa-issue-003` story above.
+
+It exists because the unit suite drives `translateVisibleBlockBatch` with a fake `fetch`. That is what makes the suite fast and free, and it also means a green suite says nothing about whether a reader pointing the extension at a page gets a translated page. That gap is small and permanent, so the check closing it is small and separate.
+
+Three things about it are deliberate:
+
+- **`.live.` in the filename** says the file bills. `package.json` is the only wiring — integration checks appear in none of the four hand-maintained lists in `AGENTS.md` — so the name is what stops it being folded into `test:integration` by reflex.
+- **The page is a local fixture**, served from `127.0.0.1` by the check itself. A page on the open web serves until its owner edits a sentence, and then the check changes both what it costs and what it asserts without anyone having touched it. `tests/integration/fixtures/inline-translation.html` is what decides the size of the bill.
+- **It asserts invariants, never output.** A model's wording changes between runs and between models. What is asserted is that Hangul arrived, that Restore puts back exactly what was there, and that the controls move through the states `inline-translation-controls.js` gives them.
+
+The key is read by `tests/integration/live-key.mjs` and handed only to the local CDP session — never a command argument, never printed, never returned to a caller. Clearing it is a `finally`, not a last step, and it goes through the options page's own Clear key control rather than writing storage behind it. Written as a step it would run only when everything before it passed, which is exactly when it matters least.

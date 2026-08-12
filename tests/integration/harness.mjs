@@ -34,8 +34,9 @@
 // nothing about what is being checked -- that is what keeps one check's needs from
 // reshaping another's.
 
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { promisify } from 'node:util';
 
 export const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -50,12 +51,18 @@ export async function until(predicate, timeoutMs, stepMs = 1000) {
   }
 }
 
-export const browser = (args, timeout = 120000) =>
-  execFileSync('agent-browser', args, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] });
+// Asynchronous on purpose. Driving the browser synchronously blocks this process's event
+// loop for the whole call, so anything the browser needs from us while it works -- a check
+// serving its own fixture page, most obviously -- cannot answer, and the driver hangs until
+// its timeout on a page that would have loaded instantly.
+const run = promisify(execFile);
 
-export const closeAllBrowsers = () => {
+export const browser = async (args, timeout = 120000) =>
+  (await run('agent-browser', args, { encoding: 'utf8', timeout })).stdout;
+
+export const closeAllBrowsers = async () => {
   try {
-    browser(['close', '--all'], 30000);
+    await browser(['close', '--all'], 30000);
   } catch {
     // Closing is best-effort cleanup; a driver that is already gone is not a failure.
   }
@@ -74,7 +81,6 @@ export function createChecks(label) {
     console.error(`FAIL ${label} - ${name}${detail ? ` (${detail})` : ''}`);
     return false;
   };
-  const fail = (name, detail = '') => check(name, false, detail);
   const finish = () => {
     if (failures.length) {
       console.error(`\n${failures.length} failing: ${failures.join(', ')}`);
@@ -83,7 +89,7 @@ export function createChecks(label) {
     }
     console.log(`\n${label}: all checks passed`);
   };
-  return { check, fail, failures, finish };
+  return { check, failures, finish };
 }
 
 function connect(endpoint) {
@@ -122,7 +128,7 @@ function connect(endpoint) {
   return { ready, send, on, close: () => ws.close() };
 }
 
-export function extensionManifest(extensionDir) {
+function extensionManifest(extensionDir) {
   return JSON.parse(readFileSync(`${extensionDir}/manifest.json`, 'utf8'));
 }
 
@@ -132,10 +138,10 @@ export function extensionManifest(extensionDir) {
 // domain, an absent page -- and leaves the caller to say which of those is a failure and in
 // what words, so a check's own output stays its own.
 export async function launchExtensionBrowser({ session, url, extensionDir }) {
-  browser(['--extension', extensionDir, '--args', '--enable-unsafe-extension-debugging',
+  await browser(['--extension', extensionDir, '--args', '--enable-unsafe-extension-debugging',
     '--session', session, 'open', url]);
 
-  const cdpUrl = browser(['get', 'cdp-url', '--session', session]).trim().split('\n').pop();
+  const cdpUrl = (await browser(['get', 'cdp-url', '--session', session])).trim().split('\n').pop();
   const httpBase = cdpUrl.replace(/^ws:\/\/([^/]+)\/.*$/, 'http://$1');
   const { webSocketDebuggerUrl } = await (await fetch(`${httpBase}/json/version`)).json();
   const cdp = connect(webSocketDebuggerUrl);

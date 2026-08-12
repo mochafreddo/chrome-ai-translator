@@ -122,7 +122,7 @@ try {
   failures.push('harness');
   console.error(`FAIL action click - harness threw: ${error?.message || error}`);
 } finally {
-  closeAllBrowsers();
+  await closeAllBrowsers();
 }
 
 finish();
