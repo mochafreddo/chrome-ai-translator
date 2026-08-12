@@ -124,8 +124,6 @@ const FULL_PAGE_TRANSLATION_MAX_TOTAL_CHARS = 60000;
 // across restarts, so renaming it would strand the old one on installs that already have it.
 const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
 const INLINE_MAX_RECORDS = 500;
-const INLINE_MAX_TOTAL_CHARS = 60000;
-const INLINE_VISIBLE_BATCH_MAX_CHARS = 2000;
 const INLINE_BLOCK_MAX_RECORD_COST = 12000;
 const INLINE_BLOCK_MAX_BATCH_COST = 12000;
 const INLINE_BLOCK_MAX_SESSION_COST = 60000;
@@ -134,7 +132,6 @@ const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
 const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
 const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
 const INLINE_LOG_LIMIT = 20;
-const INLINE_TRANSLATION_MAX_CONCURRENCY = 3;
 const INLINE_RUNTIME_CORRELATION_TTL_MS = 5 * 60 * 1000;
 const INLINE_RUNTIME_CORRELATION_LIMIT = 1000;
 const INLINE_RUNTIME_CORRELATION_STORAGE_KEY = 'inlineRuntimeCorrelations:v1';
@@ -165,11 +162,8 @@ function normalizeInlineRuntimeCorrelationEntries(value) {
   return normalized;
 }
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
-const INLINE_VISIBLE_BATCH_MAX_OUTPUT_TOKENS = 2048;
 const MIN_MAX_OUTPUT_TOKENS = 256;
 const MAX_MAX_OUTPUT_TOKENS = 128000;
-const INLINE_TRANSLATION_MIN_MAX_CHARS = 1000;
-const INLINE_TRANSLATION_EXPANSION_RATIO = 4;
 const TONE_INSTRUCTIONS = {
   technical: 'Use a clear, technical tone suitable for docs.',
   natural: 'Use natural, fluent tone.',
@@ -708,44 +702,6 @@ function buildInstructions({ targetLanguage, tone }) {
 
 function getToneInstruction(tone) {
   return TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.technical;
-}
-
-function buildTextNodeInstructions({ targetLanguage, tone }) {
-  return [
-    `Translate each record's text into ${targetLanguage}.`,
-    getToneInstruction(tone),
-    'Return one translation object for every input record.',
-    'Preserve every id exactly.',
-    'Do not translate code, commands, identifiers, URLs, filenames, product API names, or version strings.',
-    'Do not add commentary.',
-  ].join('\n');
-}
-
-function buildTextNodeResponseFormat() {
-  return {
-    type: 'json_schema',
-    name: 'inline_translations',
-    strict: true,
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        translations: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              id: { type: 'string' },
-              translation: { type: 'string' },
-            },
-            required: ['id', 'translation'],
-          },
-        },
-      },
-      required: ['translations'],
-    },
-  };
 }
 
 function getTargetLanguageCode(targetLanguage) {
@@ -1403,34 +1359,6 @@ async function translateFullPageChunk(chunk, settings) {
   }
 }
 
-function getTextRecordStats(records) {
-  return {
-    recordCount: (records || []).length,
-    totalChars: (records || []).reduce(
-      (sum, record) => sum + String(record.text || '').length,
-      0
-    ),
-  };
-}
-
-function getTextRecordChunkStats(records, index) {
-  return {
-    index,
-    recordCount: (records || []).length,
-    charCount: (records || []).reduce(
-      (sum, record) => sum + String(record.text || '').length,
-      0
-    ),
-  };
-}
-
-function getInlineTranslationConcurrency(chunkCount) {
-  return Math.min(
-    INLINE_TRANSLATION_MAX_CONCURRENCY,
-    Math.max(1, Number(chunkCount) || 1)
-  );
-}
-
 function getInlineTranslationLogStorageKey(logId) {
   return `${INLINE_LOG_STORAGE_KEY_PREFIX}${logId}`;
 }
@@ -1489,138 +1417,6 @@ function getInlineTranslationLogRemovalKeys(stored, limit = INLINE_LOG_LIMIT) {
     .map(([key]) => key);
 }
 
-function splitTextRecordsIntoChunks(records, maxChars) {
-  const chunks = [];
-  let current = [];
-  let currentLen = 0;
-  const limit = Number(maxChars) || DEFAULT_SETTINGS.chunkMaxChars;
-
-  for (const record of records || []) {
-    const size =
-      String(record.id || '').length + String(record.text || '').length + 20;
-    if (current.length && currentLen + size > limit) {
-      chunks.push(current);
-      current = [];
-      currentLen = 0;
-    }
-    current.push(record);
-    currentLen += size;
-  }
-
-  if (current.length) chunks.push(current);
-  return chunks;
-}
-
-function parseAndValidateTextNodeTranslations(outputText, records) {
-  let parsed;
-  try {
-    parsed = JSON.parse(outputText);
-  } catch {
-    throw new Error('Inline translation response was not valid JSON');
-  }
-
-  const translations = parsed?.translations;
-  if (!Array.isArray(translations)) {
-    throw new Error('Inline translation response did not include translations');
-  }
-
-  const expected = new Map(records.map((record) => [record.id, record]));
-  const seen = new Set();
-  const normalized = [];
-
-  for (const item of translations) {
-    const id = item?.id;
-    const expectedRecord = expected.get(id);
-    if (!expectedRecord) {
-      throw new Error(`Unexpected translation id: ${id}`);
-    }
-    if (seen.has(id)) {
-      throw new Error(`Duplicate translation id: ${id}`);
-    }
-    if (typeof item.translation !== 'string') {
-      throw new Error(`Missing translation for id: ${id}`);
-    }
-    assertInlineTranslationOutputBudget(item.translation, expectedRecord);
-    seen.add(id);
-    normalized.push({ id, translation: item.translation });
-  }
-
-  for (const record of records) {
-    if (!seen.has(record.id)) {
-      throw new Error(`Missing translation id: ${record.id}`);
-    }
-  }
-
-  return normalized;
-}
-
-function getInlineTranslationMaxChars(record) {
-  const originalLength = String(record?.text || '').length;
-  return Math.max(
-    INLINE_TRANSLATION_MIN_MAX_CHARS,
-    originalLength * INLINE_TRANSLATION_EXPANSION_RATIO
-  );
-}
-
-function assertInlineTranslationOutputBudget(translation, record) {
-  const maxChars = getInlineTranslationMaxChars(record);
-  if (String(translation || '').length > maxChars) {
-    throw new Error(
-      `Inline translation for id ${record?.id || '(unknown)'} is too long (${String(translation || '').length}/${maxChars} characters)`
-    );
-  }
-}
-
-function normalizeTextNodeRecords(records) {
-  if (!Array.isArray(records)) {
-    throw new Error('Inline translation records must be an array');
-  }
-
-  return records.map((record, index) => {
-    const id = record?.id;
-    const text = record?.text;
-    if (typeof id !== 'string' || !id) {
-      throw new Error(`Invalid inline translation record id at index ${index}`);
-    }
-    if (typeof text !== 'string' || !text.trim()) {
-      throw new Error(`Invalid inline translation text for id: ${id}`);
-    }
-    return { id, text };
-  });
-}
-
-function getVisibleInlineBatchMaxChars() {
-  return INLINE_VISIBLE_BATCH_MAX_CHARS;
-}
-
-function normalizeVisibleTextBatchRecords(records) {
-  const normalized = normalizeTextNodeRecords(records);
-  const totalChars = normalized.reduce(
-    (sum, record) => sum + String(record.text || '').length,
-    0
-  );
-  if (totalChars > INLINE_VISIBLE_BATCH_MAX_CHARS) {
-    throw new Error(
-      `Visible inline translation batch is too large (${totalChars}/${INLINE_VISIBLE_BATCH_MAX_CHARS} characters)`
-    );
-  }
-  return normalized;
-}
-
-function assertTextRecordBudget(records) {
-  if (records.length > INLINE_MAX_RECORDS) {
-    throw new Error(`Too many text nodes for inline translation (${records.length}/${INLINE_MAX_RECORDS})`);
-  }
-
-  const totalChars = records.reduce(
-    (sum, record) => sum + String(record.text || '').length,
-    0
-  );
-  if (totalChars > INLINE_MAX_TOTAL_CHARS) {
-    throw new Error(`Inline translation has too much text (${totalChars}/${INLINE_MAX_TOTAL_CHARS} characters)`);
-  }
-}
-
 function createInlineTranslationLogEntry(startedAtMs) {
   return {
     id: `inline-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1649,204 +1445,10 @@ function sanitizeLogError(error) {
 }
 
 async function appendInlineTranslationLog(entry) {
-  // Schema-2 diagnostics are persisted by translation-diagnostics.js.
-  // Keep this awaitable shim until legacy text-batch callers are removed.
+  // Schema-2 diagnostics are persisted by translation-diagnostics.js, so the log entry
+  // the Semantic Block batch still assembles goes nowhere. Whether to keep assembling it
+  // is its own decision; this shim keeps the call awaitable until that is made.
   void entry;
-}
-
-async function sendInlineTranslationProgress(tabId, operationId, progress) {
-  if (
-    !tabId ||
-    operationId == null ||
-    typeof chrome === 'undefined' ||
-    !chrome.tabs?.sendMessage
-  ) {
-    return;
-  }
-
-  try {
-    await chrome.tabs.sendMessage(tabId, {
-      type: 'INLINE_TRANSLATION_PROGRESS',
-      operationId,
-      progress,
-    });
-  } catch {}
-}
-
-async function translateTextNodeRecords(records, context = {}) {
-  const startedAtMs = Date.now();
-  const logEntry = createInlineTranslationLogEntry(startedAtMs);
-  const { tabId = null, operationId = null } = context;
-  let completed = false;
-
-  try {
-    const normalized = normalizeTextNodeRecords(records);
-    Object.assign(logEntry, getTextRecordStats(normalized));
-    assertTextRecordBudget(normalized);
-    if (!normalized.length) {
-      completed = true;
-      return [];
-    }
-
-    const settings = await getSettings();
-    logEntry.model = settings.model;
-    logEntry.chunkMaxChars = settings.chunkMaxChars;
-    if (!settings.apiKey) {
-      throw new Error('OpenAI API key is not set. Open Options and paste your key.');
-    }
-
-    const instructions = buildTextNodeInstructions(settings);
-    const chunks = splitTextRecordsIntoChunks(
-      normalized,
-      settings.chunkMaxChars
-    );
-    logEntry.chunkCount = chunks.length;
-    logEntry.chunks = chunks.map((chunk, index) =>
-      getTextRecordChunkStats(chunk, index + 1)
-    );
-
-    await sendInlineTranslationProgress(tabId, operationId, {
-      stage: 'queued',
-      recordCount: logEntry.recordCount,
-      totalChars: logEntry.totalChars,
-      chunkCount: logEntry.chunkCount,
-    });
-
-    const translatedByChunk = new Array(chunks.length);
-    const concurrency = getInlineTranslationConcurrency(chunks.length);
-    let nextChunkIndex = 0;
-    let completedChunks = 0;
-    let firstError = null;
-
-    async function processNextChunk() {
-      while (!firstError) {
-        const chunkIndex = nextChunkIndex;
-        nextChunkIndex += 1;
-        if (chunkIndex >= chunks.length) return;
-
-        const chunk = chunks[chunkIndex];
-        const chunkLog = logEntry.chunks[chunkIndex];
-        await sendInlineTranslationProgress(tabId, operationId, {
-          stage: 'chunk',
-          current: chunkIndex + 1,
-          total: chunks.length,
-          recordCount: chunkLog.recordCount,
-          charCount: chunkLog.charCount,
-        });
-
-        const chunkStartedAtMs = Date.now();
-        try {
-          const output = await openaiTranslateChunk({
-            apiKey: settings.apiKey,
-            model: settings.model,
-            reasoningEffort: settings.reasoningEffort,
-            instructions,
-            input: JSON.stringify({ records: chunk }),
-            textFormat: buildTextNodeResponseFormat(),
-          });
-          translatedByChunk[chunkIndex] =
-            parseAndValidateTextNodeTranslations(output, chunk);
-          chunkLog.durationMs = Date.now() - chunkStartedAtMs;
-          chunkLog.ok = true;
-          completedChunks += 1;
-          await sendInlineTranslationProgress(tabId, operationId, {
-            stage: 'chunk_done',
-            current: completedChunks,
-            total: chunks.length,
-          });
-        } catch (error) {
-          chunkLog.durationMs = Date.now() - chunkStartedAtMs;
-          chunkLog.ok = false;
-          chunkLog.error = sanitizeLogError(error);
-          firstError = firstError || error;
-        }
-      }
-    }
-
-    await Promise.all(
-      Array.from({ length: concurrency }, () => processNextChunk())
-    );
-    if (firstError) throw firstError;
-
-    const translated = translatedByChunk.flat();
-
-    await sendInlineTranslationProgress(tabId, operationId, {
-      stage: 'applying',
-    });
-    completed = true;
-    return translated;
-  } catch (error) {
-    logEntry.error = sanitizeLogError(error);
-    throw error;
-  } finally {
-    const finishedAtMs = Date.now();
-    logEntry.status = completed ? 'done' : 'error';
-    logEntry.finishedAt = new Date(finishedAtMs).toISOString();
-    logEntry.durationMs = finishedAtMs - startedAtMs;
-    await appendInlineTranslationLog(logEntry);
-  }
-}
-
-async function translateVisibleTextBatch(records, settingsSnapshot = null) {
-  const startedAtMs = Date.now();
-  const logEntry = createInlineTranslationLogEntry(startedAtMs);
-  let completed = false;
-
-  try {
-    const normalized = normalizeVisibleTextBatchRecords(records);
-    Object.assign(logEntry, getTextRecordStats(normalized));
-    logEntry.chunkCount = normalized.length ? 1 : 0;
-    logEntry.chunkMaxChars = INLINE_VISIBLE_BATCH_MAX_CHARS;
-    logEntry.chunks = normalized.length
-      ? [getTextRecordChunkStats(normalized, 1)]
-      : [];
-
-    if (!normalized.length) {
-      completed = true;
-      return [];
-    }
-
-    const settings = mergeVisibleBatchSettingsSnapshot(
-      await getSettings(),
-      settingsSnapshot
-    );
-    logEntry.model = settings.model;
-    if (!settings.apiKey) {
-      throw new Error('OpenAI API key is not set. Open Options and paste your key.');
-    }
-
-    const chunkStartedAtMs = Date.now();
-    const output = await openaiTranslateChunk({
-      apiKey: settings.apiKey,
-      model: settings.model,
-      reasoningEffort: settings.reasoningEffort,
-      instructions: buildTextNodeInstructions(settings),
-      input: JSON.stringify({ records: normalized }),
-      textFormat: buildTextNodeResponseFormat(),
-      maxOutputTokens: INLINE_VISIBLE_BATCH_MAX_OUTPUT_TOKENS,
-    });
-
-    const translations = parseAndValidateTextNodeTranslations(output, normalized);
-    if (logEntry.chunks[0]) {
-      logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;
-      logEntry.chunks[0].ok = true;
-    }
-    completed = true;
-    return translations;
-  } catch (error) {
-    logEntry.error = sanitizeLogError(error);
-    if (logEntry.chunks[0]) {
-      logEntry.chunks[0].ok = false;
-      logEntry.chunks[0].error = sanitizeLogError(error);
-    }
-    throw error;
-  } finally {
-    const finishedAtMs = Date.now();
-    logEntry.status = completed ? 'done' : 'error';
-    logEntry.finishedAt = new Date(finishedAtMs).toISOString();
-    logEntry.durationMs = finishedAtMs - startedAtMs;
-    await appendInlineTranslationLog(logEntry);
-  }
 }
 
 async function mutateInlineRuntimeCorrelations(mutator) {
@@ -2573,14 +2175,6 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           }
           return;
         }
-        if (msg?.type === 'TRANSLATE_VISIBLE_TEXT_BATCH') {
-          const translations = await translateVisibleTextBatch(
-            msg.records || [],
-            msg.settingsSnapshot || null
-          );
-          sendResponse({ ok: true, translations });
-          return;
-        }
         if (msg?.type === 'TRANSLATE_VISIBLE_BLOCK_BATCH') {
           const results = await translateVisibleBlockBatch(
             msg.records || [],
@@ -2782,12 +2376,8 @@ if (typeof module !== 'undefined' && module.exports) {
     assertInlineBlockSessionBudget,
     buildBlockInstructions,
     buildBlockResponseFormat,
-    buildTextNodeResponseFormat,
     getBlockBatchMaxOutputTokens,
     getBlockRecordCost,
-    getTextRecordStats,
-    getTextRecordChunkStats,
-    getInlineTranslationConcurrency,
     getInlineContentScriptFiles,
     classifyContentScriptFailure,
     ensureSidePanel,
@@ -2801,15 +2391,10 @@ if (typeof module !== 'undefined' && module.exports) {
     runInvocationPlan,
     getInlineTranslationLogStorageKey,
     collectInlineTranslationLogsFromStorage,
-    getVisibleInlineBatchMaxChars,
-    normalizeVisibleTextBatchRecords,
     normalizeVisibleBlockBatchRecords,
     normalizeMaxOutputTokens,
     parseAndValidateBlockTranslations,
     sanitizeLogError,
-    splitTextRecordsIntoChunks,
-    parseAndValidateTextNodeTranslations,
-    assertTextRecordBudget,
     openaiTranslateChunk,
     translateFullPageChunk,
     syncButtonVisibilityRegistration,

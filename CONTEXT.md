@@ -9,8 +9,12 @@ Translation of a page's article body into Markdown, presented in Chrome's side p
 _Avoid_: document translation, full-page translation, panel mode
 
 **Inline Translation**:
-Translation of a page's text in place, replacing the visible text on the page itself as the reader scrolls.
-_Avoid_: in-page translation, overlay translation, live translation
+Translation of a page's article content in place, one Semantic Block at a time, as the reader scrolls. Inline elements such as links, emphasis, and code survive the replacement and may move to match the translated word order.
+_Avoid_: in-page translation, overlay translation, live translation, text-node translation
+
+**Semantic Block**:
+The unit Inline Translation works in: one paragraph, heading, list item, or table cell, taken whole. Progress counts, size limits, and retries are all expressed in these.
+_Avoid_: node, chunk, segment, fragment
 
 **Floating Translate Button**:
 The control anchored to the page's bottom-right corner that is one of the two entry points to Inline Translation, the other being the Inline Translation Section. It is rendered over the host page and belongs to the extension, not to the site. It carries the controls alone: progress and errors are reported in the Inline Translation Section.

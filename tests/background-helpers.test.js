@@ -902,44 +902,6 @@ exports.tests = [
     },
   },
   {
-    name: 'splits text records without losing IDs',
-    fn() {
-      const chunks = helpers.splitTextRecordsIntoChunks(
-        [
-          { id: 'n1', text: 'alpha beta gamma' },
-          { id: 'n2', text: 'delta epsilon zeta' },
-          { id: 'n3', text: 'eta theta iota' },
-        ],
-        30
-      );
-
-      assert.deepEqual(
-        chunks.flat().map((record) => record.id),
-        ['n1', 'n2', 'n3']
-      );
-      assert.equal(chunks.length > 1, true);
-    },
-  },
-  {
-    name: 'builds strict structured output format for text-node translations',
-    fn() {
-      const format = helpers.buildTextNodeResponseFormat();
-
-      assert.equal(format.type, 'json_schema');
-      assert.equal(format.name, 'inline_translations');
-      assert.equal(format.strict, true);
-      assert.deepEqual(format.schema.required, ['translations']);
-      assert.equal(
-        format.schema.properties.translations.items.additionalProperties,
-        false
-      );
-      assert.deepEqual(
-        format.schema.properties.translations.items.required,
-        ['id', 'translation']
-      );
-    },
-  },
-  {
     name: 'builds the strict semantic block response format and instructions',
     fn() {
       const format = helpers.buildBlockResponseFormat();
@@ -1136,39 +1098,6 @@ exports.tests = [
         global.chrome = previousChrome;
         global.fetch = previousFetch;
       }
-    },
-  },
-  {
-    name: 'summarizes text record chunks without retaining raw text',
-    fn() {
-      const records = [
-        { id: 'n1', text: 'alpha' },
-        { id: 'n2', text: 'beta gamma' },
-      ];
-
-      assert.deepEqual(helpers.getTextRecordStats(records), {
-        recordCount: 2,
-        totalChars: 15,
-      });
-      assert.deepEqual(helpers.getTextRecordChunkStats(records, 3), {
-        index: 3,
-        recordCount: 2,
-        charCount: 15,
-      });
-      assert.equal(
-        JSON.stringify(helpers.getTextRecordChunkStats(records, 3)).includes(
-          'alpha'
-        ),
-        false
-      );
-    },
-  },
-  {
-    name: 'caps inline translation chunk concurrency',
-    fn() {
-      assert.equal(helpers.getInlineTranslationConcurrency(1), 1);
-      assert.equal(helpers.getInlineTranslationConcurrency(2), 2);
-      assert.equal(helpers.getInlineTranslationConcurrency(9), 3);
     },
   },
   {
@@ -1630,94 +1559,6 @@ exports.tests = [
     },
   },
   {
-    name: 'validates exact JSON translation IDs',
-    fn() {
-      const records = [
-        { id: 'n1', text: 'Hello world.' },
-        { id: 'n2', text: 'Read the article.' },
-      ];
-      const parsed = helpers.parseAndValidateTextNodeTranslations(
-        JSON.stringify({
-          translations: [
-            { id: 'n1', translation: 'Hello translated.' },
-            { id: 'n2', translation: 'Read translated.' },
-          ],
-        }),
-        records
-      );
-
-      assert.deepEqual(parsed, [
-        { id: 'n1', translation: 'Hello translated.' },
-        { id: 'n2', translation: 'Read translated.' },
-      ]);
-    },
-  },
-  {
-    name: 'rejects unexpected JSON translation IDs',
-    fn() {
-      assert.throws(
-        () =>
-          helpers.parseAndValidateTextNodeTranslations(
-            JSON.stringify({
-              translations: [{ id: 'other', translation: 'Wrong.' }],
-            }),
-            [{ id: 'n1', text: 'Hello.' }]
-          ),
-        /Unexpected translation id/
-      );
-    },
-  },
-  {
-    name: 'rejects inline translations that expand far beyond the original text',
-    fn() {
-      assert.throws(
-        () =>
-          helpers.parseAndValidateTextNodeTranslations(
-            JSON.stringify({
-              translations: [
-                { id: 'n1', translation: 'x'.repeat(1001) },
-              ],
-            }),
-            [{ id: 'n1', text: 'Hello.' }]
-          ),
-        /too long/
-      );
-    },
-  },
-  {
-    name: 'rejects too many text records before API calls',
-    fn() {
-      assert.throws(
-        () =>
-          helpers.assertTextRecordBudget(
-            Array.from({ length: 501 }, (_, index) => ({
-              id: `n${index + 1}`,
-              text: 'Hello world.',
-            }))
-          ),
-        /Too many text nodes/
-      );
-    },
-  },
-  {
-    name: 'rejects too much text before API calls',
-    fn() {
-      assert.throws(
-        () =>
-          helpers.assertTextRecordBudget([
-            { id: 'n1', text: 'x'.repeat(60001) },
-          ]),
-        /too much text/
-      );
-    },
-  },
-  {
-    name: 'uses a small visible inline batch character budget',
-    fn() {
-      assert.equal(helpers.getVisibleInlineBatchMaxChars(), 2000);
-    },
-  },
-  {
     name: 'redacts secret-shaped values from inline translation log errors',
     fn() {
       const sanitized = helpers.sanitizeLogError(
@@ -1737,47 +1578,6 @@ exports.tests = [
       assert.equal(sanitized.includes('Bearer live.token_123'), false);
       assert.equal(sanitized.includes('OpenAI rejected'), true);
       assert.equal(sanitized.includes('retry later'), true);
-    },
-  },
-  {
-    name: 'normalizes visible inline batch records with existing validation',
-    fn() {
-      assert.deepEqual(
-        helpers.normalizeVisibleTextBatchRecords([
-          { id: 'v1', text: 'Hello world.' },
-        ]),
-        [{ id: 'v1', text: 'Hello world.' }]
-      );
-      assert.throws(
-        () =>
-          helpers.normalizeVisibleTextBatchRecords([
-            { id: '', text: 'Hello.' },
-          ]),
-        /Invalid inline translation record id/
-      );
-    },
-  },
-  {
-    name: 'accepts visible inline batch records at the character budget',
-    fn() {
-      assert.deepEqual(
-        helpers.normalizeVisibleTextBatchRecords([
-          { id: 'v1', text: 'x'.repeat(2000) },
-        ]),
-        [{ id: 'v1', text: 'x'.repeat(2000) }]
-      );
-    },
-  },
-  {
-    name: 'rejects visible inline batch records over the character budget',
-    fn() {
-      assert.throws(
-        () =>
-          helpers.normalizeVisibleTextBatchRecords([
-            { id: 'v1', text: 'x'.repeat(2001) },
-          ]),
-        /Visible inline translation batch is too large/
-      );
     },
   },
   {
@@ -2286,7 +2086,10 @@ exports.tests = [
     },
   },
   {
-    name: 'does not expose legacy full-page text-node translation endpoint',
+    // The text-node path outlived its only caller for 62 commits because nothing asserted
+    // that a retired name stays retired. Every message the text-node path used is listed
+    // here, so reviving one half of it fails loudly instead of sitting in the tree.
+    name: 'does not answer any retired text-node translation message',
     async fn() {
       const previousChrome = global.chrome;
       const previousFetch = global.fetch;
@@ -2353,24 +2156,39 @@ exports.tests = [
         require('../extension/background.js');
         assert.equal(typeof messageListener, 'function');
 
-        const responses = [];
-        messageListener(
+        const retiredMessages = [
           {
             type: 'TRANSLATE_TEXT_NODES',
             records: [{ id: 'n1', text: 'Hello world.' }],
           },
-          {},
-          (response) => responses.push(response)
-        );
+          {
+            type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
+            records: [{ id: 'v1', text: 'Hello world.' }],
+            settingsSnapshot: null,
+          },
+          {
+            type: 'INLINE_TRANSLATION_PROGRESS',
+            operationId: 1,
+            progress: { stage: 'queued', recordCount: 1, chunkCount: 1 },
+          },
+        ];
 
-        for (let i = 0; i < 10 && responses.length < 1; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
+        for (const message of retiredMessages) {
+          const responses = [];
+          messageListener(message, {}, (response) => responses.push(response));
+
+          for (let i = 0; i < 10 && responses.length < 1; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+
+          assert.deepEqual(
+            responses,
+            [{ ok: false, error: { message: 'Unknown message' } }],
+            `${message.type} is answered again`
+          );
         }
 
         assert.equal(fetchCount, 0);
-        assert.deepEqual(responses, [
-          { ok: false, error: { message: 'Unknown message' } },
-        ]);
       } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;

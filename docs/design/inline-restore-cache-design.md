@@ -16,15 +16,15 @@ across page reloads, tab navigations, browser restarts, or extension storage.
 `extension/content.js` cached translations inside each viewport store in
 `translationByOriginal`. That supports two active-session cases:
 
-- a rerendered text node with the same original text can receive the cached
-  translation;
-- the same text node can revert to its original value and receive the cached
+- a Semantic Block rerendered with page-owned nodes it still owns can receive the
+  cached translation;
+- the same block can be restored to its original content and receive the cached
   translation again.
 
-`restoreInlineViewportRecords()` restored translated DOM nodes to their
-original text, cleared restorable records, incremented the operation, and created
-a new viewport store. Because the cache belonged to the old viewport store,
-clicking **Page in Korean** after **Original text** started with an empty cache.
+`restoreInlineViewportRecords()` restored translated blocks to their original
+content, cleared restorable records, incremented the operation, and created a new
+viewport store. Because the cache belonged to the old viewport store, clicking
+**Page in Korean** after **Original text** started with an empty cache.
 
 ## Chosen Approach
 
@@ -40,43 +40,52 @@ available in the content script before an inline run starts:
 - `model`;
 - `reasoningEffort`.
 
-Each bucket is keyed by exact original text, using the existing
-`getInlineOriginalTextCacheKey()` behavior. Each entry stores:
+Each bucket is keyed by the record's `cacheKey`, which `inline-block.js` derives
+from the block's serialized form. Each entry stores:
 
-- `original`: the original text;
-- `translation`: the translated text.
+- `codecVersion`: the codec that produced the entry;
+- `translatedTemplate`: the translated template, tokens and all;
+- `state`: `translated` or `translated_with_warning`;
+- `terminalCode`: the warning's code, when the state carries one;
+- `attemptCount`: how many attempts the translation took.
 
 This keeps the responsibilities distinct:
 
 - viewport store records track the current active scan position, queue,
-  in-flight work, and DOM ownership;
-- restorable records track translated DOM nodes that may need to be restored;
-- the page cache tracks known original-to-translation pairs for the current page
-  instance.
+  in-flight work, and block ownership;
+- restorable records track translated blocks that may need to be restored;
+- the page cache tracks known block-to-translated-template pairs for the current
+  page instance.
 
-Viewport scanning is intentionally bounded. Each scan inspects a limited window
-of text nodes, skips offscreen element subtrees, and schedules a continuation
-when more text nodes remain. Internal continuations resume from the stored scan
-position. External viewport changes such as scroll, resize, or page mutation
-reset that position and drop unsent queued records so the next scan prioritizes
-currently visible text instead of old viewport work.
+Viewport scanning is intentionally bounded. Blocks are discovered from the
+visible text nodes inside them, so the scan budget and the scan position are both
+counted in text nodes even though the unit of work is a block. Each scan inspects
+a limited window of text nodes, skips offscreen element subtrees, and schedules a
+continuation when more text nodes remain. Internal continuations resume from the
+stored scan position. External viewport changes such as scroll, resize, or page
+mutation reset that position and return unsent queued records to `original`, so
+the next scan prioritizes currently visible content instead of old viewport work.
+A queued page-change retry is the one exception: it is retained across the reset,
+because dropping it would leave the block it superseded looking finished. See
+`docs/design/inline-changed-text-retry-design.md`.
 
 ## Data Flow
 
 On successful inline viewport translation:
 
-1. `applyInlineViewportBatchTranslations()` applies the translated text to the
-   DOM only if the record is current and the node still contains the original
-   text.
-2. The record is marked `translated`.
+1. `applyInlineViewportBlockResults()` applies the translated template to the
+   DOM only if the record is current and the block still owns the nodes it was
+   serialized from.
+2. The record is marked `translated`, or `translated_with_warning` when one
+   repair attempt left source-language prose behind.
 3. The translation is cached in the current viewport store and in the current
    settings bucket of the page cache.
 
 On **Original text**:
 
 1. Active viewport watchers are detached.
-2. Translated nodes are restored to original text using existing ownership
-   checks.
+2. Translated blocks are restored to their original content using existing
+   ownership checks.
 3. Current records and restorable records are cleared as they are today.
 4. The page cache remains available.
 5. A fresh viewport store is created for the next inline run.
@@ -93,14 +102,15 @@ On the next **Page in Korean** click on the same page:
    signature.
 6. If the settings signature is different from the previous run, the new bucket
    starts empty and text is translated normally.
-7. Visible text collection calls `queueInlineViewportRecord()`.
-8. If a text node exactly matches a cached original string, the cached
+7. Block collection calls `queueInlineViewportBlock()`.
+8. If a block's `cacheKey` matches a cached entry from the same codec version and
+   the cached template still patches cleanly onto the block, the cached
    translation is applied immediately and no batch request is queued for that
-   node.
+   block.
 9. If the scan budget is exhausted, the next internal scan continues from the
    stored text-node position. If the viewport changes before that continuation
-   runs, queued-but-unsent records are returned to `original` state and the scan
-   restarts from the top of the current viewport.
+   runs, queued-but-unsent records other than page-change retries are returned to
+   `original` state and the scan restarts from the top of the current viewport.
 
 The implementation shares the page cache `Map` with each new viewport store.
 That avoids copy drift and keeps the helper API small:
@@ -111,7 +121,7 @@ restore/retranslate flows.
 ## Settings Snapshot
 
 The content script sends a non-secret `settingsSnapshot` with each
-`TRANSLATE_VISIBLE_TEXT_BATCH` request. The snapshot contains only:
+`TRANSLATE_VISIBLE_BLOCK_BATCH` request. The snapshot contains only:
 
 - `targetLanguage`;
 - `tone`;
@@ -119,17 +129,18 @@ The content script sends a non-secret `settingsSnapshot` with each
 - `reasoningEffort`.
 
 `extension/background.js` merges that snapshot into the current settings for the
-visible inline batch, but preserves the current stored `apiKey` and ignores other
+visible block batch, but preserves the current stored `apiKey` and ignores other
 settings such as `chunkMaxChars`, `buttonVisibility`, and `viewMode`.
 
 This keeps a run consistent with the settings used to choose the cache bucket,
 without allowing the content script to provide or override secrets.
 
-Visible inline batches also use a fixed output-token cap in the background
-request. After the model returns structured JSON, the background validates every
-expected id and rejects translations that expand far beyond their original
-record. Rejected, malformed, or missing translations fail the affected batch
-instead of being applied or cached.
+Visible block batches size their output-token cap from the batch's record cost,
+between a floor and a ceiling. After the model returns structured JSON, the
+background validates every expected id and every protected token, and rejects a
+template whose structure does not match the contract it was given. Rejected,
+malformed, or missing translations fail the affected record instead of being
+applied or cached; a repairable failure gets one repair attempt first.
 
 ## Boundaries
 
@@ -140,9 +151,10 @@ instance.
 The cache must not apply fuzzy matches. It should only apply when:
 
 - the current run's settings signature matches the cache bucket;
-- the node is still connected;
-- the current node value equals the cached `original`;
-- the cached `translation` is a string.
+- the cached entry came from the current codec version;
+- the cached `translatedTemplate` is a string;
+- the cached template produces a patch plan that applies to the block's
+  snapshot.
 
 If any condition fails, the existing queue/stale behavior applies.
 
@@ -154,38 +166,40 @@ operation checks.
 
 Queued records that have not been sent may be reset when the viewport changes.
 Those records remain in `records` for status/restoration bookkeeping, but they
-are removed from the active queue and can be queued again if their text is still
-visible in a later scan.
+are removed from the active queue and can be queued again if their block is still
+visible in a later scan. A queued page-change retry is retained rather than
+reset.
 
-If the page changes after restoration and the text no longer equals the cached
-original, the cached entry is not applied. That prevents replacing live site
-updates with stale translated text.
+If the page changes a block after restoration so that the cached template no
+longer patches onto it, the cached entry is not applied. That prevents replacing
+live site updates with a stale translation.
 
 ## Testing
 
 Focused unit coverage in `tests/content-helpers.test.js` covers:
 
-- A translated viewport record is cached in a page-level cache.
+- A translated Semantic Block is cached in a page-level cache.
 - After `restoreInlineViewportRecords()` restores the DOM and creates a fresh
-  viewport store, the same original text can be translated from the preserved
-  cache without queueing an API request.
+  viewport store, the same block can be translated from the preserved cache
+  without queueing an API request.
 - Cache buckets are separated by target language, tone, model, and reasoning
   effort, but not by `apiKey`.
-- Stopped-session translated nodes are reused only when settings match.
-- Stopped-session translated nodes are restored to original text when settings
-  change so they can be queued under the new settings.
-- Existing tests for rerendered original text, same-node reversion, stopped
-  sessions, and restore ownership continue to pass.
-- Viewport scans skip offscreen text, continue through large pages using a
-  bounded text-node budget, and reset unsent queued work when the viewport
+- Stopped-session translated blocks are reused only when settings match.
+- Stopped-session translated blocks are restored to their original content when
+  settings change so they can be queued under the new settings.
+- A partial translation is rehydrated from cache as partial, not as success.
+- A block rerendered with equivalent page-owned nodes is requeued rather than
+  treated as still translated.
+- Viewport scans skip offscreen content, resume from the stored scan position
+  when the budget runs out, and reset unsent queued work when the viewport
   changes.
 
 Focused unit coverage in `tests/background-helpers.test.js` verifies that
 visible batch settings snapshots can update translation-affecting settings
 without accepting an `apiKey` from the content script.
-It also verifies the visible-batch output cap, full-page output cap scaling,
-structured inline translation id validation, over-expanded inline translation
-rejection, and removal of the legacy text-node translation message endpoint.
+It also verifies the block-batch output cap, full-page output cap scaling,
+structured block id and protected-token validation, and that none of the retired
+text-node message names is answered again.
 
 Run:
 

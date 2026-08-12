@@ -196,41 +196,6 @@ exports.tests = [
     },
   },
   {
-    name: 'formats inline translation progress messages',
-    fn() {
-      assert.equal(
-        helpers.formatInlineProgressMessage({
-          stage: 'queued',
-          recordCount: 80,
-          chunkCount: 5,
-        }),
-        'Preparing 80 text nodes across 5 chunks...'
-      );
-      assert.equal(
-        helpers.formatInlineProgressMessage({
-          stage: 'chunk',
-          current: 2,
-          total: 5,
-          recordCount: 16,
-          charCount: 2400,
-        }),
-        'Chunk 2/5: 16 text nodes, 2400 chars'
-      );
-      assert.equal(
-        helpers.formatInlineProgressMessage({
-          stage: 'chunk_done',
-          current: 3,
-          total: 5,
-        }),
-        'Completed 3/5 chunks...'
-      );
-      assert.equal(
-        helpers.formatInlineProgressMessage({ stage: 'applying' }),
-        'Applying translated text...'
-      );
-    },
-  },
-  {
     name: 'detects code-like text conservatively',
     fn() {
       assert.equal(helpers.isCodeLikeInlineText('npm run build'), true);
@@ -242,19 +207,6 @@ exports.tests = [
         ),
         false
       );
-    },
-  },
-  {
-    name: 'accepts readable article text',
-    fn() {
-      assert.equal(
-        helpers.isTranslatableInlineText(
-          'OpenAI provides tools for building language applications.'
-        ),
-        true
-      );
-      assert.equal(helpers.isTranslatableInlineText('API'), false);
-      assert.equal(helpers.isTranslatableInlineText('  '), false);
     },
   },
   {
@@ -301,45 +253,6 @@ exports.tests = [
       assert.equal(helpers.isTrustedInlineUiEvent({ isTrusted: true }), true);
       assert.equal(helpers.isTrustedInlineUiEvent({ isTrusted: false }), false);
       assert.equal(helpers.isTrustedInlineUiEvent({}), false);
-    },
-  },
-  {
-    name: 'resets inline translation state after failures',
-    fn() {
-      const state = {
-        status: 'translating',
-        records: [{ id: 'n1', original: 'Hello', translation: null }],
-        message: '',
-      };
-
-      helpers.resetInlineTranslationAfterFailure(state);
-
-      assert.equal(state.status, 'original');
-      assert.deepEqual(state.records, []);
-    },
-  },
-  {
-    name: 'reports oversized inline text payloads before messaging',
-    fn() {
-      assert.match(
-        helpers.getInlineTextRecordBudgetError(
-          Array.from({ length: 501 }, (_, index) => ({
-            id: `n${index + 1}`,
-            text: 'Hello world.',
-          }))
-        ),
-        /Too many text nodes/
-      );
-      assert.match(
-        helpers.getInlineTextRecordBudgetError([
-          { id: 'n1', text: 'x'.repeat(60001) },
-        ]),
-        /too much text/
-      );
-      assert.equal(
-        helpers.getInlineTextRecordBudgetError([{ id: 'n1', text: 'Hello.' }]),
-        ''
-      );
     },
   },
   {
@@ -591,6 +504,70 @@ exports.tests = [
     },
   },
   {
+    // `INLINE_TRANSLATION_PROGRESS` was the half of the retired message pair that lived
+    // here: the service worker sent it and this script wrote it onto the progress line.
+    // The worker suite guards the producer; this guards the receiver, because re-adding
+    // the receiver alone is the natural way to "restore progress reporting" and it is
+    // exactly how the pair survived unnoticed the first time. Progress is now written by
+    // `updateInlineViewportMessage`, from Semantic Block counts, and by nothing else.
+    name: 'does not act on the retired inline progress message',
+    fn() {
+      const modulePath = require.resolve('../extension/content.js');
+      const originalModule = require.cache[modulePath];
+      const previous = {
+        chrome: global.chrome,
+        initialized: globalThis.__chromeAiTranslatorContentInitialized,
+        inlineState: globalThis.__chromeAiTranslatorInlineState,
+      };
+      let listener = null;
+
+      global.chrome = {
+        runtime: {
+          onMessage: {
+            addListener(fn) {
+              listener = fn;
+            },
+          },
+          sendMessage() {
+            return Promise.resolve({ ok: false });
+          },
+        },
+      };
+      delete globalThis.__chromeAiTranslatorContentInitialized;
+      delete globalThis.__chromeAiTranslatorInlineState;
+
+      try {
+        delete require.cache[modulePath];
+        require('../extension/content.js');
+        assert.equal(typeof listener, 'function');
+
+        const state = globalThis.__chromeAiTranslatorInlineState;
+        state.status = 'active';
+        state.message = 'Visible translation on';
+        const responses = [];
+        const handled = listener(
+          {
+            type: 'INLINE_TRANSLATION_PROGRESS',
+            operationId: state.operationId,
+            progress: { stage: 'queued', recordCount: 3, chunkCount: 1 },
+          },
+          {},
+          (response) => responses.push(response)
+        );
+
+        assert.equal(handled, undefined);
+        assert.deepEqual(responses, []);
+        assert.equal(state.message, 'Visible translation on');
+      } finally {
+        global.chrome = previous.chrome;
+        globalThis.__chromeAiTranslatorContentInitialized = previous.initialized;
+        globalThis.__chromeAiTranslatorInlineState = previous.inlineState;
+        delete require.cache[modulePath];
+        if (originalModule) require.cache[modulePath] = originalModule;
+      }
+    },
+  },
+  {
     name: 'brings the Floating Translate Button back with its menu down, not open',
     fn() {
       // The re-mount half of the cycle: mounting renders whatever the state says, so a
@@ -606,23 +583,19 @@ exports.tests = [
   {
     name: 'keeps a running Inline Translation running when the button is closed',
     fn() {
-      const inFlight = {
-        status: 'translating',
+      // Closing takes the UI, not the work: the run stays active on the same operation and
+      // keeps the Semantic Block records it has already collected.
+      const scanning = {
+        status: 'active',
         menuOpen: true,
-        message: 'Translating...',
-        operationId: 7,
-        records: [{ id: 'a' }],
+        message: 'Visible translation on',
+        operationId: 3,
+        records: [{ id: 'b1' }],
       };
-      helpers.closeFloatingTranslateButton(inFlight);
-      assert.equal(inFlight.status, 'translating');
-      assert.equal(helpers.isCurrentInlineOperation(inFlight, 7), true);
-      assert.deepEqual(inFlight.records, [{ id: 'a' }]);
-
-      // The viewport run keeps scanning too — closing takes the UI, not the work.
-      const scanning = { status: 'active', menuOpen: true, operationId: 3 };
       helpers.closeFloatingTranslateButton(scanning);
       assert.equal(scanning.status, 'active');
       assert.equal(scanning.operationId, 3);
+      assert.deepEqual(scanning.records, [{ id: 'b1' }]);
     },
   },
   {
@@ -689,91 +662,6 @@ exports.tests = [
     },
   },
   {
-    name: 'does not overwrite text nodes changed during translation',
-    fn() {
-      const stableNode = { isConnected: true, nodeValue: 'Hello world.' };
-      const changedNode = { isConnected: true, nodeValue: 'Updated article.' };
-      const disconnectedNode = { isConnected: false, nodeValue: 'Detached.' };
-      const result = helpers.applyInlineTranslationRecords([
-        {
-          id: 'n1',
-          node: stableNode,
-          original: 'Hello world.',
-          translation: 'Hello translated.',
-        },
-        {
-          id: 'n2',
-          node: changedNode,
-          original: 'Read the article.',
-          translation: 'Read translated.',
-        },
-        {
-          id: 'n3',
-          node: disconnectedNode,
-          original: 'Detached.',
-          translation: 'Detached translated.',
-        },
-      ]);
-
-      assert.equal(stableNode.nodeValue, 'Hello translated.');
-      assert.equal(changedNode.nodeValue, 'Updated article.');
-      assert.equal(disconnectedNode.nodeValue, 'Detached.');
-      assert.deepEqual(
-        result.applied.map((record) => record.id),
-        ['n1']
-      );
-      assert.equal(result.skipped, 1);
-    },
-  },
-  {
-    name: 'preserves text-node boundary spaces when applying translations',
-    fn() {
-      const dashNode = {
-        isConnected: true,
-        nodeValue: ' - Activates before writing code.',
-      };
-      const conjunctionNode = { isConnected: true, nodeValue: ' or ' };
-
-      helpers.applyInlineTranslationRecords([
-        {
-          id: 'n1',
-          node: dashNode,
-          original: ' - Activates before writing code.',
-          translation: '- 코드 작성 전에 활성화됩니다.',
-        },
-        {
-          id: 'n2',
-          node: conjunctionNode,
-          original: ' or ',
-          translation: '또는',
-        },
-      ]);
-
-      assert.equal(dashNode.nodeValue, ' - 코드 작성 전에 활성화됩니다.');
-      assert.equal(conjunctionNode.nodeValue, ' 또는 ');
-    },
-  },
-  {
-    name: 'preserves exact original boundary whitespace',
-    fn() {
-      const nbspNode = {
-        isConnected: true,
-        nodeValue: '\u00a0Hello world.  ',
-      };
-
-      helpers.applyInlineTranslationRecords([
-        {
-          id: 'n1',
-          node: nbspNode,
-          original: '\u00a0Hello world.  ',
-          translation: ' 안녕하세요. ',
-        },
-      ]);
-
-      assert.equal(nbspNode.nodeValue, '\u00a0안녕하세요.  ');
-    },
-  },
-  {
     name: 'requires closed shadow UI isolation',
     fn() {
       assert.equal(helpers.getInlineShadowMode(), 'closed');
@@ -786,32 +674,6 @@ exports.tests = [
         helpers.getInlineHostStyleText(),
         /pointer-events: auto !important/
       );
-    },
-  },
-  {
-    name: 'invalidates stale inline translation operations',
-    fn() {
-      const state = {
-        status: 'original',
-        records: [],
-        operationId: 0,
-      };
-
-      const first = helpers.beginInlineTranslationOperation(state, [
-        { id: 'n1', node: null, text: 'First text.' },
-      ]);
-      const second = helpers.beginInlineTranslationOperation(state, [
-        { id: 'n1', node: null, text: 'Second text.' },
-      ]);
-
-      assert.equal(helpers.isCurrentInlineOperation(state, first.operationId), false);
-      assert.equal(helpers.isCurrentInlineOperation(state, second.operationId), true);
-
-      helpers.cancelInlineTranslationOperation(state, second.operationId);
-
-      assert.equal(state.status, 'original');
-      assert.deepEqual(state.records, []);
-      assert.equal(helpers.isCurrentInlineOperation(state, second.operationId), false);
     },
   },
   {
@@ -847,278 +709,6 @@ exports.tests = [
         ),
         false
       );
-    },
-  },
-  {
-    name: 'collects visible inline text nodes into viewport queue',
-    fn() {
-      const previous = {
-        document: global.document,
-        HTMLElement: global.HTMLElement,
-        NodeFilter: global.NodeFilter,
-        window: global.window,
-      };
-
-      class FakeElement {
-        constructor(rect) {
-          this.rect = rect;
-          this.tagName = 'P';
-          this.hidden = false;
-          this.parentElement = null;
-        }
-
-        closest() {
-          return null;
-        }
-
-        getAttribute() {
-          return null;
-        }
-
-        getBoundingClientRect() {
-          return this.rect;
-        }
-      }
-
-      const visibleNode = {
-        nodeValue: 'Visible article text.',
-        parentElement: new FakeElement({
-          top: 20,
-          bottom: 44,
-          left: 10,
-          right: 300,
-          width: 290,
-          height: 24,
-        }),
-      };
-      const belowViewportNode = {
-        nodeValue: 'Below article text.',
-        parentElement: new FakeElement({
-          top: 1000,
-          bottom: 1024,
-          left: 10,
-          right: 300,
-          width: 290,
-          height: 24,
-        }),
-      };
-
-      global.HTMLElement = FakeElement;
-      global.NodeFilter = {
-        SHOW_TEXT: 4,
-        FILTER_ACCEPT: 1,
-        FILTER_REJECT: 2,
-      };
-      global.window = {
-        innerWidth: 500,
-        innerHeight: 300,
-        getComputedStyle() {
-          return {
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-          };
-        },
-      };
-      global.document = {
-        documentElement: {
-          clientWidth: 0,
-          clientHeight: 0,
-        },
-        createRange() {
-          throw new Error('range unavailable');
-        },
-        createTreeWalker(root, _show, filter) {
-          const accepted = root.nodes.filter(
-            (node) => filter.acceptNode(node) === global.NodeFilter.FILTER_ACCEPT
-          );
-          let index = -1;
-          return {
-            currentNode: null,
-            nextNode() {
-              index += 1;
-              this.currentNode = accepted[index] || null;
-              return Boolean(this.currentNode);
-            },
-          };
-        },
-      };
-
-      try {
-        const store = helpers.createInlineViewportStore(17);
-        const queued = helpers.collectVisibleInlineTextNodes(
-          { nodes: [visibleNode, belowViewportNode] },
-          store
-        );
-
-        assert.deepEqual(
-          queued.map((record) => record.id),
-          ['v1']
-        );
-        assert.equal(queued[0].original, 'Visible article text.');
-        assert.equal(store.queue.length, 1);
-      } finally {
-        global.document = previous.document;
-        global.HTMLElement = previous.HTMLElement;
-        global.NodeFilter = previous.NodeFilter;
-        global.window = previous.window;
-      }
-    },
-  },
-  {
-    name: 'does not queue offscreen text nodes in manual DOM scans',
-    fn() {
-      withFakeViewportDom(({ FakeElement, text }) => {
-        const visible = new FakeElement([
-          text('First visible article sentence.'),
-        ]);
-        const belowViewport = new FakeElement(
-          [text('Second below article sentence.')],
-          {
-            top: 700,
-            bottom: 724,
-          }
-        );
-        const laterVisible = new FakeElement(
-          [text('Third visible article sentence.')],
-          {
-            top: 60,
-            bottom: 84,
-          }
-        );
-        const root = new FakeElement([visible, belowViewport, laterVisible]);
-        const store = helpers.createInlineViewportStore(19);
-
-        const queued = helpers.collectVisibleInlineTextNodes(root, store, 10);
-
-        assert.deepEqual(
-          queued.map((record) => record.original),
-          [
-            'First visible article sentence.',
-            'Third visible article sentence.',
-          ]
-        );
-        assert.deepEqual(
-          store.queue.map((record) => record.original),
-          [
-            'First visible article sentence.',
-            'Third visible article sentence.',
-          ]
-        );
-      });
-    },
-  },
-  {
-    name: 'does not let offscreen predecessors exhaust the visible scan budget',
-    fn() {
-      withFakeViewportDom(({ FakeElement, text }) => {
-        const offscreen = Array.from({ length: 1200 }, (_item, index) =>
-          new FakeElement([text(`Offscreen article sentence ${index + 1}.`)])
-        );
-        const visible = new FakeElement(
-          [text('Visible article sentence now.')],
-          {
-            top: 20,
-            bottom: 44,
-          }
-        );
-        const root = new FakeElement([...offscreen, visible], {
-          top: 0,
-          bottom: 800,
-        });
-        const store = helpers.createInlineViewportStore(23);
-
-        const queued = helpers.collectVisibleInlineTextNodes(root, store, 1200);
-
-        assert.deepEqual(
-          queued.map((record) => record.original),
-          ['Visible article sentence now.']
-        );
-      }, { defaultRect: { top: 700, bottom: 724 } });
-    },
-  },
-  {
-    name: 'resets scan continuation and queued work when the viewport changes',
-    fn() {
-      const state = global.__chromeAiTranslatorInlineState;
-      const previousState = {
-        status: state.status,
-        records: state.records,
-        message: state.message,
-        operationId: state.operationId,
-        viewport: state.viewport,
-      };
-
-      try {
-        withFakeViewportDom(({ FakeElement, text }) => {
-          const firstViewport = Array.from({ length: 1300 }, (_item, index) =>
-            new FakeElement([text(`Initial visible sentence ${index + 1}.`)])
-          );
-          const secondViewport = [
-            new FakeElement(
-              [text('Later visible sentence.')],
-              { top: 700, bottom: 724 }
-            ),
-          ];
-          const root = new FakeElement([...firstViewport, ...secondViewport], {
-            top: 0,
-            bottom: 900,
-          });
-          const store = helpers.createInlineViewportStore(24);
-
-          helpers.collectVisibleInlineTextNodes(root, store, 1200);
-          assert.equal(store.scanStartIndex, 1200);
-
-          for (const el of firstViewport) {
-            el.rect = {
-              top: -1000,
-              bottom: -976,
-              left: 10,
-              right: 300,
-              width: 290,
-              height: 24,
-            };
-          }
-          for (const el of secondViewport) {
-            el.rect = {
-              top: 20,
-              bottom: 44,
-              left: 10,
-              right: 300,
-              width: 290,
-              height: 24,
-            };
-          }
-
-          state.status = 'active';
-          state.operationId = 24;
-          state.viewport = store;
-          helpers.scheduleInlineViewportScanFromViewportChange();
-
-          assert.equal(store.scanStartIndex, 0);
-          const queued = helpers.collectVisibleInlineTextNodes(root, store, 1200);
-          assert.deepEqual(
-            queued.map((record) => record.original),
-            ['Later visible sentence.']
-          );
-          const batch = helpers.takeInlineViewportBatch(store, 2000);
-          assert.deepEqual(
-            batch.map((record) => record.original),
-            ['Later visible sentence.']
-          );
-        }, {
-          clearTimeout() {},
-          setTimeout() {
-            return 123;
-          },
-        });
-      } finally {
-        state.status = previousState.status;
-        state.records = previousState.records;
-        state.message = previousState.message;
-        state.operationId = previousState.operationId;
-        state.viewport = previousState.viewport;
-      }
     },
   },
   {
@@ -1175,48 +765,6 @@ exports.tests = [
     },
   },
   {
-    name: 'advances viewport scans through large pages with a text-node budget',
-    fn() {
-      withFakeViewportDom(({ FakeElement, text }) => {
-        const nodes = [
-          text('First visible article sentence.'),
-          text('Second visible article sentence.'),
-          text('Third visible article sentence.'),
-          text('Fourth visible article sentence.'),
-        ];
-        const root = new FakeElement(nodes);
-        const store = helpers.createInlineViewportStore(21);
-
-        const first = helpers.collectVisibleInlineTextNodes(root, store, 2);
-        const second = helpers.collectVisibleInlineTextNodes(root, store, 2);
-
-        assert.deepEqual(
-          first.map((record) => record.original),
-          [
-            'First visible article sentence.',
-            'Second visible article sentence.',
-          ]
-        );
-        assert.deepEqual(
-          second.map((record) => record.original),
-          [
-            'Third visible article sentence.',
-            'Fourth visible article sentence.',
-          ]
-        );
-        assert.deepEqual(
-          store.queue.map((record) => record.original),
-          [
-            'First visible article sentence.',
-            'Second visible article sentence.',
-            'Third visible article sentence.',
-            'Fourth visible article sentence.',
-          ]
-        );
-      });
-    },
-  },
-  {
     name: 'schedules another viewport scan when the scan budget is exhausted',
     fn() {
       const state = global.__chromeAiTranslatorInlineState;
@@ -1265,6 +813,138 @@ exports.tests = [
         state.message = previousState.message;
         state.operationId = previousState.operationId;
         state.viewport = previousState.viewport;
+      }
+    },
+  },
+  {
+    // The scan position is the reason a long page finishes at all: a scan that runs out of
+    // budget must record where it stopped, or every later scan re-inspects the same head of
+    // the page and the tail is never reached. `docs/design/inline-restore-cache-design.md`
+    // is where the rule is written down.
+    name: 'resumes a Semantic Block scan where the previous one ran out of budget',
+    fn() {
+      const previous = {
+        document: global.document,
+        HTMLElement: global.HTMLElement,
+        window: global.window,
+      };
+      const { document, element, text } = createTestDocument();
+      const root = element('div');
+      const sentences = [
+        'First article sentence.',
+        'Second article sentence.',
+        'Third article sentence.',
+      ];
+      for (const sentence of sentences) {
+        root.appendChild(element('p', text(sentence)));
+      }
+      document.body.appendChild(root);
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => {
+        throw new Error('range unavailable');
+      };
+      global.document = document;
+      global.HTMLElement = root.constructor;
+      global.window = {
+        innerWidth: 500,
+        innerHeight: 300,
+        getComputedStyle() {
+          return {
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+
+      try {
+        const store = helpers.createInlineViewportStore(41);
+
+        const first = helpers.collectVisibleInlineBlocks(root, store, 2);
+        assert.deepEqual(
+          first.map((record) => record.template),
+          [sentences[0], sentences[1]]
+        );
+        assert.equal(store.scanStartIndex, 2);
+
+        const second = helpers.collectVisibleInlineBlocks(root, store, 2);
+        assert.deepEqual(
+          second.map((record) => record.template),
+          [sentences[2]]
+        );
+        // Nothing was left unread, so the next scan starts from the top again.
+        assert.equal(store.scanStartIndex, 0);
+      } finally {
+        global.document = previous.document;
+        global.HTMLElement = previous.HTMLElement;
+        global.window = previous.window;
+      }
+    },
+  },
+  {
+    // The scan budget is spent on text nodes, but it is only reached by nodes whose
+    // ancestors survived the element-level offscreen check. Without that pruning the
+    // budget goes on content the reader cannot see, and the blocks in front of them are
+    // never queued — the failure looks like Inline Translation doing nothing at all.
+    name: 'does not let offscreen blocks exhaust the Semantic Block scan budget',
+    fn() {
+      const previous = {
+        document: global.document,
+        HTMLElement: global.HTMLElement,
+        window: global.window,
+      };
+      const { document, element, text } = createTestDocument();
+      const offscreen = ['Far above one.', 'Far above two.', 'Far above three.'].map(
+        (sentence) => element('p', text(sentence))
+      );
+      const visible = element('p', text('The paragraph the reader is looking at.'));
+      const root = element('div');
+      for (const paragraph of [...offscreen, visible]) root.appendChild(paragraph);
+      document.body.appendChild(root);
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => {
+        throw new Error('range unavailable');
+      };
+      const offscreenRect = {
+        top: -1000,
+        bottom: -976,
+        left: 10,
+        right: 300,
+        width: 290,
+        height: 24,
+      };
+      for (const paragraph of offscreen) paragraph.rect = offscreenRect;
+      root.rect = { top: 0, bottom: 900, left: 10, right: 300, width: 290, height: 900 };
+      global.document = document;
+      global.HTMLElement = root.constructor;
+      global.window = {
+        innerWidth: 500,
+        innerHeight: 300,
+        getComputedStyle() {
+          return {
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+
+      try {
+        const store = helpers.createInlineViewportStore(42);
+
+        // A budget of one: it has to survive three offscreen paragraphs to be spent on the
+        // visible one.
+        const queued = helpers.collectVisibleInlineBlocks(root, store, 1);
+
+        assert.deepEqual(
+          queued.map((record) => record.template),
+          ['The paragraph the reader is looking at.']
+        );
+        assert.equal(store.scanStartIndex, 0);
+      } finally {
+        global.document = previous.document;
+        global.HTMLElement = previous.HTMLElement;
+        global.window = previous.window;
       }
     },
   },
@@ -1380,125 +1060,6 @@ exports.tests = [
         state.operationId = previous.operationId;
         state.viewport = previous.viewport;
       }
-    },
-  },
-  {
-    name: 'queues each visible text node once per active operation',
-    fn() {
-      const store = helpers.createInlineViewportStore(7);
-      const node = { isConnected: true, nodeValue: 'Visible article text.' };
-
-      const first = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Visible article text.'
-      );
-      const second = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Visible article text.'
-      );
-
-      assert.equal(first.id, 'v1');
-      assert.equal(first.state, 'queued');
-      assert.equal(first.operationId, 7);
-      assert.equal(second, null);
-      assert.deepEqual(
-        store.queue.map((record) => record.id),
-        ['v1']
-      );
-    },
-  },
-  {
-    name: 'reapplies cached viewport translation to rerendered original text',
-    fn() {
-      const store = helpers.createInlineViewportStore(7);
-      const firstNode = { isConnected: true, nodeValue: 'Hello world.' };
-
-      helpers.queueInlineViewportRecord(store, firstNode, 'Hello world.');
-      const batch = helpers.takeInlineViewportBatch(store);
-      helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: batch[0].id, translation: '안녕하세요.' }],
-        7,
-        store
-      );
-
-      const rerenderedNode = { isConnected: true, nodeValue: 'Hello world.' };
-      const queued = helpers.queueInlineViewportRecord(
-        store,
-        rerenderedNode,
-        'Hello world.'
-      );
-
-      assert.equal(queued, null);
-      assert.equal(rerenderedNode.nodeValue, '안녕하세요.');
-      assert.equal(store.queue.length, 0);
-      assert.equal(store.records.length, 2);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 2,
-        partial: 0,
-        pending: 0,
-        changed: 0,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'preserves boundary spaces in viewport translations and cache',
-    fn() {
-      const store = helpers.createInlineViewportStore(7);
-      const conjunctionNode = { isConnected: true, nodeValue: ' or ' };
-
-      helpers.queueInlineViewportRecord(store, conjunctionNode, ' or ');
-      const batch = helpers.takeInlineViewportBatch(store);
-      helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: batch[0].id, translation: '또는' }],
-        7,
-        store
-      );
-
-      assert.equal(conjunctionNode.nodeValue, ' 또는 ');
-      assert.equal(batch[0].translation, ' 또는 ');
-
-      const rerenderedNode = { isConnected: true, nodeValue: ' or ' };
-      const queued = helpers.queueInlineViewportRecord(
-        store,
-        rerenderedNode,
-        ' or '
-      );
-
-      assert.equal(queued, null);
-      assert.equal(rerenderedNode.nodeValue, ' 또는 ');
-    },
-  },
-  {
-    name: 'normalizes unpreserved cached viewport translations',
-    fn() {
-      const store = helpers.createInlineViewportStore(7);
-      store.translationByOriginal.set(' - Activates before writing code.', {
-        original: ' - Activates before writing code.',
-        translation: '- 코드 작성 전에 활성화됩니다.',
-      });
-      const node = {
-        isConnected: true,
-        nodeValue: ' - Activates before writing code.',
-      };
-
-      const queued = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        ' - Activates before writing code.'
-      );
-
-      assert.equal(queued, null);
-      assert.equal(node.nodeValue, ' - 코드 작성 전에 활성화됩니다.');
-      assert.equal(
-        store.translationByOriginal.get(' - Activates before writing code.')
-          .translation,
-        ' - 코드 작성 전에 활성화됩니다.'
-      );
     },
   },
   {
@@ -1642,41 +1203,6 @@ exports.tests = [
     },
   },
   {
-    name: 'reapplies cached translation when same text node reverts to original',
-    fn() {
-      const store = helpers.createInlineViewportStore(7);
-      const node = { isConnected: true, nodeValue: 'Hello world.' };
-
-      helpers.queueInlineViewportRecord(store, node, 'Hello world.');
-      const batch = helpers.takeInlineViewportBatch(store);
-      helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: batch[0].id, translation: '안녕하세요.' }],
-        7,
-        store
-      );
-
-      node.nodeValue = 'Hello world.';
-      const queued = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Hello world.'
-      );
-
-      assert.equal(queued, null);
-      assert.equal(node.nodeValue, '안녕하세요.');
-      assert.equal(store.queue.length, 0);
-      assert.equal(store.records.length, 1);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 1,
-        partial: 0,
-        pending: 0,
-        changed: 0,
-        failed: 0,
-      });
-    },
-  },
-  {
     name: 'stopping viewport translation invalidates operation without restoring text',
     fn() {
       const store = helpers.createInlineViewportStore(4);
@@ -1785,291 +1311,6 @@ exports.tests = [
     },
   },
   {
-    name: 'restores stopped-session translations after viewport restart',
-    fn() {
-      const firstStore = helpers.createInlineViewportStore(4);
-      const firstNode = { isConnected: true, nodeValue: '안녕하세요.' };
-      firstStore.records.push({
-        id: 'v1',
-        node: firstNode,
-        original: 'Hello world.',
-        translation: '안녕하세요.',
-        state: 'translated',
-        operationId: 4,
-      });
-      const state = {
-        status: 'active',
-        operationId: 4,
-        viewport: firstStore,
-        records: firstStore.records,
-        restorableRecords: [],
-      };
-
-      helpers.stopInlineViewportTranslation(state);
-
-      const secondStore = helpers.createInlineViewportStore(6);
-      const secondNode = { isConnected: true, nodeValue: '두 번째입니다.' };
-      secondStore.records.push({
-        id: 'v1',
-        node: secondNode,
-        original: 'Second visible text.',
-        translation: '두 번째입니다.',
-        state: 'translated',
-        operationId: 6,
-      });
-      state.status = 'active';
-      state.operationId = 6;
-      state.viewport = secondStore;
-      state.records = secondStore.records;
-
-      helpers.restoreInlineViewportRecords(state);
-
-      assert.equal(firstNode.nodeValue, 'Hello world.');
-      assert.equal(secondNode.nodeValue, 'Second visible text.');
-      assert.deepEqual(state.restorableRecords, []);
-      assert.equal(state.status, 'original');
-    },
-  },
-  {
-    name: 'does not requeue stopped-session translated nodes after restart',
-    fn() {
-      const firstStore = helpers.createInlineViewportStore(4);
-      const node = {
-        isConnected: true,
-        nodeValue: '번역된 OpenAI API 문장입니다.',
-      };
-      firstStore.records.push({
-        id: 'v1',
-        node,
-        original: 'This is an OpenAI API sentence.',
-        translation: '번역된 OpenAI API 문장입니다.',
-        state: 'translated',
-        operationId: 4,
-      });
-      const state = {
-        status: 'active',
-        operationId: 4,
-        viewport: firstStore,
-        records: firstStore.records,
-        restorableRecords: [],
-      };
-
-      helpers.stopInlineViewportTranslation(state);
-      const secondStore = helpers.createInlineViewportStore(6);
-      helpers.seedInlineViewportStoreWithRestorableRecords(
-        secondStore,
-        state.restorableRecords
-      );
-
-      const queued = helpers.queueInlineViewportRecord(
-        secondStore,
-        node,
-        node.nodeValue
-      );
-
-      assert.equal(queued, null);
-      assert.equal(secondStore.queue.length, 0);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
-        translated: 1,
-        partial: 0,
-        pending: 0,
-        changed: 0,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'does not requeue stopped-session translated nodes after matching settings restart',
-    fn() {
-      const settings = {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-        apiKey: 'sk-korean',
-      };
-      const signature = helpers.getInlineTranslationCacheSignature(settings);
-      const state = {
-        status: 'active',
-        operationId: 4,
-        records: [],
-        restorableRecords: [],
-        translationCacheBySettings: new Map(),
-      };
-      const firstCache = helpers.activateInlineTranslationCacheBucket(
-        state,
-        settings
-      );
-      const firstStore = helpers.createInlineViewportStore(
-        4,
-        firstCache,
-        settings
-      );
-      const node = {
-        isConnected: true,
-        nodeValue: 'This is an OpenAI API sentence.',
-      };
-
-      assert.equal(firstStore.translationSettingsSignature, signature);
-
-      const firstRecord = helpers.queueInlineViewportRecord(
-        firstStore,
-        node,
-        node.nodeValue
-      );
-      const batch = helpers.takeInlineViewportBatch(firstStore);
-      helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: firstRecord.id, translation: '번역된 OpenAI API 문장입니다.' }],
-        4,
-        firstStore
-      );
-      state.viewport = firstStore;
-      state.records = firstStore.records;
-
-      assert.equal(firstRecord.translationSettingsSignature, signature);
-
-      helpers.stopInlineViewportTranslation(state);
-      const secondCache = helpers.getInlineTranslationCacheBucket(
-        state,
-        settings
-      );
-      const secondStore = helpers.createInlineViewportStore(
-        6,
-        secondCache,
-        settings
-      );
-      helpers.seedInlineViewportStoreWithRestorableRecords(
-        secondStore,
-        state.restorableRecords
-      );
-
-      const queued = helpers.queueInlineViewportRecord(
-        secondStore,
-        node,
-        node.nodeValue
-      );
-
-      assert.equal(queued, null);
-      assert.equal(secondCache, firstCache);
-      assert.equal(secondCache.has('This is an OpenAI API sentence.'), true);
-      assert.equal(secondStore.queue.length, 0);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
-        translated: 1,
-        partial: 0,
-        pending: 0,
-        changed: 0,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'restores stopped-session translated nodes when settings change',
-    fn() {
-      const original = 'This is an OpenAI API sentence.';
-      const koreanTranslation = '번역된 OpenAI API 문장입니다.';
-      const koreanSettings = {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-        apiKey: 'sk-korean',
-      };
-      const japaneseSettings = {
-        ...koreanSettings,
-        targetLanguage: 'Japanese',
-        apiKey: 'sk-japanese',
-      };
-      const koreanSignature =
-        helpers.getInlineTranslationCacheSignature(koreanSettings);
-      const japaneseSignature =
-        helpers.getInlineTranslationCacheSignature(japaneseSettings);
-      const state = {
-        status: 'active',
-        operationId: 4,
-        records: [],
-        restorableRecords: [],
-        translationCacheBySettings: new Map(),
-      };
-      const koreanCache = helpers.getInlineTranslationCacheBucket(
-        state,
-        koreanSettings
-      );
-      const japaneseCache = helpers.getInlineTranslationCacheBucket(
-        state,
-        japaneseSettings
-      );
-      const firstStore = helpers.createInlineViewportStore(
-        4,
-        koreanCache,
-        koreanSettings
-      );
-      const node = { isConnected: true, nodeValue: original };
-
-      assert.notEqual(koreanSignature, japaneseSignature);
-      assert.notEqual(koreanCache, japaneseCache);
-      assert.equal(firstStore.translationSettingsSignature, koreanSignature);
-
-      const firstRecord = helpers.queueInlineViewportRecord(
-        firstStore,
-        node,
-        original
-      );
-      const batch = helpers.takeInlineViewportBatch(firstStore);
-      helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: firstRecord.id, translation: koreanTranslation }],
-        4,
-        firstStore
-      );
-      assert.equal(firstRecord.translationSettingsSignature, koreanSignature);
-      state.viewport = firstStore;
-      state.records = firstStore.records;
-
-      helpers.stopInlineViewportTranslation(state);
-      assert.equal(
-        state.restorableRecords[0]?.translationSettingsSignature,
-        koreanSignature
-      );
-      const secondStore = helpers.createInlineViewportStore(
-        6,
-        japaneseCache,
-        japaneseSettings
-      );
-      assert.equal(secondStore.translationSettingsSignature, japaneseSignature);
-      helpers.seedInlineViewportStoreWithRestorableRecords(
-        secondStore,
-        state.restorableRecords
-      );
-
-      assert.equal(node.nodeValue, original);
-      assert.equal(firstRecord.state, 'original');
-      assert.equal(secondStore.records.length, 0);
-      assert.deepEqual(
-        helpers.getInlineViewportStatusCounts(secondStore.records),
-        {
-          translated: 0,
-          partial: 0,
-          pending: 0,
-          changed: 0,
-          failed: 0,
-        }
-      );
-      assert.equal(japaneseCache.has(original), false);
-
-      const queued = helpers.queueInlineViewportRecord(
-        secondStore,
-        node,
-        original
-      );
-
-      assert.equal(queued?.state, 'queued');
-      assert.equal(queued?.translation, null);
-      assert.equal(secondStore.queue.length, 1);
-      assert.equal(node.nodeValue, original);
-    },
-  },
-  {
     name: 'rejects stale viewport operation after stop or replacement',
     fn() {
       const store = helpers.createInlineViewportStore(9);
@@ -2126,864 +1367,6 @@ exports.tests = [
         }),
         false
       );
-    },
-  },
-  {
-    name: 'moves queued viewport records into character-budget batches',
-    fn() {
-      const store = helpers.createInlineViewportStore(3);
-      const records = [
-        helpers.queueInlineViewportRecord(store, { nodeValue: 'a', isConnected: true }, 'alpha beta gamma'),
-        helpers.queueInlineViewportRecord(store, { nodeValue: 'b', isConnected: true }, 'delta epsilon zeta'),
-        helpers.queueInlineViewportRecord(store, { nodeValue: 'c', isConnected: true }, 'eta theta iota'),
-      ];
-
-      const batch = helpers.takeInlineViewportBatch(store, 36);
-
-      assert.deepEqual(
-        batch.map((record) => record.id),
-        ['v1']
-      );
-      assert.equal(records[0].state, 'translating');
-      assert.equal(store.queue.length, 2);
-    },
-  },
-  {
-    name: 'does not send oversized viewport records rejected by background',
-    fn() {
-      const store = helpers.createInlineViewportStore(3);
-      const oversized = helpers.queueInlineViewportRecord(
-        store,
-        { nodeValue: 'x'.repeat(2001), isConnected: true },
-        'x'.repeat(2001)
-      );
-      const small = helpers.queueInlineViewportRecord(
-        store,
-        { nodeValue: 'Hello world.', isConnected: true },
-        'Hello world.'
-      );
-
-      const batch = helpers.takeInlineViewportBatch(store, 2000);
-
-      assert.deepEqual(
-        batch.map((record) => record.id),
-        [small.id]
-      );
-      assert.equal(oversized.state, 'failed');
-      assert.equal(small.state, 'translating');
-      assert.equal(store.queue.length, 0);
-      assert.equal(store.inFlight, 1);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 1,
-        changed: 0,
-        failed: 1,
-      });
-    },
-  },
-  {
-    name: 'applies successful viewport translations and marks stale nodes',
-    fn() {
-      const stableNode = { isConnected: true, nodeValue: 'Hello world.' };
-      const changedNode = { isConnected: true, nodeValue: 'Updated text.' };
-      const detachedNode = { isConnected: false, nodeValue: 'Detached text.' };
-      const records = [
-        {
-          id: 'v1',
-          node: stableNode,
-          original: 'Hello world.',
-          translation: null,
-          state: 'translating',
-          operationId: 11,
-        },
-        {
-          id: 'v2',
-          node: changedNode,
-          original: 'Original text.',
-          translation: null,
-          state: 'translating',
-          operationId: 11,
-        },
-        {
-          id: 'v3',
-          node: detachedNode,
-          original: 'Detached text.',
-          translation: null,
-          state: 'translating',
-          operationId: 11,
-        },
-      ];
-
-      const result = helpers.applyInlineViewportBatchTranslations(
-        records,
-        [
-          { id: 'v1', translation: '안녕하세요.' },
-          { id: 'v2', translation: '원문입니다.' },
-          { id: 'v3', translation: '분리됨.' },
-        ],
-        11
-      );
-
-      assert.equal(stableNode.nodeValue, '안녕하세요.');
-      assert.equal(changedNode.nodeValue, 'Updated text.');
-      assert.equal(detachedNode.nodeValue, 'Detached text.');
-      assert.deepEqual(result, { applied: 1, stale: 2, retried: 0, ignored: 0 });
-      assert.equal(records[0].state, 'translated');
-      assert.equal(records[1].state, 'stale');
-      assert.equal(records[2].state, 'stale');
-    },
-  },
-  {
-    name: 'queues one retry when stale node has changed translatable text',
-    fn() {
-      const store = helpers.createInlineViewportStore(21);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const batch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      const result = helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        21,
-        store
-      );
-
-      const retry = store.records.find((record) => record.retryOf === original.id);
-
-      assert.deepEqual(result, { applied: 0, stale: 1, retried: 1, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, retry.id);
-      assert.equal(retry.original, 'Updated article text.');
-      assert.equal(retry.retryCount, 1);
-      assert.equal(retry.state, 'queued');
-      assert.equal(store.byNode.get(node), retry);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id, retry.id]
-      );
-      assert.deepEqual(store.queue.map((record) => record.id), [retry.id]);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 1,
-        changed: 0,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'does not retry disconnected changed nodes',
-    fn() {
-      const store = helpers.createInlineViewportStore(22);
-      let connected = true;
-      const node = {
-        get isConnected() {
-          return connected;
-        },
-        nodeValue: 'Original article text.',
-      };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const batch = helpers.takeInlineViewportBatch(store);
-
-      connected = false;
-      node.nodeValue = 'Updated article text.';
-      const result = helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        22,
-        store
-      );
-
-      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id]
-      );
-      assert.equal(
-        store.records.some((record) => record.retryOf === original.id),
-        false
-      );
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 1,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'applies queued retry translations successfully',
-    fn() {
-      const store = helpers.createInlineViewportStore(26);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const firstBatch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      helpers.applyInlineViewportBatchTranslations(
-        firstBatch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        26,
-        store
-      );
-
-      const retry = store.queue[0];
-      const retryBatch = helpers.takeInlineViewportBatch(store);
-      const result = helpers.applyInlineViewportBatchTranslations(
-        retryBatch,
-        [{ id: retry.id, translation: '업데이트된 기사 텍스트.' }],
-        26,
-        store
-      );
-
-      assert.deepEqual(result, { applied: 1, stale: 0, retried: 0, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, retry.id);
-      assert.equal(retry.state, 'translated');
-      assert.equal(retry.translation, '업데이트된 기사 텍스트.');
-      assert.equal(node.nodeValue, '업데이트된 기사 텍스트.');
-      assert.equal(store.byNode.get(node), retry);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id, retry.id]
-      );
-      assert.deepEqual(store.translationByOriginal.get('Updated article text.'), {
-        original: 'Updated article text.',
-        translation: '업데이트된 기사 텍스트.',
-      });
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 1,
-        partial: 0,
-        pending: 0,
-        changed: 0,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'stamps retry records and cache writes with active settings',
-    fn() {
-      const settings = {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-        apiKey: 'sk-korean',
-      };
-      const otherSettings = { ...settings, targetLanguage: 'Japanese' };
-      const state = {
-        status: 'active',
-        operationId: 29,
-        translationCacheBySettings: new Map(),
-      };
-      const cache = helpers.activateInlineTranslationCacheBucket(state, settings);
-      const otherCache = helpers.activateInlineTranslationCacheBucket(
-        state,
-        otherSettings
-      );
-      const signature = helpers.getInlineTranslationCacheSignature(settings);
-      const store = helpers.createInlineViewportStore(29, cache, settings);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const firstBatch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      helpers.applyInlineViewportBatchTranslations(
-        firstBatch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        29,
-        store
-      );
-
-      const retry = store.queue[0];
-      const retryBatch = helpers.takeInlineViewportBatch(store);
-      helpers.applyInlineViewportBatchTranslations(
-        retryBatch,
-        [{ id: retry.id, translation: '업데이트된 기사 텍스트.' }],
-        29,
-        store
-      );
-
-      assert.equal(original.translationSettingsSignature, signature);
-      assert.equal(retry.translationSettingsSignature, signature);
-      assert.deepEqual(cache.get('Updated article text.'), {
-        original: 'Updated article text.',
-        translation: '업데이트된 기사 텍스트.',
-      });
-      assert.equal(otherCache.has('Updated article text.'), false);
-    },
-  },
-  {
-    name: 'marks retry records failed when retry response is missing',
-    fn() {
-      const store = helpers.createInlineViewportStore(30);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const firstBatch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      helpers.applyInlineViewportBatchTranslations(
-        firstBatch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        30,
-        store
-      );
-
-      const retry = store.queue[0];
-      const retryBatch = helpers.takeInlineViewportBatch(store);
-      const result = helpers.applyInlineViewportBatchTranslations(
-        retryBatch,
-        [],
-        30,
-        store
-      );
-
-      assert.deepEqual(result, { applied: 0, stale: 0, retried: 0, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, retry.id);
-      assert.equal(retry.state, 'failed');
-      assert.equal(node.nodeValue, 'Updated article text.');
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 0,
-        failed: 1,
-      });
-    },
-  },
-  {
-    name: 'resetting queued retries restores changed status until requeued',
-    fn() {
-      const state = global.__chromeAiTranslatorInlineState;
-      const previousState = {
-        status: state.status,
-        records: state.records,
-        message: state.message,
-        operationId: state.operationId,
-        viewport: state.viewport,
-      };
-
-      try {
-        withFakeViewportDom(() => {
-          const store = helpers.createInlineViewportStore(31);
-          const node = { isConnected: true, nodeValue: 'Original article text.' };
-          const original = helpers.queueInlineViewportRecord(
-            store,
-            node,
-            'Original article text.'
-          );
-          const firstBatch = helpers.takeInlineViewportBatch(store);
-          state.status = 'active';
-          state.operationId = 31;
-          state.viewport = store;
-          state.records = store.records;
-
-          node.nodeValue = 'Updated article text.';
-          helpers.applyInlineViewportBatchTranslations(
-            firstBatch,
-            [{ id: original.id, translation: '원문 기사 텍스트.' }],
-            31,
-            store
-          );
-
-          const retry = store.queue[0];
-          assert.equal(original.supersededByRetryId, retry.id);
-          helpers.scheduleInlineViewportScanFromViewportChange();
-
-          assert.equal(retry.state, 'original');
-          assert.equal(original.supersededByRetryId, undefined);
-          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-            translated: 0,
-            partial: 0,
-            pending: 0,
-            changed: 1,
-            failed: 0,
-          });
-
-          const requeued = helpers.queueInlineViewportRecord(
-            store,
-            node,
-            node.nodeValue
-          );
-          assert.equal(requeued, retry);
-          assert.equal(original.supersededByRetryId, retry.id);
-          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-            translated: 0,
-            partial: 0,
-            pending: 1,
-            changed: 0,
-            failed: 0,
-          });
-        }, {
-          clearTimeout() {},
-          setTimeout() {
-            return 123;
-          },
-        });
-      } finally {
-        state.status = previousState.status;
-        state.records = previousState.records;
-        state.message = previousState.message;
-        state.operationId = previousState.operationId;
-        state.viewport = previousState.viewport;
-      }
-    },
-  },
-  {
-    name: 'stopping queued retries keeps unresolved changed status visible',
-    fn() {
-      const store = helpers.createInlineViewportStore(33);
-      const state = {
-        status: 'active',
-        operationId: 33,
-        records: [],
-        restorableRecords: [],
-        viewport: store,
-      };
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const firstBatch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      helpers.applyInlineViewportBatchTranslations(
-        firstBatch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        33,
-        store
-      );
-
-      const retry = store.queue[0];
-      assert.equal(original.supersededByRetryId, retry.id);
-      helpers.stopInlineViewportTranslation(state);
-
-      assert.equal(store.stopped, true);
-      assert.equal(store.queue.length, 0);
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 1,
-        failed: 0,
-      });
-      assert.equal(
-        helpers.formatInlineViewportStatusMessage(
-          helpers.getInlineViewportStatusCounts(store.records),
-          'stopped'
-        ),
-        'Visible translation stopped\nTranslated 0 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
-      );
-    },
-  },
-  {
-    name: 'stopping in-flight retries keeps unresolved changed status visible',
-    fn() {
-      const store = helpers.createInlineViewportStore(34);
-      const state = {
-        status: 'active',
-        operationId: 34,
-        records: [],
-        restorableRecords: [],
-        viewport: store,
-      };
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const firstBatch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      helpers.applyInlineViewportBatchTranslations(
-        firstBatch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        34,
-        store
-      );
-
-      const retry = store.queue[0];
-      helpers.takeInlineViewportBatch(store);
-      assert.equal(retry.state, 'translating');
-      assert.equal(original.supersededByRetryId, retry.id);
-      helpers.stopInlineViewportTranslation(state);
-
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 1,
-        changed: 1,
-        failed: 0,
-      });
-      assert.equal(
-        helpers.formatInlineViewportStatusMessage(
-          helpers.getInlineViewportStatusCounts(store.records),
-          'stopped'
-        ),
-        'Visible translation stopped\nTranslated 0 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
-      );
-    },
-  },
-  {
-    name: 'does not retry stale records that no longer own the node',
-    fn() {
-      const store = helpers.createInlineViewportStore(27);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const batch = helpers.takeInlineViewportBatch(store);
-      const replacement = {
-        id: 'v-replacement',
-        node,
-        original: 'Updated article text.',
-        translation: null,
-        state: 'queued',
-        operationId: 27,
-      };
-
-      node.nodeValue = 'Updated article text.';
-      store.byNode.set(node, replacement);
-      const result = helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        27,
-        store
-      );
-
-      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.equal(store.byNode.get(node), replacement);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id]
-      );
-      assert.equal(
-        store.records.some((record) => record.retryOf === original.id),
-        false
-      );
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 1,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'does not retry changed text that equals the rejected translation',
-    fn() {
-      const store = helpers.createInlineViewportStore(28);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const batch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      const result = helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: original.id, translation: 'Updated article text.' }],
-        28,
-        store
-      );
-
-      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id]
-      );
-      assert.equal(
-        store.records.some((record) => record.retryOf === original.id),
-        false
-      );
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 1,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'does not retry changed text that equals preserved rejected translation',
-    fn() {
-      const store = helpers.createInlineViewportStore(28);
-      const node = { isConnected: true, nodeValue: ' Original article text. ' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        ' Original article text. '
-      );
-      const batch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = ' 업데이트된 기사 텍스트. ';
-      const result = helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: original.id, translation: '업데이트된 기사 텍스트.' }],
-        28,
-        store
-      );
-
-      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id]
-      );
-      assert.equal(
-        store.records.some((record) => record.retryOf === original.id),
-        false
-      );
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 1,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'normalizes cached changed-text retry translations',
-    fn() {
-      const store = helpers.createInlineViewportStore(28);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = ' Updated article text. ';
-      store.translationByOriginal.set(' Updated article text. ', {
-        original: ' Updated article text. ',
-        translation: '업데이트된 기사 텍스트.',
-      });
-
-      const retry = helpers.queueInlineViewportRetryRecord(
-        store,
-        original,
-        ' Updated article text. ',
-        ''
-      );
-
-      assert.equal(retry.state, 'translated');
-      assert.equal(retry.translation, ' 업데이트된 기사 텍스트. ');
-      assert.equal(node.nodeValue, ' 업데이트된 기사 텍스트. ');
-      assert.equal(
-        store.translationByOriginal.get(' Updated article text. ').translation,
-        ' 업데이트된 기사 텍스트. '
-      );
-      assert.equal(original.supersededByRetryId, retry.id);
-      assert.equal(store.queue.length, 0);
-    },
-  },
-  {
-    name: 'does not retry non-translatable changed text',
-    fn() {
-      const store = helpers.createInlineViewportStore(23);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const batch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'ABC';
-      const result = helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        23,
-        store
-      );
-
-      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id]
-      );
-      assert.equal(
-        store.records.some((record) => record.retryOf === original.id),
-        false
-      );
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 1,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'does not retry a stale retry record again',
-    fn() {
-      const store = helpers.createInlineViewportStore(24);
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const firstBatch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      helpers.applyInlineViewportBatchTranslations(
-        firstBatch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        24,
-        store
-      );
-
-      const retry = store.queue[0];
-      const retryBatch = helpers.takeInlineViewportBatch(store);
-      node.nodeValue = 'Updated article text again.';
-      const result = helpers.applyInlineViewportBatchTranslations(
-        retryBatch,
-        [{ id: retry.id, translation: '업데이트된 기사 텍스트.' }],
-        24,
-        store
-      );
-
-      assert.deepEqual(result, { applied: 0, stale: 1, retried: 0, ignored: 0 });
-      assert.equal(retry.state, 'stale');
-      assert.equal(retry.supersededByRetryId, undefined);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id, retry.id]
-      );
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 1,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'applies cached translation for changed retry text without queueing',
-    fn() {
-      const store = helpers.createInlineViewportStore(25);
-      store.translationByOriginal.set('Updated article text.', {
-        original: 'Updated article text.',
-        translation: '업데이트된 기사 텍스트.',
-      });
-      const node = { isConnected: true, nodeValue: 'Original article text.' };
-      const original = helpers.queueInlineViewportRecord(
-        store,
-        node,
-        'Original article text.'
-      );
-      const batch = helpers.takeInlineViewportBatch(store);
-
-      node.nodeValue = 'Updated article text.';
-      const result = helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: original.id, translation: '원문 기사 텍스트.' }],
-        25,
-        store
-      );
-
-      const retry = store.records.find((record) => record.retryOf === original.id);
-
-      assert.deepEqual(result, { applied: 0, stale: 1, retried: 1, ignored: 0 });
-      assert.equal(original.state, 'stale');
-      assert.equal(original.supersededByRetryId, retry.id);
-      assert.equal(retry.state, 'translated');
-      assert.equal(retry.translation, '업데이트된 기사 텍스트.');
-      assert.equal(node.nodeValue, '업데이트된 기사 텍스트.');
-      assert.equal(store.byNode.get(node), retry);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(
-        store.records.map((record) => record.id),
-        [original.id, retry.id]
-      );
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 1,
-        partial: 0,
-        pending: 0,
-        changed: 0,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'ignores late viewport translations from stale operations',
-    fn() {
-      const node = { isConnected: true, nodeValue: 'Hello world.' };
-      const records = [
-        {
-          id: 'v1',
-          node,
-          original: 'Hello world.',
-          translation: null,
-          state: 'translating',
-          operationId: 4,
-        },
-      ];
-
-      const result = helpers.applyInlineViewportBatchTranslations(
-        records,
-        [{ id: 'v1', translation: '안녕하세요.' }],
-        5
-      );
-
-      assert.deepEqual(result, { applied: 0, stale: 0, retried: 0, ignored: 1 });
-      assert.equal(node.nodeValue, 'Hello world.');
-      assert.equal(records[0].state, 'translating');
     },
   },
   {
@@ -3400,172 +1783,6 @@ exports.tests = [
         message,
         'Visible translation stopped\nTranslated 3 · Partial 0 · Pending 0 · Changed 4 · Failed 1'
       );
-    },
-  },
-  {
-    name: 'restores translated viewport records and invalidates operation',
-    fn() {
-      const state = {
-        status: 'active',
-        operationId: 8,
-        viewport: helpers.createInlineViewportStore(8),
-      };
-      const node = { isConnected: true, nodeValue: '안녕하세요.' };
-      const record = {
-        id: 'v1',
-        node,
-        original: 'Hello world.',
-        translation: '안녕하세요.',
-        state: 'translated',
-        operationId: 8,
-      };
-      state.viewport.records.push(record);
-
-      helpers.restoreInlineViewportRecords(state);
-
-      assert.equal(node.nodeValue, 'Hello world.');
-      assert.equal(state.status, 'original');
-      assert.equal(state.operationId, 9);
-      assert.equal(record.state, 'original');
-    },
-  },
-  {
-    name: 'restores cached viewport translations applied to rerendered nodes',
-    fn() {
-      const store = helpers.createInlineViewportStore(8);
-      const firstNode = { isConnected: true, nodeValue: 'Hello world.' };
-
-      helpers.queueInlineViewportRecord(store, firstNode, 'Hello world.');
-      const batch = helpers.takeInlineViewportBatch(store);
-      helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: batch[0].id, translation: '안녕하세요.' }],
-        8,
-        store
-      );
-
-      const rerenderedNode = { isConnected: true, nodeValue: 'Hello world.' };
-      const queued = helpers.queueInlineViewportRecord(
-        store,
-        rerenderedNode,
-        'Hello world.'
-      );
-
-      assert.equal(queued, null);
-      assert.equal(rerenderedNode.nodeValue, '안녕하세요.');
-      assert.equal(store.records.length, 2);
-
-      const state = {
-        status: 'active',
-        operationId: 8,
-        viewport: store,
-        records: store.records,
-        restorableRecords: [],
-      };
-      const [firstRecord, rerenderedRecord] = store.records;
-
-      helpers.restoreInlineViewportRecords(state);
-
-      assert.equal(firstNode.nodeValue, 'Hello world.');
-      assert.equal(rerenderedNode.nodeValue, 'Hello world.');
-      assert.equal(state.status, 'original');
-      assert.equal(state.operationId, 9);
-      assert.equal(firstRecord.state, 'original');
-      assert.equal(rerenderedRecord.state, 'original');
-    },
-  },
-  {
-    name: 'reuses cached viewport translations after restoring original text',
-    fn() {
-      const settings = {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-      };
-      const state = {
-        status: 'active',
-        operationId: 8,
-        translationCacheBySettings: new Map(),
-        restorableRecords: [],
-      };
-      const firstCache = helpers.activateInlineTranslationCacheBucket(
-        state,
-        settings
-      );
-      const firstStore = helpers.createInlineViewportStore(
-        state.operationId,
-        firstCache
-      );
-      const node = { isConnected: true, nodeValue: 'Hello world.' };
-
-      helpers.queueInlineViewportRecord(firstStore, node, 'Hello world.');
-      const batch = helpers.takeInlineViewportBatch(firstStore);
-      helpers.applyInlineViewportBatchTranslations(
-        batch,
-        [{ id: batch[0].id, translation: '안녕하세요.' }],
-        8,
-        firstStore
-      );
-
-      state.viewport = firstStore;
-      state.records = firstStore.records;
-
-      helpers.restoreInlineViewportRecords(state);
-      assert.equal(node.nodeValue, 'Hello world.');
-
-      const secondCache = helpers.getInlineTranslationCacheBucket(
-        state,
-        settings
-      );
-      assert.equal(secondCache, firstCache);
-      assert.equal(state.viewport.translationByOriginal, firstCache);
-      const queued = helpers.queueInlineViewportRecord(
-        state.viewport,
-        node,
-        'Hello world.'
-      );
-
-      assert.equal(queued, null);
-      assert.equal(node.nodeValue, '안녕하세요.');
-      assert.equal(state.viewport.queue.length, 0);
-      assert.deepEqual(
-        helpers.getInlineViewportStatusCounts(state.viewport.records),
-        {
-          translated: 1,
-          partial: 0,
-          pending: 0,
-          changed: 0,
-          failed: 0,
-        }
-      );
-    },
-  },
-  {
-    name: 'does not restore viewport records changed after translation',
-    fn() {
-      const state = {
-        status: 'active',
-        operationId: 8,
-        viewport: helpers.createInlineViewportStore(8),
-      };
-      const node = { isConnected: true, nodeValue: 'Live site update.' };
-      const record = {
-        id: 'v1',
-        node,
-        original: 'Hello world.',
-        translation: '안녕하세요.',
-        state: 'translated',
-        operationId: 8,
-      };
-      state.viewport.records.push(record);
-
-      helpers.restoreInlineViewportRecords(state);
-
-      assert.equal(node.nodeValue, 'Live site update.');
-      assert.equal(record.state, 'stale');
-      assert.equal(state.status, 'original');
-      assert.equal(state.operationId, 9);
     },
   },
   {
@@ -4253,6 +2470,64 @@ exports.tests = [
       helpers.markInlineViewportBatchFailed([laterFailure], 22, secondStore);
       assert.equal(laterFailure.terminalSequence, 10);
       assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
+    },
+  },
+  {
+    // A translation carried over from a stopped run was produced under the settings of that
+    // run. Reusing it after the reader changed the target language would show the old answer
+    // as if it were the new one, so the block goes back to its original content and is
+    // queued again under the settings now in force.
+    name: 'restores stopped-session translated blocks when settings change',
+    fn() {
+      const { block, strong, link } = createReasoningFixture();
+      const originalText = block.textContent;
+      const cache = new Map();
+      const firstStore = helpers.createInlineViewportStore(31, cache, {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+      });
+      const record = helpers.queueInlineViewportBlock(firstStore, block);
+      helpers.applyInlineViewportBlockResults(
+        helpers.takeInlineViewportBlockBatch(firstStore),
+        [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
+        31,
+        firstStore
+      );
+      const state = {
+        status: 'active',
+        operationId: 31,
+        viewport: firstStore,
+        records: firstStore.records,
+        restorableRecords: [],
+      };
+      helpers.stopInlineViewportTranslation(state);
+
+      // A different settings signature selects a different cache bucket, which is why the
+      // carried-over translation cannot simply be reapplied.
+      const secondStore = helpers.createInlineViewportStore(32, new Map(), {
+        targetLanguage: 'Japanese',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+      });
+      helpers.seedInlineViewportStoreWithRestorableRecords(
+        secondStore,
+        state.restorableRecords
+      );
+
+      assert.equal(record.state, 'original');
+      assert.equal(secondStore.byBlock.get(block), undefined);
+      assert.deepEqual(secondStore.records, []);
+      assert.equal(block.textContent, originalText);
+      // The block's own inline elements came back, in their original order.
+      assert.equal(block.childNodes[0], strong);
+      assert.equal(block.childNodes[2], link);
+
+      // The block is available to translate again under the settings now in force.
+      const requeued = helpers.queueInlineViewportBlock(secondStore, block);
+      assert.equal(requeued.state, 'queued');
     },
   },
   {

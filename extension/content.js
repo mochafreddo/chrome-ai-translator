@@ -28,9 +28,7 @@ var { DEFAULT_MODEL } =
 
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
-var INLINE_MAX_TOTAL_CHARS = 60000;
 var INLINE_TRANSLATION_AUTH_MS = 5 * 60 * 1000;
-var INLINE_VIEWPORT_BATCH_MAX_CHARS = 2000;
 var INLINE_BLOCK_BATCH_MAX_CHARS = 12000;
 var INLINE_BLOCK_SESSION_MAX_CHARS = 60000;
 var INLINE_BLOCK_MAX_DIAGNOSTIC_CODE_CHARS = 80;
@@ -94,12 +92,10 @@ function createInlineViewportStore(
     : null;
   return {
     operationId,
-    byNode: new WeakMap(),
     byBlock: new WeakMap(),
     records: [],
     queue: [],
     inFlight: 0,
-    nextId: 0,
     nextBlockId: 0,
     nextTerminalSequence: 0,
     localDiagnostics: [],
@@ -385,55 +381,28 @@ function addInlineRestorableRecords(state = inlineState, records = []) {
 }
 
 function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
-  if (!store?.byNode || !store?.byBlock) return store;
+  if (!store?.byBlock) return store;
   const seenRecords = new Set(store.records);
   for (const record of records || []) {
-    if (record?.snapshot?.blockElement) {
-      const blockElement = record.snapshot.blockElement;
-      if (!isInlineTranslatedState(record.state) || !blockElement.isConnected) continue;
-      if (hasInlineViewportSettingsSignatureMismatch(store, record)) {
-        if (inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) {
-          const restored = inlineBlockCodec.restoreBlock(record.snapshot);
-          if (restored.ok) record.state = 'original';
-        }
-        continue;
-      }
-      if (!inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) continue;
-      if (!store.byBlock.get(blockElement)) {
-        store.byBlock.set(blockElement, record);
-      }
-      if (!seenRecords.has(record)) {
-        store.records.push(record);
-        seenRecords.add(record);
-      }
-      cacheInlineViewportBlockTranslation(store, record);
-      continue;
-    }
-    if (!isInlineTranslatedState(record?.state) || !record.node?.isConnected) continue;
+    const blockElement = record?.snapshot?.blockElement;
+    if (!blockElement) continue;
+    if (!isInlineTranslatedState(record.state) || !blockElement.isConnected) continue;
     if (hasInlineViewportSettingsSignatureMismatch(store, record)) {
-      if (
-        typeof record.translation === 'string' &&
-        record.node.nodeValue === record.translation
-      ) {
-        record.node.nodeValue = record.original;
-        record.state = 'original';
+      if (inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) {
+        const restored = inlineBlockCodec.restoreBlock(record.snapshot);
+        if (restored.ok) record.state = 'original';
       }
       continue;
     }
-    if (
-      typeof record.translation === 'string' &&
-      record.node.nodeValue !== record.translation
-    ) {
-      continue;
-    }
-    if (!store.byNode.get(record.node)) {
-      store.byNode.set(record.node, record);
+    if (!inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) continue;
+    if (!store.byBlock.get(blockElement)) {
+      store.byBlock.set(blockElement, record);
     }
     if (!seenRecords.has(record)) {
       store.records.push(record);
       seenRecords.add(record);
     }
-    cacheInlineViewportRecordTranslation(store, record);
+    cacheInlineViewportBlockTranslation(store, record);
   }
   store.nextTerminalSequence = Math.max(
     Number(store.nextTerminalSequence) || 0,
@@ -539,45 +508,8 @@ function isCodeLikeInlineText(text) {
   return false;
 }
 
-function isTranslatableInlineText(text) {
-  const value = String(text || '').replace(/\s+/g, ' ').trim();
-  if (value.length < 4) return false;
-  if (!/[A-Za-z]/.test(value)) return false;
-  if (isCodeLikeInlineText(value)) return false;
-  return true;
-}
-
 function isTrustedInlineUiEvent(event) {
   return event?.isTrusted === true;
-}
-
-function resetInlineTranslationAfterFailure(state = inlineState) {
-  state.status = 'original';
-  state.records = [];
-}
-
-function beginInlineTranslationOperation(state, records) {
-  const operationId = (Number(state.operationId) || 0) + 1;
-  state.operationId = operationId;
-  state.status = 'translating';
-  state.records = records.map((record) => ({
-    id: record.id,
-    node: record.node,
-    original: record.text,
-    translation: null,
-  }));
-  return { operationId, records: state.records };
-}
-
-function isCurrentInlineOperation(state, operationId) {
-  return state.status === 'translating' && state.operationId === operationId;
-}
-
-function cancelInlineTranslationOperation(state = inlineState, operationId = state.operationId) {
-  if (state.operationId !== operationId) return false;
-  state.status = 'original';
-  state.records = [];
-  return true;
 }
 
 function getInlineShadowMode() {
@@ -626,18 +558,6 @@ function isInlineRectInViewport(
   return true;
 }
 
-function getInlineRecordPayloadSize(record) {
-  return String(record.id || '').length + String(record.original || record.text || '').length + 20;
-}
-
-function getInlineRecordTextSize(record) {
-  return String(record.original || record.text || '').length;
-}
-
-function getInlineOriginalTextCacheKey(text) {
-  return typeof text === 'string' ? text : '';
-}
-
 function hasInlineViewportSettingsSignatureMismatch(store, record) {
   const storeSignature = store?.translationSettingsSignature || '';
   const recordSignature = record?.translationSettingsSignature || '';
@@ -649,103 +569,6 @@ function stampInlineViewportRecordSettings(store, record) {
   if (store?.translationSettingsSignature && record) {
     record.translationSettingsSignature = store.translationSettingsSignature;
   }
-  return record;
-}
-
-function cacheInlineViewportRecordTranslation(store, record) {
-  if (!store?.translationByOriginal || !isInlineTranslatedState(record?.state)) {
-    return false;
-  }
-  if (hasInlineViewportSettingsSignatureMismatch(store, record)) return false;
-  const key = getInlineOriginalTextCacheKey(record.original);
-  if (!key || typeof record.translation !== 'string') return false;
-  store.translationByOriginal.set(key, {
-    original: record.original,
-    translation: record.translation,
-  });
-  return true;
-}
-
-function getInlineBoundaryPreservedTranslation(
-  record,
-  translation = record?.translation
-) {
-  return preserveInlineBoundaryWhitespace(record?.original, translation);
-}
-
-function createInlineViewportRecord(store, node, values = {}) {
-  const record = {
-    id: `v${store.nextId + 1}`,
-    node,
-    translation: null,
-    state: 'original',
-    operationId: store.operationId,
-    ...values,
-  };
-  stampInlineViewportRecordSettings(store, record);
-  store.nextId += 1;
-  store.byNode.set(node, record);
-  store.records.push(record);
-  return record;
-}
-
-function applyCachedInlineViewportTranslation(store, node, text) {
-  const key = getInlineOriginalTextCacheKey(text);
-  const cached = key ? store?.translationByOriginal?.get(key) : null;
-  if (!cached || typeof cached.translation !== 'string') return null;
-  if (!node?.isConnected || node.nodeValue !== cached.original) return null;
-  const preservedTranslation = getInlineBoundaryPreservedTranslation(cached);
-
-  const record = createInlineViewportRecord(store, node, {
-    original: cached.original,
-    translation: preservedTranslation,
-    state: 'translated',
-  });
-  node.nodeValue = preservedTranslation;
-  cached.translation = preservedTranslation;
-  return record;
-}
-
-function queueInlineViewportRecord(store, node, text) {
-  if (!store || !node) return null;
-  const existing = store.byNode.get(node);
-  if (
-    isInlineTranslatedState(existing?.state) &&
-    typeof existing.translation === 'string' &&
-    node.isConnected &&
-    node.nodeValue === existing.original
-  ) {
-    node.nodeValue = existing.translation;
-    cacheInlineViewportRecordTranslation(store, existing);
-    return null;
-  }
-  if (
-    existing &&
-    ['queued', 'translating', 'translated', 'failed', 'stale'].includes(
-      existing.state
-    )
-  ) {
-    return null;
-  }
-
-  if (!existing) {
-    const cached = applyCachedInlineViewportTranslation(store, node, text);
-    if (cached) return null;
-  }
-
-  const record =
-    existing ||
-    createInlineViewportRecord(store, node, {
-      original: text,
-    });
-
-  record.original = text;
-  record.translation = null;
-  record.state = 'queued';
-  record.operationId = store.operationId;
-  stampInlineViewportRecordSettings(store, record);
-  markInlineViewportRetrySuperseded(store, record);
-  store.queue.push(record);
   return record;
 }
 
@@ -1117,22 +940,9 @@ function applyInlineViewportBlockResults(
   return summary;
 }
 
-function getInlineViewportRetryCount(record) {
-  const parsed = Number(record?.retryCount);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
-}
-
 function findInlineViewportRecordById(store, id) {
   if (!id) return null;
   return (store?.records || []).find((record) => record?.id === id) || null;
-}
-
-function markInlineViewportRetrySuperseded(store, retryRecord) {
-  if (!retryRecord?.retryOf) return false;
-  const parent = findInlineViewportRecordById(store, retryRecord.retryOf);
-  if (!parent) return false;
-  parent.supersededByRetryId = retryRecord.id;
-  return true;
 }
 
 function clearInlineViewportRetrySupersession(store, retryRecord) {
@@ -1155,48 +965,6 @@ function clearCanceledInlineViewportRetrySupersessions(
   }
 }
 
-function queueInlineViewportRetryRecord(
-  store,
-  staleRecord,
-  currentText,
-  rejectedTranslation = ''
-) {
-  if (!store || store.stopped || !staleRecord?.node) return null;
-  const node = staleRecord.node;
-  const text = String(currentText || '');
-  if (!node.isConnected || node.nodeValue !== text) return null;
-  if (store.byNode?.get(node) !== staleRecord) return null;
-  if (getInlineViewportRetryCount(staleRecord) >= 1) return null;
-  if (!isTranslatableInlineText(text)) return null;
-  if (text === staleRecord.original || text === rejectedTranslation) return null;
-
-  const retryRecord = createInlineViewportRecord(store, node, {
-    original: text,
-    retryOf: staleRecord.id,
-    retryCount: getInlineViewportRetryCount(staleRecord) + 1,
-  });
-  markInlineViewportRetrySuperseded(store, retryRecord);
-
-  const key = getInlineOriginalTextCacheKey(text);
-  const cached = key ? store.translationByOriginal?.get(key) : null;
-  if (
-    cached &&
-    typeof cached.translation === 'string' &&
-    node.nodeValue === cached.original
-  ) {
-    retryRecord.translation = getInlineBoundaryPreservedTranslation(cached);
-    retryRecord.state = 'translated';
-    node.nodeValue = retryRecord.translation;
-    cached.translation = retryRecord.translation;
-    cacheInlineViewportRecordTranslation(store, retryRecord);
-    return retryRecord;
-  }
-
-  retryRecord.state = 'queued';
-  store.queue.push(retryRecord);
-  return retryRecord;
-}
-
 function resetQueuedInlineViewportRecords(store) {
   if (!store?.queue?.length) return;
 
@@ -1215,95 +983,6 @@ function resetQueuedInlineViewportRecords(store) {
     retained.push(record);
   }
   store.queue = retained;
-}
-
-function takeInlineViewportBatch(
-  store,
-  maxChars = INLINE_VIEWPORT_BATCH_MAX_CHARS
-) {
-  if (!store || store.stopped || store.inFlight >= INLINE_VIEWPORT_MAX_IN_FLIGHT) {
-    return [];
-  }
-
-  const limit = Number(maxChars) || INLINE_VIEWPORT_BATCH_MAX_CHARS;
-  const batch = [];
-  let total = 0;
-
-  while (store.queue.length) {
-    const record = store.queue[0];
-    const size = getInlineRecordPayloadSize(record);
-    if (getInlineRecordTextSize(record) > limit) {
-      store.queue.shift();
-      record.state = 'failed';
-      continue;
-    }
-    if (batch.length && total + size > limit) break;
-
-    store.queue.shift();
-    record.state = 'translating';
-    batch.push(record);
-    total += size;
-
-    if (total >= limit) break;
-  }
-
-  if (batch.length) {
-    store.inFlight += 1;
-  }
-  return batch;
-}
-
-function applyInlineViewportBatchTranslations(records, translations, operationId, store = null) {
-  const byId = new Map((translations || []).map((item) => [item.id, item.translation]));
-  const result = { applied: 0, stale: 0, retried: 0, ignored: 0 };
-
-  for (const record of records || []) {
-    if (record.operationId !== operationId) {
-      result.ignored += 1;
-      continue;
-    }
-
-    const translation = byId.get(record.id);
-    if (typeof translation !== 'string') {
-      record.state = 'failed';
-      continue;
-    }
-
-    if (!record.node?.isConnected || record.node.nodeValue !== record.original) {
-      const currentText = record.node?.nodeValue;
-      record.state = 'stale';
-      result.stale += 1;
-      const preservedRejectedTranslation = getInlineBoundaryPreservedTranslation(
-        record,
-        translation
-      );
-      if (
-        typeof currentText === 'string' &&
-        queueInlineViewportRetryRecord(
-          store,
-          record,
-          currentText,
-          preservedRejectedTranslation
-        )
-      ) {
-        result.retried += 1;
-      }
-      continue;
-    }
-
-    const preservedTranslation = getInlineBoundaryPreservedTranslation(
-      record,
-      translation
-    );
-    record.node.nodeValue = preservedTranslation;
-    record.translation = preservedTranslation;
-    record.state = 'translated';
-    stampInlineViewportRecordSettings(store, record);
-    cacheInlineViewportRecordTranslation(store, record);
-    result.applied += 1;
-  }
-
-  return result;
 }
 
 function markInlineViewportBatchFailed(records, operationId, store = null) {
@@ -1448,40 +1127,24 @@ function restoreInlineViewportRecords(state = inlineState) {
     clearTimeout(viewport.scanTimer);
   }
 
-  const restoredNodes = new Set();
   const restoredBlocks = new Set();
   for (const record of getInlineViewportRestoreRecords(state)) {
-    if (record?.snapshot?.blockElement) {
-      const blockElement = record.snapshot.blockElement;
-      if (
-        isInlineTranslatedState(record.state) &&
-        blockElement.isConnected &&
-        !restoredBlocks.has(blockElement)
-      ) {
-        const restored = inlineBlockCodec.restoreBlock(record.snapshot);
-        if (!restored.ok) {
-          record.state = 'stale';
-          continue;
-        }
-        restoredBlocks.add(blockElement);
-      }
-      record.state = 'original';
-      continue;
-    }
+    // A record with no snapshot never reached the page — a block that could not be
+    // serialized is one — so there is nothing to put back, but it still goes back to
+    // `original` along with the rest.
+    const blockElement = record.snapshot?.blockElement;
     if (
+      blockElement &&
       isInlineTranslatedState(record.state) &&
-      record.node?.isConnected &&
-      !restoredNodes.has(record.node)
+      blockElement.isConnected &&
+      !restoredBlocks.has(blockElement)
     ) {
-      if (
-        typeof record.translation !== 'string' ||
-        record.node.nodeValue !== record.translation
-      ) {
+      const restored = inlineBlockCodec.restoreBlock(record.snapshot);
+      if (!restored.ok) {
         record.state = 'stale';
         continue;
       }
-      record.node.nodeValue = record.original;
-      restoredNodes.add(record.node);
+      restoredBlocks.add(blockElement);
     }
     record.state = 'original';
   }
@@ -1496,57 +1159,6 @@ function restoreInlineViewportRecords(state = inlineState) {
     null,
     sessionRecordCost
   );
-}
-
-function getInlineTextRecordBudgetError(records) {
-  if (records.length > INLINE_MAX_RECORDS) {
-    return `Too many text nodes for inline translation (${records.length}/${INLINE_MAX_RECORDS})`;
-  }
-
-  const totalChars = records.reduce(
-    (sum, record) => sum + String(record.text || '').length,
-    0
-  );
-  if (totalChars > INLINE_MAX_TOTAL_CHARS) {
-    return `Inline translation has too much text (${totalChars}/${INLINE_MAX_TOTAL_CHARS} characters)`;
-  }
-
-  return '';
-}
-
-function pluralizeInline(count, singular, plural = `${singular}s`) {
-  return count === 1 ? singular : plural;
-}
-
-function formatInlineProgressMessage(progress) {
-  if (!progress) return '';
-  if (progress.stage === 'queued') {
-    const recordCount = Number(progress.recordCount) || 0;
-    const chunkCount = Number(progress.chunkCount) || 0;
-    return `Preparing ${recordCount} ${pluralizeInline(
-      recordCount,
-      'text node'
-    )} across ${chunkCount} ${pluralizeInline(chunkCount, 'chunk')}...`;
-  }
-  if (progress.stage === 'chunk') {
-    const current = Number(progress.current) || 0;
-    const total = Number(progress.total) || 0;
-    const recordCount = Number(progress.recordCount) || 0;
-    const charCount = Number(progress.charCount) || 0;
-    return `Chunk ${current}/${total}: ${recordCount} ${pluralizeInline(
-      recordCount,
-      'text node'
-    )}, ${charCount} ${pluralizeInline(charCount, 'char')}`;
-  }
-  if (progress.stage === 'chunk_done') {
-    const current = Number(progress.current) || 0;
-    const total = Number(progress.total) || 0;
-    return `Completed ${current}/${total} ${pluralizeInline(total, 'chunk')}...`;
-  }
-  if (progress.stage === 'applying') {
-    return 'Applying translated text...';
-  }
-  return String(progress.message || '');
 }
 
 function authorizeInlineTranslation(state = inlineState, now = Date.now()) {
@@ -1565,36 +1177,6 @@ function authorizeInlineTranslationFromUiEvent(
 
 function hasInlineTranslationAuthorization(state = inlineState, now = Date.now()) {
   return Number(state.authorizedUntil) > now;
-}
-
-function preserveInlineBoundaryWhitespace(original, translation) {
-  const originalText = String(original || '');
-  const translatedText = String(translation || '');
-  if (!translatedText) return translatedText;
-
-  const leading = originalText.match(/^\s*/)?.[0] || '';
-  const trailing = originalText.match(/\s*$/)?.[0] || '';
-  const core = translatedText.replace(/^\s+|\s+$/g, '');
-  if (!core) return translatedText;
-  return `${leading}${core}${trailing}`;
-}
-
-function applyInlineTranslationRecords(records) {
-  const applied = [];
-  let skipped = 0;
-
-  for (const record of records) {
-    if (!record.node?.isConnected) continue;
-    if (record.node.nodeValue !== record.original) {
-      skipped += 1;
-      continue;
-    }
-    record.translation = getInlineBoundaryPreservedTranslation(record);
-    record.node.nodeValue = record.translation;
-    applied.push(record);
-  }
-
-  return { applied, skipped };
 }
 
 function pickArticleRoot() {
@@ -1674,18 +1256,6 @@ function isInlineTextNodeInViewport(textNode, viewport = getInlineViewportInfo()
   );
 }
 
-function shouldSkipInlineTextNode(textNode) {
-  const parent = textNode.parentElement;
-  if (!parent) return true;
-  if (parent.closest(`#${INLINE_TRANSLATOR_ID}`)) return true;
-  if (isInlineEffectivelyEditable(parent)) return true;
-  for (let el = parent; el; el = el.parentElement) {
-    if (isInlineTranslationExcludedElement(el)) return true;
-    if (isElementHidden(el)) return true;
-  }
-  return !isTranslatableInlineText(textNode.nodeValue);
-}
-
 function shouldSkipInlineBlockCandidateTextNode(textNode) {
   const parent = textNode?.parentElement;
   if (!parent) return true;
@@ -1728,108 +1298,6 @@ function shouldSkipInlineElementSubtree(node, viewport = getInlineViewportInfo()
 
 function getInlineChildNodes(node) {
   return Array.from(node?.childNodes || []);
-}
-
-function collectVisibleInlineTextNodesFromDom(root, store, maxTextNodes) {
-  const limit = normalizeInlineViewportScanLimit(maxTextNodes);
-  const startIndex = Math.max(0, Number(store?.scanStartIndex) || 0);
-  const viewport = getInlineViewportInfo();
-  const queued = [];
-  const stack = [root];
-  let textIndex = 0;
-  let inspected = 0;
-  let truncated = false;
-
-  while (stack.length) {
-    const node = stack.pop();
-    if (isInlineTextNode(node)) {
-      if (textIndex < startIndex) {
-        textIndex += 1;
-        continue;
-      }
-      if (inspected >= limit) {
-        truncated = true;
-        break;
-      }
-      textIndex += 1;
-      inspected += 1;
-      if (
-        !shouldSkipInlineTextNode(node) &&
-        isInlineTextNodeInViewport(node, viewport)
-      ) {
-        const record = queueInlineViewportRecord(store, node, node.nodeValue);
-        if (record) queued.push(record);
-      }
-      continue;
-    }
-
-    if (shouldSkipInlineElementSubtree(node, viewport)) continue;
-
-    const children = getInlineChildNodes(node);
-    for (let i = children.length - 1; i >= 0; i -= 1) {
-      stack.push(children[i]);
-    }
-  }
-
-  if (store) {
-    store.scanStartIndex = truncated ? textIndex : 0;
-  }
-  return queued;
-}
-
-function collectVisibleInlineTextNodesWithTreeWalker(root, store, maxTextNodes) {
-  const limit = normalizeInlineViewportScanLimit(maxTextNodes);
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      if (shouldSkipInlineTextNode(node)) return NodeFilter.FILTER_REJECT;
-      if (!isInlineTextNodeInViewport(node)) return NodeFilter.FILTER_REJECT;
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-
-  const queued = [];
-  let inspected = 0;
-  while (walker.nextNode()) {
-    if (inspected >= limit) break;
-    inspected += 1;
-    const node = walker.currentNode;
-    const record = queueInlineViewportRecord(store, node, node.nodeValue);
-    if (record) queued.push(record);
-  }
-  return queued;
-}
-
-function collectInlineTextNodes(root) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      return shouldSkipInlineTextNode(node)
-        ? NodeFilter.FILTER_REJECT
-        : NodeFilter.FILTER_ACCEPT;
-    },
-  });
-  const records = [];
-  let index = 0;
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    records.push({
-      id: `n${index + 1}`,
-      node,
-      text: node.nodeValue,
-    });
-    index += 1;
-  }
-  return records;
-}
-
-function collectVisibleInlineTextNodes(
-  root,
-  store,
-  maxTextNodes = INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES
-) {
-  if (root?.childNodes) {
-    return collectVisibleInlineTextNodesFromDom(root, store, maxTextNodes);
-  }
-  return collectVisibleInlineTextNodesWithTreeWalker(root, store, maxTextNodes);
 }
 
 function collectVisibleInlineBlocks(
@@ -1887,11 +1355,7 @@ function collectVisibleInlineBlocks(
 
 // Progress and errors are kept apart because the side panel, which is now the only place
 // either is shown, has a line for each: one string would leave it guessing which it held.
-function setInlineProgressMessage(message) {
-  inlineState.message = message || '';
-  updateInlineTranslatorUi();
-}
-
+// Progress is written by `updateInlineViewportMessage`, which counts Semantic Blocks.
 function setInlineErrorMessage(message) {
   inlineState.error = message || '';
   updateInlineTranslatorUi();
@@ -2447,13 +1911,6 @@ if (
       sendResponse({ ok: true, snapshot: getInlineTranslationStatusSnapshot() });
       return true;
     }
-
-    if (msg?.type === 'INLINE_TRANSLATION_PROGRESS') {
-      if (isCurrentInlineOperation(inlineState, msg.operationId)) {
-        setInlineProgressMessage(formatInlineProgressMessage(msg.progress));
-      }
-      return false;
-    }
   });
 
   initInlineTranslator();
@@ -2464,26 +1921,17 @@ if (typeof module !== 'undefined' && module.exports) {
     isInlineTranslationExcludedTag,
     isInlineTranslationExcludedElement,
     isCodeLikeInlineText,
-    isTranslatableInlineText,
     buildArticleExtraction,
     isTrustedInlineUiEvent,
-    resetInlineTranslationAfterFailure,
-    getInlineTextRecordBudgetError,
-    formatInlineProgressMessage,
     authorizeInlineTranslation,
     authorizeInlineTranslationFromUiEvent,
     hasInlineTranslationAuthorization,
-    applyInlineTranslationRecords,
-    beginInlineTranslationOperation,
-    isCurrentInlineOperation,
-    cancelInlineTranslationOperation,
     getInlineShadowMode,
     getInlineHostStyleText,
     isInlineRectInViewport,
     getInlineViewportInfo,
     getInlineTextNodeRect,
     isInlineTextNodeInViewport,
-    collectVisibleInlineTextNodes,
     collectVisibleInlineBlocks,
     isInlineViewportOperationCurrent,
     stopInlineViewportTranslation,
@@ -2506,11 +1954,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineBlockReservedRecordCost,
     queueInlineViewportBlock,
     queueInlineViewportBlockRetry,
-    queueInlineViewportRecord,
-    queueInlineViewportRetryRecord,
-    takeInlineViewportBatch,
     takeInlineViewportBlockBatch,
-    applyInlineViewportBatchTranslations,
     applyInlineViewportBlockResults,
     releaseInlineRuntimeTokensFromStaleResponse,
     flushInlineLocalDiagnostics,
