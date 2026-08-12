@@ -112,6 +112,14 @@ exports.tests = [
     },
   },
   {
+    name: 'stamps the schema version on an export with no runs',
+    fn() {
+      // The options page hands the export straight to the clipboard and to a file, so an
+      // empty export still has to say which schema a reader is looking at.
+      assert.equal(diagnostics.exportDiagnostics([]).schemaVersion, 2);
+    },
+  },
+  {
     name: 'exports canonical newest-first run order',
     fn() {
       const exported = diagnostics.exportDiagnostics([

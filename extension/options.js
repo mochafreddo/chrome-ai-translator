@@ -33,10 +33,6 @@ const { DEFAULT_MODEL } =
     ? require('./default-model.js')
     : {});
 
-const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
-const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
-const INLINE_LOG_LIMIT = 20;
-
 function setStatus(text) {
   elStatus.textContent = text || '';
 }
@@ -92,31 +88,6 @@ async function applyButtonVisibilityAccess(chromeApi, visibility) {
   return true;
 }
 
-function formatDuration(ms) {
-  const value = Number(ms) || 0;
-  if (value < 1000) return `${value}ms`;
-  return `${(value / 1000).toFixed(1)}s`;
-}
-
-function formatInlineLog(log) {
-  const chunks = Array.isArray(log.chunks) ? log.chunks : [];
-  const chunkSummary = chunks
-    .map((chunk) => {
-      const status = chunk.ok === false ? 'failed' : 'ok';
-      const duration = chunk.durationMs == null ? '' : ` ${formatDuration(chunk.durationMs)}`;
-      const error = chunk.error ? ` error=${chunk.error}` : '';
-      return `  chunk ${chunk.index}: ${status}${duration}, ${chunk.recordCount} records, ${chunk.charCount} chars${error}`;
-    })
-    .join('\n');
-  const lines = [
-    `${log.startedAt || '(unknown time)'} ${log.status || 'unknown'} ${formatDuration(log.durationMs)}`,
-    `  model=${log.model || '(unset)'} records=${log.recordCount || 0} chars=${log.totalChars || 0} chunks=${log.chunkCount || 0} chunkMax=${log.chunkMaxChars || 0}`,
-  ];
-  if (log.error) lines.push(`  error=${log.error}`);
-  if (chunkSummary) lines.push(chunkSummary);
-  return lines.join('\n');
-}
-
 function formatDiagnosticRun(run) {
   const summary = run?.summary || {};
   const codes = (run?.blocks || []).map((block) => block.terminalCode).filter(Boolean);
@@ -125,45 +96,6 @@ function formatDiagnosticRun(run) {
     `  Translated ${summary.translated || 0} · Partial ${summary.translatedWithWarning || 0} · Changed ${summary.changed || 0} · Failed ${summary.failed || 0} · Repairs ${summary.repairs || 0}`,
     ...(codes.length ? [`  codes=${codes.join(',')}`] : []),
   ].join('\n');
-}
-
-function buildDiagnosticExport(runs) {
-  return diagnosticsApi.exportDiagnostics(runs || []);
-}
-
-function isInlineTranslationLogStorageKey(key) {
-  return String(key || '').startsWith(INLINE_LOG_STORAGE_KEY_PREFIX);
-}
-
-function normalizeInlineTranslationLog(log) {
-  if (!log || typeof log !== 'object' || !log.id) return null;
-  return log;
-}
-
-function collectInlineTranslationLogsFromStorage(stored) {
-  const byId = new Map();
-  const legacy = Array.isArray(stored?.[INLINE_LOG_STORAGE_KEY])
-    ? stored[INLINE_LOG_STORAGE_KEY]
-    : [];
-
-  for (const log of legacy) {
-    const normalized = normalizeInlineTranslationLog(log);
-    if (normalized) byId.set(normalized.id, normalized);
-  }
-
-  for (const [key, value] of Object.entries(stored || {})) {
-    if (!isInlineTranslationLogStorageKey(key)) continue;
-    const normalized = normalizeInlineTranslationLog(value);
-    if (normalized) byId.set(normalized.id, normalized);
-  }
-
-  return Array.from(byId.values())
-    .sort(
-      (a, b) =>
-        (Date.parse(b.startedAt || b.finishedAt || '') || 0) -
-        (Date.parse(a.startedAt || a.finishedAt || '') || 0)
-    )
-    .slice(0, INLINE_LOG_LIMIT);
 }
 
 async function loadInlineLogs() {
@@ -297,10 +229,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkChoice,
     clearStoredApiKey,
     readCheckedChoice,
-    collectInlineTranslationLogsFromStorage,
-    formatInlineLog,
     formatDiagnosticRun,
-    buildDiagnosticExport,
     shouldClearStoredApiKey,
   };
 }

@@ -153,32 +153,6 @@ exports.tests = [
     },
   },
   {
-    name: 'labels inline diagnostic chunks as records rather than nodes',
-    fn() {
-      const formatted = helpers.formatInlineLog({
-        startedAt: '2026-07-10T00:00:00.000Z',
-        status: 'done',
-        durationMs: 10,
-        recordCount: 1,
-        totalChars: 100,
-        chunkCount: 1,
-        chunkMaxChars: 12000,
-        chunks: [
-          {
-            index: 1,
-            ok: true,
-            durationMs: 5,
-            recordCount: 1,
-            charCount: 100,
-          },
-        ],
-      });
-
-      assert.match(formatted, /1 records, 100 chars/);
-      assert.equal(formatted.includes(' nodes'), false);
-    },
-  },
-  {
     name: 'formats schema-2 partial diagnostics with stable codes',
     fn() {
       const formatted = helpers.formatDiagnosticRun({
@@ -190,7 +164,6 @@ exports.tests = [
       });
       assert.match(formatted, /Partial 1/);
       assert.match(formatted, /quality\.english_residue/);
-      assert.equal(helpers.buildDiagnosticExport([]).schemaVersion, 2);
     },
   },
 ];
