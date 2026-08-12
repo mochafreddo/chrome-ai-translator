@@ -1,8 +1,8 @@
 ## Tests
 
-`npm test` is the browser-free unit suite and is what "run the tests" means. `npm run test:integration` additionally drives a real Chrome and needs `agent-browser` plus network access. See `tests/README.md`.
+`npm test` is the browser-free unit suite and is what "run the tests" means. `npm run test:integration` additionally drives a real Chrome and needs `agent-browser` plus network access. `npm run verify:live` drives a real Chrome *and* bills a real model, and needs an OpenAI key in `.env.local` — it is the only command that spends money, which is why it is never folded into the other two. See `tests/README.md`.
 
-`npm run check:syntax` parses every extension script outside a browser. There is no linter, formatter, or type checker — those two commands are the whole verification story.
+`npm run check:syntax` parses every extension script outside a browser. There is no linter, formatter, or type checker — those commands are the whole verification story.
 
 ## Layout
 
@@ -20,6 +20,10 @@ Four hand-maintained lists decide whether a new `extension/*.js` file is loaded 
 - The suite list in `tests/run.js`, for its test file. See `tests/README.md`.
 
 `tests/static-assets.test.js` guards parts of this, but it spot-checks `check:syntax` against five named files rather than the whole directory, so an omission there passes.
+
+## Adding a browser-driven check
+
+`tests/integration/harness.mjs` holds the CDP wiring and the gotchas that come with driving this extension from outside a browser — import it rather than rebuilding it from a header comment. A new check under `tests/integration/` is reached only through its own `package.json` script; none of the four lists above covers it. One that needs a real API key reads it through `tests/integration/live-key.mjs`, which never returns the value to a caller, and belongs behind `verify:live` rather than `test:integration`.
 
 ## Version
 
