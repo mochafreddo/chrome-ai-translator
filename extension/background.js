@@ -129,9 +129,6 @@ const INLINE_BLOCK_MAX_BATCH_COST = 12000;
 const INLINE_BLOCK_MAX_SESSION_COST = 60000;
 const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
 const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
-const INLINE_LOG_STORAGE_KEY = 'inlineTranslationLogs';
-const INLINE_LOG_STORAGE_KEY_PREFIX = `${INLINE_LOG_STORAGE_KEY}:`;
-const INLINE_LOG_LIMIT = 20;
 const INLINE_RUNTIME_CORRELATION_TTL_MS = 5 * 60 * 1000;
 const INLINE_RUNTIME_CORRELATION_LIMIT = 1000;
 const INLINE_RUNTIME_CORRELATION_STORAGE_KEY = 'inlineRuntimeCorrelations:v1';
@@ -1359,98 +1356,6 @@ async function translateFullPageChunk(chunk, settings) {
   }
 }
 
-function getInlineTranslationLogStorageKey(logId) {
-  return `${INLINE_LOG_STORAGE_KEY_PREFIX}${logId}`;
-}
-
-function isInlineTranslationLogStorageKey(key) {
-  return String(key || '').startsWith(INLINE_LOG_STORAGE_KEY_PREFIX);
-}
-
-function normalizeInlineTranslationLog(log) {
-  if (!log || typeof log !== 'object' || !log.id) return null;
-  return log;
-}
-
-function collectInlineTranslationLogsFromStorage(
-  stored,
-  limit = INLINE_LOG_LIMIT
-) {
-  const byId = new Map();
-  const legacy = Array.isArray(stored?.[INLINE_LOG_STORAGE_KEY])
-    ? stored[INLINE_LOG_STORAGE_KEY]
-    : [];
-
-  for (const log of legacy) {
-    const normalized = normalizeInlineTranslationLog(log);
-    if (normalized) byId.set(normalized.id, normalized);
-  }
-
-  for (const [key, value] of Object.entries(stored || {})) {
-    if (!isInlineTranslationLogStorageKey(key)) continue;
-    const normalized = normalizeInlineTranslationLog(value);
-    if (normalized) byId.set(normalized.id, normalized);
-  }
-
-  return Array.from(byId.values())
-    .sort(
-      (a, b) =>
-        (Date.parse(b.startedAt || b.finishedAt || '') || 0) -
-        (Date.parse(a.startedAt || a.finishedAt || '') || 0)
-    )
-    .slice(0, limit);
-}
-
-function getInlineTranslationLogRemovalKeys(stored, limit = INLINE_LOG_LIMIT) {
-  return Object.entries(stored || {})
-    .filter(
-      ([key, value]) =>
-        isInlineTranslationLogStorageKey(key) &&
-        normalizeInlineTranslationLog(value)
-    )
-    .sort(
-      ([, a], [, b]) =>
-        (Date.parse(b.startedAt || b.finishedAt || '') || 0) -
-        (Date.parse(a.startedAt || a.finishedAt || '') || 0)
-    )
-    .slice(limit)
-    .map(([key]) => key);
-}
-
-function createInlineTranslationLogEntry(startedAtMs) {
-  return {
-    id: `inline-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`,
-    startedAt: new Date(startedAtMs).toISOString(),
-    status: 'started',
-    model: '',
-    recordCount: 0,
-    totalChars: 0,
-    chunkCount: 0,
-    chunkMaxChars: 0,
-    chunks: [],
-  };
-}
-
-function redactSecretText(value) {
-  return String(value || '')
-    .replace(
-      /\bsk-(?:proj|svcacct)-[A-Za-z0-9_-]+|\bsk-[A-Za-z0-9_-]+/g,
-      '[REDACTED_OPENAI_KEY]'
-    )
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]');
-}
-
-function sanitizeLogError(error) {
-  return redactSecretText(safeError(error).message).slice(0, 300);
-}
-
-async function appendInlineTranslationLog(entry) {
-  // Schema-2 diagnostics are persisted by translation-diagnostics.js, so the log entry
-  // the Semantic Block batch still assembles goes nowhere. Whether to keep assembling it
-  // is its own decision; this shim keeps the call awaitable until that is made.
-  void entry;
-}
-
 async function mutateInlineRuntimeCorrelations(mutator) {
   const operation = inlineRuntimeCorrelationMutation.catch(() => {}).then(async () => {
     const session = globalThis.chrome?.storage?.session;
@@ -1546,32 +1451,17 @@ async function translateVisibleBlockBatch(
 ) {
   const startedAtMs = Date.now();
   const runId = `run-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
-  const logEntry = createInlineTranslationLogEntry(startedAtMs);
-  let completed = false;
   let diagnosticsPersisted = true;
+  // Named by the failure diagnostics below, which run after the request that would have
+  // reported them itself.
+  let requestedModel = '';
+  let requestedCount = 0;
 
   try {
     const normalized = normalizeVisibleBlockBatchRecords(records);
-    const totalCost = normalized.reduce(
-      (sum, record) => sum + getBlockRecordCost(record),
-      0
-    );
-    logEntry.recordCount = normalized.length;
-    logEntry.totalChars = totalCost;
-    logEntry.chunkCount = normalized.length ? 1 : 0;
-    logEntry.chunkMaxChars = INLINE_BLOCK_MAX_BATCH_COST;
-    logEntry.chunks = normalized.length
-      ? [
-          {
-            index: 1,
-            recordCount: normalized.length,
-            charCount: totalCost,
-          },
-        ]
-      : [];
+    requestedCount = normalized.length;
 
     if (!normalized.length) {
-      completed = true;
       return [];
     }
 
@@ -1579,7 +1469,7 @@ async function translateVisibleBlockBatch(
       await getSettings(),
       settingsSnapshot
     );
-    logEntry.model = settings.model;
+    requestedModel = settings.model;
     if (!settings.apiKey) {
       throw new Error('OpenAI API key is not set. Open Options and paste your key.');
     }
@@ -1594,7 +1484,6 @@ async function translateVisibleBlockBatch(
     });
     diagnosticsPersisted = preflight.persisted;
 
-    const chunkStartedAtMs = Date.now();
     async function requestAndValidate(batch) {
       const modelRecords = batch.map((record) => ({
         id: record.id,
@@ -1782,14 +1671,6 @@ async function translateVisibleBlockBatch(
       await persistCompactFinal();
       diagnosticsPersisted = false;
     }
-    if (logEntry.chunks[0]) {
-      logEntry.chunks[0].durationMs = Date.now() - chunkStartedAtMs;
-      logEntry.chunks[0].ok = true;
-      logEntry.chunks[0].failedRecordCount = results.filter(
-        (result) => !result.ok
-      ).length;
-    }
-    completed = true;
     let issuedTokens = new Map();
     if (diagnosticsPersisted) {
       try {
@@ -1811,14 +1692,13 @@ async function translateVisibleBlockBatch(
       ...(!diagnosticsPersisted ? { diagnosticsUnavailable: true } : {}),
     }));
   } catch (error) {
-    logEntry.error = sanitizeLogError(error);
     await translationDiagnostics.persistRun(chrome, {
       runId,
       startedAt: new Date(startedAtMs).toISOString(),
       finishedAt: new Date().toISOString(),
-      model: logEntry.model,
+      model: requestedModel,
       outcome: 'failed',
-      summary: { requested: logEntry.recordCount, failed: logEntry.recordCount },
+      summary: { requested: requestedCount, failed: requestedCount },
       blocks: [{
         diagnosticId: `${runId}/request`,
         terminalCode: error?.code || 'runtime.request_failed',
@@ -1831,17 +1711,7 @@ async function translateVisibleBlockBatch(
         }],
       }],
     });
-    if (logEntry.chunks[0]) {
-      logEntry.chunks[0].ok = false;
-      logEntry.chunks[0].error = sanitizeLogError(error);
-    }
     throw error;
-  } finally {
-    const finishedAtMs = Date.now();
-    logEntry.status = completed ? 'done' : 'error';
-    logEntry.finishedAt = new Date(finishedAtMs).toISOString();
-    logEntry.durationMs = finishedAtMs - startedAtMs;
-    await appendInlineTranslationLog(logEntry);
   }
 }
 
@@ -2389,12 +2259,9 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineInstructions,
     runInvocation,
     runInvocationPlan,
-    getInlineTranslationLogStorageKey,
-    collectInlineTranslationLogsFromStorage,
     normalizeVisibleBlockBatchRecords,
     normalizeMaxOutputTokens,
     parseAndValidateBlockTranslations,
-    sanitizeLogError,
     openaiTranslateChunk,
     translateFullPageChunk,
     syncButtonVisibilityRegistration,

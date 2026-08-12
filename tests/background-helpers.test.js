@@ -1114,39 +1114,6 @@ exports.tests = [
     },
   },
   {
-    name: 'collects inline logs from per-run storage keys',
-    fn() {
-      const logs = helpers.collectInlineTranslationLogsFromStorage({
-        inlineTranslationLogs: [
-          {
-            id: 'legacy',
-            startedAt: '2026-06-12T00:00:00.000Z',
-            status: 'done',
-          },
-        ],
-        'inlineTranslationLogs:current-a': {
-          id: 'current-a',
-          startedAt: '2026-06-12T00:02:00.000Z',
-          status: 'done',
-        },
-        'inlineTranslationLogs:current-b': {
-          id: 'current-b',
-          startedAt: '2026-06-12T00:01:00.000Z',
-          status: 'error',
-        },
-      });
-
-      assert.deepEqual(
-        logs.map((log) => log.id),
-        ['current-a', 'current-b', 'legacy']
-      );
-      assert.equal(
-        helpers.getInlineTranslationLogStorageKey('current-a'),
-        'inlineTranslationLogs:current-a'
-      );
-    },
-  },
-  {
     name: 'serializes concurrent all-pages content script registration',
     async fn() {
       const previousChrome = global.chrome;
@@ -1556,28 +1523,6 @@ exports.tests = [
       } finally {
         global.chrome = previousChrome;
       }
-    },
-  },
-  {
-    name: 'redacts secret-shaped values from inline translation log errors',
-    fn() {
-      const sanitized = helpers.sanitizeLogError(
-        new Error(
-          [
-            'OpenAI rejected sk-live123',
-            'sk-proj-service_secret123',
-            'sk-svcacct-team_secret456',
-            'with Bearer live.token_123; retry later',
-          ].join(' ')
-        )
-      );
-
-      assert.equal(sanitized.includes('sk-live123'), false);
-      assert.equal(sanitized.includes('sk-proj-service_secret123'), false);
-      assert.equal(sanitized.includes('sk-svcacct-team_secret456'), false);
-      assert.equal(sanitized.includes('Bearer live.token_123'), false);
-      assert.equal(sanitized.includes('OpenAI rejected'), true);
-      assert.equal(sanitized.includes('retry later'), true);
     },
   },
   {
@@ -2298,6 +2243,54 @@ exports.tests = [
         assert.ok(compactRun);
       } finally {
         diagnostics.fingerprintBlock = previousFingerprintBlock;
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+      }
+    },
+  },
+  {
+    name: 'names the model and the batch size in the run a failed request leaves behind',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const stored = {};
+      const first = createTestPlainBlockRecord('failed-first');
+      const second = createTestPlainBlockRecord('failed-second');
+      first.template = 'Hello world.';
+      second.template = 'Goodbye world.';
+      global.chrome = {
+        storage: { local: {
+          async get(keys) {
+            if (Array.isArray(keys) && keys.includes('settings')) {
+              return { settings: { apiKey: 'sk-test', model: 'gpt-5.4-mini', targetLanguage: 'Korean' } };
+            }
+            if (keys === null) return { ...stored };
+            const result = {};
+            for (const key of Array.isArray(keys) ? keys : [keys]) {
+              if (Object.hasOwn(stored, key)) result[key] = stored[key];
+            }
+            return result;
+          },
+          async set(values) { Object.assign(stored, values); },
+          async remove(keys) {
+            for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
+          },
+        } },
+        runtime: { getManifest() { return { version: 'test' }; } },
+      };
+      global.fetch = async () => { throw new Error('network is down'); };
+
+      try {
+        await assert.rejects(
+          helpers.translateVisibleBlockBatch([first, second]),
+          /network is down/
+        );
+        const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
+        assert.ok(failedRun, 'the failed request is written to diagnostics');
+        assert.equal(failedRun.model, 'gpt-5.4-mini');
+        assert.equal(failedRun.summary.requested, 2);
+        assert.equal(failedRun.summary.failed, 2);
+      } finally {
         global.chrome = previousChrome;
         global.fetch = previousFetch;
       }
