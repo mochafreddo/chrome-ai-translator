@@ -78,6 +78,8 @@ The floating **Translate** button, where the chosen visibility allows it, carrie
 ## Development
 - Run tests: `npm test`
 - Check extension script syntax: `npm run check:syntax`
+- Drive a real Chrome: `npm run test:integration`. Needs `agent-browser` on `PATH` and network access. Not part of `npm test`.
+- Check that translation really works: `npm run verify:live`. Needs the above plus an OpenAI key in `.env.local`, and bills a real model — it is the only command that costs anything, so it is never run by the other two.
 
 ## Notes
 - Settings are stored in `chrome.storage.local` under `settings`.
