@@ -4032,6 +4032,47 @@ exports.tests = [
     },
   },
   {
+    name: 'stopping queued semantic block retries keeps unresolved changed status visible',
+    fn() {
+      const { store, original, retry } = queueSemanticBlockPageChangeRetry(37);
+      const state = {
+        status: 'active',
+        operationId: 37,
+        records: [],
+        restorableRecords: [],
+        viewport: store,
+      };
+      assert.equal(retry.state, 'queued');
+
+      helpers.stopInlineViewportTranslation(state);
+
+      // Stopping discards the queue, so this retry will never run. The block it superseded
+      // has to stop pointing at it, or nothing counts the block as `changed` and a stopped
+      // run with an unresolved block reads as finished.
+      assert.equal(store.stopped, true);
+      assert.deepEqual(store.queue, []);
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        partial: 0,
+        pending: 1,
+        changed: 1,
+        failed: 0,
+      });
+      assert.equal(
+        helpers.formatInlineViewportStatusMessage(
+          helpers.getInlineViewportStatusCounts(store.records),
+          'stopped'
+        ),
+        'Visible translation stopped\nTranslated 0 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
+      );
+      assert.equal(
+        helpers.getInlineTerminalReason(store.records),
+        'Page changed before translation could be applied.'
+      );
+    },
+  },
+  {
     name: 'rehydrates cached partial translations without false success',
     fn() {
       const { block } = createReasoningFixture();

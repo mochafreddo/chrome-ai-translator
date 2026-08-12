@@ -226,7 +226,11 @@ function stopInlineViewportTranslation(state = inlineState) {
 
   const hasPendingDiagnosticTask = Boolean(store.localDiagnosticRetryTimer);
   addInlineRestorableRecords(state, store.records);
-  clearCanceledInlineViewportRetrySupersessions(store, ['translating']);
+  // `store.queue = []` below discards every queued retry, so a queued retry cancels here
+  // just as an in-flight one does and has to release the record it superseded. This must
+  // run before `resetQueuedInlineViewportRecords`, which retains a queued Semantic Block
+  // retry rather than clearing its supersession.
+  clearCanceledInlineViewportRetrySupersessions(store, ['queued', 'translating']);
   resetQueuedInlineViewportRecords(store);
   store.stopped = true;
   store.queue = [];
