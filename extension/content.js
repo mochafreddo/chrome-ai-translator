@@ -617,9 +617,17 @@ function getInlineBlockReservedRecordCost(record) {
   return requestPayloadCost(record) + requestPayloadCost(repairRecord);
 }
 
+// The id carries the operation that minted it, so a record minted here cannot collide with
+// one `seedInlineViewportStoreWithRestorableRecords` carried over from a stopped session —
+// those keep the ids of an earlier operation, and every store is built for an operation id
+// that was incremented first. `findInlineViewportRecordById` resolves `retryOf` by scanning
+// `store.records` for the first match, so a duplicate id there silently resolves a retry to
+// the wrong record. Nothing else reads this format: the worker's
+// `normalizeVisibleBlockBatchRecords` asks only for a non-empty string unique within the
+// batch, diagnostics use it as an opaque `runId/<id>` suffix, and no block id is persisted.
 function createInlineViewportBlockRecord(store, blockElement, values = {}) {
   const record = {
-    id: `b${store.nextBlockId + 1}`,
+    id: `b${Number(store.operationId) || 0}-${store.nextBlockId + 1}`,
     blockElement,
     state: 'original',
     operationId: store.operationId,

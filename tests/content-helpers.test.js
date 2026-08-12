@@ -18,9 +18,12 @@ function getReasoningTranslatedTemplate(record) {
 // The retry-cancellation checks for Semantic Blocks all start from the same place: a block
 // whose translation came back after the page had already changed it, so the block was marked
 // stale and the one page-change retry it is allowed was queued behind it.
-function queueSemanticBlockPageChangeRetry(operationId) {
-  const { block } = createReasoningFixture();
-  const store = helpers.createInlineViewportStore(operationId);
+function queueSemanticBlockPageChangeRetry(
+  operationId,
+  store = helpers.createInlineViewportStore(operationId),
+  fixture = createReasoningFixture()
+) {
+  const { block } = fixture;
   const original = helpers.queueInlineViewportBlock(store, block);
   helpers.takeInlineViewportBlockBatch(store);
   const originalText = original.snapshot.originalTextValues.keys().next().value;
@@ -2285,6 +2288,98 @@ exports.tests = [
       );
       assert.equal(
         helpers.getInlineTerminalReason(store.records),
+        'Page changed before translation could be applied.'
+      );
+    },
+  },
+  {
+    // The two checks above build their store with `createInlineViewportStore` and never seed
+    // it, so neither can see what a restart does to the record ids. A restarted session
+    // carries its translated blocks into a fresh store keeping their original ids, so the
+    // first block the new session mints has to be given an id none of them already holds —
+    // otherwise `findInlineViewportRecordById` resolves the retry's `retryOf` to the seeded
+    // record, the supersession is never cleared, and the unresolved block goes back to
+    // reading as finished.
+    name: 'stopping a restarted session keeps unresolved changed status visible',
+    fn() {
+      const settings = {
+        targetLanguage: 'Korean',
+        tone: 'technical',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'none',
+      };
+      const cache = new Map();
+      const { block: firstBlock } = createReasoningFixture();
+      const firstStore = helpers.createInlineViewportStore(38, cache, settings);
+      const seeded = helpers.queueInlineViewportBlock(firstStore, firstBlock);
+      helpers.applyInlineViewportBlockResults(
+        helpers.takeInlineViewportBlockBatch(firstStore),
+        [{ id: seeded.id, disposition: 'apply', template: getReasoningTranslatedTemplate(seeded) }],
+        38,
+        firstStore
+      );
+      assert.equal(seeded.state, 'translated');
+
+      const state = {
+        status: 'active',
+        operationId: 38,
+        viewport: firstStore,
+        records: firstStore.records,
+        restorableRecords: [],
+      };
+      helpers.stopInlineViewportTranslation(state);
+
+      // Page in Korean again: a fresh store for the new operation, seeded with what the
+      // stopped run had already translated.
+      const secondStore = helpers.createInlineViewportStore(39, cache, settings);
+      helpers.seedInlineViewportStoreWithRestorableRecords(
+        secondStore,
+        state.restorableRecords
+      );
+      assert.deepEqual(secondStore.records, [seeded]);
+
+      // A second block, whose text differs from the seeded one so the shared cache bucket
+      // does not answer for it and it really is queued.
+      const secondFixture = createReasoningFixture();
+      secondFixture.strong.childNodes[0].nodeValue = 'Other reasoning models';
+      const { original, retry } = queueSemanticBlockPageChangeRetry(
+        39,
+        secondStore,
+        secondFixture
+      );
+      state.status = 'active';
+      state.operationId = 39;
+      state.viewport = secondStore;
+      state.records = secondStore.records;
+
+      // Asserted separately from the status below, so a future change that fixes the counts
+      // while leaving two records sharing an id does not read as a clean pass.
+      const mintedIds = secondStore.records.map((record) => record.id);
+      assert.equal(new Set(mintedIds).size, mintedIds.length);
+      assert.notEqual(original.id, seeded.id);
+      assert.notEqual(retry.id, seeded.id);
+
+      helpers.stopInlineViewportTranslation(state);
+
+      assert.equal(secondStore.stopped, true);
+      assert.deepEqual(secondStore.queue, []);
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
+        translated: 1,
+        partial: 0,
+        pending: 1,
+        changed: 1,
+        failed: 0,
+      });
+      assert.equal(
+        helpers.formatInlineViewportStatusMessage(
+          helpers.getInlineViewportStatusCounts(secondStore.records),
+          'stopped'
+        ),
+        'Visible translation stopped\nTranslated 1 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
+      );
+      assert.equal(
+        helpers.getInlineTerminalReason(secondStore.records),
         'Page changed before translation could be applied.'
       );
     },
