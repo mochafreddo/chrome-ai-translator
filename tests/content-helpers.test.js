@@ -15,6 +15,36 @@ function getReasoningTranslatedTemplate(record) {
   return `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
 }
 
+// The retry-cancellation checks for Semantic Blocks all start from the same place: a block
+// whose translation came back after the page had already changed it, so the block was marked
+// stale and the one page-change retry it is allowed was queued behind it.
+function queueSemanticBlockPageChangeRetry(operationId) {
+  const { block } = createReasoningFixture();
+  const store = helpers.createInlineViewportStore(operationId);
+  const original = helpers.queueInlineViewportBlock(store, block);
+  helpers.takeInlineViewportBlockBatch(store);
+  const originalText = original.snapshot.originalTextValues.keys().next().value;
+  originalText.nodeValue = 'Updated reasoning models';
+
+  helpers.applyInlineViewportBlockResults(
+    [original],
+    [
+      {
+        id: original.id,
+        disposition: 'apply',
+        template: getReasoningTranslatedTemplate(original),
+      },
+    ],
+    operationId,
+    store
+  );
+
+  const retry = store.queue[0];
+  assert.equal(original.state, 'stale');
+  assert.equal(original.supersededByRetryId, retry.id);
+  return { block, store, original, retry };
+}
+
 exports.name = 'content helpers';
 
 function withFakeViewportDom(fn, options = {}) {
@@ -3885,6 +3915,120 @@ exports.tests = [
         changed: 1,
         failed: 0,
       });
+    },
+  },
+  {
+    name: 'resetting queued semantic block retries keeps them queued rather than cancelling them',
+    fn() {
+      const state = global.__chromeAiTranslatorInlineState;
+      const previousState = {
+        status: state.status,
+        records: state.records,
+        message: state.message,
+        operationId: state.operationId,
+        viewport: state.viewport,
+      };
+
+      try {
+        withFakeViewportDom(() => {
+          const { block, store, original, retry } =
+            queueSemanticBlockPageChangeRetry(35);
+          state.status = 'active';
+          state.operationId = 35;
+          state.viewport = store;
+          state.records = store.records;
+
+          // Everything this check asserts about the retry is that the reset left it alone,
+          // which is also what a reset that never ran would look like. A plain queued block
+          // behind it is the control: the same call has to reset that one to `original`, so
+          // a green result cannot mean the reset was skipped.
+          const control = helpers.queueInlineViewportBlock(
+            store,
+            createReasoningFixture().block
+          );
+          assert.equal(control.state, 'queued');
+          assert.deepEqual(store.queue, [retry, control]);
+
+          helpers.scheduleInlineViewportScanFromViewportChange();
+
+          assert.equal(control.state, 'original');
+
+          // A queued text-node retry is cancelled by this reset and the block it superseded
+          // falls back to an unresolved `changed`. A queued block retry survives instead, so
+          // the block stays pending — either way it does not read as finished.
+          assert.equal(retry.state, 'queued');
+          assert.deepEqual(store.queue, [retry]);
+          assert.equal(original.supersededByRetryId, retry.id);
+          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+            translated: 0,
+            partial: 0,
+            pending: 1,
+            changed: 0,
+            failed: 0,
+          });
+
+          // The rescan the reset schedules re-reaches the same block, and must not queue a
+          // second retry beside the one it left alone.
+          assert.equal(helpers.queueInlineViewportBlock(store, block), null);
+          assert.deepEqual(store.queue, [retry]);
+          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+            translated: 0,
+            partial: 0,
+            pending: 1,
+            changed: 0,
+            failed: 0,
+          });
+        }, {
+          clearTimeout() {},
+          setTimeout() {
+            return 123;
+          },
+        });
+      } finally {
+        state.status = previousState.status;
+        state.records = previousState.records;
+        state.message = previousState.message;
+        state.operationId = previousState.operationId;
+        state.viewport = previousState.viewport;
+      }
+    },
+  },
+  {
+    name: 'stopping in-flight semantic block retries keeps unresolved changed status visible',
+    fn() {
+      const { store, original, retry } = queueSemanticBlockPageChangeRetry(36);
+      const state = {
+        status: 'active',
+        operationId: 36,
+        records: [],
+        restorableRecords: [],
+        viewport: store,
+      };
+      helpers.takeInlineViewportBlockBatch(store);
+      assert.equal(retry.state, 'translating');
+
+      helpers.stopInlineViewportTranslation(state);
+
+      assert.equal(store.stopped, true);
+      assert.equal(original.supersededByRetryId, undefined);
+      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        translated: 0,
+        partial: 0,
+        pending: 1,
+        changed: 1,
+        failed: 0,
+      });
+      assert.equal(
+        helpers.formatInlineViewportStatusMessage(
+          helpers.getInlineViewportStatusCounts(store.records),
+          'stopped'
+        ),
+        'Visible translation stopped\nTranslated 0 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
+      );
+      assert.equal(
+        helpers.getInlineTerminalReason(store.records),
+        'Page changed before translation could be applied.'
+      );
     },
   },
   {
