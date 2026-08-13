@@ -15,8 +15,10 @@
 //
 // The page is a local fixture, not a page on the web. A real site would serve until its
 // owner edited a sentence, and then this check would quietly change both what it costs and
-// what it asserts. The fixture fixes the input, and its three blocks are what decide the
-// size of the bill.
+// what it asserts. The fixture fixes the input, and its blocks are what decide the size of
+// the bill: three for the run that translates the page, and one hidden fourth that only
+// the run the Stop checks act on can see. What that fourth block buys is written down
+// beside it in the fixture and in tests/README.md.
 //
 // Assertions are invariants, never output. A model's wording changes between runs and
 // between models, so asserting on a translated string would make the check a report on
@@ -48,6 +50,21 @@ const FIXTURE = join(HERE, 'fixtures', 'inline-translation.html');
 const SESSION = 'chrome-ai-translator-live';
 const TARGET_LANGUAGE = 'Korean';
 const HANGUL = /[가-힣]/;
+
+// The fixture's hidden block: the one the Stop checks put in flight. See the comment beside
+// it in tests/integration/fixtures/inline-translation.html.
+const STOPPED_RUN_BLOCK_ID = 'stoppedRunBlock';
+// The first line the side panel shows once a run has been stopped, from
+// formatInlineViewportStatusMessage. A run that ended on its own says "Visible translation
+// on" instead, which is how the Stop checks tell a cancelled run from a finished one.
+const STOPPED_STATUS = 'Visible translation stopped';
+// Blocks queued or awaiting a response, out of the same status line. A run served from the
+// translation cache never has one, so this is the part of the panel a cache hit cannot
+// produce. A queued block is counted too, but the queue is drained in the same turn the
+// scan fills it and the panel is only re-read a second later, so a count this check ever
+// sees is a request already out.
+const readPending = (snapshot) =>
+  Number(/Pending (\d+)/.exec(String(snapshot?.status || ''))?.[1] || 0);
 
 const { check, failures, finish } = createChecks('inline translation live');
 
@@ -129,7 +146,13 @@ async function main() {
       const pageText = () => page.evaluate('document.body.innerText.trim()');
 
       await click('btnInlineTranslate');
+      const startedAt = Date.now();
       const translated = await until(async () => HANGUL.test(String(await pageText())), 120000, 1500);
+      // How long this page took to come back from a real model, measured rather than
+      // guessed: the click until the first translated text landed, rounded up by the poll.
+      // The stopped run below waits at least this long before concluding its own answer
+      // never arrived, and it asked for one short block where this asked for three.
+      const firstRunMs = Date.now() - startedAt;
       const afterTranslate = await controls();
       check('Inline Translation translates the page with a real API key', translated,
         `status="${afterTranslate?.status}" error="${afterTranslate?.error}"`);
@@ -140,12 +163,48 @@ async function main() {
       check('Original text puts the page back exactly as it was',
         await until(async () => (await pageText()) === originalText, 20000, 1000));
 
-      // Stopping a run that already finished proves nothing, so this stops one in flight.
+      // Stopping a run that already finished proves nothing, so this stops one in flight --
+      // and getting one in flight takes work. Restore does not empty the translation cache,
+      // which is keyed by the settings signature and so is the same bucket on the next run;
+      // translating this page again would serve every block from it and issue no request at
+      // all. What that leaves is a status flip, and Stop checks that watch only the status
+      // pass whether or not cancelling a batch works. So the page is given a block the cache
+      // has never seen, and it is the only thing the run below asks a model for.
+      const revealed = await page.evaluate(`(() => {
+        const block = document.getElementById(${JSON.stringify(STOPPED_RUN_BLOCK_ID)});
+        if (!block) return '';
+        block.hidden = false;
+        return block.innerText.trim();
+      })()`);
+      if (!check('the fixture holds a block the first run never saw',
+        typeof revealed === 'string' && revealed.length > 0 && !HANGUL.test(revealed),
+        JSON.stringify(String(revealed).slice(0, 80)))) return;
+      const revealedText = () => page.evaluate(
+        `document.getElementById(${JSON.stringify(STOPPED_RUN_BLOCK_ID)}).innerText.trim()`);
+      const originalWithRevealed = await pageText();
+
       await click('btnInlineTranslate');
-      const running = await until(async () => (await controls())?.stopDisabled === false, 15000, 250);
-      check('Stop is offered while a run is in flight', running);
+      // Pending is what says a request is out. Waiting on stopDisabled alone would settle
+      // the moment the status turned active, which happens before the page is even scanned.
+      const running = await until(async () => {
+        const now = await controls();
+        return now?.stopDisabled === false && readPending(now) > 0;
+      }, 60000, 250);
+      // The panel is read a second behind the page, so the answer can arrive between the
+      // count this saw and the click below. That leaves nothing in flight to stop, which is
+      // the one thing these checks may not quietly accept -- so it is reported here, where
+      // the detail says a race rather than a broken Stop.
+      const atStop = await controls();
+      const arrivedFirst = HANGUL.test(String(await revealedText()));
+      check('Stop is offered while a run is in flight', running && !arrivedFirst,
+        `status="${atStop?.status}"${arrivedFirst ? ' (the answer landed before Stop was clicked)' : ''}`);
       await click('btnInlineStop');
-      const settled = await until(async () => (await controls())?.stopDisabled === true, 20000, 500);
+      // Stopped, not merely finished: a run that ended on its own also dims Stop, and it
+      // says so on the line above the counts.
+      const settled = await until(async () => {
+        const now = await controls();
+        return now?.stopDisabled === true && String(now?.status || '').startsWith(STOPPED_STATUS);
+      }, 20000, 500);
       const afterStop = await controls();
       check('Stop ends the run', settled, `status="${afterStop?.status}"`);
       check('Stop leaves the page restorable', afterStop?.restoreDisabled === false,
@@ -153,9 +212,18 @@ async function main() {
       // A cancelled run reporting an error is the state 1e2a84a removed.
       check('a stopped run reports no error', !afterStop?.error, String(afterStop?.error || ''));
 
+      // The answer to the batch that was in flight is still on its way, and cancelling it is
+      // the run failing the test the content script makes before applying anything. A stop
+      // that only flipped the status would apply that answer when it arrives, so this waits
+      // longer than the first run took and checks that it never does.
+      const answerLanded = await until(async () => HANGUL.test(String(await revealedText())),
+        Math.max(firstRunMs, 15000), 1000);
+      check('a stopped run never applies the batch it had in flight', !answerLanded,
+        JSON.stringify(String(await revealedText()).slice(0, 80)));
+
       await click('btnInlineRestore');
       check('Original text still works after a stop',
-        await until(async () => (await pageText()) === originalText, 20000, 1000));
+        await until(async () => (await pageText()) === originalWithRevealed, 20000, 1000));
     });
 
     ctx.close();

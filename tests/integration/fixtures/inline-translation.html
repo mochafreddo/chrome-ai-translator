@@ -13,9 +13,21 @@
         would change what it costs and what it asserts without anyone having touched it.
       </p>
       <p>
-        Three short blocks is the whole page on purpose. The check bills a real model, so
-        the fixture is what decides the size of the bill, and keeping that decision here
-        means it is visible to whoever changes it.
+        Three short blocks is all this page shows at first, on purpose. The check bills a
+        real model, so the fixture is what decides the size of the bill, and keeping that
+        decision here means it is visible to whoever changes it.
+      </p>
+      <!--
+        The fourth block, and the whole of what the run the Stop checks act on adds to the
+        bill -- which is why it is one short paragraph rather than a second copy of the
+        page. It is hidden so that only that run can see it; why that is what makes the
+        Stop checks mean anything is written down where they are, in
+        tests/integration/inline-translation.live.test.mjs.
+      -->
+      <p id="stoppedRunBlock" hidden>
+        This paragraph stays out of the first run so that the run after it has something the
+        translation cache has never seen. A run served entirely from that cache issues no
+        request, and stopping it would prove nothing.
       </p>
     </main>
   </body>
