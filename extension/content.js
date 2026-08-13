@@ -245,7 +245,6 @@ function stopInlineViewportTranslation(state = inlineState) {
     state.operationId = (Number(state.operationId) || 0) + 1;
   }
   state.status = 'stopped';
-  state.records = store.records;
   return state.operationId;
 }
 
@@ -433,7 +432,6 @@ function getInlineViewportRestoreRecords(state = inlineState) {
 
 var inlineState = globalThis.__chromeAiTranslatorInlineState || {
   status: 'original',
-  records: [],
   menuOpen: false,
   message: '',
   error: '',
@@ -1163,7 +1161,6 @@ function restoreInlineViewportRecords(state = inlineState) {
   }
 
   state.status = 'original';
-  state.records = [];
   state.restorableRecords = [];
   state.operationId = (Number(state.operationId) || 0) + 1;
   state.viewport = createInlineViewportStore(
@@ -1835,7 +1832,6 @@ async function translateInlinePage() {
     inlineState.viewport,
     inlineState.restorableRecords
   );
-  inlineState.records = inlineState.viewport.records;
 
   attachInlineViewportWatchers(root);
   runInlineViewportScan();

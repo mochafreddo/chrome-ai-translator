@@ -586,19 +586,17 @@ exports.tests = [
   {
     name: 'keeps a running Inline Translation running when the button is closed',
     fn() {
-      // Closing takes the UI, not the work: the run stays active on the same operation and
-      // keeps the Semantic Block records it has already collected.
+      // Closing takes the UI, not the work: the run stays active on the same operation, so
+      // the Semantic Blocks already under way keep being translated against it.
       const scanning = {
         status: 'active',
         menuOpen: true,
         message: 'Visible translation on',
         operationId: 3,
-        records: [{ id: 'b1' }],
       };
       helpers.closeFloatingTranslateButton(scanning);
       assert.equal(scanning.status, 'active');
       assert.equal(scanning.operationId, 3);
-      assert.deepEqual(scanning.records, [{ id: 'b1' }]);
     },
   },
   {
@@ -773,7 +771,6 @@ exports.tests = [
       const state = global.__chromeAiTranslatorInlineState;
       const previousState = {
         status: state.status,
-        records: state.records,
         message: state.message,
         operationId: state.operationId,
         viewport: state.viewport,
@@ -812,7 +809,6 @@ exports.tests = [
         });
       } finally {
         state.status = previousState.status;
-        state.records = previousState.records;
         state.message = previousState.message;
         state.operationId = previousState.operationId;
         state.viewport = previousState.viewport;
@@ -961,7 +957,6 @@ exports.tests = [
         HTMLElement: global.HTMLElement,
         window: global.window,
         status: state.status,
-        records: state.records,
         message: state.message,
         operationId: state.operationId,
         viewport: state.viewport,
@@ -1022,7 +1017,6 @@ exports.tests = [
         state.status = 'active';
         state.operationId = 32;
         state.viewport = store;
-        state.records = store.records;
 
         helpers.runInlineViewportScan();
         await flushMicrotasks(16);
@@ -1058,7 +1052,6 @@ exports.tests = [
         global.HTMLElement = previous.HTMLElement;
         global.window = previous.window;
         state.status = previous.status;
-        state.records = previous.records;
         state.message = previous.message;
         state.operationId = previous.operationId;
         state.viewport = previous.viewport;
@@ -1223,7 +1216,6 @@ exports.tests = [
         status: 'active',
         operationId: 4,
         viewport: store,
-        records: store.records,
       };
 
       const nextOperationId = helpers.stopInlineViewportTranslation(state);
@@ -1234,7 +1226,6 @@ exports.tests = [
       assert.equal(store.stopped, true);
       assert.deepEqual(store.queue, []);
       assert.equal(node.nodeValue, '안녕하세요.');
-      assert.equal(state.records, store.records);
     },
   },
   {
@@ -1254,7 +1245,7 @@ exports.tests = [
       };
       store.localDiagnostics.push({ code: 'runtime.session_too_large', evidence: {} });
       store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
-      const state = { status: 'active', operationId: 5, viewport: store, records: [] };
+      const state = { status: 'active', operationId: 5, viewport: store };
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 2);
@@ -1277,7 +1268,7 @@ exports.tests = [
       const store = helpers.createInlineViewportStore(6);
       store.localDiagnostics.push({ code: 'runtime.session_too_large', evidence: { limit: 60000 } });
       store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
-      const state = { status: 'active', operationId: 6, viewport: store, records: [] };
+      const state = { status: 'active', operationId: 6, viewport: store };
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 1);
@@ -1303,7 +1294,7 @@ exports.tests = [
         attempt: 0,
       };
       store.localDiagnostics.push({ code: 'runtime.unsupported_block', evidence: {} });
-      const state = { status: 'active', operationId: 7, viewport: store, records: [] };
+      const state = { status: 'active', operationId: 7, viewport: store };
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 1);
@@ -1647,7 +1638,6 @@ exports.tests = [
         const state = globalThis.__chromeAiTranslatorInlineState;
         Object.assign(state, {
           status: 'active',
-          records: [],
           restorableRecords: [],
           message: 'Visible translation on',
           operationId: 7,
@@ -2033,7 +2023,6 @@ exports.tests = [
         operationId: 14,
         viewport: firstStore,
         translationCache: cache,
-        records: [],
         restorableRecords: [],
       };
 
@@ -2143,7 +2132,6 @@ exports.tests = [
       const state = global.__chromeAiTranslatorInlineState;
       const previousState = {
         status: state.status,
-        records: state.records,
         message: state.message,
         operationId: state.operationId,
         viewport: state.viewport,
@@ -2156,7 +2144,6 @@ exports.tests = [
           state.status = 'active';
           state.operationId = 35;
           state.viewport = store;
-          state.records = store.records;
 
           // Everything this check asserts about the retry is that the reset left it alone,
           // which is also what a reset that never ran would look like. A plain queued block
@@ -2206,7 +2193,6 @@ exports.tests = [
         });
       } finally {
         state.status = previousState.status;
-        state.records = previousState.records;
         state.message = previousState.message;
         state.operationId = previousState.operationId;
         state.viewport = previousState.viewport;
@@ -2220,7 +2206,6 @@ exports.tests = [
       const state = {
         status: 'active',
         operationId: 36,
-        records: [],
         restorableRecords: [],
         viewport: store,
       };
@@ -2258,7 +2243,6 @@ exports.tests = [
       const state = {
         status: 'active',
         operationId: 37,
-        records: [],
         restorableRecords: [],
         viewport: store,
       };
@@ -2324,7 +2308,6 @@ exports.tests = [
         status: 'active',
         operationId: 38,
         viewport: firstStore,
-        records: firstStore.records,
         restorableRecords: [],
       };
       helpers.stopInlineViewportTranslation(state);
@@ -2350,7 +2333,6 @@ exports.tests = [
       state.status = 'active';
       state.operationId = 39;
       state.viewport = secondStore;
-      state.records = secondStore.records;
 
       // Asserted separately from the status below, so a future change that fixes the counts
       // while leaving two records sharing an id does not read as a clean pass.
@@ -2505,7 +2487,6 @@ exports.tests = [
         status: 'active',
         operationId: 20,
         viewport: store,
-        records: store.records,
         restorableRecords: [record],
         translationCache: cache,
       };
@@ -2544,7 +2525,6 @@ exports.tests = [
         status: 'active',
         operationId: 21,
         viewport: firstStore,
-        records: firstStore.records,
         restorableRecords: [],
       };
       helpers.stopInlineViewportTranslation(state);
@@ -2594,7 +2574,6 @@ exports.tests = [
         status: 'active',
         operationId: 31,
         viewport: firstStore,
-        records: firstStore.records,
         restorableRecords: [],
       };
       helpers.stopInlineViewportTranslation(state);
