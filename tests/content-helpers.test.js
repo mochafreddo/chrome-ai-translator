@@ -2173,9 +2173,9 @@ exports.tests = [
 
           assert.equal(control.state, 'original');
 
-          // A queued text-node retry is cancelled by this reset and the block it superseded
-          // falls back to an unresolved `changed`. A queued block retry survives instead, so
-          // the block stays pending — either way it does not read as finished.
+          // The retry survives the reset, so the block it superseded stays pending rather
+          // than falling back to an unresolved `changed` — either way it does not read as
+          // finished.
           assert.equal(retry.state, 'queued');
           assert.deepEqual(store.queue, [retry]);
           assert.equal(original.supersededByRetryId, retry.id);

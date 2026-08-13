@@ -982,7 +982,9 @@ function resetQueuedInlineViewportRecords(store) {
   const retained = [];
   for (const record of store.queue) {
     if (record?.state === 'queued') {
-      if (record?.snapshot?.blockElement && record.retryOf) {
+      // `retryOf` is what makes a queued record a page-change retry, and a retry is kept
+      // rather than reset: the block it superseded is still waiting on it.
+      if (record.retryOf) {
         retained.push(record);
         continue;
       }
