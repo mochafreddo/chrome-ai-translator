@@ -624,7 +624,8 @@ function getInlineBlockReservedRecordCost(record) {
 // `store.records` for the first match, so a duplicate id there silently resolves a retry to
 // the wrong record. Nothing else reads this format: the worker's
 // `normalizeVisibleBlockBatchRecords` asks only for a non-empty string unique within the
-// batch, diagnostics use it as an opaque `runId/<id>` suffix, and no block id is persisted.
+// batch, and the one place an id outlives the page is the `runId/<id>` diagnosticId, which
+// storage checks by its `runId/` prefix alone and never parses back into a block id.
 function createInlineViewportBlockRecord(store, blockElement, values = {}) {
   const record = {
     id: `b${Number(store.operationId) || 0}-${store.nextBlockId + 1}`,
