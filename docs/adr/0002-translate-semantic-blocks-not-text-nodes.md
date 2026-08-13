@@ -9,7 +9,7 @@ That commit added the block path but did not remove the text-node one, so both l
 ## Consequences
 
 - An oversized or malformed block remains untranslated. There is deliberately **no fallback to fragment translation** — falling back would reintroduce exactly the word-order loss the block path exists to prevent.
-- Progress counts, size limits, and retries are expressed in Semantic Blocks, not text nodes.
+- Progress counts, size limits, and retries are expressed in Semantic Blocks, not text nodes. Those size limits are not all enforced in the same place: the per-batch and per-record caps are checked on both sides of the seam, while the session cap is the content script's alone. ADR-0003 says why.
 - `TRANSLATE_TEXT_NODES`, `TRANSLATE_VISIBLE_TEXT_BATCH`, and `INLINE_TRANSLATION_PROGRESS` are retired message names, and each one is guarded on the side that used to implement it. The first two were worker endpoints: a negative test in `tests/background-helpers.test.js` sends all three names to the worker and asserts it answers `Unknown message`. `INLINE_TRANSLATION_PROGRESS` ran the other way — the worker sent it and the content script acted on it — so its guard is in `tests/content-helpers.test.js`, which drives the content script's own listener and asserts the message changes nothing. Both halves are covered because reviving either one alone is what went unnoticed before.
 
 ## Do not revert this

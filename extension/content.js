@@ -30,6 +30,8 @@ var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
 var INLINE_TRANSLATION_AUTH_MS = 5 * 60 * 1000;
 var INLINE_BLOCK_BATCH_MAX_CHARS = 12000;
+// The only copy of the session cap. The worker enforces the batch and record caps and
+// has no session of its own to measure against. See ADR-0003.
 var INLINE_BLOCK_SESSION_MAX_CHARS = 60000;
 var INLINE_BLOCK_MAX_DIAGNOSTIC_CODE_CHARS = 80;
 var INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;

@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
 const fullPageMarkdown = require('../extension/full-page-markdown.js');
@@ -981,11 +983,6 @@ exports.tests = [
       assert.equal(helpers.getBlockBatchMaxOutputTokens(100), 4096);
       assert.equal(helpers.getBlockBatchMaxOutputTokens(12000), 15000);
       assert.equal(helpers.getBlockBatchMaxOutputTokens(20000), 16000);
-      assert.doesNotThrow(() => helpers.assertInlineBlockSessionBudget(48000, 12000));
-      assert.throws(
-        () => helpers.assertInlineBlockSessionBudget(48001, 12000),
-        /session.*too large/i
-      );
       const plainFixture = createTestPlainBlockRecord();
       assert.throws(
         () =>
@@ -997,6 +994,33 @@ exports.tests = [
           ),
         /Too many semantic blocks/
       );
+    },
+  },
+  {
+    // The worker used to carry an `assertInlineBlockSessionBudget` that nothing called,
+    // and this suite's green check on it was the only thing making it look live. ADR-0003
+    // gave the session cap to the content script, where `tests/content-helpers.test.js`
+    // already checks it holds. Checking the export alone would only catch the one shape
+    // that was there before, so the worker's source is read too: a re-added constant, or
+    // an assert kept out of `module.exports`, has to fail here as well.
+    name: 'leaves the Semantic Block session cap to the content script',
+    fn() {
+      assert.equal(helpers.assertInlineBlockSessionBudget, undefined);
+
+      const backgroundJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'background.js'),
+        'utf8'
+      );
+      for (const retired of [
+        'assertInlineBlockSessionBudget',
+        'INLINE_BLOCK_MAX_SESSION_COST',
+      ]) {
+        assert.equal(
+          backgroundJs.includes(retired),
+          false,
+          `${retired} is back in the service worker`
+        );
+      }
     },
   },
   {

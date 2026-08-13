@@ -126,7 +126,8 @@ const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
 const INLINE_MAX_RECORDS = 500;
 const INLINE_BLOCK_MAX_RECORD_COST = 12000;
 const INLINE_BLOCK_MAX_BATCH_COST = 12000;
-const INLINE_BLOCK_MAX_SESSION_COST = 60000;
+// There is deliberately no session cap here: the Semantic Block session is the content
+// script's, and only it knows when one starts, resets, or resumes. See ADR-0003.
 const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
 const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
 const INLINE_RUNTIME_CORRELATION_TTL_MS = 5 * 60 * 1000;
@@ -864,16 +865,6 @@ function getBlockBatchMaxOutputTokens(recordCost) {
     INLINE_BLOCK_MAX_OUTPUT_TOKENS,
     Math.max(INLINE_BLOCK_MIN_OUTPUT_TOKENS, scaled)
   );
-}
-
-function assertInlineBlockSessionBudget(currentCost, additionalCost) {
-  const total = (Number(currentCost) || 0) + (Number(additionalCost) || 0);
-  if (total > INLINE_BLOCK_MAX_SESSION_COST) {
-    throw new Error(
-      `Inline block translation session is too large (${total}/${INLINE_BLOCK_MAX_SESSION_COST} characters)`
-    );
-  }
-  return total;
 }
 
 function normalizeVisibleBlockBatchRecords(records) {
@@ -2243,7 +2234,6 @@ if (typeof module !== 'undefined' && module.exports) {
     mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,
     assertFullPageTranslationBudget,
-    assertInlineBlockSessionBudget,
     buildBlockInstructions,
     buildBlockResponseFormat,
     getBlockBatchMaxOutputTokens,
