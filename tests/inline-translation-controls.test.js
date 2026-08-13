@@ -8,7 +8,8 @@ exports.tests = [
     fn() {
       const idle = controls.getInlineTranslationControlAvailability('original');
 
-      assert.equal(idle.canStart, true);
+      // Starting is not one of these rules — it is always on offer — so a state nothing has
+      // run in is one where neither of the two rules holds.
       assert.equal(idle.canStop, false);
       assert.equal(idle.canRestore, false);
 
@@ -26,7 +27,7 @@ exports.tests = [
         controls.getInlineTranslationControlAvailability('active').canStop,
         true
       );
-      for (const status of ['original', 'translating', 'translated', 'stopped']) {
+      for (const status of ['original', 'translated', 'stopped']) {
         assert.equal(
           controls.getInlineTranslationControlAvailability(status).canStop,
           false,
@@ -47,20 +48,8 @@ exports.tests = [
           status
         );
       }
-      for (const status of ['original', 'translating']) {
-        assert.equal(
-          controls.getInlineTranslationControlAvailability(status).canRestore,
-          false,
-          status
-        );
-      }
-    },
-  },
-  {
-    name: 'refuses to start a translation that is already in flight',
-    fn() {
       assert.equal(
-        controls.getInlineTranslationControlAvailability('translating').canStart,
+        controls.getInlineTranslationControlAvailability('original').canRestore,
         false
       );
     },

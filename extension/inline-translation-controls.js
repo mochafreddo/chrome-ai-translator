@@ -31,17 +31,16 @@
     'stopped',
   ]);
 
-  // Stopping needs a run to stop, and a translation already in flight cannot be started
-  // again — asking for one is the only thing the reader can do that spends tokens twice.
+  // Stopping needs a run to stop. Starting is not a rule here: it is on offer in every
+  // status, because Start during a live run rescans what has scrolled into view rather than
+  // paying for the page a second time — `isInlineTranslationRunLive` in `content.js` is
+  // what enforces that, and dimming Start would take away the rescan along with it.
   function getInlineTranslationControlAvailability(status) {
     const current = status || 'original';
     const isActive = current === 'active';
-    const isTranslating = current === 'translating';
 
     return Object.freeze({
       isActive,
-      isTranslating,
-      canStart: !isTranslating,
       canStop: isActive,
       canRestore: INLINE_RESTORABLE_STATUSES.includes(current),
     });

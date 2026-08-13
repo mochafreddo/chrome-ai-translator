@@ -248,8 +248,14 @@ function stopInlineViewportTranslation(state = inlineState) {
   return state.operationId;
 }
 
-function canRestartInlineViewportTranslation(state = inlineState) {
-  return state.status === 'stopped' || Boolean(state.viewport?.stopped);
+// A run is live from the moment Start hands it to the viewport scanner until something
+// stops it. Pressing Start again while it is — from either of the two homes, both of which
+// leave Start pressable — is the only thing the reader can do that would pay for the same
+// page twice, so `translateInlinePage` answers it with a rescan of what has scrolled into
+// view rather than a second run. A stopped run leaves nothing in flight to duplicate, and
+// Start begins a new one.
+function isInlineTranslationRunLive(state = inlineState) {
+  return state?.status === 'active' && !state?.viewport?.stopped;
 }
 
 function hasInlineSettingsApiKey(settings) {
@@ -1090,14 +1096,14 @@ function getInlineTranslatorUiModel(
     settings?.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage;
   const menuOpen = Boolean(state?.menuOpen);
   // Which controls are on offer is the shared rule; only the labels are this home's own.
-  const { isActive, isTranslating, canStart, canStop, canRestore } =
+  // Start is not among the rules — it stays pressable in every status, and reads as a
+  // rescan once a run is live.
+  const { isActive, canStop, canRestore } =
     inlineTranslationControls.getInlineTranslationControlAvailability(status);
 
   return {
     toggleText: isActive
       ? 'Translated'
-      : isTranslating
-      ? 'Translating...'
       : status === 'stopped'
       ? 'Stopped'
       : 'Translate',
@@ -1105,7 +1111,6 @@ function getInlineTranslatorUiModel(
     translateText: isActive ? 'Scan visible text' : `Page in ${targetLanguage}`,
     stopDisabled: !canStop,
     restoreDisabled: !canRestore,
-    translateDisabled: !canStart,
     expanded: String(menuOpen),
   };
 }
@@ -1538,7 +1543,6 @@ function updateInlineTranslatorUi() {
   toggle.setAttribute('aria-expanded', model.expanded);
   menu.hidden = !model.menuOpen;
   translate.textContent = model.translateText;
-  translate.disabled = model.translateDisabled;
   stop.disabled = model.stopDisabled;
   restore.disabled = model.restoreDisabled;
 }
@@ -1775,10 +1779,7 @@ async function drainInlineViewportQueue() {
 }
 
 async function translateInlinePage() {
-  if (
-    inlineState.status === 'active' &&
-    !canRestartInlineViewportTranslation(inlineState)
-  ) {
+  if (isInlineTranslationRunLive(inlineState)) {
     scheduleInlineViewportScan();
     updateInlineViewportMessage();
     return;
@@ -1944,7 +1945,7 @@ if (typeof module !== 'undefined' && module.exports) {
     collectVisibleInlineBlocks,
     isInlineViewportOperationCurrent,
     stopInlineViewportTranslation,
-    canRestartInlineViewportTranslation,
+    isInlineTranslationRunLive,
     hasInlineSettingsApiKey,
     getDefaultInlineInstructionHandlers,
     closeFloatingTranslateButton,

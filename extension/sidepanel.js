@@ -156,13 +156,11 @@ function getInlineTranslationPanelViewModel({
   hasPageAccess = true,
 } = {}) {
   const status = snapshot?.status || 'original';
-  const { isActive, isTranslating, canStart, canStop, canRestore } =
+  const { isActive, canStop, canRestore } =
     getInlineTranslationControlAvailability(status);
-  const startText = isTranslating
-    ? 'Translating...'
-    : isActive
-    ? 'Scan visible text'
-    : 'Translate visible text';
+  // Start is not among the rules — it stays pressable in every status — so what the tab's
+  // status decides here is only which of the two things the label promises.
+  const startText = isActive ? 'Scan visible text' : 'Translate visible text';
 
   // Page access is granted per tab, and the panel stays open across tab switches, so the
   // reader can arrive here on a tab the extension has never been invoked on. None of the
@@ -185,7 +183,9 @@ function getInlineTranslationPanelViewModel({
 
   return {
     startText,
-    startDisabled: !canStart,
+    // A tab out of reach is the one thing that dims Start, and it returned above; on a tab
+    // the section can reach, Start is pressable whatever the run is doing.
+    startDisabled: false,
     stopDisabled: !canStop,
     restoreDisabled: !canRestore,
     statusText: snapshot?.progress || '',

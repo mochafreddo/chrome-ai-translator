@@ -57,12 +57,6 @@ exports.tests = [
       assert.equal(active.restoreDisabled, false);
       assert.equal(active.statusText, 'Translated 3 blocks.');
 
-      const translating = helpers.getInlineTranslationPanelViewModel({
-        snapshot: { status: 'translating', progress: 'Chunk 1/3' },
-      });
-      assert.equal(translating.startText, 'Translating...');
-      assert.equal(translating.startDisabled, true);
-
       const stopped = helpers.getInlineTranslationPanelViewModel({
         snapshot: { status: 'stopped' },
       });

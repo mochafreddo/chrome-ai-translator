@@ -605,7 +605,7 @@ exports.tests = [
       // A reload brings the button back subject to the reader's visibility choice, so
       // closing must leave nothing behind to restore from. It adds no state at all: the
       // button is closed exactly while its UI is detached.
-      const state = { status: 'translating', menuOpen: true, operationId: 4 };
+      const state = { status: 'active', menuOpen: true, operationId: 4 };
       const before = Object.keys(state).sort();
       helpers.closeFloatingTranslateButton(state);
       assert.deepEqual(Object.keys(state).sort(), before);
@@ -1335,30 +1335,38 @@ exports.tests = [
     },
   },
   {
-    name: 'allows restarting from stopped active viewport state',
+    name: 'reads a live run as one Start must rescan rather than start again',
     fn() {
-      const stoppedStore = helpers.createInlineViewportStore(2);
-      stoppedStore.stopped = true;
-
+      // Pressing Start on a run that is already under way is the only thing the reader can
+      // do that would pay for the same page twice, so `translateInlinePage` rescans instead
+      // whenever this holds. Once the run has stopped there is nothing in flight to
+      // duplicate, and Start begins a new one.
       assert.equal(
-        helpers.canRestartInlineViewportTranslation({
-          status: 'stopped',
-          viewport: stoppedStore,
-        }),
-        true
-      );
-      assert.equal(
-        helpers.canRestartInlineViewportTranslation({
-          status: 'active',
-          viewport: stoppedStore,
-        }),
-        true
-      );
-      assert.equal(
-        helpers.canRestartInlineViewportTranslation({
+        helpers.isInlineTranslationRunLive({
           status: 'active',
           viewport: helpers.createInlineViewportStore(2),
         }),
+        true
+      );
+
+      const stoppedStore = helpers.createInlineViewportStore(2);
+      stoppedStore.stopped = true;
+      assert.equal(
+        helpers.isInlineTranslationRunLive({
+          status: 'active',
+          viewport: stoppedStore,
+        }),
+        false
+      );
+      assert.equal(
+        helpers.isInlineTranslationRunLive({
+          status: 'stopped',
+          viewport: stoppedStore,
+        }),
+        false
+      );
+      assert.equal(
+        helpers.isInlineTranslationRunLive({ status: 'original' }),
         false
       );
     },
@@ -1606,7 +1614,6 @@ exports.tests = [
           translateText: 'Page in Japanese',
           stopDisabled: true,
           restoreDisabled: true,
-          translateDisabled: false,
           expanded: 'true',
         }
       );
@@ -1622,7 +1629,6 @@ exports.tests = [
           translateText: 'Scan visible text',
           stopDisabled: false,
           restoreDisabled: false,
-          translateDisabled: false,
           expanded: 'false',
         }
       );
