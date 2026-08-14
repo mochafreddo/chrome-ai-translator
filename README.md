@@ -31,9 +31,9 @@ OpenAI Responses requests set `store: false`. Page text is still transmitted to 
   - macOS: `Cmd+Shift+Y`
   - Windows/Linux: `Ctrl+Shift+Y`
 
-If the shortcut does not work, check `chrome://extensions/shortcuts`. Chrome can leave a suggested shortcut unassigned when it conflicts with another shortcut or has been changed locally.
+If the shortcut does not work, check `chrome://extensions/shortcuts`. Chrome can leave a suggested shortcut unassigned when it conflicts with another shortcut or has been changed locally. Version 0.3.0.0 renamed the command behind the shortcut, so a combination assigned by hand before that version is no longer honoured and has to be assigned once more.
 
-The Side Panel opens on either action, and the keyboard shortcut also starts a Side Panel Translation. A floating **Translate** button appears on the page where the chosen visibility allows it.
+The Side Panel opens on either action. The shortcut also starts inline translation on the page it was pressed on, whatever the button visibility is set to, and the Side Panel's **Inline translation** section is where that run reports progress and failures. A floating **Translate** button appears on the page where the chosen visibility allows it.
 
 In the Side Panel:
 
