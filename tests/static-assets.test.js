@@ -361,10 +361,10 @@ exports.tests = [
         manifest.commands[INLINE_TRANSLATION_SHORTCUT_COMMAND].description,
         /inline/i
       );
-      // The constant carries nothing unless the listener is what reads it.
+      // The constant carries nothing unless the command listener is what reads it.
       assert.match(
         backgroundJs,
-        /command !== INLINE_TRANSLATION_SHORTCUT_COMMAND/
+        /onCommand\.addListener[\s\S]{0,200}INLINE_TRANSLATION_SHORTCUT_COMMAND/
       );
     },
   },

@@ -2531,14 +2531,29 @@ exports.tests = [
       // Translate button sends TRANSLATE_TAB straight to the worker without an invocation
       // plan, so no plan has a caller to serve — and putting one back would be taking the
       // shortcut away from Inline Translation again.
+      //
+      // The removed step's name is checked, which catches the plain revert, and so is the
+      // property that outlives the name: every step of a plan is either one of the two the
+      // worker carries out itself or an instruction the content script understands. A step
+      // that translates in the worker is neither, so it cannot come back under any name
+      // without failing here.
+      const workerSteps = ['openSidePanel', 'injectContentScripts'];
+      const understood = Object.keys(
+        contentHelpers.getDefaultInlineInstructionHandlers({})
+      );
       for (const trigger of ['action', 'command', 'pageLoad', undefined]) {
         for (const buttonVisibility of ['never', 'onInvocation', 'allPages']) {
-          assert.equal(
-            helpers
-              .planInvocation({ trigger, settings: { buttonVisibility } })
-              .steps.includes('startSidePanelTranslation'),
-            false
-          );
+          const { steps } = helpers.planInvocation({
+            trigger,
+            settings: { buttonVisibility },
+          });
+          assert.equal(steps.includes('startSidePanelTranslation'), false);
+          for (const step of steps) {
+            assert.ok(
+              workerSteps.includes(step) || understood.includes(step),
+              `${step} is neither the worker's own step nor one the page can carry out`
+            );
+          }
         }
       }
     },
