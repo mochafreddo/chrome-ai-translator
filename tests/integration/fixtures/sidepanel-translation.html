@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>A page dense with links and code</title>
+  </head>
+  <body>
+    <!--
+      The page the Side Panel Translation live check translates. What its shape buys:
+
+      An <article> root, because pickArticleRoot() prefers an <article> over 400 characters
+      long whatever else is on the page -- and the check runs with the Floating Translate
+      Button mounted, which is on the page and must not be able to change what is extracted.
+
+      A <title> equal to the <h1>, so the serializer keeps the heading it already has instead
+      of prepending a second one. One less block that holds nothing worth watching.
+
+      Twelve links and twelve inline code spans, because those are what mint the placeholder
+      tokens the check is about: a link becomes a LINK_OPEN/LINK_CLOSE pair and a code span
+      becomes an ATOM, and each has to come back exactly once for the answer to be accepted.
+      Every href and every code span is unique and contains no other, which is what lets the
+      check count them one by one and name the one that went missing. tests/protected-spans.test.js
+      refuses a fixture that breaks either half of that.
+
+      Roughly 5,000 characters of template once the tokens are in it -- nearly 2,000 of that
+      the tokens themselves -- which cuts into three Translation Chunks at the smallest chunk
+      limit the options page accepts (2,000). More than one chunk is the point: the token
+      contract is settled per chunk, so a fixture that fitted in one would never exercise a
+      boundary. The size is also the bill: three requests per attempt, and the check makes
+      several attempts.
+
+      Prose in plain English with no Hangul anywhere, so "a translation arrived" is a
+      question the check can answer by looking.
+    -->
+    <article>
+      <h1>A page dense with links and code</h1>
+
+      <p>
+        A translator that rewrites a page has to decide what it is allowed to touch. Prose is
+        fair game; the address a link points at is not, and neither is the name of a function
+        a reader is going to type. The
+        <a href="https://example.com/reference/section-01">serialization rules</a> settle that
+        question once, before a single word is sent anywhere, by replacing every part of the
+        text that must survive unchanged with a placeholder. What the model receives is the
+        prose plus those placeholders, so
+        <a href="https://example.com/reference/section-02">the request itself</a> carries no
+        address and no identifier that a rewrite could damage. Calling
+        <code>spanGuard01()</code> on the way out and <code>spanGuard02()</code> on the way
+        back in is what makes the substitution reversible.
+      </p>
+
+      <p>
+        The trouble with a placeholder is that it only works if it comes back. A model is
+        asked for a translation, not for a promise about a string it never saw before, and
+        <a href="https://example.com/reference/section-03">the acceptance rules</a> are
+        therefore strict about what an answer has to contain: every placeholder that went out,
+        back exactly once, in an order that still nests. An answer that drops one is refused
+        rather than repaired, because a repair would mean guessing where the address belonged.
+        The two entry points are <code>spanGuard03()</code>, which counts what was sent, and
+        <code>spanGuard04()</code>, which counts what returned, and
+        <a href="https://example.com/reference/section-04">the comparison between them</a> is
+        the whole of the contract.
+      </p>
+
+      <p>
+        Size is the second constraint, and it pulls the other way. One request per page would
+        be cheapest, but a long enough article overruns whatever limit the model has, so
+        <a href="https://example.com/reference/section-05">the chunking rules</a> cut the
+        document into pieces at block boundaries, never through a paragraph and never through
+        a protected span. Each piece carries its own placeholders and its own contract, which
+        means a boundary is a place where the accounting starts again. Readers who want to see
+        the arithmetic can start at <code>spanGuard05()</code> and follow it into
+        <code>spanGuard06()</code>, or read
+        <a href="https://example.com/reference/section-06">the worked example</a> instead.
+      </p>
+
+      <p>
+        What happens when a piece comes back too long is its own small story. The answer is
+        not to truncate it, since a truncated translation is a translation with a paragraph
+        missing, and not to retry it unchanged either, since the same request tends to produce
+        the same answer. Instead
+        <a href="https://example.com/reference/section-07">the recovery rules</a> halve the
+        piece and translate the halves, once, and only once: a second halving would turn one
+        expensive page into an unbounded number of requests. The guard that enforces that is
+        <code>spanGuard07()</code>, and the state it reads is written by
+        <code>spanGuard08()</code>. There is a
+        <a href="https://example.com/reference/section-08">longer discussion</a> of why one
+        level is the right number.
+      </p>
+
+      <p>
+        None of this is visible to a reader who simply asks for a translation, which is the
+        point, and also the reason it is easy to break. A page can lose a link on the way
+        through and still read perfectly well, because prose is what a reader checks and an
+        address is what a reader clicks a week later. So
+        <a href="https://example.com/reference/section-09">the verification rules</a> ask a
+        narrower question than "does this read well": they ask whether the page came back
+        with as many links and as many code spans as it went out with. The two counters are
+        <code>spanGuard09()</code> and <code>spanGuard10()</code>, and
+        <a href="https://example.com/reference/section-10">the report they produce</a> names
+        anything that went missing rather than merely saying that something did.
+      </p>
+
+      <ul>
+        <li>
+          Read <a href="https://example.com/reference/section-11">the token contract</a>
+          first; <code>spanGuard11()</code> is where it is enforced.
+        </li>
+        <li>
+          Then read <a href="https://example.com/reference/section-12">the chunk boundary
+          notes</a>, which <code>spanGuard12()</code> exists to make observable.
+        </li>
+      </ul>
+    </article>
+  </body>
+</html>
