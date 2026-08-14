@@ -29,14 +29,13 @@
 // A missing key fails; it does not skip. A check that quietly passes when it did not run
 // is how this repo already lost two months of coverage -- see tests/README.md.
 
-import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   closeAllBrowsers,
   createChecks,
   launchExtensionBrowser,
+  serveFixture,
   until,
   wait,
 } from './harness.mjs';
@@ -68,22 +67,8 @@ const readPending = (snapshot) =>
 
 const { check, failures, finish } = createChecks('inline translation live');
 
-// http, not file: the extension's content scripts match http://*/* and https://*/*, and a
-// file:// page is outside that.
-function serveFixture() {
-  const body = readFileSync(FIXTURE);
-  const server = createServer((_request, response) => {
-    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(body);
-  });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () =>
-      resolve({ url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() }));
-  });
-}
-
 async function main() {
-  const fixture = await serveFixture();
+  const fixture = await serveFixture(FIXTURE);
   let ctx = null;
   try {
     ctx = await launchExtensionBrowser({
