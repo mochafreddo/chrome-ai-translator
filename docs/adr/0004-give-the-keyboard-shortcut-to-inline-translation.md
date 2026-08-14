@@ -1,0 +1,22 @@
+# Give the keyboard shortcut to Inline Translation
+
+Status: accepted
+
+The keyboard shortcut now starts Inline Translation. It used to start Side Panel Translation, and that was not an accident: `planInvocation` carried a `START_SIDE_PANEL_TRANSLATION` step added only when the trigger was `command`, under a rule written above it — reaching the side panel spends no tokens, and only the explicit translate command spends any, which is why the toolbar icon and the shortcut deliberately did different things. That rule survives with its subject changed. An invocation still spends nothing unless the reader reached for the shortcut; the shortcut still spends; what it spends on is now the other translation.
+
+The old arrangement was strange to use rather than strange to read. The command already granted Inline Translation Authorization and mounted the Floating Translate Button — it did every preparation Inline Translation needs — and then started the feature that needs none of them. A reader who pressed it saw the extension come alive on the page and the translation appear somewhere else.
+
+`START_SIDE_PANEL_TRANSLATION` is removed rather than left unused. The side panel has its own Translate button, which sends `TRANSLATE_TAB` straight to the worker without going through an invocation plan, so Side Panel Translation loses nothing by losing the step — only the shortcut ever used it.
+
+Two commands was the other available answer: keep `translate-current-tab` as it was and add a second command for Inline Translation, so each feature has a shortcut. It was rejected as premature rather than wrong. A second command is purely additive and can be added the day Side Panel Translation is missed by keyboard, without undoing anything here; adding it now would ship a shortcut for a way in nobody has asked for, and every shortcut this extension declares is one the reader has to keep out of the way of every other extension they run.
+
+## Consequences
+
+- The command's manifest key is renamed `translate-current-tab` → `translate-inline`, because the old name now describes the wrong feature. Chrome's `chrome.commands` reference does not say what becomes of a shortcut the reader assigned by hand in `chrome://extensions/shortcuts` when a command key changes; treat it as a new command whose binding falls back to `suggested_key`. That is a one-time re-assignment for a personal extension, and it is the price of the name telling the truth.
+- The shortcut opens the side panel, and must keep doing so. The Inline Translation Section is the only place Inline Translation reports progress and errors, so a shortcut that started a run without opening the panel would translate the page with nothing to watch it and nothing to say when it failed. Removing the panel-opening step means first giving Inline Translation somewhere on the page to report from.
+- The shortcut starts Inline Translation even when Button Visibility is `never`. That setting is the reader's choice about when the Floating Translate Button may appear, not a switch for the feature, and the panel the shortcut opens carries the same controls.
+- Failure of the start step is reported, unlike every other step of an invocation. `runInvocationPlan` swallows step errors so one failure does not block the rest, which is right for steps the reader is not waiting on. The start step is the one they are waiting on: without a report, a shortcut pressed on a `chrome://` tab or a page the extension cannot reach opens the panel and then does nothing at all. The failure travels to the Inline Translation Section in its own field of the tab state, not in `state.error`, which belongs to Side Panel Translation.
+
+## Do not revert this
+
+Restoring `START_SIDE_PANEL_TRANSLATION` to the command's plan looks like restoring a documented rule, because the comment that described it was specific and confident. Read what it was protecting: not that the shortcut belongs to Side Panel Translation, but that no path into the extension spends the reader's credit unless the reader asked for a translation. Both arrangements honour that. Only one of them starts the feature the shortcut has already finished preparing the page for.
