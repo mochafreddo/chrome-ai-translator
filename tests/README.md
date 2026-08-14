@@ -57,7 +57,9 @@ So the second run costs one block out of four, plus a second request's own overh
 
 ### Side Panel Translation — `verify:live:sidepanel`
 
-**The product of this check is an answer, not a green tick.** A reader reported `markdown.token_missing` — the refusal Side Panel Translation issues when an answer comes back without one of the placeholder tokens it sent — and nothing here had ever reproduced it. The unit suite drives that path with a fake `fetch`, so it cannot: the failure turns on a real model keeping tokens it was never asked to keep, and `buildInstructions` in `background.js` really does not ask. Whether it happens is a question only a billed run can answer, and this is the run that asks it.
+**The product of this check is an answer, not a green tick.** A reader reported `markdown.token_missing` — the refusal Side Panel Translation issues when an answer comes back without one of the placeholder tokens it sent — and nothing here had ever reproduced it. The unit suite drives that path with a fake `fetch`, so it cannot: the failure turns on a real model keeping tokens, and when this check was written `buildInstructions` in `background.js` had never asked it to. Whether it happens is a question only a billed run can answer, and this is the run that asks it.
+
+Since #26 the instructions do ask, and a chunk whose answer breaks the token contract buys one further attempt that names the refusal. Neither changes what this check asserts — it counts links and inline code across the whole translation, not requests — but both change what a red run costs: a chunk that fails on its tokens now bills twice, so an attempt that reproduces the reader's report is dearer than a clean one. The check remains the only thing that can say whether the asking worked.
 
 It is separate from the inline check, rather than more assertions inside it, because the two translations share nothing that matters: different controls, different unit of work — Translation Chunks against Semantic Blocks — different permissions, and different failure. Folding them together would also mean one bill you cannot decline half of. As it stands you can run either alone.
 

@@ -775,14 +775,32 @@ function assertFullPageTranslationBudget(
   }
 }
 
-function buildInstructions({ targetLanguage, tone }) {
-  return [
+// By the time the model reads a Translation Chunk, its links and its code are neither: each
+// has been replaced by a placeholder token, and `validateAndRehydrateChunk` requires every one
+// of them back, exactly once and never invented. That requirement has to be said out loud —
+// asking for it is Inline Translation's line in `buildBlockInstructions`, adapted to an answer
+// that is plain Markdown rather than a schema.
+//
+// `repair` names the code the previous answer was refused for, in the spirit of the
+// `previousErrorCode` Inline Translation hands back. All four token failures share a cause —
+// the tokens were handled rather than carried — so one correction speaks to all of them.
+function buildInstructions({ targetLanguage, tone }, repair = null) {
+  const instructions = [
     `Translate the user's input into ${targetLanguage}.`,
     getToneInstruction(tone),
     'Preserve Markdown structure (headings, lists, links).',
     'Do NOT translate code blocks fenced by ``` or inline code wrapped by backticks. Keep them exactly as-is.',
+    'Text between ⟦ and ⟧ is a placeholder standing in for a link or for code. Copy every placeholder byte-for-byte, emit each one exactly once, and invent none: a placeholder the input does not contain is as wrong as a missing one.',
+    'A LINK_OPEN placeholder must still come before the LINK_CLOSE placeholder carrying the same id, with the translated link text between the two. Reorder the words around the placeholders however the target language needs, but never translate, reword, split, or drop anything between ⟦ and ⟧.',
     'Do NOT add extra commentary. Output ONLY the translated Markdown.',
-  ].join('\n');
+  ];
+  if (repair) {
+    instructions.push(
+      `The previous answer to this same input was refused: ${repair.previousErrorCode}. Its placeholders were handled instead of carried.`,
+      'Translate it again, and this time reproduce every ⟦…⟧ placeholder from the input exactly, once each, adding none.'
+    );
+  }
+  return instructions.join('\n');
 }
 
 function getToneInstruction(tone) {
@@ -1407,22 +1425,42 @@ async function openaiTranslateChunk({
   return openAiResponse.parseCompletedResponse(json);
 }
 
-async function translateFullPageChunk(chunk, settings) {
+// The four codes `validateAndRehydrateChunk` raises when an answer breaks the token contract.
+// They are listed rather than matched on a `markdown.token_` prefix because the prefix is
+// wider than this: `token_parent_changed` belongs to Inline Translation's validator, which
+// this path never calls, and a code that arrives from somewhere else is not evidence that a
+// second attempt would go any better.
+const FULL_PAGE_TOKEN_ERROR_CODES = new Set([
+  'markdown.token_missing',
+  'markdown.token_duplicate',
+  'markdown.token_unknown',
+  'markdown.token_nesting_invalid',
+]);
+
+// A Translation Chunk gets one recovery, and the first failure to happen owns it (ADR-0005).
+// `recoveryDepth` is that budget: the split sets it on the children it makes, a repair sets it
+// on the retry, and either way the second failure of any kind ends the chunk. Two independent
+// budgets would let an over-long chunk split into N children and then repair each of them,
+// which is 2N billed attempts for a chunk the reader asked to translate once.
+async function translateFullPageChunk(chunk, settings, repair = null) {
   try {
     const output = await openaiTranslateChunk({
       apiKey: settings.apiKey,
       model: settings.model,
       reasoningEffort: settings.reasoningEffort,
-      instructions: buildInstructions(settings),
+      instructions: buildInstructions(settings, repair),
       input: chunk.template,
       maxOutputTokens: getFullPageMaxOutputTokens(chunk.template),
     });
     return fullPageMarkdown.validateAndRehydrateChunk(output, chunk);
   } catch (error) {
-    if (
-      error?.code !== 'response.incomplete.max_output_tokens' ||
-      (Number(chunk.recoveryDepth) || 0) >= 1
-    ) {
+    if ((Number(chunk.recoveryDepth) || 0) >= 1) throw error;
+    if (FULL_PAGE_TOKEN_ERROR_CODES.has(error?.code)) {
+      return translateFullPageChunk({ ...chunk, recoveryDepth: 1 }, settings, {
+        previousErrorCode: error.code,
+      });
+    }
+    if (error?.code !== 'response.incomplete.max_output_tokens') {
       throw error;
     }
     const children = fullPageMarkdown.splitChunkForRecovery(chunk);
