@@ -489,13 +489,19 @@ const INVOCATION_STEPS = Object.freeze({
   INJECT_CONTENT_SCRIPTS: 'injectContentScripts',
   GRANT_INLINE_TRANSLATION_AUTHORIZATION: 'grantInlineTranslationAuthorization',
   MOUNT_FLOATING_TRANSLATE_BUTTON: 'mountFloatingTranslateButton',
-  START_SIDE_PANEL_TRANSLATION: 'startSidePanelTranslation',
+  START_INLINE_TRANSLATION: 'startInlineTranslation',
 });
 
 const INLINE_INVOCATION_STEPS = Object.freeze([
   INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION,
   INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON,
+  INVOCATION_STEPS.START_INLINE_TRANSLATION,
 ]);
+
+// The command key in `manifest.json`, which the worker recognizes by name. Chrome offers
+// the reader whatever shortcut the manifest declares, so a key that drifts from this name
+// leaves them one the worker quietly ignores.
+const INLINE_TRANSLATION_SHORTCUT_COMMAND = 'translate-inline';
 
 function isInvocationTrigger(trigger) {
   return trigger === 'action' || trigger === 'command';
@@ -562,9 +568,16 @@ function shouldMountFloatingTranslateButton(context = {}) {
 
 // What one invocation of the extension should do, decided without touching any browser
 // API so the rules are testable. Two rules live here: the side panel is opened first
-// (ADR-0001), and reaching the panel does not itself spend tokens — only the explicit
-// "translate current tab" command starts a Side Panel Translation, which is why the icon
-// and the command deliberately differ.
+// (ADR-0001), and reaching the panel does not itself spend tokens — only the Inline
+// Translation Shortcut starts a translation, which is why the toolbar icon and the
+// shortcut deliberately differ.
+//
+// What the shortcut starts is Inline Translation (ADR-0004), the feature the steps above
+// it have just finished preparing the page for. Side Panel Translation is started from the
+// side panel's own Translate button, which sends TRANSLATE_TAB straight to the worker and
+// so needs no step here. The start step sits outside the Button Visibility rule on
+// purpose: that choice governs when the Floating Translate Button may appear, not whether
+// the feature runs, and the panel the shortcut opens carries the same controls.
 function planInvocation(context = {}) {
   const trigger = context?.trigger;
   const steps = [];
@@ -579,7 +592,7 @@ function planInvocation(context = {}) {
     steps.push(INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON);
   }
   if (trigger === 'command') {
-    steps.push(INVOCATION_STEPS.START_SIDE_PANEL_TRANSLATION);
+    steps.push(INVOCATION_STEPS.START_INLINE_TRANSLATION);
   }
   return Object.freeze({ trigger, steps: Object.freeze(steps) });
 }
@@ -609,7 +622,8 @@ function getDefaultInvocationHandlers() {
         tabId,
         INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON
       ),
-    [INVOCATION_STEPS.START_SIDE_PANEL_TRANSLATION]: translateTab,
+    [INVOCATION_STEPS.START_INLINE_TRANSLATION]: (tabId) =>
+      sendInlineInstruction(tabId, INVOCATION_STEPS.START_INLINE_TRANSLATION),
   };
 }
 
@@ -1976,7 +1990,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   });
 
   chrome.commands.onCommand.addListener(async (command) => {
-    if (command !== 'translate-current-tab') return;
+    if (command !== INLINE_TRANSLATION_SHORTCUT_COMMAND) return;
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tabId = tabs?.[0]?.id;
     if (!tabId) return;
@@ -2241,6 +2255,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineContentScriptFiles,
     classifyContentScriptFailure,
     ensureSidePanel,
+    INLINE_TRANSLATION_SHORTCUT_COMMAND,
     planInvocation,
     planInlineTranslationControl,
     runInlineTranslationControl,

@@ -24,12 +24,12 @@
   "options_page": "options.html",
 
   "commands": {
-    "translate-current-tab": {
+    "translate-inline": {
       "suggested_key": {
         "default": "Ctrl+Shift+Y",
         "mac": "Command+Shift+Y"
       },
-      "description": "Translate current tab (article body)"
+      "description": "Start inline translation on this page"
     }
   }
 }

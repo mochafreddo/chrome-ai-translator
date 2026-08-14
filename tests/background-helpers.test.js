@@ -2476,8 +2476,12 @@ exports.tests = [
     },
   },
   {
-    name: 'starts a side panel translation for the command but not the toolbar action',
+    name: 'starts Inline Translation for the shortcut but not the toolbar action',
     fn() {
+      // ADR-0004. Reaching the side panel spends nothing, and only the reader who reached
+      // for the Inline Translation Shortcut asked for a translation — so the shortcut is
+      // still the one invocation that starts one, and what it starts is now the feature
+      // the steps above it have just finished preparing the page for.
       const settings = { buttonVisibility: 'onInvocation' };
       assert.deepEqual(
         helpers.planInvocation({ trigger: 'action', settings }).steps,
@@ -2495,9 +2499,48 @@ exports.tests = [
           'injectContentScripts',
           'grantInlineTranslationAuthorization',
           'mountFloatingTranslateButton',
-          'startSidePanelTranslation',
+          'startInlineTranslation',
         ]
       );
+    },
+  },
+  {
+    name: 'starts Inline Translation from the shortcut where the reader chose never',
+    fn() {
+      // Button Visibility says when the Floating Translate Button may appear, not whether
+      // Inline Translation may run. The side panel the shortcut opens carries the same
+      // controls, so a run under never still has a home to report from.
+      assert.deepEqual(
+        helpers.planInvocation({
+          trigger: 'command',
+          settings: { buttonVisibility: 'never' },
+        }).steps,
+        [
+          'openSidePanel',
+          'injectContentScripts',
+          'grantInlineTranslationAuthorization',
+          'startInlineTranslation',
+        ]
+      );
+    },
+  },
+  {
+    name: 'plans no step that starts Side Panel Translation',
+    fn() {
+      // ADR-0004: the step is removed rather than left unused. The side panel's own
+      // Translate button sends TRANSLATE_TAB straight to the worker without an invocation
+      // plan, so no plan has a caller to serve — and putting one back would be taking the
+      // shortcut away from Inline Translation again.
+      for (const trigger of ['action', 'command', 'pageLoad', undefined]) {
+        for (const buttonVisibility of ['never', 'onInvocation', 'allPages']) {
+          assert.equal(
+            helpers
+              .planInvocation({ trigger, settings: { buttonVisibility } })
+              .steps.includes('startSidePanelTranslation'),
+            false
+          );
+        }
+      }
     },
   },
   {
@@ -2596,7 +2639,7 @@ exports.tests = [
           calls.push(`grantInlineTranslationAuthorization:${tabId}`),
         mountFloatingTranslateButton: async (tabId) =>
           calls.push(`mountFloatingTranslateButton:${tabId}`),
-        startSidePanelTranslation: async (tabId) => calls.push(`startSidePanelTranslation:${tabId}`),
+        startInlineTranslation: async (tabId) => calls.push(`startInlineTranslation:${tabId}`),
       };
 
       const settings = { buttonVisibility: 'onInvocation' };
@@ -2610,7 +2653,7 @@ exports.tests = [
         'injectContentScripts:7',
         'grantInlineTranslationAuthorization:7',
         'mountFloatingTranslateButton:7',
-        'startSidePanelTranslation:7',
+        'startInlineTranslation:7',
       ]);
 
       calls.length = 0;
@@ -2656,6 +2699,15 @@ exports.tests = [
           })
         ),
         ['grantInlineTranslationAuthorization', 'mountFloatingTranslateButton']
+      );
+      assert.deepEqual(
+        helpers.getInlineInstructions(
+          helpers.planInvocation({
+            trigger: 'command',
+            settings: { buttonVisibility: 'never' },
+          })
+        ),
+        ['grantInlineTranslationAuthorization', 'startInlineTranslation']
       );
     },
   },
@@ -2835,9 +2887,13 @@ exports.tests = [
   {
     name: 'keeps running later steps when injecting the content scripts fails',
     async fn() {
-      // Injection legitimately fails on pages extensions cannot touch. The side panel is
-      // already open by then, and a command invocation should still translate.
-      const calls = [];
+      // Injection legitimately fails on pages extensions cannot touch, and one refused
+      // step must not cost an invocation the rest of them — the plan's steps are
+      // independent. On such a page every step that speaks to the content script fails
+      // with it, the shortcut's own start step included; what the reader is told about
+      // that is its own ticket, not the plan runner's, which swallows step failures so
+      // one of them cannot block the others.
+      const attempted = [];
       await helpers.runInvocationPlan(
         helpers.planInvocation({
           trigger: 'command',
@@ -2845,21 +2901,32 @@ exports.tests = [
         }),
         3,
         {
-          openSidePanel: async () => calls.push('openSidePanel'),
+          openSidePanel: async () => attempted.push('openSidePanel'),
           injectContentScripts: async () => {
+            attempted.push('injectContentScripts');
             throw new Error('Cannot access contents of the page');
           },
           grantInlineTranslationAuthorization: async () => {
+            attempted.push('grantInlineTranslationAuthorization');
             throw new Error('Could not establish connection');
           },
           mountFloatingTranslateButton: async () => {
+            attempted.push('mountFloatingTranslateButton');
             throw new Error('Could not establish connection');
           },
-          startSidePanelTranslation: async () =>
-            calls.push('startSidePanelTranslation'),
+          startInlineTranslation: async () => {
+            attempted.push('startInlineTranslation');
+            throw new Error('Could not establish connection');
+          },
         }
       );
-      assert.deepEqual(calls, ['openSidePanel', 'startSidePanelTranslation']);
+      assert.deepEqual(attempted, [
+        'openSidePanel',
+        'injectContentScripts',
+        'grantInlineTranslationAuthorization',
+        'mountFloatingTranslateButton',
+        'startInlineTranslation',
+      ]);
     },
   },
   {

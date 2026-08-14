@@ -334,6 +334,41 @@ exports.tests = [
     },
   },
   {
+    name: 'declares the Inline Translation Shortcut the worker listens for',
+    fn() {
+      // The manifest's command key and the name the worker compares against are one
+      // vocabulary with nothing linking them: a rename on either side alone leaves the
+      // reader a shortcut Chrome offers and the worker ignores, and nothing reports it.
+      // The key and its description also have to name the feature the shortcut starts —
+      // the old name described the other one (ADR-0004).
+      const manifest = JSON.parse(
+        fs.readFileSync(
+          path.join(__dirname, '..', 'extension', 'manifest.json'),
+          'utf8'
+        )
+      );
+      const backgroundJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'background.js'),
+        'utf8'
+      );
+      const { INLINE_TRANSLATION_SHORTCUT_COMMAND } = require('../extension/background.js');
+
+      assert.equal(INLINE_TRANSLATION_SHORTCUT_COMMAND, 'translate-inline');
+      assert.deepEqual(Object.keys(manifest.commands), [
+        INLINE_TRANSLATION_SHORTCUT_COMMAND,
+      ]);
+      assert.match(
+        manifest.commands[INLINE_TRANSLATION_SHORTCUT_COMMAND].description,
+        /inline/i
+      );
+      // The constant carries nothing unless the listener is what reads it.
+      assert.match(
+        backgroundJs,
+        /command !== INLINE_TRANSLATION_SHORTCUT_COMMAND/
+      );
+    },
+  },
+  {
     name: 'loads the full-page Markdown codec before the content script',
     fn() {
       const backgroundJs = fs.readFileSync(
