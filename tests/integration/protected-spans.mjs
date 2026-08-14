@@ -86,6 +86,14 @@ export function findSurvivalFailures({ spans, original, translated }) {
   return failures;
 }
 
+// Which spans the extraction never put in the Markdown at all -- asked before anything about
+// the way back, because a fixture that stopped minting tokens makes every question about the
+// way back vacuous. Its own function rather than findSurvivalFailures with one text passed
+// twice, which is the same computation and reads like a mistake.
+export function findUnmintedSpans(spans, markdown) {
+  return findSurvivalFailures({ spans, original: markdown, translated: markdown });
+}
+
 // One line per failure, naming the span and where in the document it sits, because "a link
 // was lost" is not something anyone can act on.
 export function describeSurvivalFailures(failures) {
