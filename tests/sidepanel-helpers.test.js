@@ -360,6 +360,35 @@ exports.tests = [
     },
   },
   {
+    name: 'reads a failure back to the reader instead of its code',
+    fn() {
+      // The panel is the last stop for a Side Panel Translation failure, and a validation
+      // failure arrives with the code as its whole message. Deciding what the reader reads
+      // here — rather than in the element that shows it — is what settles it without a DOM.
+      const failed = helpers.getSidepanelDisplayState({
+        status: 'error',
+        error: {
+          message: 'markdown.token_missing',
+          code: 'markdown.token_missing',
+        },
+      });
+
+      assert.equal(
+        failed.errorText,
+        'The translation lost a link or code marker. Try again. (markdown.token_missing)'
+      );
+      // A tab that has not failed has nothing to say, and the general sentence would be a
+      // failure report of its own.
+      assert.equal(helpers.getSidepanelDisplayState({ status: 'idle' }).errorText, '');
+      // A failed tab that reported nothing about the failure is the empty error box this
+      // exists to prevent, so the status alone is enough to be owed a sentence.
+      assert.equal(
+        helpers.getSidepanelDisplayState({ status: 'error', error: {} }).errorText,
+        'The translation stopped before it finished. Try again.'
+      );
+    },
+  },
+  {
     name: 'keeps save feedback and fields independent from translation state',
     async fn() {
       const previousChrome = global.chrome;
