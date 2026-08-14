@@ -141,26 +141,35 @@ exports.tests = [
     async fn() {
       // A fixture that stopped minting a token would otherwise read as a translation that
       // dropped one, and the two want opposite fixes.
-      const { findSurvivalFailures, readProtectedSpans } = await protectedSpans();
+      const { findSurvivalFailures, findUnmintedSpans, readProtectedSpans } =
+        await protectedSpans();
       const spans = readProtectedSpans(PAGE);
       const missing = spans[0].value;
       const text = spans
         .map((span) => span.value)
         .filter((value) => value !== missing)
         .join(' ');
+      const expected = [
+        {
+          index: 1,
+          kind: 'link',
+          value: missing,
+          wentIn: 0,
+          cameBack: 0,
+          reason: 'never-minted',
+        },
+      ];
 
       assert.deepEqual(
         findSurvivalFailures({ spans, original: text, translated: text }),
-        [
-          {
-            index: 1,
-            kind: 'link',
-            value: missing,
-            wentIn: 0,
-            cameBack: 0,
-            reason: 'never-minted',
-          },
-        ]
+        expected
+      );
+      // The same question asked of one text on its own, which is how the live check asks it
+      // of the extracted Markdown before any translation exists.
+      assert.deepEqual(findUnmintedSpans(spans, text), expected);
+      assert.deepEqual(
+        findUnmintedSpans(spans, spans.map((span) => span.value).join(' ')),
+        []
       );
     },
   },

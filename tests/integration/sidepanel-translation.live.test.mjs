@@ -31,16 +31,16 @@
 // every inline code span comes back exactly as often as it went in -- counted by
 // protected-spans.mjs, whose own behaviour is checked browser-free in `npm test`.
 //
-// It translates the fixture more than once. The reported failure is not known to be
-// deterministic, and a single attempt that happened to come back whole would go green and
-// prove nothing. ATTEMPTS below is what the run costs and what it can conclude.
+// It translates the fixture more than once, because the reported failure is not known to be
+// deterministic and a single attempt that happened to come back whole would prove nothing.
+// ATTEMPTS below is that number, and the reason it is also the bill is written there rather
+// than here.
 //
 // Requires: `agent-browser` on PATH, network access, and an OpenAI key in .env.local. A
 // missing or non-OpenAI key fails the run; it does not skip it. A check that quietly passes
 // when it did not run is how this repo already lost two months of coverage -- see
 // tests/README.md.
 
-import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -48,6 +48,7 @@ import {
   closeAllBrowsers,
   createChecks,
   launchExtensionBrowser,
+  serveFixture,
   until,
   wait,
 } from './harness.mjs';
@@ -55,6 +56,7 @@ import { withApiKey } from './live-key.mjs';
 import {
   describeSurvivalFailures,
   findSurvivalFailures,
+  findUnmintedSpans,
   readProtectedSpans,
 } from './protected-spans.mjs';
 
@@ -85,24 +87,10 @@ const ATTEMPT_TIMEOUT_MS = 240000;
 
 const { check, failures, finish } = createChecks('side panel translation live');
 
-// http, not file: the extension's content scripts match http://*/* and https://*/*, and a
-// file:// page is outside that.
-function serveFixture() {
-  const body = readFileSync(FIXTURE);
-  const server = createServer((_request, response) => {
-    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(body);
-  });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () =>
-      resolve({ url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() }));
-  });
-}
-
 const countKind = (spans, kind) => spans.filter((span) => span.kind === kind).length;
 
 async function main() {
-  const fixture = await serveFixture();
+  const fixture = await serveFixture(FIXTURE);
   let ctx = null;
   try {
     ctx = await launchExtensionBrowser({
@@ -141,9 +129,13 @@ async function main() {
       // here -- through the same options page, with the key field left empty, which is what
       // makes a save keep the key already stored rather than replace it. That the key really
       // does survive is checked rather than assumed: every attempt below depends on it.
+      //
+      // It is not put back afterwards, and the key is. The difference is that a chunk limit is
+      // not a secret: the profile it stays in belongs to this check's own browser session, and
+      // every run of the check sets the limit before it translates anything.
       const optionsUrl = `chrome-extension://${ctx.extension.id}/options.html`;
       await page.navigate(optionsUrl);
-      const limited = await page.evaluate(`(async () => {
+      const savedChunkLimit = await page.evaluate(`(async () => {
         document.getElementById('chunkMaxChars').value = ${JSON.stringify(String(CHUNK_MAX_CHARS))};
         document.getElementById('btnSave').click();
         await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -156,8 +148,8 @@ async function main() {
         };
       })()`);
       if (!check('the chunk limit the fixture needs is saved, and the key beside it survives',
-        limited?.chunkMaxChars === CHUNK_MAX_CHARS && limited?.hasKey === true,
-        JSON.stringify({ ...limited, hasKey: Boolean(limited?.hasKey) }))) return;
+        savedChunkLimit?.chunkMaxChars === CHUNK_MAX_CHARS && savedChunkLimit?.hasKey === true,
+        JSON.stringify({ ...savedChunkLimit, hasKey: Boolean(savedChunkLimit?.hasKey) }))) return;
 
       await page.navigate(fixture.url);
       const pageText = () => page.evaluate('document.body.innerText.trim()');
@@ -207,7 +199,9 @@ async function main() {
       // One attempt, watched rather than merely awaited. Which Translation Chunk was in
       // flight is only knowable while the run is under way -- the worker clears the progress
       // when it fails -- and it is the one thing that says where in the document a refusal
-      // happened, so it is recorded as it goes.
+      // happened, so it is sampled as it goes. Sampled, which means a run whose chunks all
+      // came and went between two reads reports none; the counts are treated as evidence of
+      // what was seen, never as proof of what happened.
       async function translateOnce() {
         await click('btnTranslate');
         // A previous attempt left the panel saying Done, and the panel is a second behind the
@@ -229,7 +223,7 @@ async function main() {
             return true;
           }
           return false;
-        }, ATTEMPT_TIMEOUT_MS, 400);
+        }, ATTEMPT_TIMEOUT_MS, 250);
         return {
           started,
           done,
@@ -244,15 +238,22 @@ async function main() {
       let mintingChecked = false;
 
       for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
-        const of = `attempt ${attempt}/${ATTEMPTS}`;
+        const attemptLabel = `attempt ${attempt}/${ATTEMPTS}`;
         const run = await translateOnce();
         chunkTotalSeen = Math.max(chunkTotalSeen, run.chunkTotal);
         const status = String(run.state?.status || '');
 
-        if (!check(`${of} settles`, run.started && run.done,
+        if (!check(`${attemptLabel} settles`, run.started && run.done,
           `status="${status}" progress="${run.lastChunk || '(none)'}"`)) {
-          ledger.push(`${of}: never settled, last status ${status || '(unknown)'}`);
-          continue;
+          // Stop rather than carry on. A run still in flight leaves Start disabled, so the
+          // next attempt's click lands on nothing and every remaining attempt would report
+          // the same non-event as a finding of its own.
+          const abandoned = ATTEMPTS - attempt;
+          ledger.push(
+            `${attemptLabel}: never settled, last status ${status || '(unknown)'}` +
+              (abandoned ? `; ${abandoned} attempt(s) not run` : '')
+          );
+          break;
         }
 
         // The extraction happens before the first request and survives a failed translation,
@@ -261,11 +262,7 @@ async function main() {
         // tokens would make every other check below vacuously true.
         if (!mintingChecked && String(run.state?.original || '').trim()) {
           mintingChecked = true;
-          const notMinted = findSurvivalFailures({
-            spans,
-            original: run.state.original,
-            translated: run.state.original,
-          });
+          const notMinted = findUnmintedSpans(spans, run.state.original);
           check('the extracted Markdown holds every link and inline code span the fixture has',
             notMinted.length === 0, describeSurvivalFailures(notMinted));
         }
@@ -274,16 +271,17 @@ async function main() {
           // The reported failure, or another like it. The worker refuses the answer before
           // rehydrating it, so there is no output to name the token from; what the run can
           // say is which refusal and which Translation Chunk was in flight, and it says both.
-          check(`${of} is accepted with its token contract intact`, false,
+          check(`${attemptLabel} is accepted with its token contract intact`, false,
             `${run.state?.error || '(no message)'} while ${run.lastChunk || 'no chunk'} was in flight`);
           ledger.push(
-            `${of}: ${run.state?.error || 'failed with no message'} at ${run.lastChunk || 'an unknown chunk'}`
+            `${attemptLabel}: ${run.state?.error || 'failed with no message'} at ` +
+              `${run.lastChunk || 'an unknown chunk'}`
           );
           continue;
         }
 
         const translated = String(run.state?.translated || '');
-        check(`${of} comes back in the target language`, HANGUL.test(translated),
+        check(`${attemptLabel} comes back in the target language`, HANGUL.test(translated),
           JSON.stringify(translated.slice(0, 80)));
 
         const lost = findSurvivalFailures({
@@ -291,10 +289,10 @@ async function main() {
           original: run.state.original,
           translated,
         });
-        check(`${of} brings every link and inline code span back as often as it went in`,
+        check(`${attemptLabel} brings every link and inline code span back as often as it went in`,
           lost.length === 0, describeSurvivalFailures(lost));
         ledger.push(
-          `${of}: accepted over ${run.chunkTotal} chunks` +
+          `${attemptLabel}: accepted over ${run.chunkTotal || 'an unseen number of'} chunks` +
             (lost.length ? `, but ${describeSurvivalFailures(lost)}` : ', every span back')
         );
       }
@@ -304,7 +302,9 @@ async function main() {
       // to watch. Read off the panel's own progress rather than computed, because the chunking
       // is the worker's decision and not this check's.
       check('the fixture cuts into more than one Translation Chunk', chunkTotalSeen > 1,
-        `chunks the panel reported: ${chunkTotalSeen || 'none'}`);
+        chunkTotalSeen
+          ? `chunks the panel reported: ${chunkTotalSeen}`
+          : 'no Chunk n/m ever appeared in the panel, so the count was never seen');
 
       // The distinguishing property of this translation: the page beside the panel is not
       // touched. Inline Translation is the one that rewrites it.
