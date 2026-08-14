@@ -13,6 +13,11 @@ const { DEFAULT_MODEL } =
   (typeof module !== 'undefined' && module.exports
     ? require('./default-model.js')
     : {});
+const { describeSidePanelFailure } =
+  globalThis.ChromeAiTranslatorSidePanelFailure ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./sidepanel-failure.js')
+    : {});
 
 let activeTabId = null;
 let panelErrorMessage = '';
@@ -134,10 +139,18 @@ function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
     ? `Chunk ${state.progress.current}/${state.progress.total}`
     : '';
 
+  // What a failure means is chosen from its code rather than its message — see
+  // sidepanel-failure.js. A failed tab is owed a sentence whether or not it said anything
+  // about the failure, which is why the status counts on its own; a tab that has not failed
+  // is owed silence, because the general sentence would announce a failure of its own.
+  const hasFailure =
+    status === 'error' || Boolean(state?.error?.message || state?.error?.code);
+
   return {
     statusText: formatStatusText(status),
     translateButtonText: busy ? 'Translating...' : 'Translate current tab',
     translateDisabled: busy,
+    errorText: hasFailure ? describeSidePanelFailure(state.error) : '',
     progressText,
     translatedText:
       translatedText ||
@@ -395,17 +408,17 @@ const settingsSaveController = hasDocument
     })
   : null;
 
+// A failure the panel caught itself rather than heard about from the tab. It is read the
+// same way, so that a coded one is not the one failure that still reaches the reader as a
+// code — and the sentence is settled here, because what renderState is handed below has no
+// code left to settle it from.
 function renderTranslateFailure(error) {
-  const message = error?.message || String(error);
+  const message = describeSidePanelFailure({
+    message: error?.message || String(error),
+    code: error?.code,
+  });
   setPanelError(message);
   renderState({ status: 'idle', error: { message } });
-}
-
-// Side Panel Translation's error area shows the worker's account of the run it started,
-// and stands in for it with what the panel itself could not send. Inline Translation's
-// failures are in neither: they travel in their own field, to their own section.
-function getSidePanelTranslationErrorText(state, panelError = '') {
-  return state?.error?.message || panelError || '';
 }
 
 function renderState(state) {
@@ -417,7 +430,9 @@ function renderState(state) {
   btnTranslate.textContent = displayState.translateButtonText;
   btnTranslate.disabled = displayState.translateDisabled;
 
-  setError(getSidePanelTranslationErrorText(state, panelErrorMessage));
+  if (displayState.errorText) setError(displayState.errorText);
+  else if (panelErrorMessage) setError(panelErrorMessage);
+  else setError(null);
 
   setProgress(displayState.progressText);
 
@@ -456,7 +471,13 @@ async function translateNow() {
     settingsOverride,
   });
   if (!resp?.ok) {
-    throw new Error(resp?.error?.message || 'Failed to start translation');
+    const failure = new Error(
+      resp?.error?.message || 'Failed to start translation'
+    );
+    // Re-raising loses everything but the message unless the code is carried across, and a
+    // coded failure's message is the code.
+    if (typeof resp?.error?.code === 'string') failure.code = resp.error.code;
+    throw failure;
   }
   if (resp.skipped) {
     await refreshState();
@@ -546,7 +567,6 @@ if (typeof module !== 'undefined' && module.exports) {
     formatOriginalPanelText,
     formatTranslatedPanelText,
     getInlineTranslationPanelViewModel,
-    getSidePanelTranslationErrorText,
     getSidepanelDisplayState,
     readInlineTranslationError,
   };

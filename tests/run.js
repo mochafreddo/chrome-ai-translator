@@ -12,9 +12,11 @@ const suites = [
   require('./content-helpers.test'),
   require('./background-helpers.test'),
   require('./options-helpers.test'),
+  require('./sidepanel-failure.test'),
   require('./sidepanel-helpers.test'),
   require('./static-assets.test'),
   require('./live-key.test'),
+  require('./protected-spans.test'),
   require('./qa-issue-003.regression-1.test'),
 ];
 

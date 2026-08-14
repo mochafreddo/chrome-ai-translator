@@ -270,7 +270,12 @@ function copyAllowedFields(value, keys) {
 function sanitizePublicTabState(state) {
   const publicState = copyAllowedFields(state, PUBLIC_TAB_STATE_KEYS);
   if (publicState.error != null) {
-    publicState.error = copyAllowedFields(publicState.error, ['message', 'name']);
+    // The code is the panel's to read, so it travels; see safeError below for why.
+    publicState.error = copyAllowedFields(publicState.error, [
+      'message',
+      'name',
+      'code',
+    ]);
   }
   // The message is the whole of it: what the reader is told has already been chosen by the
   // time it is recorded, so the failure's own name would add nothing to read.
@@ -323,10 +328,14 @@ function setTabState(tabId, patch) {
 function safeError(err) {
   if (!err) return { message: 'Unknown error' };
   if (typeof err === 'string') return { message: err };
-  return {
+  const safe = {
     message: err.message || String(err),
     name: err.name,
   };
+  // The code is kept beside the message rather than folded into it: what the reader reads is
+  // the panel's to decide, and only the panel has the words. See extension/sidepanel-failure.js.
+  if (typeof err.code === 'string' && err.code) safe.code = err.code;
+  return safe;
 }
 
 function createRuntimeDiagnosticId(startedAt, cryptoApi = globalThis.crypto) {
@@ -2308,6 +2317,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     mergeSettingsWithExisting,
+    safeError,
     sanitizePublicTabState,
     mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,

@@ -221,27 +221,23 @@ exports.tests = [
         'Inline Translation could not start'
       );
 
+      // A tab carrying only Inline Translation's failure has not failed as far as Side
+      // Panel Translation is concerned, and its area stays silent rather than announcing
+      // a failure of the other feature's.
       assert.equal(
-        helpers.getSidePanelTranslationErrorText({
+        helpers.getSidepanelDisplayState({
+          status: 'idle',
           inlineTranslationError: inlineFailure,
-        }),
+        }).errorText,
         ''
       );
       assert.equal(
-        helpers.getSidePanelTranslationErrorText({
+        helpers.getSidepanelDisplayState({
+          status: 'error',
           error: panelFailure,
           inlineTranslationError: inlineFailure,
-        }),
+        }).errorText,
         'Side Panel Translation failed'
-      );
-      // What the panel itself could not send has no tab state to arrive in, so it stands
-      // in until the worker has something of its own to say.
-      assert.equal(
-        helpers.getSidePanelTranslationErrorText(
-          { inlineTranslationError: inlineFailure },
-          'Failed to start translation'
-        ),
-        'Failed to start translation'
       );
     },
   },
@@ -468,6 +464,35 @@ exports.tests = [
       assert.equal(state.translateButtonText, 'Translating...');
       assert.equal(state.progressText, 'Chunk 2/5');
       assert.match(state.translatedText, /Translating current tab/);
+    },
+  },
+  {
+    name: 'reads a failure back to the reader instead of its code',
+    fn() {
+      // The panel is the last stop for a Side Panel Translation failure, and a validation
+      // failure arrives with the code as its whole message. Deciding what the reader reads
+      // here — rather than in the element that shows it — is what settles it without a DOM.
+      const failed = helpers.getSidepanelDisplayState({
+        status: 'error',
+        error: {
+          message: 'markdown.token_missing',
+          code: 'markdown.token_missing',
+        },
+      });
+
+      assert.equal(
+        failed.errorText,
+        'The translation lost a link or code marker. Try again. (markdown.token_missing)'
+      );
+      // A tab that has not failed has nothing to say, and the general sentence would be a
+      // failure report of its own.
+      assert.equal(helpers.getSidepanelDisplayState({ status: 'idle' }).errorText, '');
+      // A failed tab that reported nothing about the failure is the empty error box this
+      // exists to prevent, so the status alone is enough to be owed a sentence.
+      assert.equal(
+        helpers.getSidepanelDisplayState({ status: 'error', error: {} }).errorText,
+        'The translation stopped before it finished. Try again.'
+      );
     },
   },
   {
