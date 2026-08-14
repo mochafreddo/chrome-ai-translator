@@ -29,6 +29,10 @@
 //   MV3 service workers idle out in roughly 30 seconds, so probes installed in the worker
 //   are unreliable. Observe from the page side.
 //
+// Serving a check's own fixture page is here for the same reason: every check that wants a
+// page it can hold still needs the same loopback server, and the second copy of it was
+// written before this one existed.
+//
 // What does NOT belong here: assertions about the extension's behaviour, anything about
 // translation, and anything about API keys. This module knows how to drive a browser and
 // nothing about what is being checked -- that is what keeps one check's needs from
@@ -36,6 +40,7 @@
 
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 
 export const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,6 +64,21 @@ const run = promisify(execFile);
 
 export const browser = async (args, timeout = 120000) =>
   (await run('agent-browser', args, { encoding: 'utf8', timeout })).stdout;
+
+// Serves one file, at every path, on a loopback port the OS picks. http and not file:, because
+// the extension's content scripts match http://*/* and https://*/* and a file:// page is
+// outside that. The body is read once, so the page a run sees cannot change under it.
+export function serveFixture(fixturePath) {
+  const body = readFileSync(fixturePath);
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(body);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () =>
+      resolve({ url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() }));
+  });
+}
 
 export const closeAllBrowsers = async () => {
   try {
