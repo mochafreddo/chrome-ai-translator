@@ -16,6 +16,7 @@ const suites = [
   require('./sidepanel-helpers.test'),
   require('./static-assets.test'),
   require('./live-key.test'),
+  require('./protected-spans.test'),
   require('./qa-issue-003.regression-1.test'),
 ];
 
