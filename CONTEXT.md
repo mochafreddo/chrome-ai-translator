@@ -8,12 +8,16 @@ A personal Chrome extension that translates web pages with the OpenAI Responses 
 Translation of a page's article body into Markdown, presented in Chrome's side panel beside the untouched page.
 _Avoid_: document translation, full-page translation, panel mode
 
+**Translation Chunk**:
+The unit Side Panel Translation works in: as much of the article's Markdown as one request may carry, cut at block boundaries so no block is split across two. Size limits and recovery from an over-long answer are expressed in these. Only Side Panel Translation has them.
+_Avoid_: batch, section, page part
+
 **Inline Translation**:
 Translation of a page's article content in place, one Semantic Block at a time, as the reader scrolls. Inline elements such as links, emphasis, and code survive the replacement and may move to match the translated word order.
 _Avoid_: in-page translation, overlay translation, live translation, text-node translation
 
 **Semantic Block**:
-The unit Inline Translation works in: one paragraph, heading, list item, or table cell, taken whole. Progress counts, size limits, and retries are all expressed in these.
+The unit Inline Translation works in: one paragraph, heading, list item, or table cell, taken whole. Progress counts, size limits, and retries are all expressed in these. Not a Translation Chunk, which belongs to the other translation and holds many of these.
 _Avoid_: node, chunk, segment, fragment
 
 **Floating Translate Button**:
