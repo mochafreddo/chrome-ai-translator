@@ -4,10 +4,12 @@
 // `markdown.token_missing` -- the refusal Side Panel Translation issues when an answer comes
 // back without one of the placeholder tokens it sent -- and nothing in this repo had ever
 // reproduced it. `npm test` drives the same path with a fake `fetch`, so a green suite says
-// nothing about it: the failure turns on a real model keeping tokens it was never asked to
-// keep. Side Panel Translation's instructions (buildInstructions in background.js) tell the
-// model to preserve Markdown structure and leave code alone, and say nothing at all about the
-// tokens.
+// nothing about it: the failure turns on a real model keeping tokens. When this check was
+// written, Side Panel Translation's instructions (buildInstructions in background.js) told the
+// model to preserve Markdown structure and leave code alone and said nothing at all about the
+// tokens. Since #26 they ask for the tokens back, and a chunk that loses one buys a single
+// further attempt that names the refusal -- so this check now measures whether the asking
+// worked, on a run where a failing chunk bills twice.
 //
 // This is the second check that spends money. `npm test` is browser-free and
 // `npm run test:integration` is browser-bound but unbilled -- see tests/README.md. Run this
