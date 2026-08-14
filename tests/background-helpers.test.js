@@ -316,6 +316,13 @@ exports.tests = [
       assert.match(instructions, /exactly once/i);
       assert.match(instructions, /byte-for-byte/i);
       assert.match(instructions, /invent/i);
+      // The wrongly-nested failure is one of the four the instructions have to speak to, and
+      // the sentence aimed at it names a token shape. That shape is checked against a token
+      // the chunk really carries, so the sentence cannot describe a placeholder no page mints.
+      for (const word of ['LINK_OPEN', 'LINK_CLOSE']) {
+        assert.match(instructions, new RegExp(word));
+        assert.equal(`${link.openToken} ${link.closeToken}`.includes(word), true);
+      }
     },
   },
   {

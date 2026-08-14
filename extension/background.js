@@ -791,7 +791,7 @@ function buildInstructions({ targetLanguage, tone }, repair = null) {
     'Preserve Markdown structure (headings, lists, links).',
     'Do NOT translate code blocks fenced by ``` or inline code wrapped by backticks. Keep them exactly as-is.',
     'Text between ⟦ and ⟧ is a placeholder standing in for a link or for code. Copy every placeholder byte-for-byte, emit each one exactly once, and invent none: a placeholder the input does not contain is as wrong as a missing one.',
-    'A placeholder ending in _OPEN must keep its matching _CLOSE after it, with the translated label between them. Move a placeholder to wherever the target language wants the words it belongs to, but never translate, reword, split, or drop what is between ⟦ and ⟧.',
+    'A LINK_OPEN placeholder must still come before the LINK_CLOSE placeholder carrying the same id, with the translated link text between the two. Reorder the words around the placeholders however the target language needs, but never translate, reword, split, or drop anything between ⟦ and ⟧.',
     'Do NOT add extra commentary. Output ONLY the translated Markdown.',
   ];
   if (repair) {
@@ -1457,7 +1457,6 @@ async function translateFullPageChunk(chunk, settings, repair = null) {
     if ((Number(chunk.recoveryDepth) || 0) >= 1) throw error;
     if (FULL_PAGE_TOKEN_ERROR_CODES.has(error?.code)) {
       return translateFullPageChunk({ ...chunk, recoveryDepth: 1 }, settings, {
-        attempt: 1,
         previousErrorCode: error.code,
       });
     }
