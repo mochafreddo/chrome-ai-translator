@@ -21,12 +21,16 @@ The unit Inline Translation works in: one paragraph, heading, list item, or tabl
 _Avoid_: node, chunk, segment, fragment
 
 **Floating Translate Button**:
-The control anchored to the page's bottom-right corner that is one of the two entry points to Inline Translation, the other being the Inline Translation Section. It is rendered over the host page and belongs to the extension, not to the site. It carries the controls alone: progress and errors are reported in the Inline Translation Section.
+The control anchored to the page's bottom-right corner that is one of the two homes of Inline Translation's controls, the other being the Inline Translation Section. It is rendered over the host page and belongs to the extension, not to the site. It carries the controls alone: progress and errors are reported in the Inline Translation Section.
 _Avoid_: FAB, inline button, page button, widget
 
 **Inline Translation Section**:
 The side panel's own home for Inline Translation, carrying the same start, stop, and restore controls as the Floating Translate Button, and the only place Inline Translation reports progress and errors. It is separate from the Side Panel Translation controls beside it, which translate something else, put the result somewhere else, and need different permissions.
 _Avoid_: inline panel, panel controls, inline pane
+
+**Inline Translation Shortcut**:
+The keyboard shortcut that starts Inline Translation on the page the reader is on. It is a third way in but not a third home for the controls: it only starts, and it opens the side panel so the Inline Translation Section can report what follows. Stopping and restoring stay with the two homes, where what a control will do is visible before it is pressed.
+_Avoid_: hotkey, keybinding, translate command, translate current tab
 
 **Button Visibility**:
 The reader's standing choice about when the Floating Translate Button may appear: never, only once the extension has been invoked on that page, or on every ordinary web page. The last of these grants the extension access to all sites; the others revoke it.
