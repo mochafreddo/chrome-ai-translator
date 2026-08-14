@@ -77,6 +77,83 @@ function createProtectedFullPageChunk() {
   return { chunk, link, code };
 }
 
+function createApiErrorResponse(message) {
+  return { apiError: message };
+}
+
+const FULL_PAGE_SETTINGS = Object.freeze({
+  apiKey: 'sk-test',
+  model: 'gpt-5.4-mini',
+  reasoningEffort: 'none',
+  targetLanguage: 'Korean',
+  tone: 'technical',
+});
+
+// Drives one Translation Chunk against a queue of answers and hands back what each request
+// carried, because every check below is about how many attempts were made and what the later
+// ones said. A queue that runs dry is a test asserting on an attempt that was never made, so
+// the extra request fails loudly instead of replaying the last answer.
+async function runFullPageChunk(chunk, responses, settings = FULL_PAGE_SETTINGS) {
+  const previousFetch = global.fetch;
+  const queue = [...responses];
+  const requestBodies = [];
+  global.fetch = async (_url, options) => {
+    requestBodies.push(JSON.parse(options.body));
+    if (!queue.length) {
+      throw new Error(`Unexpected full-page request #${requestBodies.length}`);
+    }
+    const response = queue.shift();
+    if (response?.apiError) {
+      return {
+        ok: false,
+        status: 400,
+        async json() {
+          return { error: { message: response.apiError } };
+        },
+      };
+    }
+    return { ok: true, async json() { return response; } };
+  };
+
+  try {
+    const translated = await helpers.translateFullPageChunk(chunk, settings);
+    return { requestBodies, translated, error: null };
+  } catch (error) {
+    return { requestBodies, translated: null, error };
+  } finally {
+    global.fetch = previousFetch;
+  }
+}
+
+// The four ways an answer can break the token contract, each written as an answer a model
+// could really return. They share a cause — the tokens were handled rather than carried —
+// which is why one correction is expected to speak to all four.
+function createTokenFailureAnswers({ link, code }) {
+  return [
+    {
+      code: 'markdown.token_missing',
+      answer: `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 실행.`,
+    },
+    {
+      code: 'markdown.token_duplicate',
+      answer:
+        `읽기 ${link.openToken}안내${link.closeToken}.\n\n` +
+        `지금 ${code.token} 그리고 ${code.token} 실행.`,
+    },
+    {
+      code: 'markdown.token_unknown',
+      answer:
+        `읽기 ${link.openToken}안내${link.closeToken}.\n\n` +
+        `지금 ${code.token} 및 ⟦CAT_RECOVERY:ATOM:C9⟧ 실행.`,
+    },
+    {
+      code: 'markdown.token_nesting_invalid',
+      answer:
+        `읽기 ${link.closeToken}안내${link.openToken}.\n\n지금 ${code.token} 실행.`,
+    },
+  ];
+}
+
 function createPlainTranslationDocument(markdown) {
   return {
     namespace: 'CAT_TAB',
@@ -217,6 +294,170 @@ exports.tests = [
         global.chrome = previousChrome;
         global.fetch = previousFetch;
       }
+    },
+  },
+  {
+    name: 'asks every full-page request to carry the placeholder tokens back',
+    async fn() {
+      const { chunk, link, code } = createProtectedFullPageChunk();
+      const { requestBodies, error } = await runFullPageChunk(chunk, [
+        createCompletedResponse(
+          `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
+        ),
+      ]);
+
+      assert.equal(error, null);
+      assert.equal(requestBodies.length, 1);
+      const { instructions } = requestBodies[0];
+      // The validator requires every token back, exactly once, and refuses one it never
+      // sent. Each of those three is asked for here, or the refusal is for something the
+      // model was never told.
+      assert.match(instructions, /⟦/);
+      assert.match(instructions, /exactly once/i);
+      assert.match(instructions, /byte-for-byte/i);
+      assert.match(instructions, /invent/i);
+    },
+  },
+  {
+    name: 'repairs a broken token contract with one further attempt that names the code',
+    async fn() {
+      const { chunk, link, code } = createProtectedFullPageChunk();
+      const { requestBodies, translated, error } = await runFullPageChunk(chunk, [
+        createCompletedResponse(
+          `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 실행.`
+        ),
+        createCompletedResponse(
+          `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
+        ),
+      ]);
+
+      assert.equal(error, null);
+      assert.equal(requestBodies.length, 2);
+      assert.deepEqual(
+        requestBodies.map((body) => body.input),
+        [chunk.template, chunk.template]
+      );
+      assert.equal(
+        requestBodies[0].instructions.includes('markdown.token_missing'),
+        false
+      );
+      assert.match(requestBodies[1].instructions, /markdown\.token_missing/);
+      assert.equal(
+        translated,
+        '읽기 [안내](<https://private.test/path?token=secret>).\n\n지금 ```private-command --secret``` 실행.'
+      );
+    },
+  },
+  {
+    name: 'takes the same one further attempt for each of the four token failures',
+    async fn() {
+      const { chunk, link, code } = createProtectedFullPageChunk();
+      for (const failure of createTokenFailureAnswers({ link, code })) {
+        const { requestBodies, translated, error } = await runFullPageChunk(chunk, [
+          createCompletedResponse(failure.answer),
+          createCompletedResponse(
+            `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
+          ),
+        ]);
+
+        assert.equal(error, null, `${failure.code} was not repaired`);
+        assert.equal(requestBodies.length, 2, `${failure.code} attempt count`);
+        assert.match(requestBodies[1].instructions, new RegExp(failure.code.replace('.', '\\.')));
+        assert.equal(
+          translated,
+          '읽기 [안내](<https://private.test/path?token=secret>).\n\n지금 ```private-command --secret``` 실행.'
+        );
+      }
+    },
+  },
+  {
+    name: 'gives up after one repair attempt rather than looping on the tokens',
+    async fn() {
+      const { chunk, link } = createProtectedFullPageChunk();
+      const lostToken = createCompletedResponse(
+        `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 실행.`
+      );
+      const { requestBodies, error } = await runFullPageChunk(chunk, [
+        lostToken,
+        lostToken,
+      ]);
+
+      assert.equal(error?.code, 'markdown.token_missing');
+      assert.equal(requestBodies.length, 2);
+    },
+  },
+  {
+    name: 'leaves a failure that is not about the tokens on its first attempt',
+    async fn() {
+      const { chunk } = createProtectedFullPageChunk();
+      const { requestBodies, error } = await runFullPageChunk(chunk, [
+        createApiErrorResponse('Incorrect API key provided'),
+      ]);
+
+      assert.match(String(error?.message), /Incorrect API key provided/);
+      assert.equal(requestBodies.length, 1);
+    },
+  },
+  {
+    name: 'repairs the four token codes and no fifth one',
+    async fn() {
+      // The repairable set is a list, not a prefix match: `markdown.token_parent_changed`
+      // is a real code elsewhere in the extension and Side Panel Translation's validator
+      // never raises it, so a chunk translation must not spend a second request on it.
+      // Only the validator can hand back a code, which is why it is the seam stubbed here.
+      const { chunk, link, code } = createProtectedFullPageChunk();
+      const originalValidate = fullPageMarkdown.validateAndRehydrateChunk;
+      fullPageMarkdown.validateAndRehydrateChunk = () => {
+        const error = new Error('markdown.token_parent_changed');
+        error.code = 'markdown.token_parent_changed';
+        throw error;
+      };
+
+      try {
+        const { requestBodies, error } = await runFullPageChunk(chunk, [
+          createCompletedResponse(
+            `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
+          ),
+        ]);
+
+        assert.equal(error?.code, 'markdown.token_parent_changed');
+        assert.equal(requestBodies.length, 1);
+      } finally {
+        fullPageMarkdown.validateAndRehydrateChunk = originalValidate;
+      }
+    },
+  },
+  {
+    name: 'does not repair the tokens of a chunk already split for an over-long answer',
+    async fn() {
+      // Both recoveries want the same chunk. The split claimed it first, so its children
+      // translate once each: a repair per child would turn one over-long chunk into twice
+      // as many billed attempts as blocks it holds.
+      const { chunk, link } = createProtectedFullPageChunk();
+      const { requestBodies, error } = await runFullPageChunk(chunk, [
+        createIncompleteResponse(),
+        createCompletedResponse(`읽기 ${link.openToken}안내.`),
+      ]);
+
+      assert.equal(error?.code, 'markdown.token_missing');
+      assert.equal(requestBodies.length, 2);
+    },
+  },
+  {
+    name: 'does not split a repair attempt that comes back over-long',
+    async fn() {
+      // The other order, and the same rule: the token failure claimed the chunk, so an
+      // over-long repair answer ends it instead of starting the second recovery.
+      const { chunk, link } = createProtectedFullPageChunk();
+      const { requestBodies, error } = await runFullPageChunk(chunk, [
+        createCompletedResponse(
+          `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 실행.`
+        ),
+        createIncompleteResponse(),
+      ]);
+
+      assert.equal(error?.code, 'response.incomplete.max_output_tokens');
+      assert.equal(requestBodies.length, 2);
     },
   },
   {
