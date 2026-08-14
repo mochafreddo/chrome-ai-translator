@@ -17,8 +17,14 @@ const { DEFAULT_MODEL } =
 let activeTabId = null;
 let panelErrorMessage = '';
 let inlineTranslationSnapshot = null;
-let inlineTranslationError = '';
-let inlineTranslationErrorTabId = null;
+// Two accounts of a failed start reach this section, and they are kept apart because they
+// are cleared by different things. The first is the panel's own, from a control the reader
+// pressed here; the panel holds it and drops it when the tab it was about goes out of
+// view. The second is the worker's, from the Inline Translation Shortcut — pressed on the
+// page, not here — and it lives in the tab state, so the tab it belongs to keeps it.
+let inlineControlError = '';
+let inlineControlErrorTabId = null;
+let inlineInvocationError = '';
 // The panel opens on a tab the reader just invoked the extension on, and asks that tab
 // about itself straight away. Until it answers, offering the controls is the better guess
 // of the two — and the wrong one costs a single click, where dimming them on a tab that is
@@ -152,7 +158,8 @@ function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
 // is the rule both homes share; only the labels below are this one's own.
 function getInlineTranslationPanelViewModel({
   snapshot = null,
-  error = '',
+  controlError = '',
+  invocationError = '',
   hasPageAccess = true,
 } = {}) {
   const status = snapshot?.status || 'original';
@@ -174,9 +181,17 @@ function getInlineTranslationPanelViewModel({
       startDisabled: true,
       stopDisabled: true,
       restoreDisabled: true,
-      statusText: MISSING_PAGE_ACCESS_MESSAGES.beforeAnyAttempt,
-      // A tab out of reach reports nothing of its own, and what the panel last heard was
-      // either about another tab or about an attempt this guidance already accounts for.
+      // One account of one problem, in the register the reader's own gesture puts it in.
+      // A gesture this tab refused — a control pressed here, the shortcut pressed on the
+      // page — is this same missing grant met from another direction, so it changes what
+      // the guidance asks for, there now being something to try again, rather than
+      // arriving beside it as a second problem.
+      statusText:
+        controlError || invocationError
+          ? MISSING_PAGE_ACCESS_MESSAGES.afterFailedAttempt
+          : MISSING_PAGE_ACCESS_MESSAGES.beforeAnyAttempt,
+      // A tab out of reach reports nothing of its own, and the guidance above has already
+      // said everything either account would repeat.
       errorText: '',
     };
   }
@@ -189,16 +204,24 @@ function getInlineTranslationPanelViewModel({
     stopDisabled: !canStop,
     restoreDisabled: !canRestore,
     statusText: snapshot?.progress || '',
-    // The panel's own account of the click it just made comes first: a control the tab
-    // never received leaves no page state behind to report it.
-    errorText: error || snapshot?.error || '',
+    // Newest first. The panel's own account of the click it just made comes ahead of a
+    // shortcut press the worker recorded before it, and a control the tab never received
+    // leaves no page state behind to report either of them.
+    errorText: controlError || invocationError || snapshot?.error || '',
   };
+}
+
+// What the Inline Translation Section takes from an update to the tab's state, and what it
+// leaves alone. Side Panel Translation's failure is in `error` and stays there.
+function readInlineTranslationError(state) {
+  return state?.inlineTranslationError?.message || '';
 }
 
 function renderInlineTranslation() {
   const model = getInlineTranslationPanelViewModel({
     snapshot: inlineTranslationSnapshot,
-    error: inlineTranslationError,
+    controlError: inlineControlError,
+    invocationError: inlineInvocationError,
     hasPageAccess: inlineTranslationPageAccess,
   });
 
@@ -219,19 +242,32 @@ function renderInlineTranslation() {
 
 // What a control did is only ever true of the tab it was aimed at, and the panel stays
 // open across tab switches.
-function setInlineTranslationError(message, tabId) {
-  inlineTranslationError = message || '';
-  inlineTranslationErrorTabId = message ? tabId : null;
+function setInlineControlError(message, tabId) {
+  inlineControlError = message || '';
+  inlineControlErrorTabId = message ? tabId : null;
+  renderInlineTranslation();
+}
+
+// Dropped rather than rendered away: the two callers are mid-refresh and paint once at the
+// end, so neither wants a render of its own.
+function forgetInlineControlError() {
+  inlineControlError = '';
+  inlineControlErrorTabId = null;
+}
+
+// The worker's per-tab state is the only way the Inline Translation Shortcut's outcome
+// reaches this section: it is pressed on the page, not here. Only the two paths that carry
+// that state read it — a render the panel synthesises for itself says nothing about a run
+// the worker started, and must not be able to clear what it did.
+function syncInlineTranslationFromTabState(state) {
+  inlineInvocationError = readInlineTranslationError(state);
   renderInlineTranslation();
 }
 
 async function refreshInlineTranslationState() {
   activeTabId = await getActiveTabId();
   if (!activeTabId) return;
-  if (inlineTranslationErrorTabId !== activeTabId) {
-    inlineTranslationError = '';
-    inlineTranslationErrorTabId = null;
-  }
+  if (inlineControlErrorTabId !== activeTabId) forgetInlineControlError();
   const resp = await chrome.runtime.sendMessage({
     type: 'GET_INLINE_TRANSLATION_STATE',
     tabId: activeTabId,
@@ -244,10 +280,9 @@ async function refreshInlineTranslationState() {
   // An error recorded while the tab was out of reach was about exactly that, and the reader
   // has since done what the guidance asked. Letting it back out now would tell them the tab
   // is unreachable in the same breath as re-enabling the controls.
-  if (wasOutOfReach && inlineTranslationPageAccess) {
-    inlineTranslationError = '';
-    inlineTranslationErrorTabId = null;
-  }
+  // The worker's own account is withdrawn on the same news, from the tab state it lives
+  // in, when the click that grant took reaches the injection step.
+  if (wasOutOfReach && inlineTranslationPageAccess) forgetInlineControlError();
   inlineTranslationSnapshot = resp?.ok ? resp.snapshot || null : null;
   renderInlineTranslation();
 }
@@ -257,7 +292,7 @@ async function sendInlineTranslationControl(control) {
   if (!tabId) return;
   activeTabId = tabId;
 
-  setInlineTranslationError('', tabId);
+  setInlineControlError('', tabId);
 
   const resp = await chrome.runtime.sendMessage({
     type: 'RUN_INLINE_TRANSLATION_CONTROL',
@@ -265,7 +300,7 @@ async function sendInlineTranslationControl(control) {
     control,
   });
   if (!resp?.ok) {
-    setInlineTranslationError(
+    setInlineControlError(
       resp?.error?.message || 'Inline translation did not answer on this tab.',
       tabId
     );
@@ -276,7 +311,7 @@ async function sendInlineTranslationControl(control) {
 
 function handleInlineTranslationControlClick(control) {
   sendInlineTranslationControl(control).catch((error) => {
-    setInlineTranslationError(error?.message || String(error), activeTabId);
+    setInlineControlError(error?.message || String(error), activeTabId);
   });
 }
 
@@ -366,6 +401,13 @@ function renderTranslateFailure(error) {
   renderState({ status: 'idle', error: { message } });
 }
 
+// Side Panel Translation's error area shows the worker's account of the run it started,
+// and stands in for it with what the panel itself could not send. Inline Translation's
+// failures are in neither: they travel in their own field, to their own section.
+function getSidePanelTranslationErrorText(state, panelError = '') {
+  return state?.error?.message || panelError || '';
+}
+
 function renderState(state) {
   const displayState = getSidepanelDisplayState(
     state || { status: 'idle' },
@@ -375,9 +417,7 @@ function renderState(state) {
   btnTranslate.textContent = displayState.translateButtonText;
   btnTranslate.disabled = displayState.translateDisabled;
 
-  if (state?.error?.message) setError(state.error.message);
-  else if (panelErrorMessage) setError(panelErrorMessage);
-  else setError(null);
+  setError(getSidePanelTranslationErrorText(state, panelErrorMessage));
 
   setProgress(displayState.progressText);
 
@@ -396,6 +436,7 @@ async function refreshState() {
   });
   if (!resp?.ok) return;
   renderState(resp.state);
+  syncInlineTranslationFromTabState(resp.state);
 }
 
 async function translateNow() {
@@ -472,6 +513,7 @@ if (hasDocument) {
     if (msg?.type !== 'STATE_UPDATED') return;
     if (msg.tabId !== activeTabId) return;
     renderState(msg.state);
+    syncInlineTranslationFromTabState(msg.state);
   });
 
   (async function init() {
@@ -481,8 +523,12 @@ if (hasDocument) {
     setupTabs();
     renderInlineTranslation();
     await loadSettings();
-    await refreshState();
+    // Whether the tab is in reach is asked first, because the panel opens holding the
+    // optimistic guess and the worker may already have a refused start waiting for it. Ask
+    // the other way round and that failure is painted in the error area for the one beat
+    // before the answer moves it into the guidance.
     await refreshInlineTranslationState().catch(() => {});
+    await refreshState();
 
     // Keep UI in sync when user switches tabs while the panel is open. Inline Translation
     // is polled on the same beat: the tab owns that state, and it moves on without the
@@ -500,6 +546,8 @@ if (typeof module !== 'undefined' && module.exports) {
     formatOriginalPanelText,
     formatTranslatedPanelText,
     getInlineTranslationPanelViewModel,
+    getSidePanelTranslationErrorText,
     getSidepanelDisplayState,
+    readInlineTranslationError,
   };
 }

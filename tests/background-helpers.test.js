@@ -7,6 +7,19 @@ const fullPageMarkdown = require('../extension/full-page-markdown.js');
 const { createReasoningFixture } = require('./inline-block.test');
 const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
+// Per-tab state is the worker's alone, and the only account of it a caller gets is the
+// STATE_UPDATED broadcast the panel listens to. Collecting those is how a test sees both
+// what was recorded and, just as importantly, when nothing was.
+function createStateBroadcastChrome(broadcasts) {
+  return {
+    runtime: {
+      async sendMessage(message) {
+        broadcasts.push(message);
+      },
+    },
+  };
+}
+
 function createCompletedResponse(outputText) {
   return {
     status: 'completed',
@@ -2905,9 +2918,9 @@ exports.tests = [
       // Injection legitimately fails on pages extensions cannot touch, and one refused
       // step must not cost an invocation the rest of them — the plan's steps are
       // independent. On such a page every step that speaks to the content script fails
-      // with it, the shortcut's own start step included; what the reader is told about
-      // that is its own ticket, not the plan runner's, which swallows step failures so
-      // one of them cannot block the others.
+      // with it, the shortcut's own start step included; the start step is reported to
+      // the reader as well, which the tests below cover, but no step's failure — nor the
+      // report of it — may stop the steps after it.
       const attempted = [];
       await helpers.runInvocationPlan(
         helpers.planInvocation({
@@ -2942,6 +2955,194 @@ exports.tests = [
         'mountFloatingTranslateButton',
         'startInlineTranslation',
       ]);
+    },
+  },
+  {
+    name: 'tells the reader when the shortcut could not start a run, and stays silent otherwise',
+    async fn() {
+      // The start step is the one the reader pressed for: on a tab out of reach its
+      // silence is indistinguishable from a translation about to appear. The steps that
+      // prepare the page are not what they pressed, so those stay silent.
+      const previousChrome = global.chrome;
+      const broadcasts = [];
+      global.chrome = createStateBroadcastChrome(broadcasts);
+
+      try {
+        await helpers.runInvocationPlan(
+          helpers.planInvocation({
+            trigger: 'command',
+            settings: { buttonVisibility: 'onInvocation' },
+          }),
+          4201,
+          {
+            openSidePanel: async () => {},
+            injectContentScripts: async () => {
+              throw new Error('Cannot access contents of the page');
+            },
+            grantInlineTranslationAuthorization: async () => {
+              throw new Error('Could not establish connection');
+            },
+            mountFloatingTranslateButton: async () => {
+              throw new Error('Could not establish connection');
+            },
+            startInlineTranslation: async () => {
+              throw new Error(
+                'Could not establish connection. Receiving end does not exist.'
+              );
+            },
+          }
+        );
+
+        assert.equal(broadcasts.length, 1);
+        const [update] = broadcasts;
+        assert.equal(update.type, 'STATE_UPDATED');
+        assert.equal(update.tabId, 4201);
+        assert.match(
+          update.state.inlineTranslationError.message,
+          /Click the extension icon on this tab/
+        );
+        // Side Panel Translation's error area is not where this belongs.
+        assert.equal(update.state.error, undefined);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'clears a reported start failure once a later run on the tab starts',
+    async fn() {
+      const previousChrome = global.chrome;
+      const broadcasts = [];
+      global.chrome = createStateBroadcastChrome(broadcasts);
+
+      const plan = { steps: ['startInlineTranslation'] };
+      const refusing = {
+        startInlineTranslation: async () => {
+          throw new Error('Could not establish connection.');
+        },
+      };
+      const accepting = { startInlineTranslation: async () => {} };
+
+      try {
+        await helpers.runInvocationPlan(plan, 4202, refusing);
+        assert.equal(broadcasts.length, 1);
+
+        await helpers.runInvocationPlan(plan, 4202, accepting);
+        assert.equal(broadcasts.length, 2);
+        assert.equal(broadcasts[1].state.inlineTranslationError, null);
+
+        // Nothing left to clear, so a run that starts on a tab carrying no failure says
+        // nothing at all.
+        await helpers.runInvocationPlan(plan, 4202, accepting);
+        assert.equal(broadcasts.length, 2);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'withdraws a reported start failure once the tab answers an invocation again',
+    async fn() {
+      // The message asks for a click on the extension icon. That click is an invocation,
+      // and its injection step succeeding is the tab answering it — so the message is
+      // withdrawn without waiting for a run the reader has not started yet. On a page no
+      // click can grant, injection fails too and the message stands.
+      const previousChrome = global.chrome;
+      const broadcasts = [];
+      global.chrome = createStateBroadcastChrome(broadcasts);
+
+      const grantedByClick = {
+        openSidePanel: async () => {},
+        injectContentScripts: async () => {},
+        grantInlineTranslationAuthorization: async () => {},
+      };
+      const clickOnAPageChromeKeepsToItself = {
+        ...grantedByClick,
+        injectContentScripts: async () => {
+          throw new Error('Cannot access contents of the page');
+        },
+      };
+      const actionInvocation = helpers.planInvocation({
+        trigger: 'action',
+        settings: { buttonVisibility: 'never' },
+      });
+      const refusedStart = {
+        startInlineTranslation: async () => {
+          throw new Error('Could not establish connection.');
+        },
+      };
+
+      try {
+        await helpers.runInvocationPlan(
+          { steps: ['startInlineTranslation'] },
+          4204,
+          refusedStart
+        );
+        assert.equal(broadcasts.length, 1);
+
+        await helpers.runInvocationPlan(
+          actionInvocation,
+          4204,
+          clickOnAPageChromeKeepsToItself
+        );
+        assert.equal(broadcasts.length, 1);
+
+        await helpers.runInvocationPlan(actionInvocation, 4204, grantedByClick);
+        assert.equal(broadcasts.length, 2);
+        assert.equal(broadcasts[1].state.inlineTranslationError, null);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'clears a reported start failure when a control the reader pressed runs',
+    async fn() {
+      // The field says Inline Translation could not be reached on this tab. A control the
+      // tab has just carried out disproves that, whichever of the three it was, and the
+      // reader has one more home for these controls than the shortcut.
+      const previousChrome = global.chrome;
+      const broadcasts = [];
+      global.chrome = createStateBroadcastChrome(broadcasts);
+
+      try {
+        await helpers.runInvocationPlan({ steps: ['startInlineTranslation'] }, 4203, {
+          startInlineTranslation: async () => {
+            throw new Error('Could not establish connection.');
+          },
+        });
+        assert.equal(broadcasts.length, 1);
+
+        await helpers.runInlineTranslationControl(4203, 'start', async () => {});
+        assert.equal(broadcasts.length, 2);
+        assert.equal(broadcasts[1].state.inlineTranslationError, null);
+      } finally {
+        global.chrome = previousChrome;
+      }
+    },
+  },
+  {
+    name: 'keeps the two translations’ failures in separate fields',
+    fn() {
+      // CONTEXT.md spends half its vocabulary keeping the two translations apart. An error
+      // box that merged them would undo that for the one moment the reader most needs to
+      // know which feature is talking.
+      const state = helpers.sanitizePublicTabState({
+        status: 'error',
+        error: { message: 'Side Panel Translation failed', name: 'Error', stack: 'x' },
+        inlineTranslationError: {
+          message: 'Inline Translation could not start',
+          stack: 'x',
+        },
+      });
+
+      assert.equal(state.error.message, 'Side Panel Translation failed');
+      assert.equal(state.error.stack, undefined);
+      assert.equal(
+        state.inlineTranslationError.message,
+        'Inline Translation could not start'
+      );
+      assert.equal(state.inlineTranslationError.stack, undefined);
     },
   },
   {

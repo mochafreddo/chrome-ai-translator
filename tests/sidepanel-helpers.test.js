@@ -80,8 +80,11 @@ exports.tests = [
       const model = helpers.getInlineTranslationPanelViewModel({
         hasPageAccess: false,
         // Whatever the panel last heard was about a tab it can still reach; this one has
-        // told it nothing, and the guidance is the whole account of why.
-        error: 'Inline translation did not answer on this tab.',
+        // told it nothing, and the guidance is the whole account of why. A shortcut press
+        // this tab refused is the same missing grant read from a third direction, and
+        // three accounts of one problem read no better than two.
+        controlError: 'Inline translation did not answer on this tab.',
+        invocationError: 'Click the extension icon on this tab, then try again.',
       });
 
       assert.equal(model.startDisabled, true);
@@ -89,6 +92,37 @@ exports.tests = [
       assert.equal(model.restoreDisabled, true);
       assert.match(model.statusText, /Click the extension icon on this tab/);
       assert.equal(model.errorText, '');
+    },
+  },
+  {
+    name: 'tells a tab that refused a gesture apart from one nothing has been asked of',
+    fn() {
+      // The Inline Translation Shortcut is pressed on the page, so on a tab out of reach
+      // the section is the whole of what the reader sees of it. Guidance that reads the
+      // same either way would leave a refused shortcut indistinguishable from never having
+      // pressed one — which is the silence this section exists to end.
+      const untouched = helpers.getInlineTranslationPanelViewModel({
+        hasPageAccess: false,
+      });
+      const refusedTheShortcut = helpers.getInlineTranslationPanelViewModel({
+        hasPageAccess: false,
+        invocationError: 'Click the extension icon on this tab, then try again.',
+      });
+      const refusedAControl = helpers.getInlineTranslationPanelViewModel({
+        hasPageAccess: false,
+        controlError: 'Click the extension icon on this tab, then try again.',
+      });
+
+      for (const model of [untouched, refusedTheShortcut, refusedAControl]) {
+        assert.equal(model.statusText.startsWith(MISSING_ACCESS_VOCABULARY), true);
+        // One account of one problem, wherever the reader arrived from.
+        assert.equal(model.errorText, '');
+      }
+
+      // Nothing has been pressed, so there is nothing to try again.
+      assert.match(untouched.statusText, /to use these controls\.$/);
+      assert.match(refusedTheShortcut.statusText, /then try again\.$/);
+      assert.match(refusedAControl.statusText, /then try again\.$/);
     },
   },
   {
@@ -128,9 +162,86 @@ exports.tests = [
       assert.equal(
         helpers.getInlineTranslationPanelViewModel({
           snapshot: { status: 'original', error: 'Stale page error.' },
-          error: 'Click the extension icon on this tab, then try again.',
+          controlError: 'Click the extension icon on this tab, then try again.',
         }).errorText,
         'Click the extension icon on this tab, then try again.'
+      );
+    },
+  },
+  {
+    name: 'shows a start the Inline Translation Shortcut could not make',
+    fn() {
+      // The shortcut is not pressed in the panel, so the worker's per-tab state is the
+      // only way its outcome reaches the section — and the section is the only place
+      // Inline Translation reports.
+      assert.equal(
+        helpers.getInlineTranslationPanelViewModel({
+          invocationError: 'Click the extension icon on this tab, then try again.',
+        }).errorText,
+        'Click the extension icon on this tab, then try again.'
+      );
+
+      // A click the reader made in the panel is more recent than any shortcut press the
+      // panel can still be holding, and the tab's own state is older than both.
+      assert.equal(
+        helpers.getInlineTranslationPanelViewModel({
+          snapshot: { status: 'original', error: 'Stale page error.' },
+          controlError: 'The click just made.',
+          invocationError: 'The shortcut pressed before it.',
+        }).errorText,
+        'The click just made.'
+      );
+      assert.equal(
+        helpers.getInlineTranslationPanelViewModel({
+          snapshot: { status: 'original', error: 'Stale page error.' },
+          invocationError: 'The shortcut pressed before it.',
+        }).errorText,
+        'The shortcut pressed before it.'
+      );
+    },
+  },
+  {
+    name: 'keeps each translation’s failures out of the other’s error area',
+    fn() {
+      // The two translate different things, put the results in different places, and need
+      // different permissions. They carry their failures in separate fields of the tab
+      // state, and each area reads only its own.
+      const inlineFailure = { message: 'Inline Translation could not start' };
+      const panelFailure = { message: 'Side Panel Translation failed' };
+
+      assert.equal(
+        helpers.readInlineTranslationError({ error: panelFailure }),
+        ''
+      );
+      assert.equal(
+        helpers.readInlineTranslationError({
+          error: panelFailure,
+          inlineTranslationError: inlineFailure,
+        }),
+        'Inline Translation could not start'
+      );
+
+      assert.equal(
+        helpers.getSidePanelTranslationErrorText({
+          inlineTranslationError: inlineFailure,
+        }),
+        ''
+      );
+      assert.equal(
+        helpers.getSidePanelTranslationErrorText({
+          error: panelFailure,
+          inlineTranslationError: inlineFailure,
+        }),
+        'Side Panel Translation failed'
+      );
+      // What the panel itself could not send has no tab state to arrive in, so it stands
+      // in until the worker has something of its own to say.
+      assert.equal(
+        helpers.getSidePanelTranslationErrorText(
+          { inlineTranslationError: inlineFailure },
+          'Failed to start translation'
+        ),
+        'Failed to start translation'
       );
     },
   },

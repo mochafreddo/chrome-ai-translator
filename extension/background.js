@@ -107,9 +107,14 @@ const PUBLIC_SETTINGS_USED_KEYS = Object.freeze([
   'viewMode',
   'chunkMaxChars',
 ]);
+// Everything the panel is allowed to see of a tab's state. The two translations keep
+// separate failures here on purpose: `error` is Side Panel Translation's, and merging
+// Inline Translation's into it would tell the reader the wrong feature is talking at the
+// one moment they most need to know which.
 const PUBLIC_TAB_STATE_KEYS = Object.freeze([
   'status',
   'error',
+  'inlineTranslationError',
   'extracted',
   'translated',
   'progress',
@@ -266,6 +271,14 @@ function sanitizePublicTabState(state) {
   const publicState = copyAllowedFields(state, PUBLIC_TAB_STATE_KEYS);
   if (publicState.error != null) {
     publicState.error = copyAllowedFields(publicState.error, ['message', 'name']);
+  }
+  // The message is the whole of it: what the reader is told has already been chosen by the
+  // time it is recorded, so the failure's own name would add nothing to read.
+  if (publicState.inlineTranslationError != null) {
+    publicState.inlineTranslationError = copyAllowedFields(
+      publicState.inlineTranslationError,
+      ['message']
+    );
   }
   if (publicState.extracted != null) {
     publicState.extracted = copyAllowedFields(publicState.extracted, [
@@ -534,6 +547,10 @@ async function runInlineTranslationControl(
   for (const step of steps) {
     await send(tabId, step);
   }
+  // A control the tab has just carried out disproves a recorded failure to reach it, and
+  // the Inline Translation Shortcut is only one of three ways into this feature. The
+  // panel reports the control's own outcome itself, from the click it is still holding.
+  clearInlineTranslationError(tabId);
 }
 
 const UNREACHABLE_CONTENT_SCRIPT_PATTERN =
@@ -627,6 +644,45 @@ function getDefaultInvocationHandlers() {
   };
 }
 
+// What an invocation tells the reader, which is one step's outcome and no other's.
+//
+// The steps ahead of it prepare the page, and the reader is not waiting on any of them: a
+// Floating Translate Button that failed to mount is not what the Inline Translation
+// Shortcut was pressed for, and saying so would bury what was. Starting Inline Translation
+// is what they pressed for, and on a chrome:// tab, a PDF, or a page the extension cannot
+// reach, its silence is indistinguishable from a translation about to appear.
+//
+// The failure travels in Inline Translation's own field of the tab state, which reaches
+// the Inline Translation Section over the STATE_UPDATED broadcast every change already
+// sends. It is not `state.error`: that one is Side Panel Translation's.
+function recordInvocationStepOutcome(tabId, step, failure) {
+  // What a recorded failure asks the reader for is a click on the extension icon, and this
+  // is the step that click makes succeed. So its success speaks, by withdrawing a message
+  // whose reason has been put right; its failure stays silent like every other step's,
+  // which is what keeps the message standing on a page no click can grant.
+  if (step === INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS) {
+    if (!failure) clearInlineTranslationError(tabId);
+    return;
+  }
+  if (step !== INVOCATION_STEPS.START_INLINE_TRANSLATION) return;
+  if (failure) {
+    setTabState(tabId, {
+      inlineTranslationError: {
+        message: describeInlineTranslationControlFailure(failure),
+      },
+    });
+    return;
+  }
+  clearInlineTranslationError(tabId);
+}
+
+// A run that started leaves nothing for an earlier failure to still be true of. The guard
+// keeps a tab that was never told anything from being sent an update saying so.
+function clearInlineTranslationError(tabId) {
+  if (!stateByTab.get(tabId)?.inlineTranslationError) return;
+  setTabState(tabId, { inlineTranslationError: null });
+}
+
 // Two properties matter here and both are covered by tests.
 //
 // The first step must run before this function awaits anything, because ADR-0001's
@@ -645,8 +701,16 @@ async function runInvocationPlan(
   for (const step of plan?.steps || []) {
     const handler = handlers?.[step];
     if (!handler) continue;
+    let failure = null;
     try {
       await handler(tabId);
+    } catch (error) {
+      failure = error || new Error('Unknown error');
+    }
+    // Independence covers the report as well: a worker that cannot record the outcome
+    // must not cost the invocation the steps that were still to come.
+    try {
+      recordInvocationStepOutcome(tabId, step, failure);
     } catch {}
   }
 }
