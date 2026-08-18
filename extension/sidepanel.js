@@ -155,7 +155,7 @@ function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
     translatedText:
       translatedText ||
       (busy
-        ? 'Translating current tab...\n\nProgress will appear here as chunks complete.'
+        ? 'Translating current tab...\n\nThe translation appears here when the last chunk is back. A failure before then leaves nothing here.'
         : 'No translation yet.\n\nUse Translate current tab to translate the active article.'),
     originalText:
       originalText ||
