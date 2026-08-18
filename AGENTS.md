@@ -33,7 +33,7 @@ Four hand-maintained lists decide whether a new `extension/*.js` file is loaded 
 
 ## Git
 
-Each unit of work lands as an `issue-<n>-<slug>` branch merged into `main` with a merge commit — nothing is committed to `main` directly. Subjects are `type(scope): imperative`; bodies are prose saying why the change was needed rather than what it touched, and are long by most projects' standards. Wrap the body by hand at about 78 columns: `git log` indents a body four spaces and never reflows it, so a soft-wrapped paragraph breaks mid-word and loses the indent in any terminal. This is the one place the soft-wrap default for prose does not apply. A commit that finishes or advances a ticket carries `Closes #<n>` or `Refs #<n>` — see `docs/agents/issue-tracker.md`.
+This is a single-maintainer repo with no review gate, so committing straight to `main` is fine, and most of the history does — six merges in a hundred and fifty-six commits. Work that runs to several commits has recently used an `issue-<n>-<slug>` branch merged with a merge commit, which keeps one ticket's commits together in the log. That is what the branch is for, and it is not required. Subjects are `type(scope): imperative`; bodies are prose saying why the change was needed rather than what it touched, and are long by most projects' standards. Wrap the body by hand at about 78 columns: `git log` indents a body four spaces and never reflows it, so a soft-wrapped paragraph breaks mid-word and loses the indent in any terminal. This is the one place the soft-wrap default for prose does not apply. A commit that finishes or advances a ticket carries `Closes #<n>` or `Refs #<n>` — see `docs/agents/issue-tracker.md`.
 
 ## Agent skills
 
