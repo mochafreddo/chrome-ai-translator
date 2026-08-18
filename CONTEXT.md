@@ -9,7 +9,7 @@ Translation of a page's article body into Markdown, presented in Chrome's side p
 _Avoid_: document translation, full-page translation, panel mode
 
 **Translation Chunk**:
-The unit Side Panel Translation works in: as much of the article's Markdown as one request may carry, cut at block boundaries so no block is split across two. Size limits and recovery are expressed in these — recovery from an over-long answer and from one that comes back without the placeholders it was sent, and a chunk gets one recovery in all (ADR-0005). Only Side Panel Translation has them.
+The unit Side Panel Translation works in: as much of the article's Markdown as one request may carry, cut at block boundaries so no block is split across two. Size limits and recovery are expressed in these — recovery from an over-long answer and from one that comes back without the placeholders it was sent, and a chunk gets one recovery in all (ADR-0005). A chunk that fails anyway ends the whole translation, and the chunks already translated are discarded with it: there is no partly-translated result to name (ADR-0006). Only Side Panel Translation has them.
 _Avoid_: batch, section, page part
 
 **Inline Translation**:
