@@ -195,6 +195,122 @@ function createTestPlainBlockRecord(id = 'b1') {
   };
 }
 
+// Three blocks, each too long to share a Translation Chunk with the next at the smallest
+// chunk size the options page accepts, so the fixture cuts into three chunks. That is what
+// makes a late failure late: two answers are already in hand, and billed, when the third
+// request goes out.
+const LATE_FAILURE_BLOCKS = [1, 2, 3].map((index) => {
+  const template = `Paragraph ${index} ${'word '.repeat(299)}`.trim();
+  return {
+    id: `m${index}`,
+    kind: 'paragraph',
+    template,
+    originalMarkdown: template,
+    entries: [],
+  };
+});
+
+// Drives a whole Side Panel Translation the way the panel does — one TRANSLATE_TAB message
+// into the worker's own chunk loop — and hands back every state the panel would have seen,
+// which is the only place the discard is visible. A queue that runs dry throws, so an
+// unexpected extra request fails loudly instead of replaying the last answer.
+async function runTabTranslation(tabId, answers, blocks = LATE_FAILURE_BLOCKS) {
+  const previousChrome = global.chrome;
+  const previousFetch = global.fetch;
+  const modulePath = require.resolve('../extension/background.js');
+  const originalModule = require.cache[modulePath];
+  const queue = [...answers];
+  const states = [];
+  const requestInputs = [];
+  let messageListener = null;
+
+  global.fetch = async (_url, options) => {
+    requestInputs.push(JSON.parse(options.body).input);
+    if (!queue.length) {
+      throw new Error(`Unexpected full-page request #${requestInputs.length}`);
+    }
+    const answer = queue.shift();
+    if (answer?.apiError) {
+      return {
+        ok: false,
+        status: 400,
+        async json() {
+          return { error: { message: answer.apiError } };
+        },
+      };
+    }
+    return { ok: true, async json() { return answer; } };
+  };
+  global.chrome = {
+    runtime: {
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(listener) { messageListener = listener; } },
+      sendMessage(message) {
+        if (message.type === 'STATE_UPDATED') states.push(message.state);
+        return Promise.resolve();
+      },
+    },
+    action: { onClicked: { addListener() {} } },
+    commands: { onCommand: { addListener() {} } },
+    sidePanel: {
+      async setPanelBehavior() {},
+      async setOptions() {},
+      async open() {},
+    },
+    scripting: { async executeScript() {} },
+    storage: {
+      local: {
+        async get() {
+          return { settings: { apiKey: 'sk-test', chunkMaxChars: 2000 } };
+        },
+        async set() {},
+      },
+    },
+    tabs: {
+      async sendMessage(_tabId, message) {
+        if (message.type === 'EXTRACT_ARTICLE') {
+          return {
+            ok: true,
+            data: {
+              title: 'Article',
+              url: 'https://example.test',
+              langHint: 'en',
+              contentMarkdown: 'Original display Markdown.',
+              translationDocument: {
+                namespace: 'CAT_TAB_SEQUENCE',
+                entries: [],
+                blocks,
+              },
+            },
+          };
+        }
+        return { ok: true };
+      },
+    },
+  };
+
+  try {
+    delete require.cache[modulePath];
+    require('../extension/background.js');
+    const responses = [];
+    messageListener(
+      { type: 'TRANSLATE_TAB', tabId },
+      {},
+      (response) => responses.push(response)
+    );
+    for (let i = 0; i < 40 && responses.length < 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    return { responses, states, requestInputs };
+  } finally {
+    global.chrome = previousChrome;
+    global.fetch = previousFetch;
+    delete require.cache[modulePath];
+    if (originalModule) require.cache[modulePath] = originalModule;
+  }
+}
+
 exports.name = 'background helpers';
 exports.tests = [
   {
@@ -749,6 +865,73 @@ exports.tests = [
         delete require.cache[modulePath];
         if (originalModule) require.cache[modulePath] = originalModule;
       }
+    },
+  },
+  {
+    // ADR-0006. The discard is the decision, so it is checked rather than left to the
+    // comment beside the loop: the two answers already paid for are gone from every state
+    // the panel could render, and the reader is left with the failure alone.
+    name: 'discards the Translation Chunks already paid for when a later one fails',
+    async fn() {
+      const { responses, states, requestInputs } = await runTabTranslation(41, [
+        createCompletedResponse('첫째 문단 번역.'),
+        createCompletedResponse('둘째 문단 번역.'),
+        createApiErrorResponse('The service refused the third request.'),
+      ]);
+
+      assert.deepEqual(responses, [{
+        ok: true,
+        skipped: true,
+        reason: 'translate_failed',
+      }]);
+      // Three requests, one per chunk: the failure is the third chunk's own, and the two
+      // before it were answered rather than skipped.
+      assert.equal(requestInputs.length, 3);
+      assert.deepEqual(
+        states
+          .filter((state) => state.progress)
+          .map((state) => `${state.progress.current}/${state.progress.total}`),
+        ['1/3', '2/3', '3/3']
+      );
+      assert.equal(states.some((state) => state.status === 'done'), false);
+      assert.equal(states.at(-1)?.status, 'error');
+      assert.equal(states.at(-1)?.translated, null);
+      assert.equal(states.at(-1)?.progress, null);
+      assert.equal(
+        states.at(-1)?.error?.message,
+        'The service refused the third request.'
+      );
+      for (const state of states) {
+        const serialized = JSON.stringify(state);
+        assert.equal(serialized.includes('첫째 문단 번역'), false);
+        assert.equal(serialized.includes('둘째 문단 번역'), false);
+      }
+    },
+  },
+  {
+    // The other half of the check above: the same fixture, answered throughout, does cut
+    // into three chunks and does publish all three. Without this, a fixture that quietly
+    // stopped producing three chunks would leave the discard checked against nothing.
+    name: 'joins every Translation Chunk in order when none of them fails',
+    async fn() {
+      const { responses, states, requestInputs } = await runTabTranslation(42, [
+        createCompletedResponse('첫째 문단 번역.'),
+        createCompletedResponse('둘째 문단 번역.'),
+        createCompletedResponse('셋째 문단 번역.'),
+      ]);
+
+      assert.deepEqual(responses, [{ ok: true }]);
+      assert.deepEqual(
+        requestInputs,
+        LATE_FAILURE_BLOCKS.map((block) => block.template)
+      );
+      assert.equal(states.at(-1)?.status, 'done');
+      assert.equal(
+        states.at(-1)?.translated,
+        '첫째 문단 번역.\n\n둘째 문단 번역.\n\n셋째 문단 번역.'
+      );
+      assert.equal(states.at(-1)?.progress, null);
+      assert.equal(states.at(-1)?.error, null);
     },
   },
   {
