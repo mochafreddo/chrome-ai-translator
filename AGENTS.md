@@ -4,6 +4,8 @@
 
 `npm run check:syntax` parses every extension script outside a browser. There is no linter, formatter, or type checker — those commands are the whole verification story.
 
+The runner prints one `PASS`/`FAIL` line per check and no summary at all, so the exit code is the only verdict. Several check names contain the word "failed", so grepping the output for failure matches passing checks.
+
 ## Layout
 
 No bundler and no build step: `extension/` is loaded unpacked as-is and every file there is a classic script. Four runtimes share it. `background.js` is the MV3 service worker and pulls its dependencies in with `importScripts`. `content.js` runs in the page and is injected programmatically by the worker — the manifest declares no `content_scripts` — from the list in `getInlineContentScriptFiles()`. `sidepanel.js` and `options.js` run in extension pages and get their dependencies from `<script>` tags in `sidepanel.html` and `options.html`.
@@ -28,6 +30,10 @@ Four hand-maintained lists decide whether a new `extension/*.js` file is loaded 
 ## Version
 
 `VERSION`, `version` in `package.json`, and `version` in `extension/manifest.json` all carry it, and nothing keeps them in sync.
+
+## Git
+
+Each unit of work lands as an `issue-<n>-<slug>` branch merged into `main` with a merge commit — nothing is committed to `main` directly. Subjects are `type(scope): imperative`; bodies are prose saying why the change was needed rather than what it touched, and are long by most projects' standards. Wrap the body by hand at about 78 columns: `git log` indents a body four spaces and never reflows it, so a soft-wrapped paragraph breaks mid-word and loses the indent in any terminal. This is the one place the soft-wrap default for prose does not apply. A commit that finishes or advances a ticket carries `Closes #<n>` or `Refs #<n>` — see `docs/agents/issue-tracker.md`.
 
 ## Agent skills
 
