@@ -20,6 +20,14 @@ _Avoid_: in-page translation, overlay translation, live translation, text-node t
 The unit Inline Translation works in: one paragraph, heading, list item, or table cell, taken whole. Progress counts, size limits, and retries are all expressed in these. Not a Translation Chunk, which belongs to the other translation and holds many of these.
 _Avoid_: node, chunk, segment, fragment
 
+**Inline Translation Session**:
+The span the Session Budget is counted over: one page visit. It begins when the page loads and ends when the page is reloaded or left. It is not ended by **Original text** and not ended by stopping — both carry the Session Budget forward, so neither is a way to start spending afresh. It bounds one visit to one page, not the reader's spending: a reader who reloads three times has three of these and pays for all three.
+_Avoid_: reading session, run, operation, tab session
+
+**Session Budget**:
+What one Inline Translation Session may spend, counted as the serialized size of the Semantic Block records sent — the initial request for each block, plus a second charge for a block whose answer needed a repair. It is a runaway guard, not a spending ceiling: its job is to catch an accounting slip or a pathological page before it empties the reader's account, and no spending ceiling exists in this extension. A page that reaches it is refused its next batch and told to reload; nothing is refunded, and the guard says no figure to the reader because the figure counts serialized records rather than anything on the page they can see (ADR-0007).
+_Avoid_: character limit, quota, spending limit, budget cap
+
 **Floating Translate Button**:
 The control anchored to the page's bottom-right corner that is one of the two homes of Inline Translation's controls, the other being the Inline Translation Section. It is rendered over the host page and belongs to the extension, not to the site. It carries the controls alone: progress and errors are reported in the Inline Translation Section.
 _Avoid_: FAB, inline button, page button, widget
