@@ -13,6 +13,18 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+## Link every commit to the ticket it satisfies
+
+A commit that satisfies a ticket carries `Closes #<n>` as a trailer; one that advances a ticket it does not finish carries `Refs #<n>`. Both go at the end of the message body, one issue per line where a commit satisfies more than one. Merging the branch then closes exactly the tickets the work actually finished, and `git log` says which commit to read for any ticket without a search.
+
+This is the only thing keeping the tracker honest when a parent is implemented as one branch. Fifteen commits between #12 and #26 carried these trailers; the #27 and #29 branches dropped them, and all seven of #29's child tickets stayed open once the work was merged — a session picked one up and found the whole ticket already implemented. Closing the parent by hand does not close its children.
+
+Where a branch implements a parent whole rather than one child at a time, the trailers are what preserve the decomposition: each commit names the children it finished, so the sequencing the tickets described survives as a record even though the branch did not follow it.
+
+## Before implementing a ticket, check whether `main` already satisfies it
+
+Read the acceptance criteria against the tree first. A ticket is open because nobody closed it, which is not the same as the work being undone — see the trailers above for how that happens.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
