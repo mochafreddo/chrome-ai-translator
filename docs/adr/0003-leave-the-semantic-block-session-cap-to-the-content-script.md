@@ -8,6 +8,8 @@ The worker copy read as defence in depth, but there is no second party for it to
 
 Enforcing it worker-side was the other available answer, and it was rejected on cost. The worker has `stateByTab` and `activeTranslationsByTab`, and the batch handler has `sender.tab.id` and the `operationId`, so an accumulator is reachable. What is not reachable is the *session*: it survives **Original text** and it survives restart-from-stopped, both of which carry the spent amount forward, and it ends only when the page is reloaded or left. Nothing in the seam tells the worker where those boundaries fall. Enforcing worker-side therefore means inventing a session lifecycle across the seam and keeping two copies of it in step — more coupling and more state than the accounting slip it would catch.
 
+This ADR as first written claimed the opposite — that **Original text** resets the Session Budget. It was wrong the day it was written: `16f577c` (2026-07-10) carried the spent amount forward across restore a month before this ADR landed on 2026-08-13, and a check in `tests/content-helpers.test.js` has named that half ever since. The boundary above is a factual correction to that claim, not a record of the behaviour moving.
+
 ## Consequences
 
 - The worker still enforces the per-batch cap (`INLINE_BLOCK_MAX_BATCH_COST`), the per-record cap (`INLINE_BLOCK_MAX_RECORD_COST`), and the record count (`INLINE_MAX_RECORDS`). Only the session cap is one-sided, and deliberately so.
