@@ -467,6 +467,22 @@ exports.tests = [
     },
   },
   {
+    // ADR-0006: nothing reaches this box until the last Translation Chunk is back, and a
+    // failure before then leaves it as empty as it started. The placeholder used to promise
+    // text arriving as chunks complete, which is a run the worker never performs.
+    name: 'promises the translated text only once the last chunk is back',
+    fn() {
+      const state = helpers.getSidepanelDisplayState({
+        status: 'translating',
+        progress: { current: 2, total: 5 },
+      });
+
+      assert.match(state.translatedText, /when the last chunk is back/);
+      assert.match(state.translatedText, /leaves nothing/);
+      assert.equal(/as chunks complete/.test(state.translatedText), false);
+    },
+  },
+  {
     name: 'reads a failure back to the reader instead of its code',
     fn() {
       // The panel is the last stop for a Side Panel Translation failure, and a validation

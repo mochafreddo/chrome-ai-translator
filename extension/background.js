@@ -2048,6 +2048,19 @@ async function translateTab(tabId, overrideSettings = null) {
     try {
       const translatedChunks = [];
 
+      // What a late failure costs, because it is a decision rather than an oversight
+      // (ADR-0006). A throw from any chunk leaves this loop, and the catch below records
+      // `translated: null`: the answers already in `translatedChunks` are discarded with
+      // it, and they were billed. A document of five chunks that fails on the fourth has
+      // paid for three the reader never sees, and pressing Translate again pays for all
+      // five afresh — nothing here resumes.
+      //
+      // Keeping what came back would invent a Side Panel Translation result that is
+      // neither done nor error, needing a name, a rendering, and a way for the reader to
+      // tell translated text from text still in its original language — to serve a failure
+      // #23 could not reproduce, that #26 now asks the model to avoid and repairs once.
+      // Inline Translation isolates its Semantic Blocks instead, and the two differ here
+      // on purpose; ADR-0006 has the reasoning and what evidence would overturn it.
       for (let i = 0; i < chunks.length; i++) {
         setTabState(tabId, {
           status: 'translating',
