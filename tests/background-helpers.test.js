@@ -197,9 +197,9 @@ function createTestPlainBlockRecord(id = 'b1') {
 
 // Three blocks, each too long to share a Translation Chunk with the next at the smallest
 // chunk size the options page accepts, so the fixture cuts into three chunks. That is what
-// makes a late failure late: two answers are already in hand, and billed, when the third
+// lets a failure arrive late: two answers are already in hand, and billed, when the third
 // request goes out.
-const LATE_FAILURE_BLOCKS = [1, 2, 3].map((index) => {
+const THREE_CHUNK_BLOCKS = [1, 2, 3].map((index) => {
   const template = `Paragraph ${index} ${'word '.repeat(299)}`.trim();
   return {
     id: `m${index}`,
@@ -210,11 +210,21 @@ const LATE_FAILURE_BLOCKS = [1, 2, 3].map((index) => {
   };
 });
 
+const THREE_CHUNK_DOCUMENT = {
+  namespace: 'CAT_TAB_SEQUENCE',
+  entries: [],
+  blocks: THREE_CHUNK_BLOCKS,
+};
+
 // Drives a whole Side Panel Translation the way the panel does — one TRANSLATE_TAB message
 // into the worker's own chunk loop — and hands back every state the panel would have seen,
 // which is the only place the discard is visible. A queue that runs dry throws, so an
 // unexpected extra request fails loudly instead of replaying the last answer.
-async function runTabTranslation(tabId, answers, blocks = LATE_FAILURE_BLOCKS) {
+async function runTabTranslation(
+  tabId,
+  answers,
+  documentModel = THREE_CHUNK_DOCUMENT
+) {
   const previousChrome = global.chrome;
   const previousFetch = global.fetch;
   const modulePath = require.resolve('../extension/background.js');
@@ -277,11 +287,7 @@ async function runTabTranslation(tabId, answers, blocks = LATE_FAILURE_BLOCKS) {
               url: 'https://example.test',
               langHint: 'en',
               contentMarkdown: 'Original display Markdown.',
-              translationDocument: {
-                namespace: 'CAT_TAB_SEQUENCE',
-                entries: [],
-                blocks,
-              },
+              translationDocument: documentModel,
             },
           };
         }
@@ -760,111 +766,41 @@ exports.tests = [
     },
   },
   {
+    // Three blocks that do fit one Translation Chunk, so the chunk overruns the output
+    // limit and is split; the second child overruns too, and one recovery is all a chunk
+    // gets (ADR-0005). Nothing is published, as ADR-0006 has it.
     name: 'does not publish done when a real tab translation recovery child is incomplete',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
-      const modulePath = require.resolve('../extension/background.js');
-      const originalModule = require.cache[modulePath];
-      const namespace = 'CAT_TAB_RECOVERY';
-      const blocks = [1, 2, 3].map((index) => ({
-        id: `m${index}`,
-        kind: 'paragraph',
-        template: `Paragraph ${index} ${'word '.repeat(115)}`.trim(),
-        originalMarkdown: `Paragraph ${index} ${'word '.repeat(115)}`.trim(),
-        entries: [],
-      }));
-      const translationDocument = { namespace, entries: [], blocks };
-      const responsesFromApi = [
-        createIncompleteResponse(),
-        createCompletedResponse(blocks[0].template),
-        createIncompleteResponse(),
-      ];
-      const states = [];
-      let requestCount = 0;
-      let messageListener = null;
-
-      global.fetch = async () => {
-        requestCount += 1;
+      const blocks = [1, 2, 3].map((index) => {
+        const template = `Paragraph ${index} ${'word '.repeat(115)}`.trim();
         return {
-          ok: true,
-          async json() { return responsesFromApi.shift(); },
+          id: `m${index}`,
+          kind: 'paragraph',
+          template,
+          originalMarkdown: template,
+          entries: [],
         };
-      };
-      global.chrome = {
-        runtime: {
-          onInstalled: { addListener() {} },
-          onStartup: { addListener() {} },
-          onMessage: { addListener(listener) { messageListener = listener; } },
-          sendMessage(message) {
-            if (message.type === 'STATE_UPDATED') states.push(message.state);
-            return Promise.resolve();
-          },
-        },
-        action: { onClicked: { addListener() {} } },
-        commands: { onCommand: { addListener() {} } },
-        sidePanel: {
-          async setPanelBehavior() {},
-          async setOptions() {},
-          async open() {},
-        },
-        scripting: { async executeScript() {} },
-        storage: {
-          local: {
-            async get() {
-              return { settings: { apiKey: 'sk-test', chunkMaxChars: 2000 } };
-            },
-            async set() {},
-          },
-        },
-        tabs: {
-          async sendMessage(_tabId, message) {
-            if (message.type === 'EXTRACT_ARTICLE') {
-              return {
-                ok: true,
-                data: {
-                  title: 'Article',
-                  url: 'https://example.test',
-                  langHint: 'en',
-                  contentMarkdown: 'Original display Markdown.',
-                  translationDocument,
-                },
-              };
-            }
-            return { ok: true };
-          },
-        },
-      };
+      });
+      const { responses, states, requestInputs } = await runTabTranslation(
+        21,
+        [
+          createIncompleteResponse(),
+          createCompletedResponse(blocks[0].template),
+          createIncompleteResponse(),
+        ],
+        { namespace: 'CAT_TAB_RECOVERY', entries: [], blocks }
+      );
 
-      try {
-        delete require.cache[modulePath];
-        require('../extension/background.js');
-        const responses = [];
-        messageListener(
-          { type: 'TRANSLATE_TAB', tabId: 21 },
-          {},
-          (response) => responses.push(response)
-        );
-        for (let i = 0; i < 20 && responses.length < 1; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-
-        assert.deepEqual(responses, [{
-          ok: true,
-          skipped: true,
-          reason: 'translate_failed',
-        }]);
-        assert.equal(states.some((state) => state.status === 'done'), false);
-        assert.equal(states.at(-1)?.status, 'error');
-        assert.equal(states.at(-1)?.translated, null);
-        assert.equal(states.at(-1)?.progress, null);
-        assert.equal(requestCount, 3);
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-        delete require.cache[modulePath];
-        if (originalModule) require.cache[modulePath] = originalModule;
-      }
+      assert.deepEqual(responses, [{
+        ok: true,
+        skipped: true,
+        reason: 'translate_failed',
+      }]);
+      assert.equal(states.some((state) => state.status === 'done'), false);
+      assert.equal(states.at(-1)?.status, 'error');
+      assert.equal(states.at(-1)?.translated, null);
+      assert.equal(states.at(-1)?.progress, null);
+      assert.equal(requestInputs.length, 3);
     },
   },
   {
@@ -909,6 +845,61 @@ exports.tests = [
     },
   },
   {
+    // The failure #27 was deferred for, end to end: a token contract broken twice. The
+    // third chunk carries a protected link, loses it, buys the one further attempt #26
+    // gave it, loses it again, and has no recovery left (ADR-0005). The discard is the
+    // same discard — four requests billed to tell the reader nothing.
+    name: 'discards the earlier answers when a token contract fails twice',
+    async fn() {
+      const namespace = 'CAT_TAB_TOKENS';
+      const link = {
+        id: 'L9',
+        kind: 'link',
+        openToken: `⟦${namespace}:LINK_OPEN:L9⟧`,
+        closeToken: `⟦${namespace}:LINK_CLOSE:L9⟧`,
+        destination: 'https://example.test/guide?token=secret',
+      };
+      const blocks = THREE_CHUNK_BLOCKS.map((block, index) =>
+        index < 2
+          ? block
+          : {
+              ...block,
+              template: `Read ${link.openToken}the guide${link.closeToken}. ${block.template}`,
+              entries: [link.id],
+            }
+      );
+      const { responses, states, requestInputs } = await runTabTranslation(
+        43,
+        [
+          createCompletedResponse('첫째 문단 번역.'),
+          createCompletedResponse('둘째 문단 번역.'),
+          createCompletedResponse('안내를 읽으세요.'),
+          createCompletedResponse('안내를 다시 읽으세요.'),
+        ],
+        { namespace, entries: [link], blocks }
+      );
+
+      // Four requests: three chunks and the third chunk's one repair, which fails on the
+      // same code and ends the chunk rather than starting the over-long recovery.
+      assert.equal(requestInputs.length, 4);
+      assert.equal(requestInputs[2], requestInputs[3]);
+      assert.deepEqual(responses, [{
+        ok: true,
+        skipped: true,
+        reason: 'translate_failed',
+      }]);
+      assert.equal(states.at(-1)?.status, 'error');
+      assert.equal(states.at(-1)?.error?.code, 'markdown.token_missing');
+      assert.equal(states.at(-1)?.translated, null);
+      for (const state of states) {
+        const serialized = JSON.stringify(state);
+        assert.equal(serialized.includes('첫째 문단 번역'), false);
+        assert.equal(serialized.includes('둘째 문단 번역'), false);
+        assert.equal(serialized.includes('token=secret'), false);
+      }
+    },
+  },
+  {
     // The other half of the check above: the same fixture, answered throughout, does cut
     // into three chunks and does publish all three. Without this, a fixture that quietly
     // stopped producing three chunks would leave the discard checked against nothing.
@@ -923,7 +914,7 @@ exports.tests = [
       assert.deepEqual(responses, [{ ok: true }]);
       assert.deepEqual(
         requestInputs,
-        LATE_FAILURE_BLOCKS.map((block) => block.template)
+        THREE_CHUNK_BLOCKS.map((block) => block.template)
       );
       assert.equal(states.at(-1)?.status, 'done');
       assert.equal(
