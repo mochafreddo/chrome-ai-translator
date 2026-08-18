@@ -2643,6 +2643,66 @@ exports.tests = [
     },
   },
   {
+    // The content script charges the Session Budget a second time for a block whose
+    // `attemptCount` comes back as 2, so this field is what a repair request costs the
+    // reader. It is produced here, and until now it was only ever asserted where it is
+    // consumed — the shape of failure ADR-0003 was written about.
+    name: 'reports the second real request a repair makes as attemptCount 2',
+    async fn() {
+      const previousChrome = global.chrome;
+      const previousFetch = global.fetch;
+      const repaired = createTestPlainBlockRecord('needs-repair');
+      repaired.template = 'Hello world.';
+      const clean = createTestPlainBlockRecord('first-time');
+      clean.template = 'Hello world.';
+      let call = 0;
+      global.chrome = {
+        storage: { local: {
+          async get(keys) {
+            if (Array.isArray(keys) ? keys.includes('settings') : keys === 'settings') {
+              return { settings: { apiKey: 'sk-test', model: 'gpt-5.4-mini', targetLanguage: 'Korean' } };
+            }
+            return {};
+          },
+          async set() {},
+          async remove() {},
+        } },
+        runtime: { getManifest() { return { version: 'test' }; } },
+      };
+      global.fetch = async () => {
+        call += 1;
+        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+          translations: [{ id: repaired.id, template: call === 1 ? repaired.template : '한국어 문장입니다.' }],
+        })); } };
+      };
+
+      try {
+        const repairedResults = await helpers.translateVisibleBlockBatch([repaired]);
+
+        assert.equal(call, 2);
+        assert.equal(repairedResults[0].disposition, 'apply');
+        assert.equal(repairedResults[0].attemptCount, 2);
+
+        // The control: one request, and nothing for the content script to charge twice.
+        call = 0;
+        global.fetch = async () => {
+          call += 1;
+          return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+            translations: [{ id: clean.id, template: '한국어 문장입니다.' }],
+          })); } };
+        };
+        const cleanResults = await helpers.translateVisibleBlockBatch([clean]);
+
+        assert.equal(call, 1);
+        assert.equal(cleanResults[0].disposition, 'apply');
+        assert.equal(cleanResults[0].attemptCount, 1);
+      } finally {
+        global.chrome = previousChrome;
+        global.fetch = previousFetch;
+      }
+    },
+  },
+  {
     name: 'persists repaired detail and falls back to compact final when fingerprints fail',
     async fn() {
       const previousChrome = global.chrome;
