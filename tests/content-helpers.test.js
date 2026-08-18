@@ -15,6 +15,40 @@ function getReasoningTranslatedTemplate(record) {
   return `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
 }
 
+// The Session Budget's limit, restated rather than imported: a check that reads the constant
+// it is checking cannot notice the constant moving.
+const INLINE_SESSION_BUDGET = 150000;
+
+// A page's worth of queued Semantic Blocks, built as bare records rather than from the DOM so
+// a check can hold hundreds of them. `lengths` is the shape of the page: what matters to the
+// accounting is how many blocks carry how much text, not what the text says.
+function queueSyntheticSemanticBlocks(store, lengths) {
+  const queued = lengths.map((length, index) => ({
+    id: `b${Number(store.operationId) || 0}-${index + 1}`,
+    state: 'queued',
+    operationId: store.operationId,
+    template: 'word '.repeat(Math.ceil(length / 5)).slice(0, length),
+    atoms: [],
+    repair: null,
+  }));
+  store.queue.push(...queued);
+  store.records.push(...queued);
+  return queued;
+}
+
+// Drains the queue the way a reader scrolling the whole page does: batch after batch, each
+// one taken once the previous request has come back, until nothing is left to take.
+function drainSemanticBlockQueue(store) {
+  const taken = [];
+  while (store.queue.length) {
+    const batch = helpers.takeInlineViewportBlockBatch(store);
+    if (!batch.length) break;
+    taken.push(...batch);
+    store.inFlight = 0;
+  }
+  return taken;
+}
+
 // The retry-cancellation checks for Semantic Blocks all start from the same place: a block
 // whose translation came back after the page had already changed it, so the block was marked
 // stale and the one page-change retry it is allowed was queued behind it.
@@ -1957,8 +1991,8 @@ exports.tests = [
       assert.equal(store.inFlight, 1);
       assert.equal(
         store.sessionRecordCost,
-        helpers.getInlineBlockReservedRecordCost(first) +
-          helpers.getInlineBlockReservedRecordCost(second)
+        helpers.getInlineBlockRecordCost(first) +
+          helpers.getInlineBlockRecordCost(second)
       );
       for (const record of [first, second]) {
         const modelRecord = (candidate) => ({
@@ -1986,7 +2020,7 @@ exports.tests = [
     },
   },
   {
-    name: 'caps semantic block batches at record and reserved session limits',
+    name: 'caps semantic block batches at the reserved record cap and the session budget',
     fn() {
       const store = helpers.createInlineViewportStore(14);
       store.queue = Array.from({ length: 501 }, (_, index) => ({
@@ -2009,7 +2043,7 @@ exports.tests = [
         ) <= 12000,
         true
       );
-      assert.equal(store.sessionRecordCost <= 60000, true);
+      assert.equal(store.sessionRecordCost <= INLINE_SESSION_BUDGET, true);
       assert.equal(
         store.records.filter((record) => record.state === 'failed').length,
         0
@@ -2023,7 +2057,7 @@ exports.tests = [
     fn() {
       const cache = new Map();
       const firstStore = helpers.createInlineViewportStore(14, cache);
-      firstStore.sessionRecordCost = 60000;
+      firstStore.sessionRecordCost = INLINE_SESSION_BUDGET;
       const state = {
         status: 'active',
         operationId: 14,
@@ -2034,7 +2068,7 @@ exports.tests = [
 
       helpers.restoreInlineViewportRecords(state);
 
-      assert.equal(state.viewport.sessionRecordCost, 60000);
+      assert.equal(state.viewport.sessionRecordCost, INLINE_SESSION_BUDGET);
       const { block } = createReasoningFixture();
       const record = helpers.queueInlineViewportBlock(state.viewport, block);
       assert.deepEqual(
@@ -2044,7 +2078,222 @@ exports.tests = [
       assert.equal(record.state, 'failed');
       assert.equal(record.errorCode, 'session_too_large');
       assert.equal(record.terminalSequence, 1);
-      assert.match(helpers.getInlineTerminalReason([record]), /60,000-character limit/);
+      assert.match(
+        helpers.getInlineTerminalReason([record]),
+        /reached this page visit's limit/
+      );
+    },
+  },
+  {
+    name: 'charges the session budget in actual record cost, not reserved cost',
+    fn() {
+      const store = helpers.createInlineViewportStore(140);
+      // Short blocks are where the two costs diverge most: reserved cost counts a whole
+      // request wrapper for every record and then counts it again for a repair most of them
+      // never need, so a page of table cells and list items pays several times its text.
+      const queued = queueSyntheticSemanticBlocks(store, Array(500).fill(40));
+      const reservedTotal = queued.reduce(
+        (sum, record) => sum + helpers.getInlineBlockReservedRecordCost(record),
+        0
+      );
+      const actualTotal = queued.reduce(
+        (sum, record) => sum + helpers.getInlineBlockRecordCost(record),
+        0
+      );
+      // The premise: charged in reserved cost this page would be refused partway.
+      assert.equal(reservedTotal > INLINE_SESSION_BUDGET, true);
+      assert.equal(actualTotal < INLINE_SESSION_BUDGET, true);
+
+      const taken = drainSemanticBlockQueue(store);
+
+      assert.equal(taken.length, queued.length);
+      assert.equal(
+        store.records.filter((record) => record.errorCode === 'session_too_large').length,
+        0
+      );
+      assert.equal(store.sessionRecordCost, actualTotal);
+      assert.equal(helpers.getInlineTerminalReason(store.records), '');
+    },
+  },
+  {
+    name: 'translates a page shaped like the measured one to the end',
+    fn() {
+      // The page issue #29 was measured on: 356 Semantic Blocks holding 37,392 characters,
+      // most of them table cells, median block length 36 characters.
+      const store = helpers.createInlineViewportStore(141);
+      const queued = queueSyntheticSemanticBlocks(store, [
+        ...Array(213).fill(36),
+        ...Array(29).fill(30),
+        ...Array(23).fill(55),
+        ...Array(91).fill(303),
+      ]);
+
+      const taken = drainSemanticBlockQueue(store);
+
+      assert.equal(queued.length, 356);
+      assert.equal(taken.length, queued.length);
+      assert.equal(store.queue.length, 0);
+      assert.equal(
+        store.records.filter((record) => record.state !== 'translating').length,
+        0
+      );
+      // Headroom, not a near miss: the page fits even if every one of its blocks had needed
+      // a repair request, which is twice what this page can possibly cost.
+      assert.equal(store.sessionRecordCost * 2 <= INLINE_SESSION_BUDGET, true);
+    },
+  },
+  {
+    name: 'charges the repair request a semantic block needed on top of the first one',
+    fn() {
+      function spendOnOneBlock(operationId, attemptCount) {
+        const { block } = createReasoningFixture();
+        const store = helpers.createInlineViewportStore(operationId);
+        const record = helpers.queueInlineViewportBlock(store, block);
+        const batch = helpers.takeInlineViewportBlockBatch(store);
+        const spentAtAssembly = store.sessionRecordCost;
+        helpers.applyInlineViewportBlockResults(
+          batch,
+          [{
+            id: record.id,
+            disposition: 'apply',
+            template: getReasoningTranslatedTemplate(record),
+            attemptCount,
+          }],
+          operationId,
+          store
+        );
+        assert.equal(record.state, 'translated');
+        return { spentAtAssembly, spent: store.sessionRecordCost };
+      }
+
+      const once = spendOnOneBlock(142, 1);
+      const repaired = spendOnOneBlock(143, 2);
+
+      assert.equal(once.spent, once.spentAtAssembly);
+      assert.equal(repaired.spent > repaired.spentAtAssembly, true);
+      assert.equal(repaired.spent > once.spent, true);
+    },
+  },
+  {
+    name: 'charges nothing for a repaired semantic block that comes back from the cache',
+    fn() {
+      const { block } = createReasoningFixture();
+      const cache = new Map();
+      const firstStore = helpers.createInlineViewportStore(144, cache);
+      const record = helpers.queueInlineViewportBlock(firstStore, block);
+      helpers.applyInlineViewportBlockResults(
+        helpers.takeInlineViewportBlockBatch(firstStore),
+        [{
+          id: record.id,
+          disposition: 'apply',
+          template: getReasoningTranslatedTemplate(record),
+          attemptCount: 2,
+        }],
+        144,
+        firstStore
+      );
+      assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+
+      const secondStore = helpers.createInlineViewportStore(145, cache);
+      assert.equal(helpers.queueInlineViewportBlock(secondStore, block), null);
+
+      // The cache replays `attemptCount: 2` with no request sent, so nothing is charged for
+      // it — here or on the next batch the store takes.
+      assert.equal(secondStore.records[0].attemptCount, 2);
+      assert.equal(secondStore.sessionRecordCost, 0);
+      assert.deepEqual(helpers.takeInlineViewportBlockBatch(secondStore), []);
+      assert.equal(secondStore.sessionRecordCost, 0);
+    },
+  },
+  {
+    name: 'releases no session budget when a batch fails or a response is outrun',
+    fn() {
+      const firstFixture = createReasoningFixture();
+      const secondFixture = createReasoningFixture();
+      const store = helpers.createInlineViewportStore(146);
+      const first = helpers.queueInlineViewportBlock(store, firstFixture.block);
+      const batch = helpers.takeInlineViewportBlockBatch(store);
+      const spent = store.sessionRecordCost;
+      assert.equal(spent > 0, true);
+
+      helpers.markInlineViewportBatchFailed(batch, 146, store);
+
+      assert.equal(first.state, 'failed');
+      assert.equal(store.sessionRecordCost, spent);
+
+      store.inFlight = 0;
+      const second = helpers.queueInlineViewportBlock(store, secondFixture.block);
+      helpers.takeInlineViewportBlockBatch(store);
+
+      assert.equal(
+        store.sessionRecordCost,
+        spent + helpers.getInlineBlockRecordCost(second)
+      );
+
+      // Nor does a response the page has outrun release anything. Its record belongs to an
+      // operation **Original text** or a restart has already replaced, so the result is
+      // ignored — but the repair request it reports was really sent, and the budget spans the
+      // page visit rather than the operation, so it is still charged.
+      store.inFlight = 0;
+      const spentBeforeStaleResponse = store.sessionRecordCost;
+      const stale = helpers.applyInlineViewportBlockResults(
+        [second],
+        [{
+          id: second.id,
+          disposition: 'reject',
+          terminalCode: 'protocol.invalid_json',
+          attemptCount: 2,
+        }],
+        147,
+        store
+      );
+
+      assert.equal(stale.ignored, 1);
+      assert.equal(
+        store.sessionRecordCost,
+        spentBeforeStaleResponse + helpers.getInlineBlockRecordCost(second)
+      );
+    },
+  },
+  {
+    name: 'tells a reader who exhausted the session budget to reload, and names no figure',
+    fn() {
+      const message = helpers.getInlineTerminalReason([
+        { state: 'failed', errorCode: 'session_too_large', terminalSequence: 1 },
+      ]);
+
+      assert.match(message, /no request was sent/);
+      assert.match(message, /Reload the page/);
+      // The retired message named 60,000 characters, which is not a number the reader can
+      // count. Any figure here would be the same false promise under a different value.
+      assert.equal(/\d/.test(message), false);
+    },
+  },
+  {
+    name: 'still refuses the request-size caps on reserved cost',
+    fn() {
+      const store = helpers.createInlineViewportStore(147);
+      const [oversized] = queueSyntheticSemanticBlocks(store, [7000]);
+      assert.equal(helpers.getInlineBlockRecordCost(oversized) < 12000, true);
+      assert.equal(helpers.getInlineBlockReservedRecordCost(oversized) > 12000, true);
+
+      assert.deepEqual(helpers.takeInlineViewportBlockBatch(store, 12000), []);
+      assert.equal(oversized.state, 'failed');
+      assert.equal(oversized.errorCode, 'block_too_large');
+      assert.equal(store.sessionRecordCost, 0);
+
+      // The per-batch cap keeps its unit too: two blocks whose actual costs would fit one
+      // request are still split across two, because their reserved costs do not.
+      const batchStore = helpers.createInlineViewportStore(148);
+      const pair = queueSyntheticSemanticBlocks(batchStore, [4000, 4000]);
+      assert.equal(
+        pair.reduce((sum, record) => sum + helpers.getInlineBlockRecordCost(record), 0) <
+          12000,
+        true
+      );
+
+      assert.deepEqual(helpers.takeInlineViewportBlockBatch(batchStore, 12000), [pair[0]]);
+      assert.deepEqual(batchStore.queue, [pair[1]]);
     },
   },
   {

@@ -31,8 +31,10 @@ var INLINE_MAX_RECORDS = 500;
 var INLINE_TRANSLATION_AUTH_MS = 5 * 60 * 1000;
 var INLINE_BLOCK_BATCH_MAX_CHARS = 12000;
 // The only copy of the session cap. The worker enforces the batch and record caps and
-// has no session of its own to measure against. See ADR-0003.
-var INLINE_BLOCK_SESSION_MAX_CHARS = 60000;
+// has no session of its own to measure against. See ADR-0003. Its unit is record cost, not
+// characters, and it is charged in actual cost rather than the reserved cost the request-size
+// caps use — see ADR-0007 for why the two costs stay apart.
+var INLINE_BLOCK_SESSION_MAX_RECORD_COST = 150000;
 var INLINE_BLOCK_MAX_DIAGNOSTIC_CODE_CHARS = 80;
 var INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;
 var INLINE_VIEWPORT_SCAN_DEBOUNCE_MS = 250;
@@ -623,6 +625,20 @@ function getInlineBlockReservedRecordCost(record) {
   return requestPayloadCost(record) + requestPayloadCost(repairRecord);
 }
 
+// A repair is a second real request carrying the same record, so it is charged the same
+// record cost again. The worker says whether one was sent by reporting `attemptCount`, and
+// this may only be read where a request actually came back: `attemptCount` is written into
+// the translation cache and replayed out of it, so a cached block presents a 2 for a repair
+// that happened in an earlier session with nothing sent for it now. See ADR-0007.
+//
+// The 2 is exact rather than `>= 2` because the worker sends at most two requests per record
+// and reports nothing else. If a third attempt is ever added, this charge has to be revisited
+// rather than silently counting it as the second.
+function chargeInlineBlockRepairRequest(store, record, result) {
+  if (!store || Number(result?.attemptCount) !== 2) return;
+  store.sessionRecordCost += getInlineBlockRecordCost(record);
+}
+
 // The id carries the operation that minted it, so a record minted here cannot collide with
 // one `seedInlineViewportStoreWithRestorableRecords` carried over from a stopped session —
 // those keep the ids of an earlier operation, and every store is built for an operation id
@@ -796,15 +812,19 @@ function takeInlineViewportBlockBatch(
       });
       continue;
     }
-    if (store.sessionRecordCost + reservedCost > INLINE_BLOCK_SESSION_MAX_CHARS) {
+    // The session budget is charged in actual cost while the caps above stay on reserved
+    // cost. Two units for the same record in adjacent lines is deliberate: reserved cost
+    // over-counts so one request can never exceed the cap it was checked against, and a
+    // cumulative budget needs no such guarantee. See ADR-0007.
+    if (store.sessionRecordCost + cost > INLINE_BLOCK_SESSION_MAX_RECORD_COST) {
       store.queue.shift();
       record.state = 'failed';
       record.errorCode = 'session_too_large';
       markInlineTerminalTransition(store, record);
       queueInlineLocalDiagnostic(store, record, 'runtime.session_too_large', {
-        recordCost: reservedCost,
+        recordCost: cost,
         sessionCost: store.sessionRecordCost,
-        limit: INLINE_BLOCK_SESSION_MAX_CHARS,
+        limit: INLINE_BLOCK_SESSION_MAX_RECORD_COST,
       });
       continue;
     }
@@ -814,7 +834,7 @@ function takeInlineViewportBlockBatch(
     record.state = 'translating';
     batch.push(record);
     batchCost += reservedCost;
-    store.sessionRecordCost += reservedCost;
+    store.sessionRecordCost += cost;
     if (batchCost >= limit) break;
   }
   if (batch.length) store.inFlight += 1;
@@ -887,11 +907,17 @@ function applyInlineViewportBlockResults(
   }
 
   for (const record of records || []) {
+    const result = byId.get(record.id);
+    // Charged ahead of everything this loop decides, including the record whose operation the
+    // page has already replaced: the repair request was sent whatever the answer turned out
+    // to be worth, and there is no refund for what was sent. `store.sessionRecordCost` spans
+    // the page visit rather than the operation, so the charge lands on the right accumulator
+    // even when the answer arrives for an operation that is over.
+    chargeInlineBlockRepairRequest(store, record, result);
     if (record.operationId !== operationId) {
       summary.ignored += 1;
       continue;
     }
-    const result = byId.get(record.id);
     if (!result) {
       record.state = 'failed';
       record.errorCode = 'request_failed';
@@ -1079,7 +1105,7 @@ function getInlineTerminalReason(records) {
     return 'Translation failed: This page block exceeds the 12,000-character request limit, so no request was sent.';
   }
   if (code === 'runtime.session_too_large' || code === 'session_too_large') {
-    return 'Translation failed: The visible translation session reached its 60,000-character limit, so no request was sent.';
+    return 'Translation failed: The visible translation reached this page visit\'s limit, so no request was sent. Reload the page to continue.';
   }
   return 'Translation failed: The translation request could not be completed.';
 }
