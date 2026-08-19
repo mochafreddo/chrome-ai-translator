@@ -554,61 +554,33 @@ exports.tests = [
     // the receiver alone is the natural way to "restore progress reporting" and it is
     // exactly how the pair survived unnoticed the first time. Progress is now written by
     // `updateInlineViewportMessage`, from Semantic Block counts, and by nothing else.
+    //
+    // The handler takes the state it answers for, so this drives it with a state of its
+    // own. Reaching the registered listener instead would mean re-requiring this script
+    // with the module singleton deleted, and the singleton a check leaves behind is
+    // whatever the check ran next then reads.
     name: 'does not act on the retired inline progress message',
     fn() {
-      const modulePath = require.resolve('../extension/content.js');
-      const originalModule = require.cache[modulePath];
-      const previous = {
-        chrome: global.chrome,
-        initialized: globalThis.__chromeAiTranslatorContentInitialized,
-        inlineState: globalThis.__chromeAiTranslatorInlineState,
-      };
-      let listener = null;
+      const state = helpers.createInlineTranslationState({
+        status: 'active',
+        message: 'Visible translation on',
+        operationId: 11,
+      });
+      const responses = [];
 
-      global.chrome = {
-        runtime: {
-          onMessage: {
-            addListener(fn) {
-              listener = fn;
-            },
-          },
-          sendMessage() {
-            return Promise.resolve({ ok: false });
-          },
+      const handled = helpers.handleInlineContentMessage(
+        {
+          type: 'INLINE_TRANSLATION_PROGRESS',
+          operationId: state.operationId,
+          progress: { stage: 'queued', recordCount: 3, chunkCount: 1 },
         },
-      };
-      delete globalThis.__chromeAiTranslatorContentInitialized;
-      delete globalThis.__chromeAiTranslatorInlineState;
+        (response) => responses.push(response),
+        state
+      );
 
-      try {
-        delete require.cache[modulePath];
-        require('../extension/content.js');
-        assert.equal(typeof listener, 'function');
-
-        const state = globalThis.__chromeAiTranslatorInlineState;
-        state.status = 'active';
-        state.message = 'Visible translation on';
-        const responses = [];
-        const handled = listener(
-          {
-            type: 'INLINE_TRANSLATION_PROGRESS',
-            operationId: state.operationId,
-            progress: { stage: 'queued', recordCount: 3, chunkCount: 1 },
-          },
-          {},
-          (response) => responses.push(response)
-        );
-
-        assert.equal(handled, undefined);
-        assert.deepEqual(responses, []);
-        assert.equal(state.message, 'Visible translation on');
-      } finally {
-        global.chrome = previous.chrome;
-        globalThis.__chromeAiTranslatorContentInitialized = previous.initialized;
-        globalThis.__chromeAiTranslatorInlineState = previous.inlineState;
-        delete require.cache[modulePath];
-        if (originalModule) require.cache[modulePath] = originalModule;
-      }
+      assert.equal(handled, undefined);
+      assert.deepEqual(responses, []);
+      assert.equal(state.message, 'Visible translation on');
     },
   },
   {
@@ -807,53 +779,148 @@ exports.tests = [
     },
   },
   {
-    name: 'schedules another viewport scan when the scan budget is exhausted',
+    // The viewport-change listener stopped being one module-level function when the scan it
+    // schedules became a scan of a particular state's store, so it is now made per attach
+    // and kept on that store. That is the only reason detaching can take off the same
+    // reference attaching put on: a listener rebuilt at detach time is a different function
+    // and `removeEventListener` would silently keep the old one, leaving a dead store's
+    // scans firing for the life of the page. Asserting the identity is what catches that —
+    // counting calls would not, because a removal aimed at the wrong reference removes
+    // nothing and throws nothing.
+    name: 'takes off the viewport-change listener it put on',
     fn() {
-      const state = global.__chromeAiTranslatorInlineState;
-      const previousState = {
-        status: state.status,
-        message: state.message,
-        operationId: state.operationId,
-        viewport: state.viewport,
+      const previousMutationObserver = global.MutationObserver;
+      const observed = [];
+      let disconnected = 0;
+
+      global.MutationObserver = class {
+        constructor(listener) {
+          this.listener = listener;
+        }
+        observe(root, options) {
+          observed.push({ root, options, listener: this.listener });
+        }
+        disconnect() {
+          disconnected += 1;
+        }
       };
-      let timerCalls = 0;
 
       try {
-        withFakeViewportDom(({ FakeElement, text }) => {
-          const nodes = Array.from({ length: 1201 }, (_item, index) =>
-            text(`Visible article sentence ${index + 1}.`)
-          );
-          const root = new FakeElement(nodes);
-          const store = helpers.createInlineViewportStore(31);
-          store.root = root;
-          state.status = 'active';
-          state.operationId = 31;
-          state.viewport = store;
+        withFakeViewportDom(({ FakeElement }) => {
+          // Every target records what was added and removed against it, so a removal aimed
+          // at the wrong reference reads as a listener that was never taken off rather than
+          // as an error.
+          const record = (target) => {
+            target.added = [];
+            target.removed = [];
+            target.addEventListener = (type, listener) =>
+              target.added.push({ type, listener });
+            target.removeEventListener = (type, listener) =>
+              target.removed.push({ type, listener });
+            return target;
+          };
 
-          helpers.runInlineViewportScan();
+          const root = record(new FakeElement([]));
+          const scrollTarget = record(new FakeElement([]));
+          scrollTarget.clientHeight = 300;
+          scrollTarget.scrollHeight = 900;
+          scrollTarget.overflowY = 'auto';
+          root.parentElement = scrollTarget;
 
-          assert.equal(store.scanStartIndex, 1200);
-          assert.equal(timerCalls, 1);
-        }, {
-          chrome: {
-            runtime: {
-              sendMessage() {
-                return new Promise(() => {});
-              },
-            },
-          },
-          clearTimeout() {},
-          setTimeout() {
-            timerCalls += 1;
-            return 123;
-          },
+          record(global.window);
+          global.window.getComputedStyle = (el) => ({
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+            overflow: el?.overflowY || 'visible',
+            overflowY: el?.overflowY || 'visible',
+          });
+          global.document.scrollingElement = null;
+          global.document.body = null;
+
+          const store = helpers.createInlineViewportStore(51);
+          const state = helpers.createInlineTranslationState({
+            status: 'active',
+            operationId: 51,
+            viewport: store,
+          });
+
+          helpers.attachInlineViewportWatchers(root, state);
+
+          const listener = store.viewportChangeListener;
+          assert.equal(typeof listener, 'function');
+          assert.deepEqual(store.scrollTargets, [global.window, scrollTarget]);
+          assert.deepEqual(scrollTarget.added, [{ type: 'scroll', listener }]);
+          assert.deepEqual(global.window.added, [
+            { type: 'scroll', listener },
+            { type: 'resize', listener },
+          ]);
+          assert.equal(observed.length, 1);
+          assert.equal(observed[0].root, root);
+          assert.equal(observed[0].listener, listener);
+
+          helpers.detachInlineViewportWatchers(state);
+
+          assert.deepEqual(scrollTarget.removed, [{ type: 'scroll', listener }]);
+          assert.deepEqual(global.window.removed, [
+            { type: 'scroll', listener },
+            { type: 'resize', listener },
+          ]);
+          assert.equal(disconnected, 1);
+          // Nothing is left for a later detach to aim at, so the store cannot hand a stale
+          // listener to whatever attaches next.
+          assert.equal(store.viewportChangeListener, null);
+          assert.deepEqual(store.scrollTargets, []);
+          assert.equal(store.observer, null);
+
+          helpers.detachInlineViewportWatchers(state);
+
+          assert.equal(scrollTarget.removed.length, 1);
+          assert.equal(global.window.removed.length, 2);
+          assert.equal(disconnected, 1);
         });
       } finally {
-        state.status = previousState.status;
-        state.message = previousState.message;
-        state.operationId = previousState.operationId;
-        state.viewport = previousState.viewport;
+        if (previousMutationObserver === undefined) delete global.MutationObserver;
+        else global.MutationObserver = previousMutationObserver;
       }
+    },
+  },
+  {
+    name: 'schedules another viewport scan when the scan budget is exhausted',
+    fn() {
+      let timerCalls = 0;
+
+      withFakeViewportDom(({ FakeElement, text }) => {
+        const nodes = Array.from({ length: 1201 }, (_item, index) =>
+          text(`Visible article sentence ${index + 1}.`)
+        );
+        const root = new FakeElement(nodes);
+        const store = helpers.createInlineViewportStore(31);
+        store.root = root;
+        const state = helpers.createInlineTranslationState({
+          status: 'active',
+          operationId: 31,
+          viewport: store,
+        });
+
+        helpers.runInlineViewportScan(state);
+
+        assert.equal(store.scanStartIndex, 1200);
+        assert.equal(timerCalls, 1);
+      }, {
+        chrome: {
+          runtime: {
+            sendMessage() {
+              return new Promise(() => {});
+            },
+          },
+        },
+        clearTimeout() {},
+        setTimeout() {
+          timerCalls += 1;
+          return 123;
+        },
+      });
     },
   },
   {
@@ -991,16 +1058,15 @@ exports.tests = [
   {
     name: 'drains semantic block page-change retries through the runtime loop',
     async fn() {
-      const state = global.__chromeAiTranslatorInlineState;
+      const state = helpers.createInlineTranslationState({
+        status: 'active',
+        operationId: 32,
+      });
       const previous = {
         chrome: global.chrome,
         document: global.document,
         HTMLElement: global.HTMLElement,
         window: global.window,
-        status: state.status,
-        message: state.message,
-        operationId: state.operationId,
-        viewport: state.viewport,
       };
       const fixture = createReasoningFixture();
       const calls = [];
@@ -1055,11 +1121,9 @@ exports.tests = [
       try {
         const store = helpers.createInlineViewportStore(32);
         store.root = fixture.block;
-        state.status = 'active';
-        state.operationId = 32;
         state.viewport = store;
 
-        helpers.runInlineViewportScan();
+        helpers.runInlineViewportScan(state);
         await flushMicrotasks(16);
 
         const translationCalls = calls.filter(
@@ -1092,10 +1156,6 @@ exports.tests = [
         global.document = previous.document;
         global.HTMLElement = previous.HTMLElement;
         global.window = previous.window;
-        state.status = previous.status;
-        state.message = previous.message;
-        state.operationId = previous.operationId;
-        state.viewport = previous.viewport;
       }
     },
   },
@@ -1678,37 +1738,27 @@ exports.tests = [
   {
     name: 'keeps inline menu target language after restoring original text',
     fn() {
-      const previousWindow = global.window;
-      global.window = { removeEventListener() {} };
+      const state = helpers.createInlineTranslationState({
+        status: 'active',
+        message: 'Visible translation on',
+        operationId: 7,
+        translationSettings: {
+          targetLanguage: 'Japanese',
+          tone: 'technical',
+          model: 'gpt-5.4-mini',
+          reasoningEffort: 'none',
+        },
+        translationCache: new Map(),
+        viewport: helpers.createInlineViewportStore(7),
+      });
 
-      try {
-        const state = globalThis.__chromeAiTranslatorInlineState;
-        Object.assign(state, {
-          status: 'active',
-          restorableRecords: [],
-          message: 'Visible translation on',
-          operationId: 7,
-          translationSettings: {
-            targetLanguage: 'Japanese',
-            tone: 'technical',
-            model: 'gpt-5.4-mini',
-            reasoningEffort: 'none',
-          },
-          translationCache: new Map(),
-          viewport: helpers.createInlineViewportStore(7),
-        });
+      helpers.restoreInlineOriginal(state);
 
-        helpers.restoreInlineOriginal();
-
-        assert.equal(state.status, 'original');
-        assert.equal(
-          helpers.getInlineTranslatorUiModel(state).translateText,
-          'Page in Japanese'
-        );
-      } finally {
-        if (previousWindow === undefined) delete global.window;
-        else global.window = previousWindow;
-      }
+      assert.equal(state.status, 'original');
+      assert.equal(
+        helpers.getInlineTranslatorUiModel(state).translateText,
+        'Page in Japanese'
+      );
     },
   },
   {
@@ -2439,74 +2489,61 @@ exports.tests = [
   {
     name: 'resetting queued semantic block retries keeps them queued rather than cancelling them',
     fn() {
-      const state = global.__chromeAiTranslatorInlineState;
-      const previousState = {
-        status: state.status,
-        message: state.message,
-        operationId: state.operationId,
-        viewport: state.viewport,
-      };
-
-      try {
-        withFakeViewportDom(() => {
-          const { block, store, original, retry } =
-            queueSemanticBlockPageChangeRetry(35);
-          state.status = 'active';
-          state.operationId = 35;
-          state.viewport = store;
-
-          // Everything this check asserts about the retry is that the reset left it alone,
-          // which is also what a reset that never ran would look like. A plain queued block
-          // behind it is the control: the same call has to reset that one to `original`, so
-          // a green result cannot mean the reset was skipped.
-          const control = helpers.queueInlineViewportBlock(
-            store,
-            createReasoningFixture().block
-          );
-          assert.equal(control.state, 'queued');
-          assert.deepEqual(store.queue, [retry, control]);
-
-          helpers.scheduleInlineViewportScanFromViewportChange();
-
-          assert.equal(control.state, 'original');
-
-          // The retry survives the reset, so the block it superseded stays pending rather
-          // than falling back to an unresolved `changed` — either way it does not read as
-          // finished.
-          assert.equal(retry.state, 'queued');
-          assert.deepEqual(store.queue, [retry]);
-          assert.equal(original.supersededByRetryId, retry.id);
-          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-            translated: 0,
-            partial: 0,
-            pending: 1,
-            changed: 0,
-            failed: 0,
-          });
-
-          // The rescan the reset schedules re-reaches the same block, and must not queue a
-          // second retry beside the one it left alone.
-          assert.equal(helpers.queueInlineViewportBlock(store, block), null);
-          assert.deepEqual(store.queue, [retry]);
-          assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-            translated: 0,
-            partial: 0,
-            pending: 1,
-            changed: 0,
-            failed: 0,
-          });
-        }, {
-          clearTimeout() {},
-          setTimeout() {
-            return 123;
-          },
+      withFakeViewportDom(() => {
+        const { block, store, original, retry } =
+          queueSemanticBlockPageChangeRetry(35);
+        const state = helpers.createInlineTranslationState({
+          status: 'active',
+          operationId: 35,
+          viewport: store,
         });
-      } finally {
-        state.status = previousState.status;
-        state.message = previousState.message;
-        state.operationId = previousState.operationId;
-        state.viewport = previousState.viewport;
-      }
+
+        // Everything this check asserts about the retry is that the reset left it alone,
+        // which is also what a reset that never ran would look like. A plain queued block
+        // behind it is the control: the same call has to reset that one to `original`, so
+        // a green result cannot mean the reset was skipped.
+        const control = helpers.queueInlineViewportBlock(
+          store,
+          createReasoningFixture().block
+        );
+        assert.equal(control.state, 'queued');
+        assert.deepEqual(store.queue, [retry, control]);
+
+        helpers.scheduleInlineViewportScanFromViewportChange(state);
+
+        assert.equal(control.state, 'original');
+
+        // The retry survives the reset, so the block it superseded stays pending rather
+        // than falling back to an unresolved `changed` — either way it does not read as
+        // finished.
+        assert.equal(retry.state, 'queued');
+        assert.deepEqual(store.queue, [retry]);
+        assert.equal(original.supersededByRetryId, retry.id);
+        assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+          translated: 0,
+          partial: 0,
+          pending: 1,
+          changed: 0,
+          failed: 0,
+        });
+
+        // The rescan the reset schedules re-reaches the same block, and must not queue a
+        // second retry beside the one it left alone.
+        assert.equal(helpers.queueInlineViewportBlock(store, block), null);
+        assert.deepEqual(store.queue, [retry]);
+        assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+          translated: 0,
+          partial: 0,
+          pending: 1,
+          changed: 0,
+          failed: 0,
+        });
+      }, {
+        clearTimeout() {},
+        setTimeout() {
+          return 123;
+        },
+      });
     },
   },
   {

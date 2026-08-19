@@ -111,6 +111,7 @@ function createInlineViewportStore(
     scanTimer: null,
     observer: null,
     scrollTargets: [],
+    viewportChangeListener: null,
     root: null,
     stopped: false,
     scanStartIndex: 0,
@@ -136,7 +137,7 @@ function queueInlineLocalDiagnostic(store, record, code, evidence = {}) {
   });
 }
 
-function flushInlineLocalDiagnostics(store) {
+function flushInlineLocalDiagnostics(store, state = inlineState) {
   if (!store?.localDiagnostics?.length || store.localDiagnosticsInFlight) return;
   const batch = {
     id: createInlineLocalDiagnosticBatchId(),
@@ -144,27 +145,27 @@ function flushInlineLocalDiagnostics(store) {
     attempt: 0,
   };
   store.localDiagnosticsInFlight = batch;
-  sendInlineLocalDiagnosticBatch(store, batch);
+  sendInlineLocalDiagnosticBatch(store, batch, state);
 }
 
 function createInlineLocalDiagnosticBatchId() {
   return inlineDiagnosticsProtocol.createUuidV4();
 }
 
-function sendInlineLocalDiagnosticBatch(store, batch) {
+function sendInlineLocalDiagnosticBatch(store, batch, state = inlineState) {
   const fail = () => {
     if (batch.attempt < 1 && store.localDiagnosticsInFlight === batch) {
       batch.attempt += 1;
-      scheduleInlineLocalDiagnosticTask(store, () => sendInlineLocalDiagnosticBatch(store, batch), 250);
+      scheduleInlineLocalDiagnosticTask(store, () => sendInlineLocalDiagnosticBatch(store, batch, state), 250);
     } else {
       store.diagnosticsUnavailable = true;
       if (store.localDiagnosticsInFlight === batch) store.localDiagnosticsInFlight = null;
       if (store.localDiagnostics.length) {
-        scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store), 250);
+        scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store, state), 250);
       }
     }
-    if (store.diagnosticsUnavailable && inlineState.viewport === store && inlineState.operationId === store.operationId) {
-      updateInlineViewportMessage();
+    if (store.diagnosticsUnavailable && state.viewport === store && state.operationId === store.operationId) {
+      updateInlineViewportMessage(state);
     }
   };
   chrome.runtime.sendMessage({
@@ -180,7 +181,7 @@ function sendInlineLocalDiagnosticBatch(store, batch) {
     }
     if (store.localDiagnosticsInFlight === batch) store.localDiagnosticsInFlight = null;
     if (store.localDiagnostics.length) {
-      scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store), 0);
+      scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store, state), 0);
     }
   }).catch(fail);
 }
@@ -193,18 +194,18 @@ function scheduleInlineLocalDiagnosticTask(store, task, delay) {
   }, delay);
 }
 
-function drainInlineLocalDiagnosticsOnStop(store, resendInFlight) {
+function drainInlineLocalDiagnosticsOnStop(store, resendInFlight, state = inlineState) {
   if (resendInFlight && store.localDiagnosticsInFlight) {
     const inFlight = store.localDiagnosticsInFlight;
     store.localDiagnosticsInFlight = null;
-    sendInlineLocalDiagnosticBatch(store, inFlight);
+    sendInlineLocalDiagnosticBatch(store, inFlight, state);
   }
   while (store.localDiagnostics.length) {
     sendInlineLocalDiagnosticBatch(store, {
       id: createInlineLocalDiagnosticBatchId(),
       diagnostics: store.localDiagnostics.splice(0, inlineDiagnosticsProtocol.limits.maxRecords),
       attempt: 1,
-    });
+    }, state);
   }
 }
 
@@ -242,7 +243,7 @@ function stopInlineViewportTranslation(state = inlineState) {
     clearTimeout(store.localDiagnosticRetryTimer);
     store.localDiagnosticRetryTimer = null;
   }
-  drainInlineLocalDiagnosticsOnStop(store, hasPendingDiagnosticTask);
+  drainInlineLocalDiagnosticsOnStop(store, hasPendingDiagnosticTask, state);
   if (state.operationId === store.operationId) {
     state.operationId = (Number(state.operationId) || 0) + 1;
   }
@@ -277,10 +278,10 @@ function hasInlineSettingsApiKey(settings) {
 function getDefaultInlineInstructionHandlers(state = inlineState) {
   return {
     grantInlineTranslationAuthorization: () => authorizeInlineTranslation(state),
-    mountFloatingTranslateButton: () => ensureInlineTranslatorUi(),
-    startInlineTranslation: () => startInlineTranslationRun(),
-    stopInlineTranslation: () => stopInlineTranslationRun(),
-    restoreInlineOriginal: () => restoreInlineOriginal(),
+    mountFloatingTranslateButton: () => ensureInlineTranslatorUi(state),
+    startInlineTranslation: () => startInlineTranslationRun(state),
+    stopInlineTranslation: () => stopInlineTranslationRun(state),
+    restoreInlineOriginal: () => restoreInlineOriginal(state),
   };
 }
 
@@ -438,15 +439,24 @@ function getInlineViewportRestoreRecords(state = inlineState) {
   return records;
 }
 
-var inlineState = globalThis.__chromeAiTranslatorInlineState || {
-  status: 'original',
-  menuOpen: false,
-  message: '',
-  error: '',
-  operationId: 0,
-  authorizedUntil: 0,
-  restorableRecords: [],
-};
+// One shape for an Inline Translation state, so a check drives the fields the page has
+// rather than the ones it remembered to write down. A hand-rolled state that left out
+// `authorizedUntil` would find the run start refusing it and say nothing about why.
+function createInlineTranslationState(overrides = {}) {
+  return {
+    status: 'original',
+    menuOpen: false,
+    message: '',
+    error: '',
+    operationId: 0,
+    authorizedUntil: 0,
+    restorableRecords: [],
+    ...overrides,
+  };
+}
+
+var inlineState =
+  globalThis.__chromeAiTranslatorInlineState || createInlineTranslationState();
 globalThis.__chromeAiTranslatorInlineState = inlineState;
 if (!inlineState.viewport) {
   inlineState.viewport = createInlineViewportStore(inlineState.operationId);
@@ -1118,7 +1128,7 @@ function getInlineTranslatorUiModel(
 async function toggleInlineTranslatorMenu(
   chromeApi = globalThis.chrome,
   state = inlineState,
-  renderUi = state === inlineState ? updateInlineTranslatorUi : null
+  renderUi = () => updateInlineTranslatorUi(state)
 ) {
   state.menuOpen = !Boolean(state.menuOpen);
   renderUi?.();
@@ -1371,15 +1381,15 @@ function collectVisibleInlineBlocks(
 // Progress and errors are kept apart because the side panel, which is now the only place
 // either is shown, has a line for each: one string would leave it guessing which it held.
 // Progress is written by `updateInlineViewportMessage`, which counts Semantic Blocks.
-function setInlineErrorMessage(message) {
-  inlineState.error = message || '';
-  updateInlineTranslatorUi();
+function setInlineErrorMessage(message, state = inlineState) {
+  state.error = message || '';
+  updateInlineTranslatorUi(state);
 }
 
-function clearInlineFeedback() {
-  inlineState.message = '';
-  inlineState.error = '';
-  updateInlineTranslatorUi();
+function clearInlineFeedback(state = inlineState) {
+  state.message = '';
+  state.error = '';
+  updateInlineTranslatorUi(state);
 }
 
 // What the side panel reads to decide what the Inline Translation Section shows. This
@@ -1405,19 +1415,16 @@ function formatInlineViewportErrorText(records, diagnosticsUnavailable = false) 
 
 // The counts are progress. A reason that has been reached is not withdrawn by a later
 // scan, so this only ever sets one — the reader's next attempt is what clears it.
-function updateInlineViewportMessage() {
-  const records = inlineState.viewport?.records || [];
+function updateInlineViewportMessage(state = inlineState) {
+  const records = state.viewport?.records || [];
   const counts = getInlineViewportStatusCounts(records);
-  inlineState.message = formatInlineViewportStatusMessage(
-    counts,
-    inlineState.status
-  );
+  state.message = formatInlineViewportStatusMessage(counts, state.status);
   const errorText = formatInlineViewportErrorText(
     records,
-    Boolean(inlineState.viewport?.diagnosticsUnavailable)
+    Boolean(state.viewport?.diagnosticsUnavailable)
   );
-  if (errorText) inlineState.error = errorText;
-  updateInlineTranslatorUi();
+  if (errorText) state.error = errorText;
+  updateInlineTranslatorUi(state);
 }
 
 function detachInlineTranslatorUi() {
@@ -1426,11 +1433,11 @@ function detachInlineTranslatorUi() {
   globalThis.__chromeAiTranslatorInlineUiRoot = null;
 }
 
-function ensureInlineTranslatorUi() {
+function ensureInlineTranslatorUi(state = inlineState) {
   let host = document.getElementById(INLINE_TRANSLATOR_ID);
   if (host && inlineUiRoot) {
-    refreshInlineTranslatorSettings()
-      .then(() => updateInlineTranslatorUi())
+    refreshInlineTranslatorSettings(globalThis.chrome, state)
+      .then(() => updateInlineTranslatorUi(state))
       .catch(() => {});
     return host;
   }
@@ -1493,25 +1500,27 @@ function ensureInlineTranslatorUi() {
 
   inlineUiRoot.querySelector('[data-role="toggle"]').addEventListener('click', (event) => {
     if (!isTrustedInlineUiEvent(event)) return;
-    toggleInlineTranslatorMenu().catch(() => updateInlineTranslatorUi());
+    toggleInlineTranslatorMenu(globalThis.chrome, state).catch(() =>
+      updateInlineTranslatorUi(state)
+    );
   });
   inlineUiRoot
     .querySelector('[data-action="translate"]')
     .addEventListener('click', (event) => {
-      if (!authorizeInlineTranslationFromUiEvent(event)) return;
-      startInlineTranslationRun();
+      if (!authorizeInlineTranslationFromUiEvent(event, state)) return;
+      startInlineTranslationRun(state);
     });
   inlineUiRoot
     .querySelector('[data-action="stop"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
-      stopInlineTranslationRun();
+      stopInlineTranslationRun(state);
     });
   inlineUiRoot
     .querySelector('[data-action="restore"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
-      restoreInlineOriginal();
+      restoreInlineOriginal(state);
     });
   inlineUiRoot
     .querySelector('[data-action="close"]')
@@ -1519,25 +1528,25 @@ function ensureInlineTranslatorUi() {
       if (!isTrustedInlineUiEvent(event)) return;
       // Only the UI goes. A translation already under way keeps running and keeps its
       // records, so the reader can bring the button back and pick it up where it is.
-      closeFloatingTranslateButton();
+      closeFloatingTranslateButton(state);
       detachInlineTranslatorUi();
     });
 
-  updateInlineTranslatorUi();
-  refreshInlineTranslatorSettings()
-    .then(() => updateInlineTranslatorUi())
+  updateInlineTranslatorUi(state);
+  refreshInlineTranslatorSettings(globalThis.chrome, state)
+    .then(() => updateInlineTranslatorUi(state))
     .catch(() => {});
   return host;
 }
 
-function updateInlineTranslatorUi() {
+function updateInlineTranslatorUi(state = inlineState) {
   if (!inlineUiRoot) return;
   const toggle = inlineUiRoot.querySelector('[data-role="toggle"]');
   const menu = inlineUiRoot.querySelector('[data-role="menu"]');
   const translate = inlineUiRoot.querySelector('[data-action="translate"]');
   const stop = inlineUiRoot.querySelector('[data-action="stop"]');
   const restore = inlineUiRoot.querySelector('[data-action="restore"]');
-  const model = getInlineTranslatorUiModel(inlineState);
+  const model = getInlineTranslatorUiModel(state);
 
   toggle.textContent = model.toggleText;
   toggle.setAttribute('aria-expanded', model.expanded);
@@ -1547,28 +1556,28 @@ function updateInlineTranslatorUi() {
   restore.disabled = model.restoreDisabled;
 }
 
-function runInlineViewportScan() {
-  const store = inlineState.viewport;
-  if (!store || store.stopped || inlineState.status !== 'active') return;
+function runInlineViewportScan(state = inlineState) {
+  const store = state.viewport;
+  if (!store || store.stopped || state.status !== 'active') return;
   const root = store.root || pickArticleRoot();
   if (!root) {
-    setInlineErrorMessage('No article content found.');
+    setInlineErrorMessage('No article content found.', state);
     return;
   }
   store.root = root;
   collectVisibleInlineBlocks(root, store);
   if (store.scanStartIndex > 0) {
-    scheduleInlineViewportScan();
+    scheduleInlineViewportScan(state);
   }
-  updateInlineViewportMessage();
-  drainInlineViewportQueue().catch((error) =>
-    setInlineErrorMessage(error?.message || String(error))
+  updateInlineViewportMessage(state);
+  drainInlineViewportQueue(state).catch((error) =>
+    setInlineErrorMessage(error?.message || String(error), state)
   );
 }
 
-function scheduleInlineViewportScan(options = {}) {
-  const store = inlineState.viewport;
-  if (!store || store.stopped || inlineState.status !== 'active') return;
+function scheduleInlineViewportScan(state = inlineState, options = {}) {
+  const store = state.viewport;
+  if (!store || store.stopped || state.status !== 'active') return;
   if (options?.resetScanStartIndex) {
     store.scanStartIndex = 0;
     resetQueuedInlineViewportRecords(store);
@@ -1576,12 +1585,12 @@ function scheduleInlineViewportScan(options = {}) {
   if (store.scanTimer) clearTimeout(store.scanTimer);
   store.scanTimer = setTimeout(() => {
     store.scanTimer = null;
-    runInlineViewportScan();
+    runInlineViewportScan(state);
   }, INLINE_VIEWPORT_SCAN_DEBOUNCE_MS);
 }
 
-function scheduleInlineViewportScanFromViewportChange() {
-  scheduleInlineViewportScan({ resetScanStartIndex: true });
+function scheduleInlineViewportScanFromViewportChange(state = inlineState) {
+  scheduleInlineViewportScan(state, { resetScanStartIndex: true });
 }
 
 function isInlineScrollableElement(el) {
@@ -1616,41 +1625,43 @@ function getInlineViewportScrollTargets(root) {
   return targets;
 }
 
-function attachInlineViewportWatchers(root) {
+// The listener is made here rather than being one module-level function, because it has
+// to carry the state whose store the scan it schedules belongs to. It is kept on that
+// store so detaching removes the same reference attaching added: a fresh closure per call
+// would leave every scroll target holding a listener nothing can take off again.
+function attachInlineViewportWatchers(root, state = inlineState) {
+  const store = state.viewport;
+  const onViewportChange = () =>
+    scheduleInlineViewportScanFromViewportChange(state);
   const scrollTargets = getInlineViewportScrollTargets(root);
   for (const target of scrollTargets) {
-    target.addEventListener(
-      'scroll',
-      scheduleInlineViewportScanFromViewportChange,
-      { passive: true }
-    );
+    target.addEventListener('scroll', onViewportChange, { passive: true });
   }
-  window.addEventListener('resize', scheduleInlineViewportScanFromViewportChange);
+  window.addEventListener('resize', onViewportChange);
 
-  const observer = new MutationObserver(scheduleInlineViewportScanFromViewportChange);
+  const observer = new MutationObserver(onViewportChange);
   observer.observe(root, {
     childList: true,
     subtree: true,
     characterData: true,
   });
-  inlineState.viewport.observer = observer;
-  inlineState.viewport.scrollTargets = scrollTargets;
+  store.observer = observer;
+  store.scrollTargets = scrollTargets;
+  store.viewportChangeListener = onViewportChange;
 }
 
-function detachInlineViewportWatchers() {
-  const store = inlineState.viewport;
-  const scrollTargets = store?.scrollTargets?.length
-    ? store.scrollTargets
-    : [window];
-  for (const target of scrollTargets) {
-    target?.removeEventListener?.(
-      'scroll',
-      scheduleInlineViewportScanFromViewportChange
-    );
+function detachInlineViewportWatchers(state = inlineState) {
+  const store = state.viewport;
+  const onViewportChange = store?.viewportChangeListener;
+  if (onViewportChange) {
+    for (const target of store.scrollTargets || []) {
+      target?.removeEventListener?.('scroll', onViewportChange);
+    }
+    window.removeEventListener('resize', onViewportChange);
   }
-  window.removeEventListener('resize', scheduleInlineViewportScanFromViewportChange);
   if (store) {
     store.scrollTargets = [];
+    store.viewportChangeListener = null;
     if (store.observer) {
       store.observer.disconnect();
       store.observer = null;
@@ -1672,24 +1683,24 @@ function releaseInlineRuntimeTokensFromStaleResponse(resp, operationId) {
   return true;
 }
 
-async function drainInlineViewportQueue() {
-  const store = inlineState.viewport;
-  if (!store || store.stopped || inlineState.status !== 'active') return;
+async function drainInlineViewportQueue(state = inlineState) {
+  const store = state.viewport;
+  if (!store || store.stopped || state.status !== 'active') return;
   const operationId = store.operationId;
-  flushInlineLocalDiagnostics(store);
+  flushInlineLocalDiagnostics(store, state);
 
   while (
-    isInlineViewportOperationCurrent(inlineState, store, operationId) &&
+    isInlineViewportOperationCurrent(state, store, operationId) &&
     store.inFlight < INLINE_VIEWPORT_MAX_IN_FLIGHT &&
     store.queue.length
   ) {
     const batch = takeInlineViewportBlockBatch(store);
-    flushInlineLocalDiagnostics(store);
+    flushInlineLocalDiagnostics(store, state);
     if (!batch.length) {
-      updateInlineViewportMessage();
+      updateInlineViewportMessage(state);
       return;
     }
-    updateInlineViewportMessage();
+    updateInlineViewportMessage(state);
 
     chrome.runtime
       .sendMessage({
@@ -1706,7 +1717,7 @@ async function drainInlineViewportQueue() {
         })),
       })
       .then((resp) => {
-        if (!isInlineViewportOperationCurrent(inlineState, store, operationId)) {
+        if (!isInlineViewportOperationCurrent(state, store, operationId)) {
           releaseInlineRuntimeTokensFromStaleResponse(resp, operationId);
           return;
         }
@@ -1744,49 +1755,50 @@ async function drainInlineViewportQueue() {
           }).then((diagnosticResponse) => {
             if (diagnosticResponse?.ok !== true) {
               store.diagnosticsUnavailable = true;
-              if (isInlineViewportOperationCurrent(inlineState, store, operationId)) {
-                updateInlineViewportMessage();
+              if (isInlineViewportOperationCurrent(state, store, operationId)) {
+                updateInlineViewportMessage(state);
               }
             }
           }).catch(() => {
             store.diagnosticsUnavailable = true;
-            if (isInlineViewportOperationCurrent(inlineState, store, operationId)) {
-              updateInlineViewportMessage();
+            if (isInlineViewportOperationCurrent(state, store, operationId)) {
+              updateInlineViewportMessage(state);
             }
           });
         }
         if (resp.results.some((result) => result.diagnosticsUnavailable)) {
           store.diagnosticsUnavailable = true;
         }
-        addInlineRestorableRecords(inlineState, batch);
+        addInlineRestorableRecords(state, batch);
       })
       .catch(() => {
-        if (isInlineViewportOperationCurrent(inlineState, store, operationId)) {
+        if (isInlineViewportOperationCurrent(state, store, operationId)) {
           markInlineViewportBatchFailed(batch, operationId, store);
         }
       })
       .finally(() => {
-        if (!isInlineViewportOperationCurrent(inlineState, store, operationId)) {
+        if (!isInlineViewportOperationCurrent(state, store, operationId)) {
           return;
         }
         store.inFlight = Math.max(0, store.inFlight - 1);
-        updateInlineViewportMessage();
-        drainInlineViewportQueue().catch((error) =>
-          setInlineErrorMessage(error?.message || String(error))
+        updateInlineViewportMessage(state);
+        drainInlineViewportQueue(state).catch((error) =>
+          setInlineErrorMessage(error?.message || String(error), state)
         );
       });
   }
 }
 
-async function translateInlinePage() {
-  if (isInlineTranslationRunLive(inlineState)) {
-    scheduleInlineViewportScan();
-    updateInlineViewportMessage();
+async function translateInlinePage(state = inlineState) {
+  if (isInlineTranslationRunLive(state)) {
+    scheduleInlineViewportScan(state);
+    updateInlineViewportMessage(state);
     return;
   }
-  if (!hasInlineTranslationAuthorization()) {
+  if (!hasInlineTranslationAuthorization(state)) {
     setInlineErrorMessage(
-      'Use the extension toolbar or shortcut first to authorize inline translation.'
+      'Use the extension toolbar or shortcut first to authorize inline translation.',
+      state
     );
     return;
   }
@@ -1799,71 +1811,74 @@ async function translateInlinePage() {
     );
   }
   if (!hasInlineSettingsApiKey(settingsResponse.settings)) {
-    setInlineErrorMessage('Open Options and paste your OpenAI API key.');
+    setInlineErrorMessage('Open Options and paste your OpenAI API key.', state);
     return;
   }
 
   const root = pickArticleRoot();
   if (!root) throw new Error('No article content found.');
 
-  detachInlineViewportWatchers();
-  addInlineRestorableRecords(inlineState, inlineState.viewport?.records || []);
+  detachInlineViewportWatchers(state);
+  addInlineRestorableRecords(state, state.viewport?.records || []);
   const settingsSnapshot = createInlineTranslationSettingsSnapshot(
     settingsResponse.settings
   );
-  inlineState.translationSettings = settingsSnapshot;
+  state.translationSettings = settingsSnapshot;
   const translationCache = activateInlineTranslationCacheBucket(
-    inlineState,
+    state,
     settingsSnapshot
   );
   const sessionRecordCost = Math.max(
     0,
-    Number(inlineState.viewport?.sessionRecordCost) || 0
+    Number(state.viewport?.sessionRecordCost) || 0
   );
-  inlineState.operationId = (Number(inlineState.operationId) || 0) + 1;
-  inlineState.status = 'active';
-  inlineState.viewport = createInlineViewportStore(
-    inlineState.operationId,
+  state.operationId = (Number(state.operationId) || 0) + 1;
+  state.status = 'active';
+  state.viewport = createInlineViewportStore(
+    state.operationId,
     translationCache,
     settingsSnapshot,
     sessionRecordCost
   );
-  inlineState.viewport.root = root;
+  state.viewport.root = root;
   seedInlineViewportStoreWithRestorableRecords(
-    inlineState.viewport,
-    inlineState.restorableRecords
+    state.viewport,
+    state.restorableRecords
   );
 
-  attachInlineViewportWatchers(root);
-  runInlineViewportScan();
+  attachInlineViewportWatchers(root, state);
+  runInlineViewportScan(state);
 }
 
-function restoreInlineOriginal() {
-  detachInlineViewportWatchers();
-  restoreInlineViewportRecords(inlineState);
-  clearInlineFeedback();
-  updateInlineTranslatorUi();
+function restoreInlineOriginal(state = inlineState) {
+  detachInlineViewportWatchers(state);
+  restoreInlineViewportRecords(state);
+  clearInlineFeedback(state);
+  updateInlineTranslatorUi(state);
 }
 
 // The three Inline Translation controls, each with one body whichever of its two homes
 // pressed it. Starting clears what the last attempt reported: the reader is asking again,
 // so the previous answer is no longer the current one.
-function startInlineTranslationRun() {
-  setInlineErrorMessage('');
-  translateInlinePage().catch((error) =>
-    setInlineErrorMessage(error?.message || String(error))
+function startInlineTranslationRun(state = inlineState) {
+  setInlineErrorMessage('', state);
+  translateInlinePage(state).catch((error) =>
+    setInlineErrorMessage(error?.message || String(error), state)
   );
 }
 
-function stopInlineTranslationRun() {
-  stopInlineViewportTranslation();
-  detachInlineViewportWatchers();
-  updateInlineViewportMessage();
+function stopInlineTranslationRun(state = inlineState) {
+  stopInlineViewportTranslation(state);
+  detachInlineViewportWatchers(state);
+  updateInlineViewportMessage(state);
 }
 
-async function initInlineTranslator() {
+async function initInlineTranslator(state = inlineState) {
   try {
-    runInlineInstructions(await requestInlineStartupInstructions());
+    runInlineInstructions(
+      await requestInlineStartupInstructions(),
+      getDefaultInlineInstructionHandlers(state)
+    );
   } catch {}
 }
 
@@ -1890,38 +1905,56 @@ function handleExtractArticle(sendResponse) {
   }
 }
 
+// Every message this script answers, in one place and against the state it is answering
+// for. Returning `true` holds the response channel open until `sendResponse` has run;
+// returning nothing says this script has no answer, which is how a message meant for
+// another listener passes through untouched.
+function handleInlineContentMessage(msg, sendResponse, state = inlineState) {
+  if (msg?.type === 'EXTRACT_ARTICLE') {
+    handleExtractArticle(sendResponse);
+    return true;
+  }
+
+  if (msg?.type === 'RUN_INLINE_INSTRUCTION') {
+    try {
+      if (
+        !runInlineInstruction(
+          msg.instruction,
+          getDefaultInlineInstructionHandlers(state)
+        )
+      ) {
+        throw new Error(`Unknown inline instruction: ${msg.instruction}`);
+      }
+      sendResponse({ ok: true });
+    } catch (e) {
+      sendResponse({
+        ok: false,
+        error: { message: e?.message || String(e) },
+      });
+    }
+    return true;
+  }
+
+  if (msg?.type === 'GET_INLINE_TRANSLATION_STATE') {
+    sendResponse({
+      ok: true,
+      snapshot: getInlineTranslationStatusSnapshot(state),
+    });
+    return true;
+  }
+
+  return undefined;
+}
+
 if (
   typeof chrome !== 'undefined' &&
   chrome.runtime?.onMessage &&
   !globalThis.__chromeAiTranslatorContentInitialized
 ) {
   globalThis.__chromeAiTranslatorContentInitialized = true;
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg?.type === 'EXTRACT_ARTICLE') {
-      handleExtractArticle(sendResponse);
-      return true;
-    }
-
-    if (msg?.type === 'RUN_INLINE_INSTRUCTION') {
-      try {
-        if (!runInlineInstruction(msg.instruction)) {
-          throw new Error(`Unknown inline instruction: ${msg.instruction}`);
-        }
-        sendResponse({ ok: true });
-      } catch (e) {
-        sendResponse({
-          ok: false,
-          error: { message: e?.message || String(e) },
-        });
-      }
-      return true;
-    }
-
-    if (msg?.type === 'GET_INLINE_TRANSLATION_STATE') {
-      sendResponse({ ok: true, snapshot: getInlineTranslationStatusSnapshot() });
-      return true;
-    }
-  });
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) =>
+    handleInlineContentMessage(msg, sendResponse)
+  );
 
   initInlineTranslator();
 }
@@ -1968,6 +2001,10 @@ if (typeof module !== 'undefined' && module.exports) {
     formatInlineViewportErrorText,
     getInlineTerminalReason,
     getInlineTranslationStatusSnapshot,
+    handleInlineContentMessage,
+    createInlineTranslationState,
+    attachInlineViewportWatchers,
+    detachInlineViewportWatchers,
     getInlineTranslatorUiModel,
     toggleInlineTranslatorMenu,
     runInlineViewportScan,
