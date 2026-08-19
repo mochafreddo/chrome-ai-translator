@@ -67,6 +67,11 @@
   const MAX_STRUCTURE_DEPTH = 256;
   const MAX_FINGERPRINT_CHARS = 120000;
 
+  // Code-like inline text — a URL, a filename, a flag, a shell command, a dotted identifier
+  // — is text a translator would corrupt rather than translate. Two callers ask: this codec,
+  // deciding whether a link label is a protected atom, and the content script, deciding
+  // whether a candidate text node is worth scanning at all. It lives here because the codec
+  // already owns what a protected atom is, and one home is what keeps the two answers equal.
   function isCodeLikeInlineText(text) {
     const value = String(text || '').trim();
     if (!value) return true;
@@ -975,6 +980,7 @@
     matchesOriginalOwnership,
     isSemanticBlockElement,
     serializeBlock,
+    isCodeLikeInlineText,
     isProtectedAtomicLinkLabel,
     restoreBlock,
     validateTranslatedTemplate,

@@ -490,32 +490,6 @@ function isInlineEffectivelyEditable(element) {
   return false;
 }
 
-function isCodeLikeInlineText(text) {
-  const value = String(text || '').trim();
-  if (!value) return true;
-  if (/^https?:\/\//i.test(value)) return true;
-  if (
-    /^[\w./-]+\.(md|js|ts|tsx|jsx|json|ya?ml|css|html|py|rb|go|rs|java|kt|swift|sh)$/i.test(
-      value
-    )
-  ) {
-    return true;
-  }
-  if (/^--?[a-z0-9][a-z0-9-]*(=.*)?$/i.test(value)) return true;
-  if (
-    /^(npm|pnpm|yarn|node|git|gh|curl|cd|ls|cat|grep|rg|mkdir|rm|cp|mv)\b/.test(
-      value
-    )
-  ) {
-    return true;
-  }
-  if (/^[A-Z0-9_./-]{1,24}$/.test(value)) return true;
-  if (/^[a-zA-Z_$][\w$]*(\.[a-zA-Z_$][\w$]*){1,}$/.test(value)) {
-    return true;
-  }
-  return false;
-}
-
 function isTrustedInlineUiEvent(event) {
   return event?.isTrusted === true;
 }
@@ -1308,7 +1282,7 @@ function shouldSkipInlineBlockCandidateTextNode(textNode) {
   }
   const value = String(textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
   if (!/[A-Za-z]/.test(value)) return true;
-  return isCodeLikeInlineText(value);
+  return inlineBlockCodec.isCodeLikeInlineText(value);
 }
 
 function normalizeInlineViewportScanLimit(maxTextNodes) {
@@ -1956,7 +1930,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     isInlineTranslationExcludedTag,
     isInlineTranslationExcludedElement,
-    isCodeLikeInlineText,
+    isCodeLikeInlineText: inlineBlockCodec.isCodeLikeInlineText,
     buildArticleExtraction,
     isTrustedInlineUiEvent,
     authorizeInlineTranslation,
