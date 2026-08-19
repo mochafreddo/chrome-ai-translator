@@ -235,6 +235,13 @@ exports.tests = [
   {
     name: 'detects code-like text conservatively',
     fn() {
+      // The predicate has one home, in the codec that already owns what a protected atom is.
+      // Asserting the identity — not just matching behaviour — is what makes every assertion
+      // below cover the codec's link-label call site as well as the content script's scan.
+      assert.equal(
+        helpers.isCodeLikeInlineText,
+        inlineBlockCodec.isCodeLikeInlineText
+      );
       assert.equal(helpers.isCodeLikeInlineText('npm run build'), true);
       assert.equal(helpers.isCodeLikeInlineText('README.md'), true);
       assert.equal(helpers.isCodeLikeInlineText('https://example.com'), true);
@@ -1885,6 +1892,54 @@ exports.tests = [
         assert.equal(queued.length, 1);
         assert.equal(store.queue.length, 1);
         assert.equal(store.queue[0].atoms[0].label, 'x');
+      } finally {
+        global.document = previous.document;
+        global.HTMLElement = previous.HTMLElement;
+        global.window = previous.window;
+      }
+    },
+  },
+  {
+    name: 'skips a code-like block on the scan the reader actually triggers',
+    fn() {
+      // The identity assertion above binds the exported predicate. This one binds the other
+      // end: the scan that walks the page. Without it, a local copy reintroduced inside
+      // shouldSkipInlineBlockCandidateTextNode would leave the suite green while the scanner
+      // and the codec answered differently again.
+      const previous = {
+        document: global.document,
+        HTMLElement: global.HTMLElement,
+        window: global.window,
+      };
+      const { document, element, text } = createTestDocument();
+      const command = element('p', text('npm run build'));
+      const prose = element('p', text('Then reload the extension.'));
+      const root = element('div', command, prose);
+      document.body.appendChild(root);
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => {
+        throw new Error('range unavailable');
+      };
+      global.document = document;
+      global.HTMLElement = root.constructor;
+      global.window = {
+        innerWidth: 500,
+        innerHeight: 300,
+        getComputedStyle() {
+          return {
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+
+      try {
+        const store = helpers.createInlineViewportStore(12);
+        const queued = helpers.collectVisibleInlineBlocks(root, store);
+
+        assert.equal(queued.length, 1);
+        assert.equal(queued[0].template, 'Then reload the extension.');
       } finally {
         global.document = previous.document;
         global.HTMLElement = previous.HTMLElement;
