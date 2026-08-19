@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const validation = require('../extension/translation-validation.js');
+const { createReasoningFixture } = require('./inline-block.test');
 
 function plainRecord(id = 'b1', template = 'This is source prose.') {
   return {
@@ -17,6 +18,23 @@ function plainRecord(id = 'b1', template = 'This is source prose.') {
   };
 }
 
+// A block whose contract has an atom token to lose, so a structure verdict can be told
+// apart from a protocol one. The plain record above has no entries and therefore no way
+// to fail structurally.
+function reasoningRecord(id = 'reasoning') {
+  const { serialized } = createReasoningFixture();
+  return {
+    id,
+    template: serialized.template,
+    atoms: serialized.atoms,
+    contract: serialized.contract,
+  };
+}
+
+function atomToken(record) {
+  return record.contract.entries.find((entry) => entry.kind === 'atom').token;
+}
+
 exports.name = 'translation validation';
 exports.tests = [
   {
@@ -30,6 +48,56 @@ exports.tests = [
         ),
         (error) => error.code === 'protocol.missing_id'
       );
+    },
+  },
+  {
+    name: 'refuses a response id that was never requested',
+    fn() {
+      assert.throws(
+        () => validation.validateBlockResponse(
+          JSON.stringify({
+            translations: [{ id: 'never-asked', template: 'anything' }],
+          }),
+          [plainRecord()],
+          { targetLanguage: 'Korean' }
+        ),
+        (error) => error.code === 'protocol.unexpected_id'
+      );
+    },
+  },
+  {
+    // The batch is the unit of the request and the record is the unit of the verdict: one
+    // block dropping a token has to fail on its own rather than take the batch with it,
+    // which is only visible with a sibling that survives the same response.
+    name: 'confines a lost token to the one record that dropped it',
+    fn() {
+      const first = reasoningRecord('b1');
+      const second = reasoningRecord('b2');
+      const result = validation.validateBlockResponse(
+        JSON.stringify({
+          translations: [
+            { id: 'b1', template: first.template },
+            {
+              id: 'b2',
+              template: second.template.split(atomToken(second)).join(''),
+            },
+          ],
+        }),
+        [first, second],
+        { targetLanguage: 'Korean' }
+      );
+
+      assert.deepEqual(
+        result.records.map((record) => [record.id, record.structure.status]),
+        [
+          ['b1', 'safe'],
+          ['b2', 'unsafe'],
+        ]
+      );
+      assert.deepEqual(result.records[1].structure.codes, [
+        'structure.token_missing',
+      ]);
+      assert.equal(result.records[1].quality.status, 'uncertain');
     },
   },
   {
@@ -72,14 +140,14 @@ exports.tests = [
   {
     name: 'does not count protected token syntax as English residue',
     fn() {
-      const { serialized } = require('./inline-block.test').createReasoningFixture();
-      const translated = serialized.template
+      const record = reasoningRecord('tokenized');
+      const translated = record.template
         .replace('Reasoning models', '추론 모델')
         .replace(' like ', '와 같은 ')
         .replace(' use internal reasoning tokens.', '은 내부 추론 토큰을 사용합니다.');
       const result = validation.validateBlockResponse(
-        JSON.stringify({ translations: [{ id: 'tokenized', template: translated }] }),
-        [{ id: 'tokenized', ...serialized }],
+        JSON.stringify({ translations: [{ id: record.id, template: translated }] }),
+        [record],
         { targetLanguage: 'Korean' }
       );
       assert.equal(result.records[0].quality.status, 'complete');
