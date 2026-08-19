@@ -119,10 +119,11 @@ function assertApplied(record, template, targetLanguage = 'Korean') {
   });
 }
 
-// The two below are the same assertions under names that say the retired
-// `parseAndValidateBlockTranslations` judged this input the other way. Every one of
-// them is a coverage gap recorded on issue #37, not a rule this repo wants: closing a
-// gap turns its check red, which is how the gap gets noticed again.
+// The two below are the same assertions under names that say the retired guard judged
+// this input the other way. That guard was `parseAndValidateBlockTranslations`, deleted
+// from the worker on issue #38, so read it out of git rather than looking for it in the
+// tree. Every one of these is a coverage gap recorded on issue #37, not a rule this repo
+// wants: closing a gap turns its check red, which is how the gap gets noticed again.
 //
 // `assertUnguarded` is ISSUE-003 itself, still live — the live path applies English
 // the retired guard refused. `assertOverguarded` is the inverse: the live path

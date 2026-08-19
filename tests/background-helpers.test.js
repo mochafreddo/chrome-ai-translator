@@ -1459,38 +1459,6 @@ exports.tests = [
     },
   },
   {
-    name: 'returns per-record token failures after exact block ID validation',
-    fn() {
-      const first = createBlockApiRecord('b1');
-      const second = createBlockApiRecord('b2');
-      const atom = second.contract.entries.find((entry) => entry.kind === 'atom');
-      const parsed = helpers.parseAndValidateBlockTranslations(
-        JSON.stringify({
-          translations: [
-            { id: 'b1', template: first.template },
-            { id: 'b2', template: second.template.replace(atom.token, '') },
-          ],
-        }),
-        [first, second]
-      );
-
-      assert.deepEqual(parsed, [
-        { id: 'b1', ok: true, template: first.template },
-        { id: 'b2', ok: false, errorCode: 'token_missing' },
-      ]);
-      assert.throws(
-        () =>
-          helpers.parseAndValidateBlockTranslations(
-            JSON.stringify({
-              translations: [{ id: 'other', template: first.template }],
-            }),
-            [first]
-          ),
-        /Unexpected translation id/
-      );
-    },
-  },
-  {
     name: 'rejects repaired non-Korean output without exposing block internals',
     async fn() {
       const previousChrome = global.chrome;
