@@ -1543,10 +1543,9 @@ exports.tests = [
   {
     name: 'serializes concurrent all-pages content script registration',
     async fn() {
-      const previousChrome = global.chrome;
       const registered = new Map();
 
-      global.chrome = {
+      const chrome = {
         permissions: {
           async contains() {
             return true;
@@ -1571,27 +1570,23 @@ exports.tests = [
           },
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        await Promise.all([
-          helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' }),
-          helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' }),
-        ]);
+      await Promise.all([
+        worker.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' }),
+        worker.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' }),
+      ]);
 
-        assert.equal(registered.size, 1);
-        assert.deepEqual(
-          registered.get('inline-translator-auto-show')?.matches,
-          ['http://*/*', 'https://*/*']
-        );
-      } finally {
-        global.chrome = previousChrome;
-      }
+      assert.equal(registered.size, 1);
+      assert.deepEqual(
+        registered.get('inline-translator-auto-show')?.matches,
+        ['http://*/*', 'https://*/*']
+      );
     },
   },
   {
     name: 'updates existing all-pages content script after duplicate registration',
     async fn() {
-      const previousChrome = global.chrome;
       const registered = new Map([
         [
           'inline-translator-auto-show',
@@ -1604,7 +1599,7 @@ exports.tests = [
         ],
       ]);
 
-      global.chrome = {
+      const chrome = {
         permissions: {
           async contains() {
             return true;
@@ -1631,35 +1626,31 @@ exports.tests = [
           },
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        await helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
+      await worker.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
 
-        assert.deepEqual(
-          registered.get('inline-translator-auto-show'),
-          {
-            id: 'inline-translator-auto-show',
-            matches: ['http://*/*', 'https://*/*'],
-            js: [
-              'default-model.js',
-              'inline-block.js',
-              'inline-diagnostics-protocol.js',
-              'inline-translation-controls.js',
-              'full-page-markdown.js',
-              'content.js',
-            ],
-            runAt: 'document_idle',
-          }
-        );
-      } finally {
-        global.chrome = previousChrome;
-      }
+      assert.deepEqual(
+        registered.get('inline-translator-auto-show'),
+        {
+          id: 'inline-translator-auto-show',
+          matches: ['http://*/*', 'https://*/*'],
+          js: [
+            'default-model.js',
+            'inline-block.js',
+            'inline-diagnostics-protocol.js',
+            'inline-translation-controls.js',
+            'full-page-markdown.js',
+            'content.js',
+          ],
+          runAt: 'document_idle',
+        }
+      );
     },
   },
   {
     name: 'updates registered all-pages content script without duplicate registration',
     async fn() {
-      const previousChrome = global.chrome;
       const registered = new Map([
         [
           'inline-translator-auto-show',
@@ -1672,7 +1663,7 @@ exports.tests = [
         ],
       ]);
 
-      global.chrome = {
+      const chrome = {
         permissions: {
           async contains() {
             return true;
@@ -1702,37 +1693,32 @@ exports.tests = [
           },
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        await helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
+      await worker.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
 
-        assert.deepEqual(
-          registered.get('inline-translator-auto-show'),
-          {
-            id: 'inline-translator-auto-show',
-            matches: ['http://*/*', 'https://*/*'],
-            js: [
-              'default-model.js',
-              'inline-block.js',
-              'inline-diagnostics-protocol.js',
-              'inline-translation-controls.js',
-              'full-page-markdown.js',
-              'content.js',
-            ],
-            runAt: 'document_idle',
-          }
-        );
-      } finally {
-        global.chrome = previousChrome;
-      }
+      assert.deepEqual(
+        registered.get('inline-translator-auto-show'),
+        {
+          id: 'inline-translator-auto-show',
+          matches: ['http://*/*', 'https://*/*'],
+          js: [
+            'default-model.js',
+            'inline-block.js',
+            'inline-diagnostics-protocol.js',
+            'inline-translation-controls.js',
+            'full-page-markdown.js',
+            'content.js',
+          ],
+          runAt: 'document_idle',
+        }
+      );
     },
   },
   {
     name: 'does not throw when all-pages duplicate recovery fails',
     async fn() {
-      const previousChrome = global.chrome;
-
-      global.chrome = {
+      const chrome = {
         permissions: {
           async contains() {
             return true;
@@ -1753,20 +1739,15 @@ exports.tests = [
           },
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        await helpers.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
-      } finally {
-        global.chrome = previousChrome;
-      }
+      await worker.syncButtonVisibilityRegistration({ buttonVisibility: 'allPages' });
     },
   },
   {
     name: 'safely ignores all-pages registration failures from runtime events',
     async fn() {
-      const previousChrome = global.chrome;
-
-      global.chrome = {
+      const chrome = {
         permissions: {
           async contains() {
             return true;
@@ -1781,17 +1762,14 @@ exports.tests = [
           },
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        assert.equal(
-          await helpers.syncButtonVisibilityRegistrationSafely({
-            buttonVisibility: 'allPages',
-          }),
-          false
-        );
-      } finally {
-        global.chrome = previousChrome;
-      }
+      assert.equal(
+        await worker.syncButtonVisibilityRegistrationSafely({
+          buttonVisibility: 'allPages',
+        }),
+        false
+      );
     },
   },
   {
@@ -1800,8 +1778,6 @@ exports.tests = [
       // Registering it is what lets the button appear without the reader invoking the
       // extension. The other two choices must leave no registration behind, or a reader who
       // moved away from all pages would keep getting the button on every page.
-      const previousChrome = global.chrome;
-
       for (const [visibility, expected] of [
         ['allPages', ['inline-translator-auto-show']],
         ['onInvocation', []],
@@ -1811,7 +1787,7 @@ exports.tests = [
           ['inline-translator-auto-show', { id: 'inline-translator-auto-show' }],
         ]);
 
-        global.chrome = {
+        const chrome = {
           permissions: {
             async contains() {
               return true;
@@ -1834,15 +1810,12 @@ exports.tests = [
             },
           },
         };
+        const worker = helpers.createBackgroundWorker({ chrome });
 
-        try {
-          await helpers.syncButtonVisibilityRegistration({
-            buttonVisibility: visibility,
-          });
-          assert.deepEqual(Array.from(registered.keys()), expected, visibility);
-        } finally {
-          global.chrome = previousChrome;
-        }
+        await worker.syncButtonVisibilityRegistration({
+          buttonVisibility: visibility,
+        });
+        assert.deepEqual(Array.from(registered.keys()), expected, visibility);
       }
     },
   },
@@ -1851,10 +1824,9 @@ exports.tests = [
     async fn() {
       // An install migrating off the old checkbox reaches never without the reader opening
       // the options page, so the access the checkbox asked for has to be given back here.
-      const previousChrome = global.chrome;
       const removed = [];
 
-      global.chrome = {
+      const chrome = {
         permissions: {
           async contains() {
             return true;
@@ -1868,28 +1840,24 @@ exports.tests = [
           async unregisterContentScripts() {},
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        await helpers.syncButtonVisibilityRegistration({ inlineAutoShow: false });
-        await helpers.syncButtonVisibilityRegistration({
-          buttonVisibility: 'onInvocation',
-        });
-        assert.deepEqual(removed, [
-          ['http://*/*', 'https://*/*'],
-          ['http://*/*', 'https://*/*'],
-        ]);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      await worker.syncButtonVisibilityRegistration({ inlineAutoShow: false });
+      await worker.syncButtonVisibilityRegistration({
+        buttonVisibility: 'onInvocation',
+      });
+      assert.deepEqual(removed, [
+        ['http://*/*', 'https://*/*'],
+        ['http://*/*', 'https://*/*'],
+      ]);
     },
   },
   {
     name: 'keeps access to all sites for the all-pages choice',
     async fn() {
-      const previousChrome = global.chrome;
       let removed = false;
 
-      global.chrome = {
+      const chrome = {
         permissions: {
           async contains() {
             return true;
@@ -1907,15 +1875,12 @@ exports.tests = [
           async unregisterContentScripts() {},
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        await helpers.syncButtonVisibilityRegistration({
-          buttonVisibility: 'allPages',
-        });
-        assert.equal(removed, false);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      await worker.syncButtonVisibilityRegistration({
+        buttonVisibility: 'allPages',
+      });
+      assert.equal(removed, false);
     },
   },
   {
@@ -1923,10 +1888,9 @@ exports.tests = [
     async fn() {
       // The choice and the permission can disagree: Chrome lets the reader revoke access
       // from its own UI, which no longer reaches the options page.
-      const previousChrome = global.chrome;
       const unregistered = [];
 
-      global.chrome = {
+      const chrome = {
         permissions: {
           async contains() {
             return false;
@@ -1941,15 +1905,12 @@ exports.tests = [
           },
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        await helpers.syncButtonVisibilityRegistration({
-          buttonVisibility: 'allPages',
-        });
-        assert.deepEqual(unregistered, ['inline-translator-auto-show']);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      await worker.syncButtonVisibilityRegistration({
+        buttonVisibility: 'allPages',
+      });
+      assert.deepEqual(unregistered, ['inline-translator-auto-show']);
     },
   },
   {
@@ -2809,7 +2770,8 @@ exports.tests = [
       // added above the loop in runInvocationPlan fails here and nowhere else in this
       // suite. Deliberately not awaiting the returned promise before asserting.
       let openedSynchronously = false;
-      const running = helpers.runInvocationPlan(
+      const worker = helpers.createBackgroundWorker();
+      const running = worker.runInvocationPlan(
         helpers.planInvocation({ trigger: 'action' }),
         1,
         {
@@ -2830,9 +2792,8 @@ exports.tests = [
     async fn() {
       // Same constraint one level down: setOptions only restates the manifest default,
       // so awaiting it ahead of open() would spend the gesture for nothing.
-      const previousChrome = global.chrome;
       const calls = [];
-      global.chrome = {
+      const chrome = {
         sidePanel: {
           async open() {
             calls.push('open');
@@ -2842,12 +2803,9 @@ exports.tests = [
           },
         },
       };
-      try {
-        await helpers.ensureSidePanel(11);
-        assert.deepEqual(calls, ['open', 'setOptions']);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      const worker = helpers.createBackgroundWorker({ chrome });
+      await worker.ensureSidePanel(11);
+      assert.deepEqual(calls, ['open', 'setOptions']);
     },
   },
   {
@@ -3027,11 +2985,10 @@ exports.tests = [
       // ADR-0001: the panel opens only from inside the click's own task, and Button
       // Visibility can only be read asynchronously. Reading it first would forfeit the
       // gesture — silently, since Chrome simply refuses to open the panel.
-      const previousChrome = global.chrome;
       const calls = [];
       let releaseSettings = null;
 
-      global.chrome = {
+      const chrome = {
         storage: {
           local: {
             get() {
@@ -3044,30 +3001,27 @@ exports.tests = [
           },
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        const running = helpers.runInvocation('action', 9, {
-          openSidePanel: async (tabId) => calls.push(`openSidePanel:${tabId}`),
-          injectContentScripts: async () => calls.push('injectContentScripts'),
-          grantInlineTranslationAuthorization: async () =>
-            calls.push('grantInlineTranslationAuthorization'),
-          mountFloatingTranslateButton: async () =>
-            calls.push('mountFloatingTranslateButton'),
-        });
+      const running = worker.runInvocation('action', 9, {
+        openSidePanel: async (tabId) => calls.push(`openSidePanel:${tabId}`),
+        injectContentScripts: async () => calls.push('injectContentScripts'),
+        grantInlineTranslationAuthorization: async () =>
+          calls.push('grantInlineTranslationAuthorization'),
+        mountFloatingTranslateButton: async () =>
+          calls.push('mountFloatingTranslateButton'),
+      });
 
-        assert.deepEqual(calls, ['openSidePanel:9', 'readSettings']);
-        releaseSettings();
-        await running;
-        assert.deepEqual(calls, [
-          'openSidePanel:9',
-          'readSettings',
-          'injectContentScripts',
-          'grantInlineTranslationAuthorization',
-          'mountFloatingTranslateButton',
-        ]);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      assert.deepEqual(calls, ['openSidePanel:9', 'readSettings']);
+      releaseSettings();
+      await running;
+      assert.deepEqual(calls, [
+        'openSidePanel:9',
+        'readSettings',
+        'injectContentScripts',
+        'grantInlineTranslationAuthorization',
+        'mountFloatingTranslateButton',
+      ]);
     },
   },
   {
@@ -3075,10 +3029,9 @@ exports.tests = [
     async fn() {
       // The step is started before the plan runs, so the plan must adopt what is already
       // running rather than open a second panel.
-      const previousChrome = global.chrome;
       const calls = [];
 
-      global.chrome = {
+      const chrome = {
         storage: {
           local: {
             async get() {
@@ -3087,23 +3040,20 @@ exports.tests = [
           },
         },
       };
+      const worker = helpers.createBackgroundWorker({ chrome });
 
-      try {
-        await helpers.runInvocation('action', 2, {
-          openSidePanel: async () => calls.push('openSidePanel'),
-          injectContentScripts: async () => calls.push('injectContentScripts'),
-          grantInlineTranslationAuthorization: async () =>
-            calls.push('grantInlineTranslationAuthorization'),
-        });
+      await worker.runInvocation('action', 2, {
+        openSidePanel: async () => calls.push('openSidePanel'),
+        injectContentScripts: async () => calls.push('injectContentScripts'),
+        grantInlineTranslationAuthorization: async () =>
+          calls.push('grantInlineTranslationAuthorization'),
+      });
 
-        assert.deepEqual(calls, [
-          'openSidePanel',
-          'injectContentScripts',
-          'grantInlineTranslationAuthorization',
-        ]);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      assert.deepEqual(calls, [
+        'openSidePanel',
+        'injectContentScripts',
+        'grantInlineTranslationAuthorization',
+      ]);
     },
   },
   {
@@ -3121,7 +3071,8 @@ exports.tests = [
       };
 
       const settings = { buttonVisibility: 'onInvocation' };
-      await helpers.runInvocationPlan(
+      const worker = helpers.createBackgroundWorker();
+      await worker.runInvocationPlan(
         helpers.planInvocation({ trigger: 'command', settings }),
         7,
         handlers
@@ -3135,7 +3086,7 @@ exports.tests = [
       ]);
 
       calls.length = 0;
-      await helpers.runInvocationPlan(
+      await worker.runInvocationPlan(
         helpers.planInvocation({ trigger: 'action', settings }),
         7,
         handlers
@@ -3234,8 +3185,9 @@ exports.tests = [
       // the authorization did not land, carrying on would run it unauthorized, and the
       // reader has to be told their click did nothing.
       const sent = [];
+      const worker = helpers.createBackgroundWorker();
       await assert.rejects(
-        helpers.runInlineTranslationControl(9, 'start', async (tabId, step) => {
+        worker.runInlineTranslationControl(9, 'start', async (tabId, step) => {
           sent.push(`${step}:${tabId}`);
           throw new Error('Could not establish connection.');
         }),
@@ -3244,7 +3196,7 @@ exports.tests = [
       assert.deepEqual(sent, ['grantInlineTranslationAuthorization:9']);
 
       await assert.rejects(
-        helpers.runInlineTranslationControl(9, 'nonsense', async () => {}),
+        worker.runInlineTranslationControl(9, 'nonsense', async () => {}),
         /nonsense/
       );
     },
@@ -3255,41 +3207,34 @@ exports.tests = [
       // The content script answers whether it carried the instruction out, and it catches
       // its own throw to do so. A sender that read only the transport would report a
       // gesture the page declined as done, and the panel would render success.
-      const previousChrome = global.chrome;
-      global.chrome = {
-        tabs: {
-          async sendMessage() {
-            return { ok: false, error: { message: 'no page to authorize' } };
+      const refusingPage = helpers.createBackgroundWorker({
+        chrome: {
+          tabs: {
+            async sendMessage() {
+              return { ok: false, error: { message: 'no page to authorize' } };
+            },
           },
         },
-      };
-      try {
-        await assert.rejects(
-          helpers.sendInlineInstruction(5, 'grantInlineTranslationAuthorization'),
-          /no page to authorize/
-        );
-      } finally {
-        global.chrome = previousChrome;
-      }
+      });
+      await assert.rejects(
+        refusingPage.sendInlineInstruction(5, 'grantInlineTranslationAuthorization'),
+        /no page to authorize/
+      );
 
-      const silentChrome = { tabs: { async sendMessage() {} } };
-      global.chrome = silentChrome;
-      try {
-        await assert.rejects(
-          helpers.sendInlineInstruction(5, 'startInlineTranslation'),
-          /startInlineTranslation/
-        );
-      } finally {
-        global.chrome = previousChrome;
-      }
+      const silentPage = helpers.createBackgroundWorker({
+        chrome: { tabs: { async sendMessage() {} } },
+      });
+      await assert.rejects(
+        silentPage.sendInlineInstruction(5, 'startInlineTranslation'),
+        /startInlineTranslation/
+      );
     },
   },
   {
     name: 'stops a control at the step the page refuses, before it runs unauthorized',
     async fn() {
-      const previousChrome = global.chrome;
       const sent = [];
-      global.chrome = {
+      const chrome = {
         tabs: {
           async sendMessage(tabId, message) {
             sent.push(message.instruction);
@@ -3299,15 +3244,12 @@ exports.tests = [
           },
         },
       };
-      try {
-        await assert.rejects(
-          helpers.runInlineTranslationControl(5, 'start'),
-          /no page to authorize/
-        );
-        assert.deepEqual(sent, ['grantInlineTranslationAuthorization']);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      const worker = helpers.createBackgroundWorker({ chrome });
+      await assert.rejects(
+        worker.runInlineTranslationControl(5, 'start'),
+        /no page to authorize/
+      );
+      assert.deepEqual(sent, ['grantInlineTranslationAuthorization']);
     },
   },
   {
@@ -3346,7 +3288,8 @@ exports.tests = [
       // alone. Nothing in the extension yet produces such a plan for an invocation, but the
       // runner must honour one when Button Visibility starts suppressing the button.
       const calls = [];
-      await helpers.runInvocationPlan(
+      const worker = helpers.createBackgroundWorker();
+      await worker.runInvocationPlan(
         { steps: ['injectContentScripts', 'grantInlineTranslationAuthorization'] },
         4,
         {
@@ -3372,7 +3315,13 @@ exports.tests = [
       // the reader as well, which the tests below cover, but no step's failure — nor the
       // report of it — may stop the steps after it.
       const attempted = [];
-      await helpers.runInvocationPlan(
+      // The start step's failure is reported, and the report has somewhere to go here.
+      // What it says is the next check's business; what matters to this one is that no
+      // step's failure stopped the step after it, report included.
+      const worker = helpers.createBackgroundWorker({
+        chrome: createStateBroadcastChrome([]),
+      });
+      await worker.runInvocationPlan(
         helpers.planInvocation({
           trigger: 'command',
           settings: { buttonVisibility: 'onInvocation' },
@@ -3413,57 +3362,55 @@ exports.tests = [
       // The start step is the one the reader pressed for: on a tab out of reach its
       // silence is indistinguishable from a translation about to appear. The steps that
       // prepare the page are not what they pressed, so those stay silent.
-      const previousChrome = global.chrome;
       const broadcasts = [];
-      global.chrome = createStateBroadcastChrome(broadcasts);
+      const worker = helpers.createBackgroundWorker({
+        chrome: createStateBroadcastChrome(broadcasts),
+      });
 
-      try {
-        await helpers.runInvocationPlan(
-          helpers.planInvocation({
-            trigger: 'command',
-            settings: { buttonVisibility: 'onInvocation' },
-          }),
-          4201,
-          {
-            openSidePanel: async () => {},
-            injectContentScripts: async () => {
-              throw new Error('Cannot access contents of the page');
-            },
-            grantInlineTranslationAuthorization: async () => {
-              throw new Error('Could not establish connection');
-            },
-            mountFloatingTranslateButton: async () => {
-              throw new Error('Could not establish connection');
-            },
-            startInlineTranslation: async () => {
-              throw new Error(
-                'Could not establish connection. Receiving end does not exist.'
-              );
-            },
-          }
-        );
+      await worker.runInvocationPlan(
+        helpers.planInvocation({
+          trigger: 'command',
+          settings: { buttonVisibility: 'onInvocation' },
+        }),
+        4201,
+        {
+          openSidePanel: async () => {},
+          injectContentScripts: async () => {
+            throw new Error('Cannot access contents of the page');
+          },
+          grantInlineTranslationAuthorization: async () => {
+            throw new Error('Could not establish connection');
+          },
+          mountFloatingTranslateButton: async () => {
+            throw new Error('Could not establish connection');
+          },
+          startInlineTranslation: async () => {
+            throw new Error(
+              'Could not establish connection. Receiving end does not exist.'
+            );
+          },
+        }
+      );
 
-        assert.equal(broadcasts.length, 1);
-        const [update] = broadcasts;
-        assert.equal(update.type, 'STATE_UPDATED');
-        assert.equal(update.tabId, 4201);
-        assert.match(
-          update.state.inlineTranslationError.message,
-          /Click the extension icon on this tab/
-        );
-        // Side Panel Translation's error area is not where this belongs.
-        assert.equal(update.state.error, undefined);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      assert.equal(broadcasts.length, 1);
+      const [update] = broadcasts;
+      assert.equal(update.type, 'STATE_UPDATED');
+      assert.equal(update.tabId, 4201);
+      assert.match(
+        update.state.inlineTranslationError.message,
+        /Click the extension icon on this tab/
+      );
+      // Side Panel Translation's error area is not where this belongs.
+      assert.equal(update.state.error, undefined);
     },
   },
   {
     name: 'clears a reported start failure once a later run on the tab starts',
     async fn() {
-      const previousChrome = global.chrome;
       const broadcasts = [];
-      global.chrome = createStateBroadcastChrome(broadcasts);
+      const worker = helpers.createBackgroundWorker({
+        chrome: createStateBroadcastChrome(broadcasts),
+      });
 
       const plan = { steps: ['startInlineTranslation'] };
       const refusing = {
@@ -3473,21 +3420,17 @@ exports.tests = [
       };
       const accepting = { startInlineTranslation: async () => {} };
 
-      try {
-        await helpers.runInvocationPlan(plan, 4202, refusing);
-        assert.equal(broadcasts.length, 1);
+      await worker.runInvocationPlan(plan, 4201, refusing);
+      assert.equal(broadcasts.length, 1);
 
-        await helpers.runInvocationPlan(plan, 4202, accepting);
-        assert.equal(broadcasts.length, 2);
-        assert.equal(broadcasts[1].state.inlineTranslationError, null);
+      await worker.runInvocationPlan(plan, 4201, accepting);
+      assert.equal(broadcasts.length, 2);
+      assert.equal(broadcasts[1].state.inlineTranslationError, null);
 
-        // Nothing left to clear, so a run that starts on a tab carrying no failure says
-        // nothing at all.
-        await helpers.runInvocationPlan(plan, 4202, accepting);
-        assert.equal(broadcasts.length, 2);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      // Nothing left to clear, so a run that starts on a tab carrying no failure says
+      // nothing at all.
+      await worker.runInvocationPlan(plan, 4201, accepting);
+      assert.equal(broadcasts.length, 2);
     },
   },
   {
@@ -3497,9 +3440,10 @@ exports.tests = [
       // and its injection step succeeding is the tab answering it — so the message is
       // withdrawn without waiting for a run the reader has not started yet. On a page no
       // click can grant, injection fails too and the message stands.
-      const previousChrome = global.chrome;
       const broadcasts = [];
-      global.chrome = createStateBroadcastChrome(broadcasts);
+      const worker = helpers.createBackgroundWorker({
+        chrome: createStateBroadcastChrome(broadcasts),
+      });
 
       const grantedByClick = {
         openSidePanel: async () => {},
@@ -3522,27 +3466,23 @@ exports.tests = [
         },
       };
 
-      try {
-        await helpers.runInvocationPlan(
-          { steps: ['startInlineTranslation'] },
-          4204,
-          refusedStart
-        );
-        assert.equal(broadcasts.length, 1);
+      await worker.runInvocationPlan(
+        { steps: ['startInlineTranslation'] },
+        4201,
+        refusedStart
+      );
+      assert.equal(broadcasts.length, 1);
 
-        await helpers.runInvocationPlan(
-          actionInvocation,
-          4204,
-          clickOnAPageChromeKeepsToItself
-        );
-        assert.equal(broadcasts.length, 1);
+      await worker.runInvocationPlan(
+        actionInvocation,
+        4201,
+        clickOnAPageChromeKeepsToItself
+      );
+      assert.equal(broadcasts.length, 1);
 
-        await helpers.runInvocationPlan(actionInvocation, 4204, grantedByClick);
-        assert.equal(broadcasts.length, 2);
-        assert.equal(broadcasts[1].state.inlineTranslationError, null);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      await worker.runInvocationPlan(actionInvocation, 4201, grantedByClick);
+      assert.equal(broadcasts.length, 2);
+      assert.equal(broadcasts[1].state.inlineTranslationError, null);
     },
   },
   {
@@ -3551,24 +3491,21 @@ exports.tests = [
       // The field says Inline Translation could not be reached on this tab. A control the
       // tab has just carried out disproves that, whichever of the three it was, and the
       // reader has one more home for these controls than the shortcut.
-      const previousChrome = global.chrome;
       const broadcasts = [];
-      global.chrome = createStateBroadcastChrome(broadcasts);
+      const worker = helpers.createBackgroundWorker({
+        chrome: createStateBroadcastChrome(broadcasts),
+      });
 
-      try {
-        await helpers.runInvocationPlan({ steps: ['startInlineTranslation'] }, 4203, {
-          startInlineTranslation: async () => {
-            throw new Error('Could not establish connection.');
-          },
-        });
-        assert.equal(broadcasts.length, 1);
+      await worker.runInvocationPlan({ steps: ['startInlineTranslation'] }, 4201, {
+        startInlineTranslation: async () => {
+          throw new Error('Could not establish connection.');
+        },
+      });
+      assert.equal(broadcasts.length, 1);
 
-        await helpers.runInlineTranslationControl(4203, 'start', async () => {});
-        assert.equal(broadcasts.length, 2);
-        assert.equal(broadcasts[1].state.inlineTranslationError, null);
-      } finally {
-        global.chrome = previousChrome;
-      }
+      await worker.runInlineTranslationControl(4201, 'start', async () => {});
+      assert.equal(broadcasts.length, 2);
+      assert.equal(broadcasts[1].state.inlineTranslationError, null);
     },
   },
   {
