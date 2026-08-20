@@ -138,8 +138,6 @@ const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
 const INLINE_RUNTIME_CORRELATION_TTL_MS = 5 * 60 * 1000;
 const INLINE_RUNTIME_CORRELATION_LIMIT = 1000;
 const INLINE_RUNTIME_CORRELATION_STORAGE_KEY = 'inlineRuntimeCorrelations:v1';
-const inlineRuntimeCorrelations = new Map();
-let inlineRuntimeCorrelationMutation = Promise.resolve();
 
 function normalizeInlineRuntimeCorrelationEntries(value) {
   const normalized = Object.create(null);
@@ -172,11 +170,6 @@ const TONE_INSTRUCTIONS = {
   natural: 'Use natural, fluent tone.',
   formal: 'Use formal and polite tone.',
 };
-
-// Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
-const stateByTab = new Map();
-const activeTranslationsByTab = new Map();
-let buttonVisibilityRegistrationSync = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -246,18 +239,6 @@ function mergeVisibleBatchSettingsSnapshot(currentSettings, settingsSnapshot = n
   return merged;
 }
 
-async function getSettings() {
-  const stored = await chrome.storage.local.get(['settings', 'openai_api_key']);
-  // Backward/compat: allow apiKey in openai_api_key
-  const settings = stored.settings || {};
-  const apiKey = settings.apiKey || stored.openai_api_key || '';
-  return mergeSettings({ ...settings, apiKey });
-}
-
-async function saveSettings(settings) {
-  await chrome.storage.local.set({ settings: mergeSettings(settings) });
-}
-
 function copyAllowedFields(value, keys) {
   const result = {};
   if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
@@ -312,19 +293,6 @@ function createPublicSettingsUsed(settings) {
   return copyAllowedFields(settings, PUBLIC_SETTINGS_USED_KEYS);
 }
 
-function setTabState(tabId, patch) {
-  const prev = stateByTab.get(tabId) || { status: 'idle' };
-  const next = sanitizePublicTabState({
-    ...prev,
-    ...patch,
-    updatedAt: nowIso(),
-  });
-  stateByTab.set(tabId, next);
-  chrome.runtime
-    .sendMessage({ type: 'STATE_UPDATED', tabId, state: next })
-    .catch(() => {});
-}
-
 function safeError(err) {
   if (!err) return { message: 'Unknown error' };
   if (typeof err === 'string') return { message: err };
@@ -336,38 +304,6 @@ function safeError(err) {
   // the panel's to decide, and only the panel has the words. See extension/sidepanel-failure.js.
   if (typeof err.code === 'string' && err.code) safe.code = err.code;
   return safe;
-}
-
-function createRuntimeDiagnosticId(startedAt, cryptoApi = globalThis.crypto) {
-  const suffix = typeof cryptoApi?.randomUUID === 'function'
-    ? cryptoApi.randomUUID()
-    : Math.random().toString(36).slice(2, 12);
-  return `runtime-${startedAt}-${suffix}`;
-}
-
-// ADR-0001. Applied on install and on startup, and never re-enabled from a translation path.
-async function releaseActionClickToExtension() {
-  try {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
-  } catch {}
-}
-
-async function ensureSidePanel(tabId) {
-  // ADR-0001: open() has to come before any other await. Chrome only honours it while
-  // the user gesture that started this invocation is still live, and awaiting anything
-  // first forfeits it. setOptions merely reasserts the manifest default, so it can wait.
-  // Both calls fail silently on older versions or where the panel is unsupported.
-  try {
-    await chrome.sidePanel.open({ tabId });
-  } catch {}
-
-  try {
-    await chrome.sidePanel.setOptions({
-      tabId,
-      path: 'sidepanel.html',
-      enabled: true,
-    });
-  } catch {}
 }
 
 function getInlineContentScriptFiles() {
@@ -465,46 +401,9 @@ function classifyContentScriptFailure(failure, url = '') {
   };
 }
 
-async function getTabUrl(tabId) {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    return typeof tab?.url === 'string' ? tab.url : '';
-  } catch {
-    return '';
-  }
-}
-
-async function ensureContentScript(tabId) {
-  // Programmatic injection: requires "scripting" + "activeTab" (or host permissions)
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: getInlineContentScriptFiles(),
-    });
-  } catch (e) {
-    // If already injected, executeScript can still succeed; on some pages it may fail (e.g., chrome://)
-    throw e;
-  }
-}
-
 // Steps the content script carries out. The background worker decides; the content script
 // executes, so the step name is also the instruction sent over the wire.
 const INLINE_INSTRUCTION_MESSAGE = 'RUN_INLINE_INSTRUCTION';
-
-// The content script answers whether it carried the instruction out, and an instruction it
-// refused is as much a failure as one that never arrived — a caller told otherwise would
-// report a gesture that did nothing as done.
-async function sendInlineInstruction(tabId, instruction) {
-  const response = await chrome.tabs.sendMessage(tabId, {
-    type: INLINE_INSTRUCTION_MESSAGE,
-    instruction,
-  });
-  if (!response?.ok) {
-    throw new Error(
-      response?.error?.message || `The page could not carry out ${instruction}`
-    );
-  }
-}
 
 const INVOCATION_STEPS = Object.freeze({
   OPEN_SIDE_PANEL: 'openSidePanel',
@@ -539,27 +438,6 @@ function planInlineTranslationControl(control) {
     ? [INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION, step]
     : [];
   return Object.freeze({ control, steps: Object.freeze(steps) });
-}
-
-// Unlike an invocation, whose steps are independent, a control is a single gesture: a
-// refused step stops the rest, because carrying on would run the control unauthorized and
-// leave the reader with a click that silently did nothing.
-async function runInlineTranslationControl(
-  tabId,
-  control,
-  send = sendInlineInstruction
-) {
-  const { steps } = planInlineTranslationControl(control);
-  if (!steps.length) {
-    throw new Error(`Unknown inline translation control: ${control}`);
-  }
-  for (const step of steps) {
-    await send(tabId, step);
-  }
-  // A control the tab has just carried out disproves a recorded failure to reach it, and
-  // the Inline Translation Shortcut is only one of three ways into this feature. The
-  // panel reports the control's own outcome itself, from the click it is still holding.
-  clearInlineTranslationError(tabId);
 }
 
 const UNREACHABLE_CONTENT_SCRIPT_PATTERN =
@@ -634,116 +512,6 @@ function getInlineInstructions(plan) {
   );
 }
 
-function getDefaultInvocationHandlers() {
-  return {
-    [INVOCATION_STEPS.OPEN_SIDE_PANEL]: ensureSidePanel,
-    [INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS]: ensureContentScript,
-    [INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION]: (tabId) =>
-      sendInlineInstruction(
-        tabId,
-        INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION
-      ),
-    [INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON]: (tabId) =>
-      sendInlineInstruction(
-        tabId,
-        INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON
-      ),
-    [INVOCATION_STEPS.START_INLINE_TRANSLATION]: (tabId) =>
-      sendInlineInstruction(tabId, INVOCATION_STEPS.START_INLINE_TRANSLATION),
-  };
-}
-
-// What an invocation tells the reader, which is one step's outcome and no other's.
-//
-// The steps ahead of it prepare the page, and the reader is not waiting on any of them: a
-// Floating Translate Button that failed to mount is not what the Inline Translation
-// Shortcut was pressed for, and saying so would bury what was. Starting Inline Translation
-// is what they pressed for, and on a chrome:// tab, a PDF, or a page the extension cannot
-// reach, its silence is indistinguishable from a translation about to appear.
-//
-// The failure travels in Inline Translation's own field of the tab state, which reaches
-// the Inline Translation Section over the STATE_UPDATED broadcast every change already
-// sends. It is not `state.error`: that one is Side Panel Translation's.
-function recordInvocationStepOutcome(tabId, step, failure) {
-  // What a recorded failure asks the reader for is a click on the extension icon, and this
-  // is the step that click makes succeed. So its success speaks, by withdrawing a message
-  // whose reason has been put right; its failure stays silent like every other step's,
-  // which is what keeps the message standing on a page no click can grant.
-  if (step === INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS) {
-    if (!failure) clearInlineTranslationError(tabId);
-    return;
-  }
-  if (step !== INVOCATION_STEPS.START_INLINE_TRANSLATION) return;
-  if (failure) {
-    setTabState(tabId, {
-      inlineTranslationError: {
-        message: describeInlineTranslationControlFailure(failure),
-      },
-    });
-    return;
-  }
-  clearInlineTranslationError(tabId);
-}
-
-// A run that started leaves nothing for an earlier failure to still be true of. The guard
-// keeps a tab that was never told anything from being sent an update saying so.
-function clearInlineTranslationError(tabId) {
-  if (!stateByTab.get(tabId)?.inlineTranslationError) return;
-  setTabState(tabId, { inlineTranslationError: null });
-}
-
-// Two properties matter here and both are covered by tests.
-//
-// The first step must run before this function awaits anything, because ADR-0001's
-// gesture window is spent by the first await on the path from the listener to
-// chrome.sidePanel.open(). Adding an await above the loop is the regression to fear.
-// `runInvocation` below now starts that step itself, and holds the same line; keeping the
-// property here as well costs nothing and keeps a plan run on its own honest.
-//
-// Steps are otherwise independent: content script injection legitimately fails on pages
-// extensions cannot touch, and that must not stop a command invocation from translating.
-async function runInvocationPlan(
-  plan,
-  tabId,
-  handlers = getDefaultInvocationHandlers()
-) {
-  for (const step of plan?.steps || []) {
-    const handler = handlers?.[step];
-    if (!handler) continue;
-    let failure = null;
-    try {
-      await handler(tabId);
-    } catch (error) {
-      failure = error || new Error('Unknown error');
-    }
-    // Independence covers the report as well: a worker that cannot record the outcome
-    // must not cost the invocation the steps that were still to come.
-    try {
-      recordInvocationStepOutcome(tabId, step, failure);
-    } catch {}
-  }
-}
-
-// An invocation's plan needs the reader's Button Visibility choice, which only storage can
-// answer and only asynchronously — yet ADR-0001's gesture is spent by the first await ahead
-// of chrome.sidePanel.open(). So the panel-opening step is started here, in the event's own
-// task, and the plan that follows adopts it instead of opening a second panel.
-//
-// Only the two invocation triggers belong here, because the panel opens before the plan is
-// known. A page load has no gesture to spend and asks the worker for its instructions.
-async function runInvocation(
-  trigger,
-  tabId,
-  handlers = getDefaultInvocationHandlers()
-) {
-  const openedSidePanel = startSidePanelStep(handlers, tabId);
-  const settings = await getSettings();
-  return runInvocationPlan(planInvocation({ trigger, settings }), tabId, {
-    ...handlers,
-    [INVOCATION_STEPS.OPEN_SIDE_PANEL]: () => openedSidePanel,
-  });
-}
-
 function startSidePanelStep(handlers, tabId) {
   const handler = handlers?.[INVOCATION_STEPS.OPEN_SIDE_PANEL];
   const started = (async () => handler?.(tabId))();
@@ -751,16 +519,6 @@ function startSidePanelStep(handlers, tabId) {
   // promise handled now keeps that gap from being reported as an unhandled rejection.
   started.catch(() => {});
   return started;
-}
-
-async function extractArticle(tabId) {
-  const resp = await chrome.tabs.sendMessage(tabId, {
-    type: 'EXTRACT_ARTICLE',
-  });
-  if (!resp || !resp.ok) {
-    throw new Error(resp?.error?.message || 'Failed to extract article');
-  }
-  return resp.data;
 }
 
 function assertFullPageTranslationBudget(
@@ -1037,47 +795,6 @@ function normalizeVisibleBlockBatchRecords(records) {
   return normalized;
 }
 
-async function openaiTranslateChunk({
-  apiKey,
-  model,
-  reasoningEffort = DEFAULT_SETTINGS.reasoningEffort,
-  instructions,
-  input,
-  textFormat = null,
-  maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
-}) {
-  const body = {
-    model,
-    instructions,
-    input,
-    max_output_tokens: normalizeMaxOutputTokens(maxOutputTokens),
-    store: false,
-  };
-  if (reasoningEffort) {
-    body.reasoning = { effort: reasoningEffort };
-  }
-  if (textFormat) {
-    body.text = { format: textFormat };
-  }
-
-  const res = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  const json = await res.json().catch(() => null);
-  if (!res.ok) {
-    const msg = json?.error?.message || `OpenAI API error (${res.status})`;
-    throw new Error(msg);
-  }
-
-  return openAiResponse.parseCompletedResponse(json);
-}
-
 // The four codes `validateAndRehydrateChunk` raises when an answer breaks the token contract.
 // They are listed rather than matched on a `markdown.token_` prefix because the prefix is
 // wider than this: `token_parent_changed` belongs to Inline Translation's validator, which
@@ -1090,403 +807,8 @@ const FULL_PAGE_TOKEN_ERROR_CODES = new Set([
   'markdown.token_nesting_invalid',
 ]);
 
-// A Translation Chunk gets one recovery, and the first failure to happen owns it (ADR-0005).
-// `recoveryDepth` is that budget: the split sets it on the children it makes, a repair sets it
-// on the retry, and either way the second failure of any kind ends the chunk. Two independent
-// budgets would let an over-long chunk split into N children and then repair each of them,
-// which is 2N billed attempts for a chunk the reader asked to translate once.
-async function translateFullPageChunk(chunk, settings, repair = null) {
-  try {
-    const output = await openaiTranslateChunk({
-      apiKey: settings.apiKey,
-      model: settings.model,
-      reasoningEffort: settings.reasoningEffort,
-      instructions: buildInstructions(settings, repair),
-      input: chunk.template,
-      maxOutputTokens: getFullPageMaxOutputTokens(chunk.template),
-    });
-    return fullPageMarkdown.validateAndRehydrateChunk(output, chunk);
-  } catch (error) {
-    if ((Number(chunk.recoveryDepth) || 0) >= 1) throw error;
-    if (FULL_PAGE_TOKEN_ERROR_CODES.has(error?.code)) {
-      return translateFullPageChunk({ ...chunk, recoveryDepth: 1 }, settings, {
-        previousErrorCode: error.code,
-      });
-    }
-    if (error?.code !== 'response.incomplete.max_output_tokens') {
-      throw error;
-    }
-    const children = fullPageMarkdown.splitChunkForRecovery(chunk);
-    const translated = [];
-    for (const child of children) {
-      translated.push(await translateFullPageChunk(child, settings));
-    }
-    return translated.join('\n\n');
-  }
-}
-
-async function mutateInlineRuntimeCorrelations(mutator) {
-  const operation = inlineRuntimeCorrelationMutation.catch(() => {}).then(async () => {
-    const session = globalThis.chrome?.storage?.session;
-    const storedValue = session
-      ? (await session.get([INLINE_RUNTIME_CORRELATION_STORAGE_KEY]))[INLINE_RUNTIME_CORRELATION_STORAGE_KEY] || {}
-      : Object.fromEntries(inlineRuntimeCorrelations);
-    const stored = normalizeInlineRuntimeCorrelationEntries(storedValue);
-    const result = await mutator(stored);
-    if (session) await session.set({ [INLINE_RUNTIME_CORRELATION_STORAGE_KEY]: stored });
-    else {
-      inlineRuntimeCorrelations.clear();
-      for (const [token, entry] of Object.entries(stored)) inlineRuntimeCorrelations.set(token, entry);
-    }
-    return result;
-  });
-  inlineRuntimeCorrelationMutation = operation;
-  return operation;
-}
-
-async function issueInlineRuntimeCorrelations(items, context = {}) {
-  return mutateInlineRuntimeCorrelations((entries) => {
-    const now = Date.now();
-    for (const [token, entry] of Object.entries(entries)) {
-      if (entry.expiresAt <= now) delete entries[token];
-    }
-    if (Object.keys(entries).length + items.length > INLINE_RUNTIME_CORRELATION_LIMIT) {
-      throw new Error('Inline runtime correlation capacity exceeded');
-    }
-    const issued = new Map();
-    for (const { id, metadata } of items) {
-      const token = createInlineRuntimeCorrelationToken();
-      entries[token] = {
-        ...metadata,
-        tabId: Number.isInteger(context.tabId) ? context.tabId : null,
-        operationId: context.operationId ?? null,
-        expiresAt: now + INLINE_RUNTIME_CORRELATION_TTL_MS,
-      };
-      issued.set(id, token);
-    }
-    return issued;
-  });
-}
-
 function createInlineRuntimeCorrelationToken() {
   return inlineDiagnosticsProtocol.createUuidV4();
-}
-
-async function consumeInlineRuntimeCorrelations(outcomes, releaseTokens, context = {}) {
-  return mutateInlineRuntimeCorrelations((entries) => {
-    const now = Date.now();
-    const resolved = [];
-    const tokens = new Set();
-    const validated = [];
-    const requested = [
-      ...outcomes.map((outcome) => ({ token: outcome?.correlationToken, outcome })),
-      ...releaseTokens.map((token) => ({ token, outcome: null })),
-    ];
-    for (const item of requested) {
-      const token = String(item.token || '');
-      const entry = Object.hasOwn(entries, token) ? entries[token] : null;
-      if (
-        !token || tokens.has(token) || !entry || entry.expiresAt <= now || entry.reservedAt ||
-        entry.tabId !== (Number.isInteger(context.tabId) ? context.tabId : null) ||
-        entry.operationId !== (context.operationId ?? null)
-      ) return null;
-      tokens.add(token);
-      validated.push({ token, outcome: item.outcome, entry });
-    }
-    if (validated.some(({ entry }) => entry.runId !== validated[0].entry.runId)) return null;
-    for (const item of validated) {
-      if (item.outcome) {
-        item.entry.reservedAt = now;
-        resolved.push(item);
-      } else delete entries[item.token];
-    }
-    return resolved;
-  });
-}
-
-async function finalizeInlineRuntimeCorrelations(resolved, persisted) {
-  return mutateInlineRuntimeCorrelations((entries) => {
-    for (const { token } of resolved) {
-      if (persisted) delete entries[token];
-      else if (entries[token]) delete entries[token].reservedAt;
-    }
-  });
-}
-
-async function translateVisibleBlockBatch(
-  records,
-  settingsSnapshot = null,
-  options = {}
-) {
-  const startedAtMs = Date.now();
-  const runId = `run-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
-  let diagnosticsPersisted = true;
-  // Named by the failure diagnostics below, which run after the request that would have
-  // reported them itself.
-  let requestedModel = '';
-  let requestedCount = 0;
-
-  try {
-    const normalized = normalizeVisibleBlockBatchRecords(records);
-    requestedCount = normalized.length;
-
-    if (!normalized.length) {
-      return [];
-    }
-
-    const settings = mergeVisibleBatchSettingsSnapshot(
-      await getSettings(),
-      settingsSnapshot
-    );
-    requestedModel = settings.model;
-    if (!settings.apiKey) {
-      throw new Error('OpenAI API key is not set. Open Options and paste your key.');
-    }
-    const preflight = await translationDiagnostics.persistRun(chrome, {
-      runId,
-      startedAt: new Date(startedAtMs).toISOString(),
-      model: settings.model,
-      targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-      outcome: 'interrupted',
-      summary: { requested: normalized.length },
-      blocks: [],
-    });
-    diagnosticsPersisted = preflight.persisted;
-
-    async function requestAndValidate(batch) {
-      const modelRecords = batch.map((record) => ({
-        id: record.id,
-        template: record.template,
-        atoms: record.atoms,
-        repair: record.repair || null,
-      }));
-      const output = await openaiTranslateChunk({
-        apiKey: settings.apiKey,
-        model: settings.model,
-        reasoningEffort: settings.reasoningEffort,
-        instructions: buildBlockInstructions(settings),
-        input: JSON.stringify({ records: modelRecords }),
-        textFormat: buildBlockResponseFormat(),
-        maxOutputTokens: getBlockBatchMaxOutputTokens(
-          batch.reduce((sum, record) => sum + getBlockRecordCost(record), 0)
-        ),
-      });
-      return translationValidation.validateBlockResponse(output, batch, {
-        targetLanguage: settings.targetLanguage,
-      }).records;
-    }
-
-    const initial = await requestAndValidate(normalized);
-    const terminalById = new Map();
-    const initialById = new Map(initial.map((result) => [result.id, result]));
-    const repairs = [];
-    for (const result of initial) {
-      const decision = translationPolicy.decideBlockDisposition(result, 1);
-      if (decision.disposition === 'retry') {
-        const source = normalized.find((record) => record.id === result.id);
-        repairs.push({
-          ...source,
-          repair: { attempt: 1, previousErrorCode: decision.terminalCode },
-        });
-      } else {
-        terminalById.set(result.id, {
-          result,
-          decision,
-          attemptCount: 1,
-          timeline: [{
-            stage: 'initial_validation',
-            disposition: decision.disposition,
-            codes: [decision.terminalCode].filter(Boolean),
-          }],
-        });
-      }
-    }
-    if (repairs.length) {
-      try {
-        const repaired = await requestAndValidate(repairs);
-        for (const result of repaired) {
-          const initialResult = initialById.get(result.id);
-          const initialDecision = translationPolicy.decideBlockDisposition(initialResult, 1);
-          const decision = translationPolicy.decideBlockDisposition(result, 2);
-          terminalById.set(result.id, {
-            result,
-            decision,
-            attemptCount: 2,
-            timeline: [
-              { stage: 'initial_validation', disposition: 'retry', codes: [initialDecision.terminalCode].filter(Boolean) },
-              { stage: 'repair_validation', disposition: decision.disposition, codes: [decision.terminalCode].filter(Boolean) },
-            ],
-          });
-        }
-      } catch (error) {
-        const repairCode = String(error?.code || '').startsWith('protocol.')
-          ? error.code
-          : 'runtime.repair_request_failed';
-        for (const repair of repairs) {
-          const initialResult = initialById.get(repair.id);
-          const initialDecision = translationPolicy.decideBlockDisposition(initialResult, 1);
-          terminalById.set(repair.id, {
-            result: initialResult,
-            decision: {
-              disposition: 'reject',
-              terminalCode: repairCode,
-              messageKey: 'repair_request_failed',
-            },
-            attemptCount: 2,
-            timeline: [
-              { stage: 'initial_validation', disposition: 'retry', codes: [initialDecision.terminalCode].filter(Boolean) },
-              { stage: 'repair_validation', disposition: 'reject', codes: [repairCode] },
-            ],
-          });
-        }
-      }
-    }
-    const results = normalized.map((record) => {
-      const terminal = terminalById.get(record.id);
-      const apply = terminal.decision.disposition !== 'reject';
-      return {
-        id: record.id,
-        disposition: terminal.decision.disposition,
-        ...(apply ? { template: terminal.result.template } : {}),
-        terminalCode: terminal.decision.terminalCode,
-        messageKey: terminal.decision.messageKey,
-        attemptCount: terminal.attemptCount,
-        diagnostic: {
-          structure: terminal.result.structure,
-          quality: terminal.result.quality,
-          timeline: terminal.timeline,
-        },
-      };
-    });
-    const finalOutcome = results.some((result) => result.disposition === 'reject')
-      ? 'failed'
-      : results.some((result) => result.disposition === 'apply_with_warning')
-        ? 'partial'
-        : 'done';
-    const finalSummary = {
-      requested: results.length,
-      translated: results.filter((result) => result.disposition === 'apply').length,
-      translatedWithWarning: results.filter((result) => result.disposition === 'apply_with_warning').length,
-      failed: results.filter((result) => result.disposition === 'reject').length,
-      repairs: results.filter((result) => result.attemptCount === 2).length,
-    };
-    async function persistCompactFinal() {
-      const persistence = await translationDiagnostics.persistRun(chrome, {
-        runId,
-        startedAt: new Date(startedAtMs).toISOString(),
-        finishedAt: new Date().toISOString(),
-        extensionVersion: chrome.runtime?.getManifest?.().version || '',
-        model: settings.model,
-        targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-        outcome: finalOutcome,
-        summary: finalSummary,
-        blocks: [],
-      });
-      if (!persistence.persisted) await translationDiagnostics.discardRun(chrome, runId);
-      return persistence;
-    }
-    const correlationsById = new Map();
-    const normalizedById = new Map(normalized.map((record) => [record.id, record]));
-    try {
-      const correlationEntries = await Promise.all(results.map(async (result) => {
-        const record = normalizedById.get(result.id);
-        const fingerprints = await translationDiagnostics.fingerprintBlock(
-          chrome,
-          record?.template,
-          record?.contract
-        );
-        return [result.id, {
-          runId,
-          diagnosticId: `${runId}/${result.id}`,
-          ...fingerprints,
-          extensionVersion: chrome.runtime?.getManifest?.().version || '',
-          model: settings.model,
-          targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-        }];
-      }));
-      for (const [id, correlation] of correlationEntries) correlationsById.set(id, correlation);
-    const problemResults = results.filter(
-      (result) => result.attemptCount === 2 || result.disposition !== 'apply'
-    );
-    const diagnosticBlocks = problemResults.map((result) => {
-      const correlation = correlationsById.get(result.id) || {};
-      return {
-        diagnosticId: correlation.diagnosticId,
-        sourceFingerprint: correlation.sourceFingerprint,
-        contractFingerprint: correlation.contractFingerprint,
-        terminalCode: result.terminalCode,
-        terminalDisposition: result.disposition,
-        attemptCount: result.attemptCount,
-        structure: result.diagnostic.structure,
-        quality: result.diagnostic.quality,
-        timeline: result.diagnostic.timeline,
-      };
-    });
-      const persistence = await translationDiagnostics.persistRun(chrome, {
-      runId,
-      startedAt: new Date(startedAtMs).toISOString(),
-      finishedAt: new Date().toISOString(),
-      extensionVersion: chrome.runtime?.getManifest?.().version || '',
-      model: settings.model,
-      targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-      outcome: finalOutcome,
-      summary: finalSummary,
-        blocks: diagnosticBlocks,
-      });
-      diagnosticsPersisted = persistence.persisted;
-      if (!persistence.persisted) await persistCompactFinal();
-    } catch {
-      // Diagnostics must never change an otherwise valid translation result.
-      await persistCompactFinal();
-      diagnosticsPersisted = false;
-    }
-    let issuedTokens = new Map();
-    if (diagnosticsPersisted) {
-      try {
-        issuedTokens = await issueInlineRuntimeCorrelations(
-          results
-            .filter((result) => correlationsById.has(result.id))
-            .map((result) => ({ id: result.id, metadata: correlationsById.get(result.id) })),
-          options.correlationContext
-        );
-      } catch {
-        diagnosticsPersisted = false;
-      }
-    }
-    return results.map(({ diagnostic, ...result }) => ({
-      ...result,
-      ...(issuedTokens.has(result.id)
-        ? { correlationToken: issuedTokens.get(result.id) }
-        : {}),
-      ...(!diagnosticsPersisted ? { diagnosticsUnavailable: true } : {}),
-    }));
-  } catch (error) {
-    await translationDiagnostics.persistRun(chrome, {
-      runId,
-      startedAt: new Date(startedAtMs).toISOString(),
-      finishedAt: new Date().toISOString(),
-      model: requestedModel,
-      outcome: 'failed',
-      summary: { requested: requestedCount, failed: requestedCount },
-      blocks: [{
-        diagnosticId: `${runId}/request`,
-        terminalCode: error?.code || 'runtime.request_failed',
-        terminalDisposition: 'reject',
-        attemptCount: 1,
-        timeline: [{
-          stage: 'initial_validation',
-          disposition: 'reject',
-          codes: [error?.code || 'runtime.request_failed'],
-        }],
-      }],
-    });
-    throw error;
-  }
-}
-
-async function hasAllSitesAccess() {
-  if (!chrome.permissions?.contains) return false;
-  return chrome.permissions.contains({ origins: ALL_SITES_ORIGINS });
 }
 
 function getAllPagesContentScript() {
@@ -1504,277 +826,1025 @@ function isDuplicateInlineContentScriptError(error) {
   );
 }
 
-async function getRegisteredAllPagesContentScript() {
-  if (!chrome.scripting.getRegisteredContentScripts) return null;
-  const scripts = await chrome.scripting.getRegisteredContentScripts({
-    ids: [INLINE_CONTENT_SCRIPT_ID],
-  });
-  return (scripts || []).find((script) => script?.id === INLINE_CONTENT_SCRIPT_ID);
-}
+// The worker the extension runs, with the platform it runs on handed to it.
+//
+// `platform` names the three things the worker cannot reach without the browser giving them
+// to it: Chrome's extension namespaces, the network, and the crypto that names a diagnostics
+// run. Leave any of them out and this instance reads it off the global scope at the moment
+// it needs it, which is the ambient path the service worker itself takes and the one every
+// caller of this file's exports has always been on.
+//
+// The state below is this instance's rather than the module's — the three long-lived maps
+// and the two promise chains that serialize writes to them — so a second construction is a
+// second worker carrying nothing over. That is what a restarting service worker is, and
+// what a caller wanting a clean one has had to delete the require cache to get.
+function createBackgroundWorker(platform = {}) {
+  const givenChrome = platform.chrome ?? null;
+  const givenFetch = platform.fetch ?? null;
+  const givenCrypto = platform.crypto ?? null;
 
-async function updateAllPagesContentScript(script) {
-  if (!chrome.scripting.updateContentScripts) return false;
-  try {
-    await chrome.scripting.updateContentScripts([script]);
-    return true;
-  } catch (error) {
-    if (isDuplicateInlineContentScriptError(error)) return false;
-    throw error;
+  // Read when a call needs it rather than captured at construction, because an instance
+  // given no platform has to keep seeing whatever the global scope holds by then — the
+  // service worker's `chrome` arrives after this module is evaluated, not before it. A
+  // call that uses one of these more than once still takes its own local copy first.
+  function getChrome() {
+    return givenChrome ?? globalThis.chrome;
   }
-}
 
-async function syncButtonVisibilityRegistration(settings = null) {
-  const previousSync = buttonVisibilityRegistrationSync.catch(() => {});
-  const nextSync = previousSync.then(() =>
-    syncButtonVisibilityRegistrationNow(settings)
-  );
-  buttonVisibilityRegistrationSync = nextSync;
-  return nextSync;
-}
-
-async function syncButtonVisibilityRegistrationSafely(settings = null) {
-  try {
-    await syncButtonVisibilityRegistration(settings);
-    return true;
-  } catch {
-    return false;
+  // This reaches the one place the worker itself names crypto. The diagnostics modules name
+  // it too — `createUuidV4` and the fingerprint signing both close over their own global
+  // scope — so an instance handed a crypto still takes its correlation tokens and its
+  // fingerprints from the ambient one. Closing that needs those modules to accept a
+  // platform as well, which is the contract half of this sequence rather than the expand.
+  function getCrypto() {
+    return givenCrypto ?? globalThis.crypto;
   }
-}
 
-async function unregisterAllPagesContentScript() {
-  try {
-    await chrome.scripting.unregisterContentScripts({
+  // Named `fetch` so the one request in this worker reads as it always has. The ambient
+  // call goes through the global rather than a reference lifted off it: a detached `fetch`
+  // loses the receiver the browser's own binding requires.
+  function fetch(...args) {
+    return givenFetch ? givenFetch(...args) : globalThis.fetch(...args);
+  }
+
+  const inlineRuntimeCorrelations = new Map();
+  let inlineRuntimeCorrelationMutation = Promise.resolve();
+
+  // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
+  const stateByTab = new Map();
+  const activeTranslationsByTab = new Map();
+  let buttonVisibilityRegistrationSync = Promise.resolve();
+
+  async function getSettings() {
+    const chrome = getChrome();
+    const stored = await chrome.storage.local.get(['settings', 'openai_api_key']);
+    // Backward/compat: allow apiKey in openai_api_key
+    const settings = stored.settings || {};
+    const apiKey = settings.apiKey || stored.openai_api_key || '';
+    return mergeSettings({ ...settings, apiKey });
+  }
+
+  async function saveSettings(settings) {
+    const chrome = getChrome();
+    await chrome.storage.local.set({ settings: mergeSettings(settings) });
+  }
+
+  function setTabState(tabId, patch) {
+    const chrome = getChrome();
+    const prev = stateByTab.get(tabId) || { status: 'idle' };
+    const next = sanitizePublicTabState({
+      ...prev,
+      ...patch,
+      updatedAt: nowIso(),
+    });
+    stateByTab.set(tabId, next);
+    chrome.runtime
+      .sendMessage({ type: 'STATE_UPDATED', tabId, state: next })
+      .catch(() => {});
+  }
+
+  function createRuntimeDiagnosticId(startedAt, cryptoApi = getCrypto()) {
+    const suffix = typeof cryptoApi?.randomUUID === 'function'
+      ? cryptoApi.randomUUID()
+      : Math.random().toString(36).slice(2, 12);
+    return `runtime-${startedAt}-${suffix}`;
+  }
+
+  // ADR-0001. Applied on install and on startup, and never re-enabled from a translation path.
+  async function releaseActionClickToExtension() {
+    const chrome = getChrome();
+    try {
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+    } catch {}
+  }
+
+  async function ensureSidePanel(tabId) {
+    const chrome = getChrome();
+    // ADR-0001: open() has to come before any other await. Chrome only honours it while
+    // the user gesture that started this invocation is still live, and awaiting anything
+    // first forfeits it. setOptions merely reasserts the manifest default, so it can wait.
+    // Both calls fail silently on older versions or where the panel is unsupported.
+    try {
+      await chrome.sidePanel.open({ tabId });
+    } catch {}
+
+    try {
+      await chrome.sidePanel.setOptions({
+        tabId,
+        path: 'sidepanel.html',
+        enabled: true,
+      });
+    } catch {}
+  }
+
+  async function getTabUrl(tabId) {
+    const chrome = getChrome();
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      return typeof tab?.url === 'string' ? tab.url : '';
+    } catch {
+      return '';
+    }
+  }
+
+  async function ensureContentScript(tabId) {
+    const chrome = getChrome();
+    // Programmatic injection: requires "scripting" + "activeTab" (or host permissions)
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: getInlineContentScriptFiles(),
+      });
+    } catch (e) {
+      // If already injected, executeScript can still succeed; on some pages it may fail (e.g., chrome://)
+      throw e;
+    }
+  }
+
+  // The content script answers whether it carried the instruction out, and an instruction it
+  // refused is as much a failure as one that never arrived — a caller told otherwise would
+  // report a gesture that did nothing as done.
+  async function sendInlineInstruction(tabId, instruction) {
+    const chrome = getChrome();
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: INLINE_INSTRUCTION_MESSAGE,
+      instruction,
+    });
+    if (!response?.ok) {
+      throw new Error(
+        response?.error?.message || `The page could not carry out ${instruction}`
+      );
+    }
+  }
+
+  // Unlike an invocation, whose steps are independent, a control is a single gesture: a
+  // refused step stops the rest, because carrying on would run the control unauthorized and
+  // leave the reader with a click that silently did nothing.
+  async function runInlineTranslationControl(
+    tabId,
+    control,
+    send = sendInlineInstruction
+  ) {
+    const { steps } = planInlineTranslationControl(control);
+    if (!steps.length) {
+      throw new Error(`Unknown inline translation control: ${control}`);
+    }
+    for (const step of steps) {
+      await send(tabId, step);
+    }
+    // A control the tab has just carried out disproves a recorded failure to reach it, and
+    // the Inline Translation Shortcut is only one of three ways into this feature. The
+    // panel reports the control's own outcome itself, from the click it is still holding.
+    clearInlineTranslationError(tabId);
+  }
+
+  function getDefaultInvocationHandlers() {
+    return {
+      [INVOCATION_STEPS.OPEN_SIDE_PANEL]: ensureSidePanel,
+      [INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS]: ensureContentScript,
+      [INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION]: (tabId) =>
+        sendInlineInstruction(
+          tabId,
+          INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION
+        ),
+      [INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON]: (tabId) =>
+        sendInlineInstruction(
+          tabId,
+          INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON
+        ),
+      [INVOCATION_STEPS.START_INLINE_TRANSLATION]: (tabId) =>
+        sendInlineInstruction(tabId, INVOCATION_STEPS.START_INLINE_TRANSLATION),
+    };
+  }
+
+  // What an invocation tells the reader, which is one step's outcome and no other's.
+  //
+  // The steps ahead of it prepare the page, and the reader is not waiting on any of them: a
+  // Floating Translate Button that failed to mount is not what the Inline Translation
+  // Shortcut was pressed for, and saying so would bury what was. Starting Inline Translation
+  // is what they pressed for, and on a chrome:// tab, a PDF, or a page the extension cannot
+  // reach, its silence is indistinguishable from a translation about to appear.
+  //
+  // The failure travels in Inline Translation's own field of the tab state, which reaches
+  // the Inline Translation Section over the STATE_UPDATED broadcast every change already
+  // sends. It is not `state.error`: that one is Side Panel Translation's.
+  function recordInvocationStepOutcome(tabId, step, failure) {
+    // What a recorded failure asks the reader for is a click on the extension icon, and this
+    // is the step that click makes succeed. So its success speaks, by withdrawing a message
+    // whose reason has been put right; its failure stays silent like every other step's,
+    // which is what keeps the message standing on a page no click can grant.
+    if (step === INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS) {
+      if (!failure) clearInlineTranslationError(tabId);
+      return;
+    }
+    if (step !== INVOCATION_STEPS.START_INLINE_TRANSLATION) return;
+    if (failure) {
+      setTabState(tabId, {
+        inlineTranslationError: {
+          message: describeInlineTranslationControlFailure(failure),
+        },
+      });
+      return;
+    }
+    clearInlineTranslationError(tabId);
+  }
+
+  // A run that started leaves nothing for an earlier failure to still be true of. The guard
+  // keeps a tab that was never told anything from being sent an update saying so.
+  function clearInlineTranslationError(tabId) {
+    if (!stateByTab.get(tabId)?.inlineTranslationError) return;
+    setTabState(tabId, { inlineTranslationError: null });
+  }
+
+  // Two properties matter here and both are covered by tests.
+  //
+  // The first step must run before this function awaits anything, because ADR-0001's
+  // gesture window is spent by the first await on the path from the listener to
+  // chrome.sidePanel.open(). Adding an await above the loop is the regression to fear.
+  // `runInvocation` below now starts that step itself, and holds the same line; keeping the
+  // property here as well costs nothing and keeps a plan run on its own honest.
+  //
+  // Steps are otherwise independent: content script injection legitimately fails on pages
+  // extensions cannot touch, and that must not stop a command invocation from translating.
+  async function runInvocationPlan(
+    plan,
+    tabId,
+    handlers = getDefaultInvocationHandlers()
+  ) {
+    for (const step of plan?.steps || []) {
+      const handler = handlers?.[step];
+      if (!handler) continue;
+      let failure = null;
+      try {
+        await handler(tabId);
+      } catch (error) {
+        failure = error || new Error('Unknown error');
+      }
+      // Independence covers the report as well: a worker that cannot record the outcome
+      // must not cost the invocation the steps that were still to come.
+      try {
+        recordInvocationStepOutcome(tabId, step, failure);
+      } catch {}
+    }
+  }
+
+  // An invocation's plan needs the reader's Button Visibility choice, which only storage can
+  // answer and only asynchronously — yet ADR-0001's gesture is spent by the first await ahead
+  // of chrome.sidePanel.open(). So the panel-opening step is started here, in the event's own
+  // task, and the plan that follows adopts it instead of opening a second panel.
+  //
+  // Only the two invocation triggers belong here, because the panel opens before the plan is
+  // known. A page load has no gesture to spend and asks the worker for its instructions.
+  async function runInvocation(
+    trigger,
+    tabId,
+    handlers = getDefaultInvocationHandlers()
+  ) {
+    const openedSidePanel = startSidePanelStep(handlers, tabId);
+    const settings = await getSettings();
+    return runInvocationPlan(planInvocation({ trigger, settings }), tabId, {
+      ...handlers,
+      [INVOCATION_STEPS.OPEN_SIDE_PANEL]: () => openedSidePanel,
+    });
+  }
+
+  async function extractArticle(tabId) {
+    const chrome = getChrome();
+    const resp = await chrome.tabs.sendMessage(tabId, {
+      type: 'EXTRACT_ARTICLE',
+    });
+    if (!resp || !resp.ok) {
+      throw new Error(resp?.error?.message || 'Failed to extract article');
+    }
+    return resp.data;
+  }
+
+  async function openaiTranslateChunk({
+    apiKey,
+    model,
+    reasoningEffort = DEFAULT_SETTINGS.reasoningEffort,
+    instructions,
+    input,
+    textFormat = null,
+    maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+  }) {
+    const body = {
+      model,
+      instructions,
+      input,
+      max_output_tokens: normalizeMaxOutputTokens(maxOutputTokens),
+      store: false,
+    };
+    if (reasoningEffort) {
+      body.reasoning = { effort: reasoningEffort };
+    }
+    if (textFormat) {
+      body.text = { format: textFormat };
+    }
+
+    const res = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      const msg = json?.error?.message || `OpenAI API error (${res.status})`;
+      throw new Error(msg);
+    }
+
+    return openAiResponse.parseCompletedResponse(json);
+  }
+
+  // A Translation Chunk gets one recovery, and the first failure to happen owns it (ADR-0005).
+  // `recoveryDepth` is that budget: the split sets it on the children it makes, a repair sets it
+  // on the retry, and either way the second failure of any kind ends the chunk. Two independent
+  // budgets would let an over-long chunk split into N children and then repair each of them,
+  // which is 2N billed attempts for a chunk the reader asked to translate once.
+  async function translateFullPageChunk(chunk, settings, repair = null) {
+    try {
+      const output = await openaiTranslateChunk({
+        apiKey: settings.apiKey,
+        model: settings.model,
+        reasoningEffort: settings.reasoningEffort,
+        instructions: buildInstructions(settings, repair),
+        input: chunk.template,
+        maxOutputTokens: getFullPageMaxOutputTokens(chunk.template),
+      });
+      return fullPageMarkdown.validateAndRehydrateChunk(output, chunk);
+    } catch (error) {
+      if ((Number(chunk.recoveryDepth) || 0) >= 1) throw error;
+      if (FULL_PAGE_TOKEN_ERROR_CODES.has(error?.code)) {
+        return translateFullPageChunk({ ...chunk, recoveryDepth: 1 }, settings, {
+          previousErrorCode: error.code,
+        });
+      }
+      if (error?.code !== 'response.incomplete.max_output_tokens') {
+        throw error;
+      }
+      const children = fullPageMarkdown.splitChunkForRecovery(chunk);
+      const translated = [];
+      for (const child of children) {
+        translated.push(await translateFullPageChunk(child, settings));
+      }
+      return translated.join('\n\n');
+    }
+  }
+
+  async function mutateInlineRuntimeCorrelations(mutator) {
+    const operation = inlineRuntimeCorrelationMutation.catch(() => {}).then(async () => {
+      const session = getChrome()?.storage?.session;
+      const storedValue = session
+        ? (await session.get([INLINE_RUNTIME_CORRELATION_STORAGE_KEY]))[INLINE_RUNTIME_CORRELATION_STORAGE_KEY] || {}
+        : Object.fromEntries(inlineRuntimeCorrelations);
+      const stored = normalizeInlineRuntimeCorrelationEntries(storedValue);
+      const result = await mutator(stored);
+      if (session) await session.set({ [INLINE_RUNTIME_CORRELATION_STORAGE_KEY]: stored });
+      else {
+        inlineRuntimeCorrelations.clear();
+        for (const [token, entry] of Object.entries(stored)) inlineRuntimeCorrelations.set(token, entry);
+      }
+      return result;
+    });
+    inlineRuntimeCorrelationMutation = operation;
+    return operation;
+  }
+
+  async function issueInlineRuntimeCorrelations(items, context = {}) {
+    return mutateInlineRuntimeCorrelations((entries) => {
+      const now = Date.now();
+      for (const [token, entry] of Object.entries(entries)) {
+        if (entry.expiresAt <= now) delete entries[token];
+      }
+      if (Object.keys(entries).length + items.length > INLINE_RUNTIME_CORRELATION_LIMIT) {
+        throw new Error('Inline runtime correlation capacity exceeded');
+      }
+      const issued = new Map();
+      for (const { id, metadata } of items) {
+        const token = createInlineRuntimeCorrelationToken();
+        entries[token] = {
+          ...metadata,
+          tabId: Number.isInteger(context.tabId) ? context.tabId : null,
+          operationId: context.operationId ?? null,
+          expiresAt: now + INLINE_RUNTIME_CORRELATION_TTL_MS,
+        };
+        issued.set(id, token);
+      }
+      return issued;
+    });
+  }
+
+  async function consumeInlineRuntimeCorrelations(outcomes, releaseTokens, context = {}) {
+    return mutateInlineRuntimeCorrelations((entries) => {
+      const now = Date.now();
+      const resolved = [];
+      const tokens = new Set();
+      const validated = [];
+      const requested = [
+        ...outcomes.map((outcome) => ({ token: outcome?.correlationToken, outcome })),
+        ...releaseTokens.map((token) => ({ token, outcome: null })),
+      ];
+      for (const item of requested) {
+        const token = String(item.token || '');
+        const entry = Object.hasOwn(entries, token) ? entries[token] : null;
+        if (
+          !token || tokens.has(token) || !entry || entry.expiresAt <= now || entry.reservedAt ||
+          entry.tabId !== (Number.isInteger(context.tabId) ? context.tabId : null) ||
+          entry.operationId !== (context.operationId ?? null)
+        ) return null;
+        tokens.add(token);
+        validated.push({ token, outcome: item.outcome, entry });
+      }
+      if (validated.some(({ entry }) => entry.runId !== validated[0].entry.runId)) return null;
+      for (const item of validated) {
+        if (item.outcome) {
+          item.entry.reservedAt = now;
+          resolved.push(item);
+        } else delete entries[item.token];
+      }
+      return resolved;
+    });
+  }
+
+  async function finalizeInlineRuntimeCorrelations(resolved, persisted) {
+    return mutateInlineRuntimeCorrelations((entries) => {
+      for (const { token } of resolved) {
+        if (persisted) delete entries[token];
+        else if (entries[token]) delete entries[token].reservedAt;
+      }
+    });
+  }
+
+  async function translateVisibleBlockBatch(
+    records,
+    settingsSnapshot = null,
+    options = {}
+  ) {
+    const chrome = getChrome();
+    const startedAtMs = Date.now();
+    const runId = `run-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
+    let diagnosticsPersisted = true;
+    // Named by the failure diagnostics below, which run after the request that would have
+    // reported them itself.
+    let requestedModel = '';
+    let requestedCount = 0;
+
+    try {
+      const normalized = normalizeVisibleBlockBatchRecords(records);
+      requestedCount = normalized.length;
+
+      if (!normalized.length) {
+        return [];
+      }
+
+      const settings = mergeVisibleBatchSettingsSnapshot(
+        await getSettings(),
+        settingsSnapshot
+      );
+      requestedModel = settings.model;
+      if (!settings.apiKey) {
+        throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+      }
+      const preflight = await translationDiagnostics.persistRun(chrome, {
+        runId,
+        startedAt: new Date(startedAtMs).toISOString(),
+        model: settings.model,
+        targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+        outcome: 'interrupted',
+        summary: { requested: normalized.length },
+        blocks: [],
+      });
+      diagnosticsPersisted = preflight.persisted;
+
+      async function requestAndValidate(batch) {
+        const modelRecords = batch.map((record) => ({
+          id: record.id,
+          template: record.template,
+          atoms: record.atoms,
+          repair: record.repair || null,
+        }));
+        const output = await openaiTranslateChunk({
+          apiKey: settings.apiKey,
+          model: settings.model,
+          reasoningEffort: settings.reasoningEffort,
+          instructions: buildBlockInstructions(settings),
+          input: JSON.stringify({ records: modelRecords }),
+          textFormat: buildBlockResponseFormat(),
+          maxOutputTokens: getBlockBatchMaxOutputTokens(
+            batch.reduce((sum, record) => sum + getBlockRecordCost(record), 0)
+          ),
+        });
+        return translationValidation.validateBlockResponse(output, batch, {
+          targetLanguage: settings.targetLanguage,
+        }).records;
+      }
+
+      const initial = await requestAndValidate(normalized);
+      const terminalById = new Map();
+      const initialById = new Map(initial.map((result) => [result.id, result]));
+      const repairs = [];
+      for (const result of initial) {
+        const decision = translationPolicy.decideBlockDisposition(result, 1);
+        if (decision.disposition === 'retry') {
+          const source = normalized.find((record) => record.id === result.id);
+          repairs.push({
+            ...source,
+            repair: { attempt: 1, previousErrorCode: decision.terminalCode },
+          });
+        } else {
+          terminalById.set(result.id, {
+            result,
+            decision,
+            attemptCount: 1,
+            timeline: [{
+              stage: 'initial_validation',
+              disposition: decision.disposition,
+              codes: [decision.terminalCode].filter(Boolean),
+            }],
+          });
+        }
+      }
+      if (repairs.length) {
+        try {
+          const repaired = await requestAndValidate(repairs);
+          for (const result of repaired) {
+            const initialResult = initialById.get(result.id);
+            const initialDecision = translationPolicy.decideBlockDisposition(initialResult, 1);
+            const decision = translationPolicy.decideBlockDisposition(result, 2);
+            terminalById.set(result.id, {
+              result,
+              decision,
+              attemptCount: 2,
+              timeline: [
+                { stage: 'initial_validation', disposition: 'retry', codes: [initialDecision.terminalCode].filter(Boolean) },
+                { stage: 'repair_validation', disposition: decision.disposition, codes: [decision.terminalCode].filter(Boolean) },
+              ],
+            });
+          }
+        } catch (error) {
+          const repairCode = String(error?.code || '').startsWith('protocol.')
+            ? error.code
+            : 'runtime.repair_request_failed';
+          for (const repair of repairs) {
+            const initialResult = initialById.get(repair.id);
+            const initialDecision = translationPolicy.decideBlockDisposition(initialResult, 1);
+            terminalById.set(repair.id, {
+              result: initialResult,
+              decision: {
+                disposition: 'reject',
+                terminalCode: repairCode,
+                messageKey: 'repair_request_failed',
+              },
+              attemptCount: 2,
+              timeline: [
+                { stage: 'initial_validation', disposition: 'retry', codes: [initialDecision.terminalCode].filter(Boolean) },
+                { stage: 'repair_validation', disposition: 'reject', codes: [repairCode] },
+              ],
+            });
+          }
+        }
+      }
+      const results = normalized.map((record) => {
+        const terminal = terminalById.get(record.id);
+        const apply = terminal.decision.disposition !== 'reject';
+        return {
+          id: record.id,
+          disposition: terminal.decision.disposition,
+          ...(apply ? { template: terminal.result.template } : {}),
+          terminalCode: terminal.decision.terminalCode,
+          messageKey: terminal.decision.messageKey,
+          attemptCount: terminal.attemptCount,
+          diagnostic: {
+            structure: terminal.result.structure,
+            quality: terminal.result.quality,
+            timeline: terminal.timeline,
+          },
+        };
+      });
+      const finalOutcome = results.some((result) => result.disposition === 'reject')
+        ? 'failed'
+        : results.some((result) => result.disposition === 'apply_with_warning')
+          ? 'partial'
+          : 'done';
+      const finalSummary = {
+        requested: results.length,
+        translated: results.filter((result) => result.disposition === 'apply').length,
+        translatedWithWarning: results.filter((result) => result.disposition === 'apply_with_warning').length,
+        failed: results.filter((result) => result.disposition === 'reject').length,
+        repairs: results.filter((result) => result.attemptCount === 2).length,
+      };
+      async function persistCompactFinal() {
+        const persistence = await translationDiagnostics.persistRun(chrome, {
+          runId,
+          startedAt: new Date(startedAtMs).toISOString(),
+          finishedAt: new Date().toISOString(),
+          extensionVersion: chrome.runtime?.getManifest?.().version || '',
+          model: settings.model,
+          targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+          outcome: finalOutcome,
+          summary: finalSummary,
+          blocks: [],
+        });
+        if (!persistence.persisted) await translationDiagnostics.discardRun(chrome, runId);
+        return persistence;
+      }
+      const correlationsById = new Map();
+      const normalizedById = new Map(normalized.map((record) => [record.id, record]));
+      try {
+        const correlationEntries = await Promise.all(results.map(async (result) => {
+          const record = normalizedById.get(result.id);
+          const fingerprints = await translationDiagnostics.fingerprintBlock(
+            chrome,
+            record?.template,
+            record?.contract
+          );
+          return [result.id, {
+            runId,
+            diagnosticId: `${runId}/${result.id}`,
+            ...fingerprints,
+            extensionVersion: chrome.runtime?.getManifest?.().version || '',
+            model: settings.model,
+            targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+          }];
+        }));
+        for (const [id, correlation] of correlationEntries) correlationsById.set(id, correlation);
+      const problemResults = results.filter(
+        (result) => result.attemptCount === 2 || result.disposition !== 'apply'
+      );
+      const diagnosticBlocks = problemResults.map((result) => {
+        const correlation = correlationsById.get(result.id) || {};
+        return {
+          diagnosticId: correlation.diagnosticId,
+          sourceFingerprint: correlation.sourceFingerprint,
+          contractFingerprint: correlation.contractFingerprint,
+          terminalCode: result.terminalCode,
+          terminalDisposition: result.disposition,
+          attemptCount: result.attemptCount,
+          structure: result.diagnostic.structure,
+          quality: result.diagnostic.quality,
+          timeline: result.diagnostic.timeline,
+        };
+      });
+        const persistence = await translationDiagnostics.persistRun(chrome, {
+        runId,
+        startedAt: new Date(startedAtMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        extensionVersion: chrome.runtime?.getManifest?.().version || '',
+        model: settings.model,
+        targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+        outcome: finalOutcome,
+        summary: finalSummary,
+          blocks: diagnosticBlocks,
+        });
+        diagnosticsPersisted = persistence.persisted;
+        if (!persistence.persisted) await persistCompactFinal();
+      } catch {
+        // Diagnostics must never change an otherwise valid translation result.
+        await persistCompactFinal();
+        diagnosticsPersisted = false;
+      }
+      let issuedTokens = new Map();
+      if (diagnosticsPersisted) {
+        try {
+          issuedTokens = await issueInlineRuntimeCorrelations(
+            results
+              .filter((result) => correlationsById.has(result.id))
+              .map((result) => ({ id: result.id, metadata: correlationsById.get(result.id) })),
+            options.correlationContext
+          );
+        } catch {
+          diagnosticsPersisted = false;
+        }
+      }
+      return results.map(({ diagnostic, ...result }) => ({
+        ...result,
+        ...(issuedTokens.has(result.id)
+          ? { correlationToken: issuedTokens.get(result.id) }
+          : {}),
+        ...(!diagnosticsPersisted ? { diagnosticsUnavailable: true } : {}),
+      }));
+    } catch (error) {
+      await translationDiagnostics.persistRun(chrome, {
+        runId,
+        startedAt: new Date(startedAtMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        model: requestedModel,
+        outcome: 'failed',
+        summary: { requested: requestedCount, failed: requestedCount },
+        blocks: [{
+          diagnosticId: `${runId}/request`,
+          terminalCode: error?.code || 'runtime.request_failed',
+          terminalDisposition: 'reject',
+          attemptCount: 1,
+          timeline: [{
+            stage: 'initial_validation',
+            disposition: 'reject',
+            codes: [error?.code || 'runtime.request_failed'],
+          }],
+        }],
+      });
+      throw error;
+    }
+  }
+
+  async function hasAllSitesAccess() {
+    const chrome = getChrome();
+    if (!chrome.permissions?.contains) return false;
+    return chrome.permissions.contains({ origins: ALL_SITES_ORIGINS });
+  }
+
+  async function getRegisteredAllPagesContentScript() {
+    const chrome = getChrome();
+    if (!chrome.scripting.getRegisteredContentScripts) return null;
+    const scripts = await chrome.scripting.getRegisteredContentScripts({
       ids: [INLINE_CONTENT_SCRIPT_ID],
     });
-  } catch {}
-}
+    return (scripts || []).find((script) => script?.id === INLINE_CONTENT_SCRIPT_ID);
+  }
 
-// Brings both things the all-pages choice needs — access to every site and a content script
-// registered across pages — into line with the choice the reader has made.
-async function syncButtonVisibilityRegistrationNow(settings = null) {
-  const effective = settings || (await getSettings());
-  const visibility = readButtonVisibility(effective);
-
-  if (visibility !== BUTTON_VISIBILITY.ALL_PAGES) {
-    await unregisterAllPagesContentScript();
-    // Giving the access back belongs here as well as on the options page: an install
-    // migrating off the old checkbox reaches never without the reader opening options at
-    // all, and the access that checkbox asked for would otherwise outlive it.
+  async function updateAllPagesContentScript(script) {
+    const chrome = getChrome();
+    if (!chrome.scripting.updateContentScripts) return false;
     try {
-      if (chrome.permissions?.remove) {
-        await chrome.permissions.remove({ origins: ALL_SITES_ORIGINS });
-      }
-    } catch {}
-    return;
-  }
-
-  // Registering the content script across pages is what lets the button appear without the
-  // reader invoking the extension. It needs the access the choice asked for, which Chrome's
-  // own UI can revoke without the options page ever hearing about it.
-  if (!(await hasAllSitesAccess())) {
-    await unregisterAllPagesContentScript();
-    return;
-  }
-
-  const allPagesContentScript = getAllPagesContentScript();
-  try {
-    if (
-      chrome.scripting.updateContentScripts &&
-      (await getRegisteredAllPagesContentScript())
-    ) {
-      if (await updateAllPagesContentScript(allPagesContentScript)) return;
+      await chrome.scripting.updateContentScripts([script]);
+      return true;
+    } catch (error) {
+      if (isDuplicateInlineContentScriptError(error)) return false;
+      throw error;
     }
-  } catch {}
+  }
 
-  try {
-    await chrome.scripting.registerContentScripts([allPagesContentScript]);
-  } catch (error) {
-    if (isDuplicateInlineContentScriptError(error)) {
-      if (await updateAllPagesContentScript(allPagesContentScript)) return;
+  async function syncButtonVisibilityRegistration(settings = null) {
+    const previousSync = buttonVisibilityRegistrationSync.catch(() => {});
+    const nextSync = previousSync.then(() =>
+      syncButtonVisibilityRegistrationNow(settings)
+    );
+    buttonVisibilityRegistrationSync = nextSync;
+    return nextSync;
+  }
+
+  async function syncButtonVisibilityRegistrationSafely(settings = null) {
+    try {
+      await syncButtonVisibilityRegistration(settings);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function unregisterAllPagesContentScript() {
+    const chrome = getChrome();
+    try {
+      await chrome.scripting.unregisterContentScripts({
+        ids: [INLINE_CONTENT_SCRIPT_ID],
+      });
+    } catch {}
+  }
+
+  // Brings both things the all-pages choice needs — access to every site and a content script
+  // registered across pages — into line with the choice the reader has made.
+  async function syncButtonVisibilityRegistrationNow(settings = null) {
+    const chrome = getChrome();
+    const effective = settings || (await getSettings());
+    const visibility = readButtonVisibility(effective);
+
+    if (visibility !== BUTTON_VISIBILITY.ALL_PAGES) {
+      await unregisterAllPagesContentScript();
+      // Giving the access back belongs here as well as on the options page: an install
+      // migrating off the old checkbox reaches never without the reader opening options at
+      // all, and the access that checkbox asked for would otherwise outlive it.
       try {
-        await chrome.scripting.unregisterContentScripts({
-          ids: [INLINE_CONTENT_SCRIPT_ID],
-        });
-        await chrome.scripting.registerContentScripts([allPagesContentScript]);
+        if (chrome.permissions?.remove) {
+          await chrome.permissions.remove({ origins: ALL_SITES_ORIGINS });
+        }
       } catch {}
       return;
     }
-    throw error;
-  }
-}
 
-async function translateTab(tabId, overrideSettings = null) {
-  if (activeTranslationsByTab.has(tabId)) {
-    return { skipped: true, reason: 'already_running' };
-  }
-
-  const operationToken = Symbol(`translate-tab-${tabId}`);
-  activeTranslationsByTab.set(tabId, operationToken);
-
-  try {
-    const settings = mergeSettings({
-      ...(await getSettings()),
-      ...(overrideSettings || {}),
-    });
-
-    if (!settings.apiKey) {
-      setTabState(tabId, {
-        status: 'error',
-        error: {
-          message: 'OpenAI API key is not set. Open Options and paste your key.',
-        },
-      });
-      return { skipped: true, reason: 'missing_api_key' };
+    // Registering the content script across pages is what lets the button appear without the
+    // reader invoking the extension. It needs the access the choice asked for, which Chrome's
+    // own UI can revoke without the options page ever hearing about it.
+    if (!(await hasAllSitesAccess())) {
+      await unregisterAllPagesContentScript();
+      return;
     }
 
-    setTabState(tabId, {
-      status: 'extracting',
-      error: null,
-      extracted: null,
-      translated: null,
-      progress: null,
-    });
-    await ensureSidePanel(tabId);
+    const allPagesContentScript = getAllPagesContentScript();
+    try {
+      if (
+        chrome.scripting.updateContentScripts &&
+        (await getRegisteredAllPagesContentScript())
+      ) {
+        if (await updateAllPagesContentScript(allPagesContentScript)) return;
+      }
+    } catch {}
 
     try {
-      await ensureContentScript(tabId);
-    } catch (e) {
-      const failure = classifyContentScriptFailure(e, await getTabUrl(tabId));
-      setTabState(tabId, {
-        status: 'error',
-        error: { message: failure.message },
-      });
-      return { skipped: true, reason: 'content_script_unavailable' };
+      await chrome.scripting.registerContentScripts([allPagesContentScript]);
+    } catch (error) {
+      if (isDuplicateInlineContentScriptError(error)) {
+        if (await updateAllPagesContentScript(allPagesContentScript)) return;
+        try {
+          await chrome.scripting.unregisterContentScripts({
+            ids: [INLINE_CONTENT_SCRIPT_ID],
+          });
+          await chrome.scripting.registerContentScripts([allPagesContentScript]);
+        } catch {}
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async function translateTab(tabId, overrideSettings = null) {
+    if (activeTranslationsByTab.has(tabId)) {
+      return { skipped: true, reason: 'already_running' };
     }
 
-    let translationDocument;
-    let displayExtraction;
-    let chunks;
+    const operationToken = Symbol(`translate-tab-${tabId}`);
+    activeTranslationsByTab.set(tabId, operationToken);
+
     try {
-      const extracted = await extractArticle(tabId);
-      if (
-        !extracted ||
-        typeof extracted !== 'object' ||
-        Array.isArray(extracted)
-      ) {
-        throw new Error('Article extraction is malformed.');
+      const settings = mergeSettings({
+        ...(await getSettings()),
+        ...(overrideSettings || {}),
+      });
+
+      if (!settings.apiKey) {
+        setTabState(tabId, {
+          status: 'error',
+          error: {
+            message: 'OpenAI API key is not set. Open Options and paste your key.',
+          },
+        });
+        return { skipped: true, reason: 'missing_api_key' };
       }
-      const { title, url, langHint, contentMarkdown } = extracted;
-      if (
-        typeof title !== 'string' ||
-        typeof url !== 'string' ||
-        typeof langHint !== 'string' ||
-        typeof contentMarkdown !== 'string'
-      ) {
-        throw new Error('Article extraction is malformed.');
-      }
-      translationDocument = extracted.translationDocument;
-      if (!translationDocument || !Array.isArray(translationDocument.blocks)) {
-        throw new Error(
-          'Article extraction did not include a translation document.'
-        );
-      }
-      assertFullPageTranslationBudget(contentMarkdown);
-      chunks = fullPageMarkdown.createTranslationChunks(
-        translationDocument,
-        settings.chunkMaxChars
-      );
-      displayExtraction = { title, url, langHint, contentMarkdown };
-    } catch (e) {
+
       setTabState(tabId, {
-        status: 'error',
-        error: safeError(e),
+        status: 'extracting',
+        error: null,
         extracted: null,
         translated: null,
         progress: null,
       });
-      return { skipped: true, reason: 'extract_failed' };
-    }
+      await ensureSidePanel(tabId);
 
-    setTabState(tabId, {
-      status: 'translating',
-      extracted: displayExtraction,
-      translated: null,
-      settingsUsed: createPublicSettingsUsed(settings),
-    });
-
-    try {
-      const translatedChunks = [];
-
-      // What a late failure costs, because it is a decision rather than an oversight
-      // (ADR-0006). A throw from any chunk leaves this loop, and the catch below records
-      // `translated: null`: the answers already in `translatedChunks` are discarded with
-      // it, and they were billed. A document of five chunks that fails on the fourth has
-      // paid for three the reader never sees, and pressing Translate again pays for all
-      // five afresh — nothing here resumes.
-      //
-      // Keeping what came back would invent a Side Panel Translation result that is
-      // neither done nor error, needing a name, a rendering, and a way for the reader to
-      // tell translated text from text still in its original language — to serve a failure
-      // #23 could not reproduce, that #26 now asks the model to avoid and repairs once.
-      // Inline Translation isolates its Semantic Blocks instead, and the two differ here
-      // on purpose; ADR-0006 has the reasoning and what evidence would overturn it.
-      for (let i = 0; i < chunks.length; i++) {
+      try {
+        await ensureContentScript(tabId);
+      } catch (e) {
+        const failure = classifyContentScriptFailure(e, await getTabUrl(tabId));
         setTabState(tabId, {
-          status: 'translating',
-          progress: { current: i + 1, total: chunks.length },
+          status: 'error',
+          error: { message: failure.message },
         });
-        const out = await translateFullPageChunk(chunks[i], settings);
-        translatedChunks.push(out.trim());
+        return { skipped: true, reason: 'content_script_unavailable' };
       }
 
-      const translated = translatedChunks.join('\n\n');
+      let translationDocument;
+      let displayExtraction;
+      let chunks;
+      try {
+        const extracted = await extractArticle(tabId);
+        if (
+          !extracted ||
+          typeof extracted !== 'object' ||
+          Array.isArray(extracted)
+        ) {
+          throw new Error('Article extraction is malformed.');
+        }
+        const { title, url, langHint, contentMarkdown } = extracted;
+        if (
+          typeof title !== 'string' ||
+          typeof url !== 'string' ||
+          typeof langHint !== 'string' ||
+          typeof contentMarkdown !== 'string'
+        ) {
+          throw new Error('Article extraction is malformed.');
+        }
+        translationDocument = extracted.translationDocument;
+        if (!translationDocument || !Array.isArray(translationDocument.blocks)) {
+          throw new Error(
+            'Article extraction did not include a translation document.'
+          );
+        }
+        assertFullPageTranslationBudget(contentMarkdown);
+        chunks = fullPageMarkdown.createTranslationChunks(
+          translationDocument,
+          settings.chunkMaxChars
+        );
+        displayExtraction = { title, url, langHint, contentMarkdown };
+      } catch (e) {
+        setTabState(tabId, {
+          status: 'error',
+          error: safeError(e),
+          extracted: null,
+          translated: null,
+          progress: null,
+        });
+        return { skipped: true, reason: 'extract_failed' };
+      }
+
       setTabState(tabId, {
-        status: 'done',
-        translated,
-        progress: null,
-      });
-      return { skipped: false };
-    } catch (e) {
-      setTabState(tabId, {
-        status: 'error',
-        error: safeError(e),
+        status: 'translating',
+        extracted: displayExtraction,
         translated: null,
-        progress: null,
+        settingsUsed: createPublicSettingsUsed(settings),
       });
-      return { skipped: true, reason: 'translate_failed' };
-    }
-  } finally {
-    if (activeTranslationsByTab.get(tabId) === operationToken) {
-      activeTranslationsByTab.delete(tabId);
+
+      try {
+        const translatedChunks = [];
+
+        // What a late failure costs, because it is a decision rather than an oversight
+        // (ADR-0006). A throw from any chunk leaves this loop, and the catch below records
+        // `translated: null`: the answers already in `translatedChunks` are discarded with
+        // it, and they were billed. A document of five chunks that fails on the fourth has
+        // paid for three the reader never sees, and pressing Translate again pays for all
+        // five afresh — nothing here resumes.
+        //
+        // Keeping what came back would invent a Side Panel Translation result that is
+        // neither done nor error, needing a name, a rendering, and a way for the reader to
+        // tell translated text from text still in its original language — to serve a failure
+        // #23 could not reproduce, that #26 now asks the model to avoid and repairs once.
+        // Inline Translation isolates its Semantic Blocks instead, and the two differ here
+        // on purpose; ADR-0006 has the reasoning and what evidence would overturn it.
+        for (let i = 0; i < chunks.length; i++) {
+          setTabState(tabId, {
+            status: 'translating',
+            progress: { current: i + 1, total: chunks.length },
+          });
+          const out = await translateFullPageChunk(chunks[i], settings);
+          translatedChunks.push(out.trim());
+        }
+
+        const translated = translatedChunks.join('\n\n');
+        setTabState(tabId, {
+          status: 'done',
+          translated,
+          progress: null,
+        });
+        return { skipped: false };
+      } catch (e) {
+        setTabState(tabId, {
+          status: 'error',
+          error: safeError(e),
+          translated: null,
+          progress: null,
+        });
+        return { skipped: true, reason: 'translate_failed' };
+      }
+    } finally {
+      if (activeTranslationsByTab.get(tabId) === operationToken) {
+        activeTranslationsByTab.delete(tabId);
+      }
     }
   }
-}
 
-if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-  chrome.runtime.onInstalled.addListener(async () => {
+  // What the browser calls this worker with, and the only way in for a caller holding
+  // nothing but this instance. Registering them is the entry point's, at the foot of this
+  // file, so each one names the event it serves: that name is all that still links a handler
+  // to its registration now that the two are apart.
+
+  // chrome.runtime.onInstalled.
+  async function onInstalled() {
     const settings = await getSettings();
     await saveSettings(settings);
     await syncButtonVisibilityRegistrationSafely(settings);
     await releaseActionClickToExtension();
-  });
+  }
 
-  chrome.runtime.onStartup.addListener(async () => {
+  // chrome.runtime.onStartup.
+  async function onStartup() {
     await releaseActionClickToExtension();
     await syncButtonVisibilityRegistrationSafely();
-  });
+  }
 
-  // Deliberately not async: the first step opens the side panel, and awaiting anything
-  // before it would forfeit the user gesture Chrome requires (ADR-0001).
-  chrome.action.onClicked.addListener((tab) => {
+  // chrome.action.onClicked. Deliberately not async: the first step opens the side panel,
+  // and awaiting anything before it would forfeit the user gesture Chrome requires
+  // (ADR-0001).
+  function onActionClicked(tab) {
     if (!tab?.id) return;
     runInvocation('action', tab.id);
-  });
+  }
 
-  chrome.commands.onCommand.addListener(async (command) => {
+  // The Inline Translation Shortcut, registered on chrome.commands.onCommand.addListener.
+  // Chrome offers that listener every command the manifest declares, so
+  // INLINE_TRANSLATION_SHORTCUT_COMMAND is what decides which of them reaches the worker.
+  async function onCommand(command) {
     if (command !== INLINE_TRANSLATION_SHORTCUT_COMMAND) return;
+    const chrome = getChrome();
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tabId = tabs?.[0]?.id;
     if (!tabId) return;
     await runInvocation('command', tabId);
-  });
+  }
 
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // chrome.runtime.onMessage.
+  function onMessage(msg, sender, sendResponse) {
+    const chrome = getChrome();
     (async () => {
       try {
         if (msg?.type === 'GET_STATE') {
@@ -2015,11 +2085,63 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 
     // Keep the message channel open for async response
     return true;
-  });
+  }
+
+  return {
+    // What the browser calls, and what a caller holding only this instance drives it by.
+    handlers: {
+      onInstalled,
+      onStartup,
+      onActionClicked,
+      onCommand,
+      onMessage,
+    },
+    // Everything below is what this file already exported, backed by this instance so that an
+    // export and the worker the browser is running are the same thing.
+    createRuntimeDiagnosticId,
+    ensureSidePanel,
+    openaiTranslateChunk,
+    runInlineTranslationControl,
+    runInvocation,
+    runInvocationPlan,
+    sendInlineInstruction,
+    syncButtonVisibilityRegistration,
+    syncButtonVisibilityRegistrationSafely,
+    translateFullPageChunk,
+    translateVisibleBlockBatch,
+  };
+}
+
+// The one instance the browser runs, built with no platform on purpose: it reads Chrome,
+// the network, and crypto off the global scope, which is exactly what the service worker
+// offers. Everything this file exports is that instance's, so a caller reaching for an
+// export gets the same worker the browser is driving.
+const backgroundWorker = createBackgroundWorker();
+const {
+  createRuntimeDiagnosticId,
+  ensureSidePanel,
+  openaiTranslateChunk,
+  runInlineTranslationControl,
+  runInvocation,
+  runInvocationPlan,
+  sendInlineInstruction,
+  syncButtonVisibilityRegistration,
+  syncButtonVisibilityRegistrationSafely,
+  translateFullPageChunk,
+  translateVisibleBlockBatch,
+} = backgroundWorker;
+
+if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+  chrome.runtime.onInstalled.addListener(backgroundWorker.handlers.onInstalled);
+  chrome.runtime.onStartup.addListener(backgroundWorker.handlers.onStartup);
+  chrome.action.onClicked.addListener(backgroundWorker.handlers.onActionClicked);
+  chrome.commands.onCommand.addListener(backgroundWorker.handlers.onCommand);
+  chrome.runtime.onMessage.addListener(backgroundWorker.handlers.onMessage);
 }
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    createBackgroundWorker,
     mergeSettingsWithExisting,
     safeError,
     sanitizePublicTabState,
