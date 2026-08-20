@@ -93,35 +93,39 @@ const FULL_PAGE_SETTINGS = Object.freeze({
 // carried, because every check below is about how many attempts were made and what the later
 // ones said. A queue that runs dry is a test asserting on an attempt that was never made, so
 // the extra request fails loudly instead of replaying the last answer.
+//
+// The network is the whole platform this worker gets. Translating a chunk decides how many
+// requests to make and what each one says, and reaches nothing else: a chunk that fails
+// throws to its caller rather than recording anything, so there is no per-tab state to
+// broadcast and no Chrome namespace to hand over.
 async function runFullPageChunk(chunk, responses, settings = FULL_PAGE_SETTINGS) {
-  const previousFetch = global.fetch;
   const queue = [...responses];
   const requestBodies = [];
-  global.fetch = async (_url, options) => {
-    requestBodies.push(JSON.parse(options.body));
-    if (!queue.length) {
-      throw new Error(`Unexpected full-page request #${requestBodies.length}`);
-    }
-    const response = queue.shift();
-    if (response?.apiError) {
-      return {
-        ok: false,
-        status: 400,
-        async json() {
-          return { error: { message: response.apiError } };
-        },
-      };
-    }
-    return { ok: true, async json() { return response; } };
-  };
+  const worker = helpers.createBackgroundWorker({
+    fetch: async (_url, options) => {
+      requestBodies.push(JSON.parse(options.body));
+      if (!queue.length) {
+        throw new Error(`Unexpected full-page request #${requestBodies.length}`);
+      }
+      const response = queue.shift();
+      if (response?.apiError) {
+        return {
+          ok: false,
+          status: 400,
+          async json() {
+            return { error: { message: response.apiError } };
+          },
+        };
+      }
+      return { ok: true, async json() { return response; } };
+    },
+  });
 
   try {
-    const translated = await helpers.translateFullPageChunk(chunk, settings);
+    const translated = await worker.translateFullPageChunk(chunk, settings);
     return { requestBodies, translated, error: null };
   } catch (error) {
     return { requestBodies, translated: null, error };
-  } finally {
-    global.fetch = previousFetch;
   }
 }
 
@@ -216,55 +220,52 @@ const THREE_CHUNK_DOCUMENT = {
   blocks: THREE_CHUNK_BLOCKS,
 };
 
-// Drives a whole Side Panel Translation the way the panel does — one TRANSLATE_TAB message
-// into the worker's own chunk loop — and hands back every state the panel would have seen,
-// which is the only place the discard is visible. A queue that runs dry throws, so an
-// unexpected extra request fails loudly instead of replaying the last answer.
-async function runTabTranslation(
-  tabId,
-  answers,
-  documentModel = THREE_CHUNK_DOCUMENT
-) {
-  const previousChrome = global.chrome;
-  const previousFetch = global.fetch;
-  const modulePath = require.resolve('../extension/background.js');
-  const originalModule = require.cache[modulePath];
-  const queue = [...answers];
-  const states = [];
-  const requestInputs = [];
-  let messageListener = null;
+// Hands messages to a worker the way Chrome does and collects the answers. The handler
+// returns before the work it started finishes — it returns `true` to keep the channel open
+// and calls `sendResponse` later — so a caller waits on the callback rather than on the
+// call. Every message is delivered before the wait begins, because a duplicate arriving
+// while the first is still running is itself something checked below.
+//
+// The tick bound is a deadlock guard rather than a timeout worth tuning: everything the
+// worker does under these fake platforms resolves in microtasks and immediate timers, so a
+// message unanswered after this many turns of the loop is not going to be answered. Coming
+// back short is asserted rather than returned, because a check reading only the broadcasts
+// would otherwise pass on a message that never got that far.
+async function collectWorkerResponses(worker, messages) {
+  const responses = [];
+  for (const message of messages) {
+    worker.handlers.onMessage(message, {}, (response) => responses.push(response));
+  }
+  for (let i = 0; i < 40 && responses.length < messages.length; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(responses.length, messages.length, 'a worker message went unanswered');
+  return responses;
+}
 
-  global.fetch = async (_url, options) => {
-    requestInputs.push(JSON.parse(options.body).input);
-    if (!queue.length) {
-      throw new Error(`Unexpected full-page request #${requestInputs.length}`);
-    }
-    const answer = queue.shift();
-    if (answer?.apiError) {
-      return {
-        ok: false,
-        status: 400,
-        async json() {
-          return { error: { message: answer.apiError } };
-        },
-      };
-    }
-    return { ok: true, async json() { return answer; } };
-  };
-  global.chrome = {
+// The five namespaces a whole-tab translation reaches and nothing else: `runtime` for the
+// state broadcast the panel listens to, `sidePanel` for the panel it opens beside the page,
+// `scripting` for the content script it makes sure is there, `storage` for the settings it
+// translates under, and `tabs` for the extraction it asks the page for. The checks that
+// drive one vary the same three things — what the settings say, what the page hands back,
+// and whether the broadcast is collected — so those are the parameters and the rest is the
+// same platform every time.
+//
+// `extract` is handed the tab id, because a check covering what article extraction can come
+// back with needs a different answer per tab.
+function createTabTranslationChrome({
+  settings,
+  extract,
+  onStateMessage = () => {},
+}) {
+  return {
     runtime: {
-      onInstalled: { addListener() {} },
-      onStartup: { addListener() {} },
-      onMessage: { addListener(listener) { messageListener = listener; } },
       sendMessage(message) {
-        if (message.type === 'STATE_UPDATED') states.push(message.state);
+        if (message.type === 'STATE_UPDATED') onStateMessage(message);
         return Promise.resolve();
       },
     },
-    action: { onClicked: { addListener() {} } },
-    commands: { onCommand: { addListener() {} } },
     sidePanel: {
-      async setPanelBehavior() {},
       async setOptions() {},
       async open() {},
     },
@@ -272,49 +273,75 @@ async function runTabTranslation(
     storage: {
       local: {
         async get() {
-          return { settings: { apiKey: 'sk-test', chunkMaxChars: 2000 } };
+          return { settings };
         },
         async set() {},
       },
     },
     tabs: {
-      async sendMessage(_tabId, message) {
+      async sendMessage(tabId, message) {
         if (message.type === 'EXTRACT_ARTICLE') {
-          return {
-            ok: true,
-            data: {
-              title: 'Article',
-              url: 'https://example.test',
-              langHint: 'en',
-              contentMarkdown: 'Original display Markdown.',
-              translationDocument: documentModel,
-            },
-          };
+          return { ok: true, data: extract(tabId) };
         }
         return { ok: true };
       },
     },
   };
+}
 
-  try {
-    delete require.cache[modulePath];
-    require('../extension/background.js');
-    const responses = [];
-    messageListener(
-      { type: 'TRANSLATE_TAB', tabId },
-      {},
-      (response) => responses.push(response)
-    );
-    for (let i = 0; i < 40 && responses.length < 1; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    return { responses, states, requestInputs };
-  } finally {
-    global.chrome = previousChrome;
-    global.fetch = previousFetch;
-    delete require.cache[modulePath];
-    if (originalModule) require.cache[modulePath] = originalModule;
-  }
+// Drives a whole Side Panel Translation the way the panel does — one TRANSLATE_TAB message
+// into the worker's own chunk loop — and hands back every state the panel would have seen,
+// which is the only place the discard is visible. A queue that runs dry throws, so an
+// unexpected extra request fails loudly instead of replaying the last answer.
+//
+// The platform carries the five namespaces this path reaches: `runtime` for the broadcast
+// each recorded state travels on, `sidePanel` for the panel the translation opens beside the
+// page, `scripting` for the content script it makes sure is there, `storage` for the settings
+// it translates under, and `tabs` for the extraction it asks the page for.
+async function runTabTranslation(
+  tabId,
+  answers,
+  documentModel = THREE_CHUNK_DOCUMENT
+) {
+  const queue = [...answers];
+  const states = [];
+  const requestInputs = [];
+
+  const worker = helpers.createBackgroundWorker({
+    fetch: async (_url, options) => {
+      requestInputs.push(JSON.parse(options.body).input);
+      if (!queue.length) {
+        throw new Error(`Unexpected full-page request #${requestInputs.length}`);
+      }
+      const answer = queue.shift();
+      if (answer?.apiError) {
+        return {
+          ok: false,
+          status: 400,
+          async json() {
+            return { error: { message: answer.apiError } };
+          },
+        };
+      }
+      return { ok: true, async json() { return answer; } };
+    },
+    chrome: createTabTranslationChrome({
+      settings: { apiKey: 'sk-test', chunkMaxChars: 2000 },
+      extract: () => ({
+        title: 'Article',
+        url: 'https://example.test',
+        langHint: 'en',
+        contentMarkdown: 'Original display Markdown.',
+        translationDocument: documentModel,
+      }),
+      onStateMessage: (message) => states.push(message.state),
+    }),
+  });
+
+  const responses = await collectWorkerResponses(worker, [
+    { type: 'TRANSLATE_TAB', tabId },
+  ]);
+  return { responses, states, requestInputs };
 }
 
 exports.name = 'background helpers';
@@ -322,100 +349,66 @@ exports.tests = [
   {
     name: 'recovers one incomplete full-page chunk with ordered protected children',
     async fn() {
-      const previousFetch = global.fetch;
       const { chunk, link, code } = createProtectedFullPageChunk();
-      const requestBodies = [];
-      const responses = [
+      const { requestBodies, translated, error } = await runFullPageChunk(chunk, [
         createIncompleteResponse(),
         createCompletedResponse(
           `읽기 ${link.openToken}안내${link.closeToken}.`
         ),
         createCompletedResponse(`지금 ${code.token} 실행.`),
-      ];
-      global.fetch = async (_url, options) => {
-        requestBodies.push(JSON.parse(options.body));
-        const response = responses.shift();
-        return { ok: true, async json() { return response; } };
-      };
+      ]);
 
-      try {
-        const translated = await helpers.translateFullPageChunk(chunk, {
-          apiKey: 'sk-test',
-          model: 'gpt-5.4-mini',
-          reasoningEffort: 'none',
-          targetLanguage: 'Korean',
-          tone: 'technical',
-        });
-
-        assert.equal(requestBodies.length, 3);
-        assert.equal(
-          translated,
-          '읽기 [안내](<https://private.test/path?token=secret>).\n\n지금 ```private-command --secret``` 실행.'
-        );
-        assert.deepEqual(
-          requestBodies.map((body) => body.input),
-          [chunk.template, chunk.blocks[0].template, chunk.blocks[1].template]
-        );
-        for (const body of requestBodies) {
-          const request = JSON.stringify(body);
-          assert.equal(request.includes(link.destination), false);
-          assert.equal(request.includes(code.value), false);
-        }
-      } finally {
-        global.fetch = previousFetch;
+      assert.equal(error, null);
+      assert.equal(requestBodies.length, 3);
+      assert.equal(
+        translated,
+        '읽기 [안내](<https://private.test/path?token=secret>).\n\n지금 ```private-command --secret``` 실행.'
+      );
+      assert.deepEqual(
+        requestBodies.map((body) => body.input),
+        [chunk.template, chunk.blocks[0].template, chunk.blocks[1].template]
+      );
+      for (const body of requestBodies) {
+        const request = JSON.stringify(body);
+        assert.equal(request.includes(link.destination), false);
+        assert.equal(request.includes(code.value), false);
       }
     },
   },
   {
     name: 'stops after an incomplete recovery child without publishing success',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
+      // The `runtime` this worker is given is what makes the second assertion mean
+      // anything: had the failed chunk recorded a state, the broadcast would be collected
+      // here. A chunk translation is not supposed to record one at all — the loop that
+      // does is a level up — so an empty collection is the check.
       const { chunk, link } = createProtectedFullPageChunk();
-      const states = [];
-      let requestCount = 0;
-      const responses = [
+      const broadcasts = [];
+      const requestBodies = [];
+      const answers = [
         createIncompleteResponse(),
         createCompletedResponse(
           `읽기 ${link.openToken}안내${link.closeToken}.`
         ),
         createIncompleteResponse(),
       ];
-      global.chrome = {
-        runtime: {
-          sendMessage(message) {
-            states.push(message);
-            return Promise.resolve();
-          },
+      const worker = helpers.createBackgroundWorker({
+        chrome: createStateBroadcastChrome(broadcasts),
+        fetch: async (_url, options) => {
+          requestBodies.push(JSON.parse(options.body));
+          return { ok: true, async json() { return answers.shift(); } };
         },
-      };
-      global.fetch = async () => {
-        requestCount += 1;
-        const response = responses.shift();
-        return { ok: true, async json() { return response; } };
-      };
+      });
 
-      try {
-        await assert.rejects(
-          () =>
-            helpers.translateFullPageChunk(chunk, {
-              apiKey: 'sk-test',
-              model: 'gpt-5.4-mini',
-              reasoningEffort: 'none',
-              targetLanguage: 'Korean',
-              tone: 'technical',
-            }),
-          (error) => error.code === 'response.incomplete.max_output_tokens'
-        );
-        assert.equal(requestCount, 3);
-        assert.equal(
-          states.some((message) => message?.state?.status === 'done'),
-          false
-        );
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-      }
+      await assert.rejects(
+        () => worker.translateFullPageChunk(chunk, FULL_PAGE_SETTINGS),
+        (error) => error.code === 'response.incomplete.max_output_tokens'
+      );
+      assert.equal(requestBodies.length, 3);
+      assert.equal(
+        broadcasts.some((message) => message?.state?.status === 'done'),
+        false
+      );
     },
   },
   {
@@ -592,177 +585,120 @@ exports.tests = [
   {
     name: 'keeps extraction contracts out of tab state while translating protected Markdown',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
-      const modulePath = require.resolve('../extension/background.js');
-      const originalModule = require.cache[modulePath];
       const { chunk, link, code } = createProtectedFullPageChunk();
       const stateMessages = [];
       const requestBodies = [];
-      let messageListener = null;
 
-      global.fetch = async (_url, options) => {
-        requestBodies.push(JSON.parse(options.body));
-        return {
-          ok: true,
-          async json() {
-            return createCompletedResponse(
-              `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
-            );
-          },
-        };
-      };
-      global.chrome = {
-        runtime: {
-          onInstalled: { addListener() {} },
-          onStartup: { addListener() {} },
-          onMessage: { addListener(listener) { messageListener = listener; } },
-          sendMessage(message) {
-            if (message.type === 'STATE_UPDATED') stateMessages.push(message);
-            return Promise.resolve();
-          },
-        },
-        action: { onClicked: { addListener() {} } },
-        commands: { onCommand: { addListener() {} } },
-        sidePanel: {
-          async setPanelBehavior() {},
-          async setOptions() {},
-          async open() {},
-        },
-        scripting: { async executeScript() {} },
-        storage: {
-          local: {
-            async get() {
-              return {
-                settings: {
-                  apiKey: 'sk-test',
-                  chunkMaxChars: 2000,
-                  arbitraryStoredSibling: 'stored-state-secret',
-                },
-              };
+      const worker = helpers.createBackgroundWorker({
+        fetch: async (_url, options) => {
+          requestBodies.push(JSON.parse(options.body));
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse(
+                `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
+              );
             },
-            async set() {},
-          },
+          };
         },
-        tabs: {
-          async sendMessage(_tabId, message) {
-            if (message.type === 'EXTRACT_ARTICLE') {
-              return {
-                ok: true,
-                data: {
-                  title: 'Article',
-                  url: 'https://example.test',
-                  langHint: 'en',
-                  contentMarkdown: 'Read the guide and run the command.',
-                  translationDocument: {
-                    namespace: chunk.contract.namespace,
-                    entries: chunk.contract.entries,
-                    blocks: chunk.blocks,
-                  },
-                  contract: 'unexpected-contract-sentinel',
-                  destination: 'https://unexpected.test/private-destination',
-                  body: 'unexpected-body-sentinel',
-                  apiKey: 'unexpected-key-sentinel',
-                },
-              };
-            }
-            return { ok: true };
+        chrome: createTabTranslationChrome({
+          settings: {
+            apiKey: 'sk-test',
+            chunkMaxChars: 2000,
+            arbitraryStoredSibling: 'stored-state-secret',
           },
-        },
-      };
+          extract: () => ({
+            title: 'Article',
+            url: 'https://example.test',
+            langHint: 'en',
+            contentMarkdown: 'Read the guide and run the command.',
+            translationDocument: {
+              namespace: chunk.contract.namespace,
+              entries: chunk.contract.entries,
+              blocks: chunk.blocks,
+            },
+            contract: 'unexpected-contract-sentinel',
+            destination: 'https://unexpected.test/private-destination',
+            body: 'unexpected-body-sentinel',
+            apiKey: 'unexpected-key-sentinel',
+          }),
+          onStateMessage: (message) => stateMessages.push(message),
+        }),
+      });
 
-      try {
-        delete require.cache[modulePath];
-        require('../extension/background.js');
-        const responses = [];
-        messageListener(
-          { type: 'TRANSLATE_TAB', tabId: 20 },
-          {},
-          (response) => responses.push(response)
-        );
-        for (let i = 0; i < 20 && responses.length < 1; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
+      const responses = await collectWorkerResponses(worker, [
+        { type: 'TRANSLATE_TAB', tabId: 20 },
+      ]);
 
-        assert.deepEqual(responses, [{ ok: true }]);
-        assert.equal(stateMessages.at(-1)?.state?.status, 'done');
-        const publicStateKeys = new Set([
-          'status',
-          'error',
-          'extracted',
-          'translated',
-          'progress',
-          'settingsUsed',
-          'updatedAt',
-        ]);
-        const settingsUsedKeys = [
-          'model',
-          'reasoningEffort',
-          'targetLanguage',
-          'tone',
-          'viewMode',
-          'chunkMaxChars',
-        ];
-        for (const message of stateMessages) {
-          const serialized = JSON.stringify(message);
-          assert.equal(
-            Object.keys(message.state).every((key) => publicStateKeys.has(key)),
-            true
-          );
-          if (message.state.settingsUsed) {
-            assert.deepEqual(
-              Object.keys(message.state.settingsUsed),
-              settingsUsedKeys
-            );
-          }
-          assert.equal(serialized.includes('translationDocument'), false);
-          assert.equal(
-            serialized.includes('unexpected-contract-sentinel'),
-            false
-          );
-          assert.equal(serialized.includes('private-destination'), false);
-          assert.equal(serialized.includes('unexpected-body-sentinel'), false);
-          assert.equal(serialized.includes('unexpected-key-sentinel'), false);
-          if (message.state.status !== 'done') {
-            assert.equal(serialized.includes('token=secret'), false);
-            assert.equal(serialized.includes('private-command --secret'), false);
-          }
-        }
-        const stateResponses = [];
-        messageListener(
-          { type: 'GET_STATE', tabId: 20 },
-          {},
-          (response) => stateResponses.push(response)
-        );
-        for (let i = 0; i < 10 && stateResponses.length < 1; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        assert.equal(stateResponses.length, 1);
+      assert.deepEqual(responses, [{ ok: true }]);
+      assert.equal(stateMessages.at(-1)?.state?.status, 'done');
+      const publicStateKeys = new Set([
+        'status',
+        'error',
+        'extracted',
+        'translated',
+        'progress',
+        'settingsUsed',
+        'updatedAt',
+      ]);
+      const settingsUsedKeys = [
+        'model',
+        'reasoningEffort',
+        'targetLanguage',
+        'tone',
+        'viewMode',
+        'chunkMaxChars',
+      ];
+      for (const message of stateMessages) {
+        const serialized = JSON.stringify(message);
         assert.equal(
-          Object.keys(stateResponses[0].state).every((key) =>
-            publicStateKeys.has(key)
-          ),
+          Object.keys(message.state).every((key) => publicStateKeys.has(key)),
           true
         );
+        if (message.state.settingsUsed) {
+          assert.deepEqual(
+            Object.keys(message.state.settingsUsed),
+            settingsUsedKeys
+          );
+        }
+        assert.equal(serialized.includes('translationDocument'), false);
         assert.equal(
-          JSON.stringify(stateResponses[0]).includes('stored-state-secret'),
+          serialized.includes('unexpected-contract-sentinel'),
           false
         );
-        assert.equal(requestBodies.length, 1);
-        assert.equal(
-          JSON.stringify(requestBodies).includes('token=secret'),
-          false
-        );
-        assert.equal(
-          JSON.stringify(requestBodies).includes('private-command --secret'),
-          false
-        );
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-        delete require.cache[modulePath];
-        if (originalModule) require.cache[modulePath] = originalModule;
+        assert.equal(serialized.includes('private-destination'), false);
+        assert.equal(serialized.includes('unexpected-body-sentinel'), false);
+        assert.equal(serialized.includes('unexpected-key-sentinel'), false);
+        if (message.state.status !== 'done') {
+          assert.equal(serialized.includes('token=secret'), false);
+          assert.equal(serialized.includes('private-command --secret'), false);
+        }
       }
+
+      // The same worker, asked for the state it just recorded: the panel reads it back
+      // through GET_STATE, and what comes out has to be as bounded as what was broadcast.
+      const stateResponses = await collectWorkerResponses(worker, [
+        { type: 'GET_STATE', tabId: 20 },
+      ]);
+      assert.equal(
+        Object.keys(stateResponses[0].state).every((key) =>
+          publicStateKeys.has(key)
+        ),
+        true
+      );
+      assert.equal(
+        JSON.stringify(stateResponses[0]).includes('stored-state-secret'),
+        false
+      );
+      assert.equal(requestBodies.length, 1);
+      assert.equal(
+        JSON.stringify(requestBodies).includes('token=secret'),
+        false
+      );
+      assert.equal(
+        JSON.stringify(requestBodies).includes('private-command --secret'),
+        false
+      );
     },
   },
   {
@@ -928,10 +864,6 @@ exports.tests = [
   {
     name: 'owns malformed and oversized extraction failures without publishing display state',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
-      const modulePath = require.resolve('../extension/background.js');
-      const originalModule = require.cache[modulePath];
       const extractionByTab = new Map([
         [30, null],
         [31, undefined],
@@ -968,93 +900,51 @@ exports.tests = [
         ],
       ]);
       const statesByTab = new Map();
-      let fetchCount = 0;
-      let messageListener = null;
+      let requestCount = 0;
 
-      global.fetch = async () => {
-        fetchCount += 1;
-        throw new Error('model request must not run');
-      };
-      global.chrome = {
-        runtime: {
-          onInstalled: { addListener() {} },
-          onStartup: { addListener() {} },
-          onMessage: { addListener(listener) { messageListener = listener; } },
-          sendMessage(message) {
-            if (message.type === 'STATE_UPDATED') {
-              const states = statesByTab.get(message.tabId) || [];
-              states.push(message.state);
-              statesByTab.set(message.tabId, states);
-            }
-            return Promise.resolve();
+      // One worker for all six tabs, because the per-tab state is this instance's and each
+      // tab keeps its own entry in it. Six of them would say nothing the six entries do not.
+      const worker = helpers.createBackgroundWorker({
+        fetch: async () => {
+          requestCount += 1;
+          throw new Error('model request must not run');
+        },
+        chrome: createTabTranslationChrome({
+          settings: { apiKey: 'sk-test', chunkMaxChars: 2000 },
+          extract: (tabId) => extractionByTab.get(tabId),
+          onStateMessage: (message) => {
+            const states = statesByTab.get(message.tabId) || [];
+            states.push(message.state);
+            statesByTab.set(message.tabId, states);
           },
-        },
-        action: { onClicked: { addListener() {} } },
-        commands: { onCommand: { addListener() {} } },
-        sidePanel: {
-          async setPanelBehavior() {},
-          async setOptions() {},
-          async open() {},
-        },
-        scripting: { async executeScript() {} },
-        storage: {
-          local: {
-            async get() {
-              return { settings: { apiKey: 'sk-test', chunkMaxChars: 2000 } };
-            },
-            async set() {},
-          },
-        },
-        tabs: {
-          async sendMessage(tabId, message) {
-            if (message.type === 'EXTRACT_ARTICLE') {
-              return { ok: true, data: extractionByTab.get(tabId) };
-            }
-            return { ok: true };
-          },
-        },
-      };
+        }),
+      });
 
-      try {
-        delete require.cache[modulePath];
-        require('../extension/background.js');
+      for (const tabId of extractionByTab.keys()) {
+        const responses = await collectWorkerResponses(worker, [
+          { type: 'TRANSLATE_TAB', tabId },
+        ]);
+        assert.deepEqual(responses, [{
+          ok: true,
+          skipped: true,
+          reason: 'extract_failed',
+        }]);
+      }
 
-        for (const tabId of extractionByTab.keys()) {
-          const responses = [];
-          messageListener(
-            { type: 'TRANSLATE_TAB', tabId },
-            {},
-            (response) => responses.push(response)
-          );
-          for (let i = 0; i < 20 && responses.length < 1; i += 1) {
-            await new Promise((resolve) => setTimeout(resolve, 0));
-          }
-          assert.deepEqual(responses, [{
-            ok: true,
-            skipped: true,
-            reason: 'extract_failed',
-          }]);
-        }
-
-        assert.equal(fetchCount, 0);
-        for (const states of statesByTab.values()) {
-          assert.equal(states.at(-1)?.status, 'error');
-          assert.equal(states.at(-1)?.progress, null);
-          assert.equal(states.at(-1)?.translated, null);
-          assert.equal(
-            states.some((state) => Boolean(state.extracted)),
-            false
-          );
-          assert.equal(
-            JSON.stringify(states).includes('oversized-display-sentinel'),
-            false
-          );
-        }
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-        delete require.cache[modulePath];
-        if (originalModule) require.cache[modulePath] = originalModule;
+      assert.equal(requestCount, 0);
+      assert.equal(statesByTab.size, extractionByTab.size);
+      for (const states of statesByTab.values()) {
+        assert.equal(states.at(-1)?.status, 'error');
+        assert.equal(states.at(-1)?.progress, null);
+        assert.equal(states.at(-1)?.translated, null);
+        assert.equal(
+          states.some((state) => Boolean(state.extracted)),
+          false
+        );
+        assert.equal(
+          JSON.stringify(states).includes('oversized-display-sentinel'),
+          false
+        );
       }
     },
   },
@@ -1916,224 +1806,95 @@ exports.tests = [
   {
     name: 'skips duplicate full-tab translations while one is running',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
-      const modulePath = require.resolve('../extension/background.js');
-      const originalModule = require.cache[modulePath];
-      let messageListener = null;
-      let fetchCount = 0;
+      // Both messages go in before either is waited on, so the second one really does
+      // arrive while the first is mid-flight — which is the only condition under which
+      // the worker has a running translation to recognize.
+      let requestCount = 0;
 
-      global.fetch = async () => {
-        fetchCount += 1;
-        await Promise.resolve();
-        return {
-          ok: true,
-          async json() {
-            return createCompletedResponse('번역 결과');
-          },
-        };
-      };
-
-      global.chrome = {
-        runtime: {
-          onInstalled: { addListener() {} },
-          onStartup: { addListener() {} },
-          onMessage: {
-            addListener(listener) {
-              messageListener = listener;
+      const worker = helpers.createBackgroundWorker({
+        fetch: async () => {
+          requestCount += 1;
+          await Promise.resolve();
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse('번역 결과');
             },
+          };
+        },
+        chrome: createTabTranslationChrome({
+          settings: {
+            apiKey: 'sk-test',
+            model: 'ft:gpt_custom/model',
+            targetLanguage: 'Japanese',
+            tone: 'technical',
+            chunkMaxChars: 12000,
           },
-          sendMessage() {
-            return Promise.resolve();
-          },
-        },
-        action: { onClicked: { addListener() {} } },
-        commands: { onCommand: { addListener() {} } },
-        sidePanel: {
-          async setPanelBehavior() {},
-          async setOptions() {},
-          async open() {},
-        },
-        scripting: {
-          async executeScript() {},
-        },
-        storage: {
-          local: {
-            async get() {
-              return {
-                settings: {
-                  apiKey: 'sk-test',
-                  model: 'ft:gpt_custom/model',
-                  targetLanguage: 'Japanese',
-                  tone: 'technical',
-                  chunkMaxChars: 12000,
-                },
-              };
-            },
-            async set() {},
-          },
-        },
-        tabs: {
-          async sendMessage(_tabId, message) {
-            if (message.type === 'EXTRACT_ARTICLE') {
-              return {
-                ok: true,
-                data: {
-                  title: 'Article',
-                  url: 'https://example.test',
-                  langHint: 'en',
-                  contentMarkdown: 'Hello world.',
-                  translationDocument:
-                    createPlainTranslationDocument('Hello world.'),
-                },
-              };
-            }
-            return { ok: true };
-          },
-        },
-      };
+          extract: () => ({
+            title: 'Article',
+            url: 'https://example.test',
+            langHint: 'en',
+            contentMarkdown: 'Hello world.',
+            translationDocument:
+              createPlainTranslationDocument('Hello world.'),
+          }),
+        }),
+      });
 
-      try {
-        delete require.cache[modulePath];
-        require('../extension/background.js');
-        assert.equal(typeof messageListener, 'function');
+      const responses = await collectWorkerResponses(worker, [
+        { type: 'TRANSLATE_TAB', tabId: 10 },
+        { type: 'TRANSLATE_TAB', tabId: 10 },
+      ]);
 
-        const responses = [];
-        messageListener(
-          { type: 'TRANSLATE_TAB', tabId: 10 },
-          {},
-          (response) => responses.push(response)
-        );
-        messageListener(
-          { type: 'TRANSLATE_TAB', tabId: 10 },
-          {},
-          (response) => responses.push(response)
-        );
-
-        for (let i = 0; i < 10 && responses.length < 2; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-
-        assert.equal(fetchCount, 1);
-        assert.equal(responses.length, 2);
-        assert.deepEqual(responses.find((response) => response.skipped), {
-          ok: true,
-          skipped: true,
-          reason: 'already_running',
-        });
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-        delete require.cache[modulePath];
-        if (originalModule) require.cache[modulePath] = originalModule;
-      }
+      assert.equal(requestCount, 1);
+      assert.deepEqual(responses.find((response) => response.skipped), {
+        ok: true,
+        skipped: true,
+        reason: 'already_running',
+      });
     },
   },
   {
     name: 'uses a full-page output token cap scaled to the chunk size',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
-      const modulePath = require.resolve('../extension/background.js');
-      const originalModule = require.cache[modulePath];
-      let messageListener = null;
       const requestBodies = [];
       const markdown = 'A'.repeat(20000);
 
-      global.fetch = async (_url, options) => {
-        requestBodies.push(JSON.parse(options.body));
-        return {
-          ok: true,
-          async json() {
-            return createCompletedResponse('번역 결과');
-          },
-        };
-      };
-
-      global.chrome = {
-        runtime: {
-          onInstalled: { addListener() {} },
-          onStartup: { addListener() {} },
-          onMessage: {
-            addListener(listener) {
-              messageListener = listener;
+      const worker = helpers.createBackgroundWorker({
+        fetch: async (_url, options) => {
+          requestBodies.push(JSON.parse(options.body));
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse('번역 결과');
             },
+          };
+        },
+        chrome: createTabTranslationChrome({
+          settings: {
+            apiKey: 'sk-test',
+            model: 'gpt-5.4-mini',
+            targetLanguage: 'Korean',
+            tone: 'technical',
+            chunkMaxChars: 60000,
           },
-          sendMessage() {
-            return Promise.resolve();
-          },
-        },
-        action: { onClicked: { addListener() {} } },
-        commands: { onCommand: { addListener() {} } },
-        sidePanel: {
-          async setPanelBehavior() {},
-          async setOptions() {},
-          async open() {},
-        },
-        scripting: {
-          async executeScript() {},
-        },
-        storage: {
-          local: {
-            async get() {
-              return {
-                settings: {
-                  apiKey: 'sk-test',
-                  model: 'gpt-5.4-mini',
-                  targetLanguage: 'Korean',
-                  tone: 'technical',
-                  chunkMaxChars: 60000,
-                },
-              };
-            },
-            async set() {},
-          },
-        },
-        tabs: {
-          async sendMessage(_tabId, message) {
-            if (message.type === 'EXTRACT_ARTICLE') {
-              return {
-                ok: true,
-                data: {
-                  title: 'Article',
-                  url: 'https://example.test',
-                  langHint: 'en',
-                  contentMarkdown: markdown,
-                  translationDocument:
-                    createPlainTranslationDocument(markdown),
-                },
-              };
-            }
-            return { ok: true };
-          },
-        },
-      };
+          extract: () => ({
+            title: 'Article',
+            url: 'https://example.test',
+            langHint: 'en',
+            contentMarkdown: markdown,
+            translationDocument: createPlainTranslationDocument(markdown),
+          }),
+        }),
+      });
 
-      try {
-        delete require.cache[modulePath];
-        require('../extension/background.js');
-        assert.equal(typeof messageListener, 'function');
+      const responses = await collectWorkerResponses(worker, [
+        { type: 'TRANSLATE_TAB', tabId: 11 },
+      ]);
 
-        const responses = [];
-        messageListener(
-          { type: 'TRANSLATE_TAB', tabId: 11 },
-          {},
-          (response) => responses.push(response)
-        );
-
-        for (let i = 0; i < 10 && responses.length < 1; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-
-        assert.deepEqual(responses, [{ ok: true }]);
-        assert.equal(requestBodies.length, 1);
-        assert.equal(requestBodies[0].max_output_tokens, markdown.length);
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-        delete require.cache[modulePath];
-        if (originalModule) require.cache[modulePath] = originalModule;
-      }
+      assert.deepEqual(responses, [{ ok: true }]);
+      assert.equal(requestBodies.length, 1);
+      assert.equal(requestBodies[0].max_output_tokens, markdown.length);
     },
   },
   {
