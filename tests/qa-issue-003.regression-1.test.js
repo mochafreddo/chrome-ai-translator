@@ -349,61 +349,60 @@ exports.tests = [
   {
     name: 'uses merged settings when production completeness validation is enabled',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
       const record = createReasoningRecord();
-      global.chrome = {
-        storage: {
-          local: {
-            async get() {
-              return {
-                settings: {
-                  apiKey: 'test-key',
-                  model: 'gpt-5.4-mini',
-                  reasoningEffort: 'none',
-                  targetLanguage: 'Korean',
-                  tone: 'natural',
-                },
-              };
+      // The batch is handed a worker rather than left to find one: `storage.local` for the
+      // settings the snapshot is merged into and the diagnostics run it writes, and the
+      // network for the two requests a repair makes. Correlations stay in this worker's own
+      // state, which is what leaves the token below on every result.
+      const worker = background.createBackgroundWorker({
+        chrome: {
+          storage: {
+            local: {
+              async get() {
+                return {
+                  settings: {
+                    apiKey: 'test-key',
+                    model: 'gpt-5.4-mini',
+                    reasoningEffort: 'none',
+                    targetLanguage: 'Korean',
+                    tone: 'natural',
+                  },
+                };
+              },
+              async set() {},
             },
-            async set() {},
           },
         },
-      };
-      global.fetch = async () => ({
-        ok: true,
-        async json() {
-          return createCompletedResponse(JSON.stringify({
-            translations: [{ id: record.id, template: record.template }],
-          }));
-        },
+        fetch: async () => ({
+          ok: true,
+          async json() {
+            return createCompletedResponse(JSON.stringify({
+              translations: [{ id: record.id, template: record.template }],
+            }));
+          },
+        }),
       });
 
-      try {
-        for (const settingsSnapshot of [null, { tone: 'formal' }]) {
-          const results = await background.translateVisibleBlockBatch(
-            [record],
-            settingsSnapshot,
-            { validateTranslationCompleteness: true }
-          );
-          assert.equal(results.length, 1);
-          assert.equal(results[0].id, record.id);
-          assert.equal(results[0].disposition, 'reject');
-          assert.equal(
-            results[0].terminalCode,
-            'quality.target_language_missing'
-          );
-          assert.equal(results[0].messageKey, 'wrong_target_language_rejected');
-          assert.equal(results[0].attemptCount, 2);
-          assert.match(
-            results[0].correlationToken,
-            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-          );
-          assert.equal(Object.hasOwn(results[0], 'template'), false);
-        }
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
+      for (const settingsSnapshot of [null, { tone: 'formal' }]) {
+        const results = await worker.translateVisibleBlockBatch(
+          [record],
+          settingsSnapshot,
+          { validateTranslationCompleteness: true }
+        );
+        assert.equal(results.length, 1);
+        assert.equal(results[0].id, record.id);
+        assert.equal(results[0].disposition, 'reject');
+        assert.equal(
+          results[0].terminalCode,
+          'quality.target_language_missing'
+        );
+        assert.equal(results[0].messageKey, 'wrong_target_language_rejected');
+        assert.equal(results[0].attemptCount, 2);
+        assert.match(
+          results[0].correlationToken,
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        );
+        assert.equal(Object.hasOwn(results[0], 'template'), false);
       }
     },
   },
