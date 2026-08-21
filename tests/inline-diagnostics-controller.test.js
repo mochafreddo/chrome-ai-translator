@@ -8,7 +8,20 @@ module.exports = {
     {
       name: 'creates protocol-valid correlation identifiers',
       fn() {
-        assert.match(protocol.createUuidV4(), protocol.uuidV4Pattern);
+        assert.match(protocol.createUuidV4(globalThis.crypto), protocol.uuidV4Pattern);
+
+        // The path a crypto without `randomUUID` takes — what an older browser hands the
+        // content script — has to mint a token the same pattern accepts.
+        assert.match(
+          protocol.createUuidV4({
+            getRandomValues: (bytes) => globalThis.crypto.getRandomValues(bytes),
+          }),
+          protocol.uuidV4Pattern
+        );
+
+        // And a caller with no crypto to mint from is told so rather than handed something
+        // the pattern would refuse on the way back in.
+        assert.throws(() => protocol.createUuidV4(), /needs the crypto/);
       },
     },
     {

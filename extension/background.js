@@ -106,7 +106,7 @@ const {
   require('./inline-translation-controls.js');
 const { MISSING_PAGE_ACCESS_MESSAGES } =
   globalThis.ChromeAiTranslatorPageAccess || require('./page-access.js');
-const translationDiagnostics =
+const translationDiagnosticsModule =
   globalThis.ChromeAiTranslatorDiagnostics || require('./translation-diagnostics.js');
 const inlineDiagnosticsProtocol =
   globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol || require('./inline-diagnostics-protocol.js');
@@ -838,10 +838,6 @@ const FULL_PAGE_TOKEN_ERROR_CODES = new Set([
   'markdown.token_nesting_invalid',
 ]);
 
-function createInlineRuntimeCorrelationToken() {
-  return inlineDiagnosticsProtocol.createUuidV4();
-}
-
 function getAllPagesContentScript() {
   return {
     id: INLINE_CONTENT_SCRIPT_ID,
@@ -860,17 +856,19 @@ function isDuplicateInlineContentScriptError(error) {
 // The worker the extension runs, with the platform it runs on handed to it.
 //
 // `platform` names the three things the worker cannot reach on its own: Chrome's extension
-// namespaces, the network, and the crypto that names a diagnostics run. What an instance was
+// namespaces, the network, and the crypto that names a diagnostics run, signs the
+// fingerprints in it, and mints the tokens a batch reports under. What an instance was
 // handed is all it can reach — there is no global scope behind this. A path that reaches for
 // a namespace its platform does not carry fails saying so, which is the whole point of
 // building the worker rather than letting it find the browser by name: the service worker
 // hands over the platform Chrome gave it at the foot of this file, and a check hands over the
 // namespaces the one path it drives touches and can be certain nothing else was in play.
 //
-// The state below is this instance's rather than the module's — the three long-lived maps
-// and the two promise chains that serialize writes to them — so a second construction is a
-// second worker carrying nothing over. That is what a restarting service worker is, and
-// what a caller wanting a clean one used to have to delete the require cache to get.
+// The state below is this instance's rather than the module's — the three long-lived maps,
+// the two promise chains that serialize writes to them, and the diagnostics module it
+// signs and writes runs through — so a second construction is a second worker carrying
+// nothing over. That is what a restarting service worker is, and what a caller wanting a
+// clean one used to have to delete the require cache to get.
 function createBackgroundWorker(platform = {}) {
   const givenChrome = platform.chrome ?? null;
   const givenFetch = platform.fetch ?? null;
@@ -892,6 +890,22 @@ function createBackgroundWorker(platform = {}) {
   function fetch(...args) {
     if (!givenFetch) throw missingPlatform('a network');
     return givenFetch(...args);
+  }
+
+  // This worker's diagnostics module, signing and seeding with the crypto the worker was
+  // built with. A second construction of the worker is a second one of these, with its own
+  // installation secret, its own key cache and its own write chain — which is what a
+  // restarting service worker is, and what a check gets by building a worker.
+  const translationDiagnostics =
+    translationDiagnosticsModule.createTranslationDiagnostics(givenCrypto);
+
+  // The correlation token a batch hands the page, from the same crypto. Unlike the runtime
+  // diagnostic id below, a worker with no crypto cannot mint one at all: the page's report
+  // is matched back against the protocol's UUID pattern, so there is no lesser token to
+  // fall back to. The one caller already treats a failure here as diagnostics being
+  // unavailable for the batch, which is what it is.
+  function createInlineRuntimeCorrelationToken() {
+    return inlineDiagnosticsProtocol.createUuidV4(givenCrypto);
   }
 
   const inlineRuntimeCorrelations = new Map();
@@ -930,11 +944,10 @@ function createBackgroundWorker(platform = {}) {
       .catch(() => {});
   }
 
-  // A platform with no crypto is not an error here: the id has a suffix either way. This is
-  // the one place the worker itself names crypto. The two diagnostics modules name it as well
-  // — `createUuidV4` for a correlation token, the fingerprint signing for a block — and each
-  // reads the global scope it was published into rather than anything handed to it, which is
-  // how every module in this extension is wired and belongs to those modules rather than here.
+  // A platform with no crypto is not an error here: the id has a suffix either way, and a
+  // timestamp with a weak suffix still names a run. That tolerance is this function's alone
+  // — the two other places the crypto is spent, the correlation token above and the
+  // fingerprint signing behind the diagnostics module, both fail without one.
   function createRuntimeDiagnosticId(startedAt, cryptoApi = givenCrypto) {
     const suffix = typeof cryptoApi?.randomUUID === 'function'
       ? cryptoApi.randomUUID()
