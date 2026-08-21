@@ -15,9 +15,18 @@
       maxSessionCost: 60000,
     }),
     uuidV4Pattern: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-    createUuidV4() {
-      if (globalScope.crypto?.randomUUID) return globalScope.crypto.randomUUID();
-      const bytes = globalScope.crypto.getRandomValues(new Uint8Array(16));
+    // The correlation token a Semantic Block batch hands the page, minted with the crypto
+    // the caller mints it with. Per call rather than per construction, because this is a
+    // frozen protocol object with no state to construct: the worker passes the crypto its
+    // platform carries, and the content script passes the page's.
+    //
+    // A missing crypto is an error rather than something to fall back from. The token is
+    // matched against the pattern above on the way back in, so a batch that cannot mint a
+    // real one has nothing to offer the page and should say so here.
+    createUuidV4(cryptoApi) {
+      if (!cryptoApi) throw new Error('A correlation token needs the crypto that mints it');
+      if (cryptoApi.randomUUID) return cryptoApi.randomUUID();
+      const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
       bytes[6] = (bytes[6] & 0x0f) | 0x40;
       bytes[8] = (bytes[8] & 0x3f) | 0x80;
       const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));

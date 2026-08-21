@@ -8,7 +8,7 @@ module.exports = {
     {
       name: 'creates protocol-valid correlation identifiers',
       fn() {
-        assert.match(protocol.createUuidV4(), protocol.uuidV4Pattern);
+        assert.match(protocol.createUuidV4(globalThis.crypto), protocol.uuidV4Pattern);
       },
     },
     {

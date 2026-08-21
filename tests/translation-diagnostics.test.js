@@ -1,6 +1,14 @@
 const assert = require('node:assert/strict');
 const diagnostics = require('../extension/translation-diagnostics.js');
 
+// A signing, writing diagnostics module built with the platform's own crypto. Built per
+// check rather than once for the file, because the installation secret, the imported-key
+// cache and the write chain belong to a construction: a check that wants a fresh secret and
+// an empty cache asks for one here instead of reaching into the module for them.
+function createDiagnostics(cryptoApi = globalThis.crypto) {
+  return diagnostics.createTranslationDiagnostics(cryptoApi);
+}
+
 exports.name = 'translation diagnostics';
 exports.tests = [
   {
@@ -40,31 +48,36 @@ exports.tests = [
   {
     name: 'creates installation-scoped stable HMAC fingerprints',
     async fn() {
+      const signing = createDiagnostics();
       const a = new Uint8Array(32).fill(1);
       const b = new Uint8Array(32).fill(2);
-      assert.equal(await diagnostics.fingerprint(a, 'same'), await diagnostics.fingerprint(a, 'same'));
-      assert.notEqual(await diagnostics.fingerprint(a, 'same'), await diagnostics.fingerprint(b, 'same'));
+      assert.equal(await signing.fingerprint(a, 'same'), await signing.fingerprint(a, 'same'));
+      assert.notEqual(await signing.fingerprint(a, 'same'), await signing.fingerprint(b, 'same'));
     },
   },
   {
+    // A failed import must not poison the key cache: the second call has to try again rather
+    // than await the rejection the first one left behind. The crypto that fails once is
+    // handed over rather than patched onto the global one, so nothing outside this check
+    // sees it and nothing has to be put back afterwards.
     name: 'retries a transient HMAC key import failure',
     async fn() {
-      const subtle = globalThis.crypto.subtle;
-      const originalImportKey = subtle.importKey;
       let calls = 0;
-      subtle.importKey = async function transientImport(...args) {
-        calls += 1;
-        if (calls === 1) throw new Error('transient');
-        return originalImportKey.apply(this, args);
-      };
+      const signing = createDiagnostics({
+        subtle: {
+          importKey(...args) {
+            calls += 1;
+            if (calls === 1) return Promise.reject(new Error('transient'));
+            return globalThis.crypto.subtle.importKey(...args);
+          },
+          sign: (...args) => globalThis.crypto.subtle.sign(...args),
+        },
+      });
       const secret = new Uint8Array(32).fill(9);
-      try {
-        await assert.rejects(diagnostics.fingerprint(secret, 'value'), /transient/);
-        assert.match(await diagnostics.fingerprint(secret, 'value'), /^hmac-sha256:/);
-        assert.equal(calls, 2);
-      } finally {
-        subtle.importKey = originalImportKey;
-      }
+
+      await assert.rejects(signing.fingerprint(secret, 'value'), /transient/);
+      assert.match(await signing.fingerprint(secret, 'value'), /^hmac-sha256:/);
+      assert.equal(calls, 2);
     },
   },
   {
@@ -143,7 +156,7 @@ exports.tests = [
         async remove(key) { delete stored[key]; },
       } } };
 
-      assert.deepEqual(await diagnostics.discardRun(chromeApi, 'provisional'), { discarded: true });
+      assert.deepEqual(await createDiagnostics().discardRun(chromeApi, 'provisional'), { discarded: true });
       assert.deepEqual(stored['inlineDiagnostics:v2:index'], ['kept']);
       assert.equal(stored['inlineDiagnostics:v2:run:provisional'], undefined);
     },
@@ -176,8 +189,9 @@ exports.tests = [
         summary: { requested: 1, failed: 1 },
         blocks: [],
       };
+      const writing = createDiagnostics();
 
-      assert.deepEqual(await diagnostics.persistRunIdempotent(chromeApi, run), {
+      assert.deepEqual(await writing.persistRunIdempotent(chromeApi, run), {
         persisted: true,
         duplicate: true,
       });
@@ -187,7 +201,7 @@ exports.tests = [
       assert.equal(stored[runKey].summary.failed, 1);
 
       stored[runKey] = { runId: 'local-test', idempotencyFingerprint: 'corrupt', outcome: 'interrupted' };
-      assert.deepEqual(await diagnostics.persistRunIdempotent(chromeApi, run), {
+      assert.deepEqual(await writing.persistRunIdempotent(chromeApi, run), {
         persisted: true,
         duplicate: false,
       });

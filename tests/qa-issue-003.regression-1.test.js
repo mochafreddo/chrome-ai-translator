@@ -373,6 +373,9 @@ exports.tests = [
             },
           },
         },
+        // The correlation token asserted below is minted from this, and so is the
+        // fingerprint on the run behind it.
+        crypto: globalThis.crypto,
         fetch: async () => ({
           ok: true,
           async json() {

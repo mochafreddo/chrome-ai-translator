@@ -1467,6 +1467,11 @@ exports.tests = [
       };
       const worker = helpers.createBackgroundWorker({
         chrome: createBlockBatchChrome(),
+        // Every batch below signs a fingerprint per block and mints a correlation token, so
+        // a worker driving this path needs the crypto for both. Node's own is handed over
+        // rather than a stand-in: what these checks care about is that the run is written
+        // and correlated, not what the signature comes out as.
+        crypto: globalThis.crypto,
         // In the target language the settings name, so every batch below is applied on its
         // merits rather than repaired for saying nothing Korean.
         fetch: async () => ({ ok: true, async json() { return createCompletedResponse(JSON.stringify({
@@ -1518,6 +1523,7 @@ exports.tests = [
             async set() { throw new Error('session unavailable'); },
           },
         }),
+        crypto: globalThis.crypto,
         fetch: async (_url, options) => {
           requestBodies.push(JSON.parse(options.body));
           return {
@@ -2092,6 +2098,7 @@ exports.tests = [
       });
       const platform = {
         chrome,
+        crypto: globalThis.crypto,
         fetch: async () => ({
           ok: true,
           async json() {
@@ -2217,7 +2224,11 @@ exports.tests = [
       assert.equal(localRun.summary.requested, 1);
       assert.equal(localRun.blocks[0].quality.evidence.recordCost, 13000);
       assert.equal(localRun.blocks[0].quality.evidence.limit, 12000);
+      // A diagnostics module of this check's own, built with the same crypto and reading
+      // through the same Chrome, arrives at the same fingerprints: the installation secret
+      // is what Chrome kept rather than what either construction happened to hold.
       const expectedFingerprints = await require('../extension/translation-diagnostics.js')
+        .createTranslationDiagnostics(globalThis.crypto)
         .fingerprintBlock(chrome, record.template, record.contract);
       assert.equal(localRun.blocks[0].sourceFingerprint, expectedFingerprints.sourceFingerprint);
       assert.equal(localRun.blocks[0].contractFingerprint, expectedFingerprints.contractFingerprint);
@@ -2323,6 +2334,7 @@ exports.tests = [
       let call = 0;
       const worker = helpers.createBackgroundWorker({
         chrome: createBlockBatchChrome(),
+        crypto: globalThis.crypto,
         fetch: async () => {
           call += 1;
           if (call === 2) {
@@ -2357,6 +2369,7 @@ exports.tests = [
       let repairCalls = 0;
       const repairWorker = helpers.createBackgroundWorker({
         chrome: createBlockBatchChrome(),
+        crypto: globalThis.crypto,
         fetch: async () => {
           repairCalls += 1;
           return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
@@ -2380,6 +2393,7 @@ exports.tests = [
       let cleanCalls = 0;
       const cleanWorker = helpers.createBackgroundWorker({
         chrome: createBlockBatchChrome(),
+        crypto: globalThis.crypto,
         fetch: async () => {
           cleanCalls += 1;
           return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
@@ -2398,14 +2412,29 @@ exports.tests = [
   {
     name: 'persists repaired detail and falls back to compact final when fingerprints fail',
     async fn() {
-      const diagnostics = require('../extension/translation-diagnostics.js');
-      const previousFingerprintBlock = diagnostics.fingerprintBlock;
       const stored = {};
       let record = createTestPlainBlockRecord('repair-success');
       record.template = 'Hello world.';
       let call = 0;
+      // Fingerprinting fails here by handing the worker a crypto that stops signing, which
+      // is the whole reason the diagnostics module is built with one: the same batch runs
+      // twice against the same worker, once with a crypto that signs and once without, and
+      // nothing outside this platform is touched to arrange it. Signing rather than key
+      // import is what gives way, because a key already imported for this installation's
+      // secret is cached and would never be asked for a second time.
+      let signing = true;
       const worker = helpers.createBackgroundWorker({
         chrome: createBlockBatchChrome({ stored }),
+        crypto: {
+          getRandomValues: (bytes) => globalThis.crypto.getRandomValues(bytes),
+          randomUUID: () => globalThis.crypto.randomUUID(),
+          subtle: {
+            importKey: (...args) => globalThis.crypto.subtle.importKey(...args),
+            sign: (...args) => (signing
+              ? globalThis.crypto.subtle.sign(...args)
+              : Promise.reject(new Error('fingerprint unavailable'))),
+          },
+        },
         fetch: async () => {
           call += 1;
           return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
@@ -2414,33 +2443,26 @@ exports.tests = [
         },
       });
 
-      // Fingerprinting is the one thing here that is still borrowed rather than handed over:
-      // it lives in the diagnostics module, which closes over its own global scope, so making
-      // it fail means replacing it and putting it back afterwards.
-      try {
-        const detailedResults = await worker.translateVisibleBlockBatch([record]);
-        const detailedRun = Object.values(stored).find((value) => value?.blocks?.length === 1);
-        assert.equal(detailedResults[0].disposition, 'apply');
-        assert.equal(detailedResults[0].diagnosticsUnavailable, undefined);
-        assert.equal(detailedRun.outcome, 'done');
-        assert.equal(detailedRun.blocks[0].terminalDisposition, 'apply');
-        assert.equal(detailedRun.blocks[0].terminalCode, '');
-        assert.equal(detailedRun.blocks[0].timeline[1].disposition, 'apply');
+      const detailedResults = await worker.translateVisibleBlockBatch([record]);
+      const detailedRun = Object.values(stored).find((value) => value?.blocks?.length === 1);
+      assert.equal(detailedResults[0].disposition, 'apply');
+      assert.equal(detailedResults[0].diagnosticsUnavailable, undefined);
+      assert.equal(detailedRun.outcome, 'done');
+      assert.equal(detailedRun.blocks[0].terminalDisposition, 'apply');
+      assert.equal(detailedRun.blocks[0].terminalCode, '');
+      assert.equal(detailedRun.blocks[0].timeline[1].disposition, 'apply');
 
-        record = createTestPlainBlockRecord('fingerprint-failure');
-        record.template = 'Hello world.';
-        call = 0;
-        diagnostics.fingerprintBlock = async () => { throw new Error('fingerprint unavailable'); };
-        const fallbackResults = await worker.translateVisibleBlockBatch([record]);
-        const compactRun = Object.values(stored).find((value) =>
-          value?.outcome === 'done' && Array.isArray(value.blocks) && value.blocks.length === 0
-        );
-        assert.equal(fallbackResults[0].disposition, 'apply');
-        assert.equal(fallbackResults[0].diagnosticsUnavailable, true);
-        assert.ok(compactRun);
-      } finally {
-        diagnostics.fingerprintBlock = previousFingerprintBlock;
-      }
+      record = createTestPlainBlockRecord('fingerprint-failure');
+      record.template = 'Hello world.';
+      call = 0;
+      signing = false;
+      const fallbackResults = await worker.translateVisibleBlockBatch([record]);
+      const compactRun = Object.values(stored).find((value) =>
+        value?.outcome === 'done' && Array.isArray(value.blocks) && value.blocks.length === 0
+      );
+      assert.equal(fallbackResults[0].disposition, 'apply');
+      assert.equal(fallbackResults[0].diagnosticsUnavailable, true);
+      assert.ok(compactRun);
     },
   },
   {

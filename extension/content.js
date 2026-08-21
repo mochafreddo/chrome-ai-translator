@@ -148,8 +148,10 @@ function flushInlineLocalDiagnostics(store, state = inlineState) {
   sendInlineLocalDiagnosticBatch(store, batch, state);
 }
 
+// The page's own crypto, named here rather than inside the protocol object: the token is
+// minted with whatever crypto its caller mints it with, and in the page that is the page's.
 function createInlineLocalDiagnosticBatchId() {
-  return inlineDiagnosticsProtocol.createUuidV4();
+  return inlineDiagnosticsProtocol.createUuidV4(globalThis.crypto);
 }
 
 function sendInlineLocalDiagnosticBatch(store, batch, state = inlineState) {
