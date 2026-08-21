@@ -1,8 +1,9 @@
 // background.js (MV3 service worker)
 // Personal use only: API key is stored locally by the user.
 
-// Both codecs below read the Placeholder Token contract off the global scope as they load, so
-// it goes in ahead of them rather than beside them.
+// The two modules below that read a translation back — the inline-block codec and Side Panel
+// Translation's rehydration half — take the Placeholder Token contract off the global scope as
+// they load, so it goes in ahead of them rather than beside them.
 if (
   typeof importScripts === 'function' &&
   !globalThis.ChromeAiTranslatorPlaceholderTokens
@@ -31,16 +32,36 @@ const openAiResponse =
   (typeof module !== 'undefined' && module.exports
     ? require('./openai-response.js')
     : null);
+// Side Panel Translation's codec, in the two parts the worker calls. The entry module goes in
+// ahead of both, which read it as they load; the third part, the one that reads a page into a
+// document model, runs in the content script and is not imported here.
 if (
   typeof importScripts === 'function' &&
-  !globalThis.ChromeAiTranslatorFullPageMarkdown
+  !globalThis.ChromeAiTranslatorMarkdownEntries
 ) {
-  importScripts('full-page-markdown.js');
+  importScripts('markdown-entries.js');
 }
-const fullPageMarkdown =
-  globalThis.ChromeAiTranslatorFullPageMarkdown ||
+if (
+  typeof importScripts === 'function' &&
+  !globalThis.ChromeAiTranslatorMarkdownRehydration
+) {
+  importScripts('markdown-rehydration.js');
+}
+const markdownRehydration =
+  globalThis.ChromeAiTranslatorMarkdownRehydration ||
   (typeof module !== 'undefined' && module.exports
-    ? require('./full-page-markdown.js')
+    ? require('./markdown-rehydration.js')
+    : null);
+if (
+  typeof importScripts === 'function' &&
+  !globalThis.ChromeAiTranslatorTranslationChunks
+) {
+  importScripts('translation-chunks.js');
+}
+const translationChunks =
+  globalThis.ChromeAiTranslatorTranslationChunks ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./translation-chunks.js')
     : null);
 if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorValidation) {
@@ -321,7 +342,8 @@ function getInlineContentScriptFiles() {
     'inline-block.js',
     'inline-diagnostics-protocol.js',
     'inline-translation-controls.js',
-    'full-page-markdown.js',
+    'markdown-entries.js',
+    'markdown-document.js',
     'content.js',
   ];
 }
@@ -1185,7 +1207,7 @@ function createBackgroundWorker(platform = {}) {
         input: chunk.template,
         maxOutputTokens: getFullPageMaxOutputTokens(chunk.template),
       });
-      return fullPageMarkdown.validateAndRehydrateChunk(output, chunk);
+      return markdownRehydration.validateAndRehydrateChunk(output, chunk);
     } catch (error) {
       if ((Number(chunk.recoveryDepth) || 0) >= 1) throw error;
       if (FULL_PAGE_TOKEN_ERROR_CODES.has(error?.code)) {
@@ -1196,7 +1218,7 @@ function createBackgroundWorker(platform = {}) {
       if (error?.code !== 'response.incomplete.max_output_tokens') {
         throw error;
       }
-      const children = fullPageMarkdown.splitChunkForRecovery(chunk);
+      const children = translationChunks.splitChunkForRecovery(chunk);
       const translated = [];
       for (const child of children) {
         translated.push(await translateFullPageChunk(child, settings));
@@ -1746,7 +1768,7 @@ function createBackgroundWorker(platform = {}) {
           );
         }
         assertFullPageTranslationBudget(contentMarkdown);
-        chunks = fullPageMarkdown.createTranslationChunks(
+        chunks = translationChunks.createTranslationChunks(
           translationDocument,
           settings.chunkMaxChars
         );

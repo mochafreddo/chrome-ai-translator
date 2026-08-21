@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
-const fullPageMarkdown = require('../extension/full-page-markdown.js');
+const markdownRehydration = require('../extension/markdown-rehydration.js');
+const translationChunks = require('../extension/translation-chunks.js');
 const { createReasoningFixture } = require('./inline-block.test');
 const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
@@ -71,7 +72,7 @@ function createProtectedFullPageChunk() {
       },
     ],
   };
-  const [chunk] = fullPageMarkdown.createTranslationChunks(documentModel, 200);
+  const [chunk] = translationChunks.createTranslationChunks(documentModel, 200);
   return { chunk, link, code };
 }
 
@@ -666,8 +667,8 @@ exports.tests = [
       // never raises it, so a chunk translation must not spend a second request on it.
       // Only the validator can hand back a code, which is why it is the seam stubbed here.
       const { chunk, link, code } = createProtectedFullPageChunk();
-      const originalValidate = fullPageMarkdown.validateAndRehydrateChunk;
-      fullPageMarkdown.validateAndRehydrateChunk = () => {
+      const originalValidate = markdownRehydration.validateAndRehydrateChunk;
+      markdownRehydration.validateAndRehydrateChunk = () => {
         const error = new Error('markdown.token_parent_changed');
         error.code = 'markdown.token_parent_changed';
         throw error;
@@ -683,7 +684,7 @@ exports.tests = [
         assert.equal(error?.code, 'markdown.token_parent_changed');
         assert.equal(requestBodies.length, 1);
       } finally {
-        fullPageMarkdown.validateAndRehydrateChunk = originalValidate;
+        markdownRehydration.validateAndRehydrateChunk = originalValidate;
       }
     },
   },
@@ -1559,7 +1560,8 @@ exports.tests = [
         'inline-block.js',
         'inline-diagnostics-protocol.js',
         'inline-translation-controls.js',
-        'full-page-markdown.js',
+        'markdown-entries.js',
+        'markdown-document.js',
         'content.js',
       ]);
     },
@@ -1665,7 +1667,8 @@ exports.tests = [
             'inline-block.js',
             'inline-diagnostics-protocol.js',
             'inline-translation-controls.js',
-            'full-page-markdown.js',
+            'markdown-entries.js',
+            'markdown-document.js',
             'content.js',
           ],
           runAt: 'document_idle',
@@ -1733,7 +1736,8 @@ exports.tests = [
             'inline-block.js',
             'inline-diagnostics-protocol.js',
             'inline-translation-controls.js',
-            'full-page-markdown.js',
+            'markdown-entries.js',
+            'markdown-document.js',
             'content.js',
           ],
           runAt: 'document_idle',

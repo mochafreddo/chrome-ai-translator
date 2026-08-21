@@ -10,10 +10,10 @@ var inlineDiagnosticsProtocol =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-diagnostics-protocol.js')
     : null);
-var fullPageMarkdown =
-  globalThis.ChromeAiTranslatorFullPageMarkdown ||
+var markdownDocument =
+  globalThis.ChromeAiTranslatorMarkdownDocument ||
   (typeof module !== 'undefined' && module.exports
-    ? require('./full-page-markdown.js')
+    ? require('./markdown-document.js')
     : null);
 var inlineTranslationControls =
   globalThis.ChromeAiTranslatorInlineTranslationControls ||
@@ -1231,13 +1231,13 @@ function pickArticleRoot() {
 }
 
 function buildArticleExtraction(root, metadata) {
-  const translationDocument = fullPageMarkdown.serializeMarkdownDocument(
+  const translationDocument = markdownDocument.serializeMarkdownDocument(
     root,
     metadata
   );
   return {
     ...metadata,
-    contentMarkdown: fullPageMarkdown.renderOriginalMarkdown(
+    contentMarkdown: markdownDocument.renderOriginalMarkdown(
       translationDocument
     ),
     translationDocument,

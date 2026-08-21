@@ -1,7 +1,7 @@
 // The Placeholder Token contract, checked once because it is decided once.
 //
 // The four failures this module names are checked from each translation's side too — in
-// tests/inline-block.test.js and tests/full-page-markdown.test.js, through the codes each of
+// tests/inline-block.test.js and tests/markdown-codec.test.js, through the codes each of
 // them reports. Those are the checks that say the reader still hears the right sentence. These
 // are the checks that say why: the contract itself, asked directly, with both translations'
 // entry kinds fed through the adapter seam that is the whole reason one module can serve both.
@@ -240,7 +240,7 @@ exports.tests = [
       // The point of the module. Two codecs that each kept their own walk is the state this
       // replaced, and it is a state that reads as fine right up to the moment one of them is
       // fixed alone.
-      for (const file of ['inline-block.js', 'full-page-markdown.js']) {
+      for (const file of ['inline-block.js', 'markdown-rehydration.js']) {
         const source = readExtensionFile(file);
         assert.match(source, /placeholderTokens\.enumerateExpectedTokens\(/, file);
         assert.match(source, /placeholderTokens\.walkExpectedTokens\(/, file);

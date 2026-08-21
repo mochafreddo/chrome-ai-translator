@@ -9,9 +9,10 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createCodec(globalScope) {
   'use strict';
 
-  // The Placeholder Token contract, which this codec shares with the full-page Markdown one.
-  // In the page it is already loaded — the injected file list puts it ahead of this file — and
-  // under a CommonJS loader it comes in by require, which is how the unit suite reaches it.
+  // The Placeholder Token contract, which this codec shares with Side Panel Translation's
+  // rehydration half in `extension/markdown-rehydration.js`. In the page it is already loaded
+  // — the injected file list puts it ahead of this file — and under a CommonJS loader it comes
+  // in by require, which is how the unit suite reaches it.
   const placeholderTokens =
     globalScope?.ChromeAiTranslatorPlaceholderTokens ||
     (typeof module !== 'undefined' && module.exports
