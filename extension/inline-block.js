@@ -1,13 +1,22 @@
 (function exposeInlineBlockCodec(root, factory) {
-  const api = factory();
+  const api = factory(root);
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
   }
   if (root) {
     root.ChromeAiTranslatorInlineBlock = api;
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function createCodec() {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function createCodec(globalScope) {
   'use strict';
+
+  // The Placeholder Token contract, which this codec shares with the full-page Markdown one.
+  // In the page it is already loaded — the injected file list puts it ahead of this file — and
+  // under a CommonJS loader it comes in by require, which is how the unit suite reaches it.
+  const placeholderTokens =
+    globalScope?.ChromeAiTranslatorPlaceholderTokens ||
+    (typeof module !== 'undefined' && module.exports
+      ? require('./placeholder-tokens.js')
+      : null);
 
   const CODEC_VERSION = 1;
   const SEMANTIC_BLOCK_TAGS = new Set([
@@ -647,17 +656,15 @@
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  function getExpectedTokens(contract) {
-    const tokens = [];
-    for (const entry of contract?.entries || []) {
-      if (entry?.kind === 'wrapper') {
-        tokens.push({ token: entry.openToken, action: 'open', entry });
-        tokens.push({ token: entry.closeToken, action: 'close', entry });
-      } else if (entry?.kind === 'atom') {
-        tokens.push({ token: entry.token, action: 'atom', entry });
-      }
-    }
-    return tokens;
+  // This codec's half of the adapter onto the shared contract: a wrapper entry is a pair, an
+  // atom entry is an atom, and nothing else in a contract is a Placeholder Token. The other
+  // half is that the failure strings the shared module returns are already this codec's
+  // reported codes, so `validationError` passes them through unchanged — they cross the worker
+  // seam and `translation-validation.js` maps them into `structure.*` from there.
+  function classifyContractEntry(entry) {
+    if (entry.kind === 'wrapper') return placeholderTokens.PAIR;
+    if (entry.kind === 'atom') return placeholderTokens.ATOM;
+    return null;
   }
 
   function validationError(errorCode) {
@@ -680,8 +687,11 @@
       return validationError('output_too_long');
     }
 
-    const expectedTokens = getExpectedTokens(contract);
-    const byToken = new Map(expectedTokens.map((item) => [item.token, item]));
+    const expectedTokens = placeholderTokens.enumerateExpectedTokens(
+      contract.entries,
+      classifyContractEntry
+    );
+    const expected = new Set(expectedTokens.map((token) => token.value));
     const literalTokenLimits = new Map();
     for (const item of contract.literalTokens || []) {
       if (
@@ -696,34 +706,36 @@
     }
     const literalTokenCounts = new Map();
     for (const token of getTokenLikeLiterals(template)) {
-      if (byToken.has(token)) continue;
+      if (expected.has(token)) continue;
       const count = (literalTokenCounts.get(token) || 0) + 1;
       if (count > (literalTokenLimits.get(token) || 0)) {
         return validationError('token_unknown');
       }
       literalTokenCounts.set(token, count);
     }
+    // Inventions inside this block's own namespace, which the shared residue test cannot see
+    // on its own: a token that is shaped right and closed right but names an entry the request
+    // never sent leaves no residue behind. The two questions together are why an answer this
+    // codec accepts holds only tokens it sent.
     const tokenExpression = new RegExp(
       `⟦${escapeRegExp(contract.namespace)}:[^⟧]+⟧`,
       'g'
     );
-    const matches = Array.from(template.matchAll(tokenExpression));
-    const counts = new Map();
-    for (const match of matches) {
-      const token = match[0];
-      if (!byToken.has(token)) return validationError('token_unknown');
-      counts.set(token, (counts.get(token) || 0) + 1);
+    for (const match of template.matchAll(tokenExpression)) {
+      if (!expected.has(match[0])) return validationError('token_unknown');
     }
-    for (const { token } of expectedTokens) {
-      const count = counts.get(token) || 0;
-      if (count === 0) return validationError('token_missing');
-      if (count > 1) return validationError('token_duplicate');
-    }
-    let withoutExpectedTokens = template;
-    for (const { token } of expectedTokens) {
-      withoutExpectedTokens = withoutExpectedTokens.split(token).join('');
-    }
-    if (withoutExpectedTokens.includes(`⟦${contract.namespace}:`)) {
+    const countFailure = placeholderTokens.findCountFailure(
+      template,
+      expectedTokens
+    );
+    if (countFailure) return validationError(countFailure);
+    if (
+      placeholderTokens.hasUnexpectedNamespaceResidue(
+        template,
+        contract.namespace,
+        expectedTokens
+      )
+    ) {
       return validationError('token_unknown');
     }
     if (
@@ -733,51 +745,16 @@
       return validationError('output_parse_failed');
     }
 
-    const tree = { type: 'root', id: 'ROOT', children: [] };
-    const stack = [tree];
-    let cursor = 0;
-    for (const match of matches) {
-      if (match.index > cursor) {
-        stack[stack.length - 1].children.push({
-          type: 'text',
-          value: template.slice(cursor, match.index),
-        });
-      }
-      const tokenInfo = byToken.get(match[0]);
-      const currentParent = stack[stack.length - 1];
-      if (tokenInfo.action === 'open') {
-        if (tokenInfo.entry.parentId !== currentParent.id) {
-          return validationError('token_parent_changed');
-        }
-        const wrapper = {
-          type: 'wrapper',
-          id: tokenInfo.entry.id,
-          children: [],
-        };
-        currentParent.children.push(wrapper);
-        stack.push(wrapper);
-      } else if (tokenInfo.action === 'close') {
-        if (stack.length === 1 || currentParent.id !== tokenInfo.entry.id) {
-          return validationError('token_nesting_invalid');
-        }
-        stack.pop();
-      } else {
-        if (tokenInfo.entry.parentId !== currentParent.id) {
-          return validationError('token_parent_changed');
-        }
-        currentParent.children.push({
-          type: 'atom',
-          id: tokenInfo.entry.id,
-        });
-      }
-      cursor = match.index + match[0].length;
-    }
-    if (stack.length !== 1) return validationError('token_nesting_invalid');
-    if (cursor < template.length) {
-      tree.children.push({ type: 'text', value: template.slice(cursor) });
-    }
+    // The walk with parents enforced: this codec's entries record which entry they sat inside,
+    // and the tree it returns is what `createPatchPlan` rebuilds the block's children from.
+    const walked = placeholderTokens.walkExpectedTokens(
+      template,
+      expectedTokens,
+      { trackParents: true }
+    );
+    if (!walked.ok) return validationError(walked.reason);
 
-    return { ok: true, tree, template };
+    return { ok: true, tree: walked.tree, template };
   }
 
   function sameNodeList(actual, expected) {

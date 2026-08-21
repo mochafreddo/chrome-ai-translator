@@ -1,6 +1,14 @@
 // background.js (MV3 service worker)
 // Personal use only: API key is stored locally by the user.
 
+// Both codecs below read the Placeholder Token contract off the global scope as they load, so
+// it goes in ahead of them rather than beside them.
+if (
+  typeof importScripts === 'function' &&
+  !globalThis.ChromeAiTranslatorPlaceholderTokens
+) {
+  importScripts('placeholder-tokens.js');
+}
 if (
   typeof importScripts === 'function' &&
   !globalThis.ChromeAiTranslatorInlineBlock
@@ -309,6 +317,7 @@ function safeError(err) {
 function getInlineContentScriptFiles() {
   return [
     'default-model.js',
+    'placeholder-tokens.js',
     'inline-block.js',
     'inline-diagnostics-protocol.js',
     'inline-translation-controls.js',

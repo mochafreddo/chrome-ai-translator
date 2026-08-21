@@ -1555,6 +1555,7 @@ exports.tests = [
     fn() {
       assert.deepEqual(helpers.getInlineContentScriptFiles(), [
         'default-model.js',
+        'placeholder-tokens.js',
         'inline-block.js',
         'inline-diagnostics-protocol.js',
         'inline-translation-controls.js',
@@ -1660,6 +1661,7 @@ exports.tests = [
           matches: ['http://*/*', 'https://*/*'],
           js: [
             'default-model.js',
+            'placeholder-tokens.js',
             'inline-block.js',
             'inline-diagnostics-protocol.js',
             'inline-translation-controls.js',
@@ -1727,6 +1729,7 @@ exports.tests = [
           matches: ['http://*/*', 'https://*/*'],
           js: [
             'default-model.js',
+            'placeholder-tokens.js',
             'inline-block.js',
             'inline-diagnostics-protocol.js',
             'inline-translation-controls.js',

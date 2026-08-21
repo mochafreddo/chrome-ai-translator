@@ -1,4 +1,5 @@
 const suites = [
+  require('./placeholder-tokens.test'),
   require('./inline-block.test'),
   require('./full-page-markdown.test'),
   require('./openai-response.test'),
