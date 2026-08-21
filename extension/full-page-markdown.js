@@ -1,6 +1,15 @@
 (function exposeFullPageMarkdown(globalScope) {
   'use strict';
 
+  // The Placeholder Token contract, which this codec shares with the inline-block one. In the
+  // worker it is already loaded — background.js imports it ahead of this file — and under a
+  // CommonJS loader it comes in by require, which is how the unit suite reaches it.
+  const placeholderTokens =
+    globalScope?.ChromeAiTranslatorPlaceholderTokens ||
+    (typeof module !== 'undefined' && module.exports
+      ? require('./placeholder-tokens.js')
+      : null);
+
   function getTagName(node) {
     return String(node?.tagName || '').toUpperCase();
   }
@@ -737,23 +746,24 @@
     );
   }
 
-  function getExpectedTokens(entries) {
-    const tokens = [];
-    for (const entry of entries) {
-      if (entry.kind === 'link') {
-        tokens.push({ value: entry.openToken, action: 'open', entry });
-        tokens.push({ value: entry.closeToken, action: 'close', entry });
-      } else if (entry.kind === 'code') {
-        tokens.push({ value: entry.token, action: 'atom', entry });
-      }
-    }
-    return tokens;
+  // This codec's half of the adapter onto the shared contract: a link entry is a pair, a code
+  // entry is an atom, and a block entry carries no Placeholder Token at all.
+  function classifyChunkEntry(entry) {
+    if (entry.kind === 'link') return placeholderTokens.PAIR;
+    if (entry.kind === 'code') return placeholderTokens.ATOM;
+    return null;
   }
 
-  function countOccurrences(value, needle) {
-    if (!needle) return 0;
-    return String(value).split(needle).length - 1;
-  }
+  // The four failures in this codec's spelling. The shared module answers with the bare code,
+  // and the `markdown.` prefix is what the side panel keys the reader's four sentences on and
+  // what background.js reads to decide whether a chunk is worth one repair attempt, so the
+  // prefix is applied here rather than in the module both codecs share.
+  const TOKEN_FAILURE_CODES = Object.freeze({
+    token_missing: 'markdown.token_missing',
+    token_duplicate: 'markdown.token_duplicate',
+    token_unknown: 'markdown.token_unknown',
+    token_nesting_invalid: 'markdown.token_nesting_invalid',
+  });
 
   function escapeMarkdownLinkLabel(value) {
     return String(value || '')
@@ -774,39 +784,39 @@
   function validateAndRehydrateChunk(output, chunk) {
     const value = String(output || '');
     const entries = getChunkEntries(chunk);
-    const expectedTokens = getExpectedTokens(entries);
-    let withoutExpected = value;
-    for (const token of expectedTokens) {
-      withoutExpected = withoutExpected.split(token.value).join('');
-    }
-    const activeNamespace = String(chunk?.contract?.namespace || '');
+    const expectedTokens = placeholderTokens.enumerateExpectedTokens(
+      entries,
+      classifyChunkEntry
+    );
+    // A chunk's namespace is the whole vocabulary the model was given, so anything left in it
+    // once the chunk's own tokens are removed is a token the model invented. This codec asks
+    // that before it counts, which is not the order the inline codec uses and is left alone:
+    // an answer that both loses a token and invents one has two things wrong with it, and
+    // which of the two each translation names first is not a difference worth chasing.
+    const namespace = String(chunk?.contract?.namespace || '');
     if (
-      activeNamespace &&
-      withoutExpected.includes(`⟦${activeNamespace}:`)
+      placeholderTokens.hasUnexpectedNamespaceResidue(
+        value,
+        namespace,
+        expectedTokens
+      )
     ) {
-      throw createValidationError('markdown.token_unknown');
+      throw createValidationError(TOKEN_FAILURE_CODES.token_unknown);
     }
-    for (const token of expectedTokens) {
-      const count = countOccurrences(value, token.value);
-      if (count === 0) throw createValidationError('markdown.token_missing');
-      if (count > 1) throw createValidationError('markdown.token_duplicate');
+    const countFailure = placeholderTokens.findCountFailure(
+      value,
+      expectedTokens
+    );
+    if (countFailure) {
+      throw createValidationError(TOKEN_FAILURE_CODES[countFailure]);
     }
 
-    const positions = expectedTokens
-      .map((token) => ({ ...token, index: value.indexOf(token.value) }))
-      .sort((left, right) => left.index - right.index);
-    const stack = [];
-    for (const token of positions) {
-      if (token.action === 'open') {
-        stack.push(token.entry.id);
-      } else if (token.action === 'close') {
-        if (stack.pop() !== token.entry.id) {
-          throw createValidationError('markdown.token_nesting_invalid');
-        }
-      }
-    }
-    if (stack.length) {
-      throw createValidationError('markdown.token_nesting_invalid');
+    // The walk without parents enforced: a chunk's entries do not record which entry they sat
+    // inside, so balance and nesting is all this codec can ask. The tree it returns is unused
+    // here — rehydration works from the entries, not from the answer's shape.
+    const walked = placeholderTokens.walkExpectedTokens(value, expectedTokens);
+    if (!walked.ok) {
+      throw createValidationError(TOKEN_FAILURE_CODES[walked.reason]);
     }
 
     let result = value;

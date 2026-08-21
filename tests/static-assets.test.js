@@ -331,6 +331,49 @@ exports.tests = [
         packageJson.scripts['check:syntax'],
         /node --check extension\/default-model\.js/
       );
+      assert.match(
+        packageJson.scripts['check:syntax'],
+        /node --check extension\/placeholder-tokens\.js/
+      );
+    },
+  },
+  {
+    name: 'loads the shared Placeholder Token contract ahead of both codecs that read it',
+    fn() {
+      // Both codecs resolve the contract as they load, so a list that puts it after either of
+      // them leaves that codec holding null and failing on the first answer it validates —
+      // in the worker or in the page, whichever list is the one that was missed. Neither list
+      // is derived from the directory, and there are two of them here rather than one.
+      const backgroundJs = fs.readFileSync(
+        path.join(__dirname, '..', 'extension', 'background.js'),
+        'utf8'
+      );
+      const filesMatch = backgroundJs.match(
+        /function getInlineContentScriptFiles\(\) \{\s*return \[([^\]]+)\]/s
+      );
+
+      assert.equal(
+        fs.existsSync(
+          path.join(__dirname, '..', 'extension', 'placeholder-tokens.js')
+        ),
+        true
+      );
+      assert.ok(filesMatch);
+      for (const reader of ['inline-block.js', 'full-page-markdown.js']) {
+        assert.notEqual(filesMatch[1].indexOf(`'${reader}'`), -1, reader);
+        assert.equal(
+          filesMatch[1].indexOf("'placeholder-tokens.js'") <
+            filesMatch[1].indexOf(`'${reader}'`),
+          true,
+          `content script list: placeholder-tokens.js after ${reader}`
+        );
+        assert.equal(
+          backgroundJs.indexOf("importScripts('placeholder-tokens.js')") <
+            backgroundJs.indexOf(`importScripts('${reader}')`),
+          true,
+          `worker imports: placeholder-tokens.js after ${reader}`
+        );
+      }
     },
   },
   {

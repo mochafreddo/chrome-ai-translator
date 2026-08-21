@@ -134,14 +134,21 @@ exports.tests = [
       // added without wording here reaches the reader as a code again. Nothing else would
       // report that. A failure raised any other way falls to the general sentence instead,
       // which is why this guard is drawn around this one way of raising them.
-      const raised = new Set(
-        Array.from(
-          readExtensionFile('full-page-markdown.js').matchAll(
-            /createValidationError\('([^']+)'\)/g
-          ),
+      //
+      // The codec now decides these four in the module it shares with the inline codec and
+      // spells them in one map on the way out, so both shapes are read: the map's values, and
+      // any code still raised as a literal. Either is a code the reader can be shown.
+      const source = readExtensionFile('full-page-markdown.js');
+      const raised = new Set([
+        ...Array.from(
+          source.matchAll(/^\s+token_[a-z_]+: '([^']+)',$/gm),
           (match) => match[1]
-        )
-      );
+        ),
+        ...Array.from(
+          source.matchAll(/createValidationError\('([^']+)'\)/g),
+          (match) => match[1]
+        ),
+      ]);
 
       assert.equal(raised.size, 4);
       for (const code of raised) {
