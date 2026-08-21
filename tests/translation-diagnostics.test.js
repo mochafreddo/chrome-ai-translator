@@ -81,6 +81,52 @@ exports.tests = [
     },
   },
   {
+    // Two constructions share nothing. The first imports a key for the secret Chrome kept
+    // and caches it; the second is built with a crypto that cannot import one at all and
+    // has to fail on its own account, which it only does if the cache and the secret went
+    // with the construction rather than staying on the module.
+    name: 'gives each construction its own installation secret and key cache',
+    async fn() {
+      const stored = {};
+      const chromeApi = { storage: { local: {
+        async get() { return { ...stored }; },
+        async set(values) { Object.assign(stored, values); },
+      } } };
+
+      const signed = await createDiagnostics().fingerprintBlock(chromeApi, 'template', {});
+      assert.match(signed.sourceFingerprint, /^hmac-sha256:/);
+
+      const second = createDiagnostics({
+        getRandomValues: (bytes) => globalThis.crypto.getRandomValues(bytes),
+        subtle: {
+          importKey: () => Promise.reject(new Error('no key for this construction')),
+          sign: (...args) => globalThis.crypto.subtle.sign(...args),
+        },
+      });
+      await assert.rejects(
+        second.fingerprintBlock(chromeApi, 'template', {}),
+        /no key for this construction/
+      );
+    },
+  },
+  {
+    // The contract, stated the way the worker's platform states it: a construction handed no
+    // crypto says which piece it was built without rather than failing on an undefined
+    // property several frames further in.
+    name: 'says what a construction with no crypto was built without',
+    async fn() {
+      const chromeApi = { storage: { local: {
+        async get() { return {}; },
+        async set() {},
+      } } };
+
+      await assert.rejects(
+        createDiagnostics(null).fingerprintBlock(chromeApi, 'template', {}),
+        /built without crypto/
+      );
+    },
+  },
+  {
     name: 'bounds runs and problem blocks',
     fn() {
       const runs = Array.from({ length: 21 }, (_, index) => ({

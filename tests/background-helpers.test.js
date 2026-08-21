@@ -2466,6 +2466,33 @@ exports.tests = [
     },
   },
   {
+    // The borrow #46 left standing, stated as behaviour: a worker built with no crypto has
+    // no fingerprints and no correlation token, and says so. Until the diagnostics module
+    // was built with a crypto it would have found the global one instead and this batch
+    // would have come back claiming diagnostics it never signed.
+    name: 'reports diagnostics as unavailable to a worker built with no crypto',
+    async fn() {
+      const stored = {};
+      const record = createTestPlainBlockRecord('no-crypto');
+      record.template = 'Hello world.';
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({ stored }),
+        fetch: async () => ({ ok: true, async json() { return createCompletedResponse(JSON.stringify({
+          translations: [{ id: record.id, template: '한국어 문장입니다.' }],
+        })); } }),
+      });
+
+      const results = await worker.translateVisibleBlockBatch([record]);
+
+      // The translation itself is untouched: diagnostics never change a valid result.
+      assert.equal(results[0].disposition, 'apply');
+      assert.equal(results[0].diagnosticsUnavailable, true);
+      assert.equal(results[0].correlationToken, undefined);
+      const run = Object.values(stored).find((value) => value?.outcome === 'done');
+      assert.equal(run.blocks.length, 0);
+    },
+  },
+  {
     name: 'names the model and the batch size in the run a failed request leaves behind',
     async fn() {
       const stored = {};
