@@ -81,6 +81,28 @@ function createApiErrorResponse(message) {
   return { apiError: message };
 }
 
+// Drives one request and hands back the body it carried. The two checks that use it are about
+// what goes out rather than what comes back, so the answer is fixed and the request is what is
+// kept. The network is the whole platform, because building a request reaches no Chrome
+// namespace.
+async function runTranslationRequest(request) {
+  let requestBody = null;
+  const worker = helpers.createBackgroundWorker({
+    fetch: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return {
+        ok: true,
+        async json() {
+          return createCompletedResponse('번역 결과');
+        },
+      };
+    },
+  });
+
+  const output = await worker.openaiTranslateChunk(request);
+  return { requestBody, output };
+}
+
 const FULL_PAGE_SETTINGS = Object.freeze({
   apiKey: 'sk-test',
   model: 'gpt-5.4-mini',
@@ -199,6 +221,57 @@ function createTestPlainBlockRecord(id = 'b1') {
   };
 }
 
+// The settings a Semantic Block batch translates under. Every check that drives one wants the
+// same three fields — a key to send, a model to name in the run it writes, and a target
+// language its answers are judged against — so those are the default, and a check spells the
+// settings out only where the difference is its subject.
+const BLOCK_BATCH_SETTINGS = Object.freeze({
+  apiKey: 'sk-test',
+  model: 'gpt-5.4-mini',
+  targetLanguage: 'Korean',
+});
+
+// The platform a Semantic Block batch reaches, and nothing else: `storage.local` for the
+// settings it translates under, the key its fingerprints are signed with, and the diagnostics
+// run it leaves behind, plus `runtime.getManifest` for the version that run is stamped with.
+// A batch is handed its records and hands its results straight back, so there is no tab to
+// broadcast to and no panel to open — the network is the only other thing it touches, and the
+// worker takes that as `fetch`.
+//
+// `stored` is the caller's own object, which is how a check reads back the run that was
+// written; one that only cares about the results it got lets this keep a throwaway. `session`
+// is absent unless a check is about session storage, because a worker without one holds its
+// correlations in instance state instead — see the restart below, where the difference is the
+// whole point.
+function createBlockBatchChrome({
+  stored = {},
+  settings = BLOCK_BATCH_SETTINGS,
+  session = null,
+} = {}) {
+  return {
+    runtime: { getManifest() { return { version: 'test' }; } },
+    storage: {
+      ...(session ? { session } : {}),
+      local: {
+        async get(keys) {
+          if (keys === null) return { ...stored };
+          const requested = Array.isArray(keys) ? keys : [keys];
+          if (requested.includes('settings')) return { settings };
+          const result = {};
+          for (const key of requested) {
+            if (Object.hasOwn(stored, key)) result[key] = stored[key];
+          }
+          return result;
+        },
+        async set(values) { Object.assign(stored, values); },
+        async remove(keys) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
+        },
+      },
+    },
+  };
+}
+
 // Three blocks, each too long to share a Translation Chunk with the next at the smallest
 // chunk size the options page accepts, so the fixture cuts into three chunks. That is what
 // lets a failure arrive late: two answers are already in hand, and billed, when the third
@@ -231,10 +304,13 @@ const THREE_CHUNK_DOCUMENT = {
 // message unanswered after this many turns of the loop is not going to be answered. Coming
 // back short is asserted rather than returned, because a check reading only the broadcasts
 // would otherwise pass on a message that never got that far.
-async function collectWorkerResponses(worker, messages) {
+//
+// The sender is where the worker reads the tab out of, so a message whose answer depends on
+// which tab sent it passes one. The panel's own messages carry no tab, which is the default.
+async function collectWorkerResponses(worker, messages, sender = {}) {
   const responses = [];
   for (const message of messages) {
-    worker.handlers.onMessage(message, {}, (response) => responses.push(response));
+    worker.handlers.onMessage(message, sender, (response) => responses.push(response));
   }
   for (let i = 0; i < 40 && responses.length < messages.length; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1167,65 +1243,31 @@ exports.tests = [
   {
     name: 'sends reasoning none in Responses API requests',
     async fn() {
-      const previousFetch = global.fetch;
-      let requestBody = null;
+      const { requestBody, output } = await runTranslationRequest({
+        apiKey: 'sk-test',
+        model: 'gpt-5.4-mini',
+        instructions: 'Translate.',
+        input: 'Hello.',
+      });
 
-      global.fetch = async (_url, options) => {
-        requestBody = JSON.parse(options.body);
-        return {
-          ok: true,
-          async json() {
-            return createCompletedResponse('번역 결과');
-          },
-        };
-      };
-
-      try {
-        const output = await helpers.openaiTranslateChunk({
-          apiKey: 'sk-test',
-          model: 'gpt-5.4-mini',
-          instructions: 'Translate.',
-          input: 'Hello.',
-        });
-
-        assert.equal(output, '번역 결과');
-        assert.deepEqual(requestBody.reasoning, { effort: 'none' });
-        assert.equal(requestBody.max_output_tokens, 8192);
-        assert.equal(requestBody.store, false);
-      } finally {
-        global.fetch = previousFetch;
-      }
+      assert.equal(output, '번역 결과');
+      assert.deepEqual(requestBody.reasoning, { effort: 'none' });
+      assert.equal(requestBody.max_output_tokens, 8192);
+      assert.equal(requestBody.store, false);
     },
   },
   {
     name: 'allows a lower output token cap for small translation batches',
     async fn() {
-      const previousFetch = global.fetch;
-      let requestBody = null;
+      const { requestBody } = await runTranslationRequest({
+        apiKey: 'sk-test',
+        model: 'gpt-5.4-mini',
+        instructions: 'Translate.',
+        input: 'Hello.',
+        maxOutputTokens: 2048,
+      });
 
-      global.fetch = async (_url, options) => {
-        requestBody = JSON.parse(options.body);
-        return {
-          ok: true,
-          async json() {
-            return createCompletedResponse('번역 결과');
-          },
-        };
-      };
-
-      try {
-        await helpers.openaiTranslateChunk({
-          apiKey: 'sk-test',
-          model: 'gpt-5.4-mini',
-          instructions: 'Translate.',
-          input: 'Hello.',
-          maxOutputTokens: 2048,
-        });
-
-        assert.equal(requestBody.max_output_tokens, 2048);
-      } finally {
-        global.fetch = previousFetch;
-      }
+      assert.equal(requestBody.max_output_tokens, 2048);
     },
   },
   {
@@ -1351,70 +1393,58 @@ exports.tests = [
   {
     name: 'rejects repaired non-Korean output without exposing block internals',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
       const record = createBlockApiRecord();
       const requestBodies = [];
-      global.chrome = {
-        storage: {
+      const worker = helpers.createBackgroundWorker({
+        // Session storage that refuses the write is what leaves this batch with no
+        // correlation token to hand back: the tokens are minted into it, and a batch that
+        // cannot record where a block came from does not offer the page one to report under.
+        // Everything else about the platform is whole, so that refusal is the only thing the
+        // absent token can be blamed on - the diagnostics run itself is written and readable.
+        chrome: createBlockBatchChrome({
+          settings: {
+            apiKey: 'sk-test',
+            model: 'gpt-5.4-mini',
+            reasoningEffort: 'none',
+            targetLanguage: 'Korean',
+            tone: 'technical',
+          },
           session: {
             async get() { return {}; },
             async set() { throw new Error('session unavailable'); },
           },
-          local: {
-            async get(key) {
-              if (key === 'settings' || key?.includes?.('settings')) {
-                return {
-                  settings: {
-                    apiKey: 'sk-test',
-                    model: 'gpt-5.4-mini',
-                    reasoningEffort: 'none',
-                    targetLanguage: 'Korean',
-                    tone: 'technical',
-                  },
-                };
-              }
-              return {};
+        }),
+        fetch: async (_url, options) => {
+          requestBodies.push(JSON.parse(options.body));
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse(JSON.stringify({
+                translations: [{ id: record.id, template: record.template }],
+              }));
             },
-            async set() {},
-          },
+          };
         },
-      };
-      global.fetch = async (_url, options) => {
-        requestBodies.push(JSON.parse(options.body));
-        return {
-          ok: true,
-          async json() {
-            return createCompletedResponse(JSON.stringify({
-              translations: [{ id: record.id, template: record.template }],
-            }));
-          },
-        };
-      };
+      });
 
-      try {
-        const results = await helpers.translateVisibleBlockBatch([record]);
-        const input = JSON.parse(requestBodies[1].input);
+      const results = await worker.translateVisibleBlockBatch([record]);
+      const input = JSON.parse(requestBodies[1].input);
 
-        assert.equal(results[0].correlationToken, undefined);
-        const result = results[0];
-        assert.equal(result.disposition, 'reject');
-        assert.equal('template' in result, false);
-        assert.equal(result.terminalCode, 'quality.target_language_missing');
-        assert.equal(requestBodies.length, 2);
-        assert.equal(input.records[0].contract, undefined);
-        assert.equal(input.records[0].atoms[0].href, undefined);
-        assert.equal(requestBodies[1].text.format.name, 'inline_block_translations');
-        assert.equal(
-          requestBodies[1].max_output_tokens,
-          helpers.getBlockBatchMaxOutputTokens(
-            helpers.getBlockRecordCost(record)
-          )
-        );
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-      }
+      assert.equal(results[0].correlationToken, undefined);
+      const result = results[0];
+      assert.equal(result.disposition, 'reject');
+      assert.equal('template' in result, false);
+      assert.equal(result.terminalCode, 'quality.target_language_missing');
+      assert.equal(requestBodies.length, 2);
+      assert.equal(input.records[0].contract, undefined);
+      assert.equal(input.records[0].atoms[0].href, undefined);
+      assert.equal(requestBodies[1].text.format.name, 'inline_block_translations');
+      assert.equal(
+        requestBodies[1].max_output_tokens,
+        helpers.getBlockBatchMaxOutputTokens(
+          helpers.getBlockRecordCost(record)
+        )
+      );
     },
   },
   {
@@ -1898,15 +1928,19 @@ exports.tests = [
     },
   },
   {
+    // The correlation token a batch hands back has to outlive the worker that minted it: the
+    // DOM outcome it is reported under arrives after the service worker has been allowed to
+    // sleep and come back up. So this drives one worker to get a token and a second one,
+    // built on the same platform, to answer for it — which is what an MV3 restart is, and it
+    // says so directly: the second worker starts with none of the first one's instance state
+    // and only what session storage kept.
     name: 'handles semantic block viewport translation messages',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
-      const modulePath = require.resolve('../extension/background.js');
-      const originalModule = require.cache[modulePath];
       const record = createBlockApiRecord();
-      let messageListener = null;
       const stored = {};
+      // Already in session storage before either worker starts, and never referenced again.
+      // Every field a run is stamped with has to come from what the worker itself wrote about
+      // the block it translated, so a planted entry claiming otherwise has to go unread.
       const sessionStored = {
         'inlineRuntimeCorrelations:v1': {
           '00000000-0000-4000-8000-000000000000': {
@@ -1924,378 +1958,252 @@ exports.tests = [
         },
       };
 
-      global.fetch = async () => ({
-        ok: true,
-        async json() {
-          return createCompletedResponse(JSON.stringify({
-            translations: [{ id: record.id, template: record.template }],
-          }));
+      // Session storage is what makes the restart below mean anything: a worker that has one
+      // keeps its correlations there rather than in the map it loses on the way down.
+      const chrome = createBlockBatchChrome({
+        stored,
+        settings: {
+          apiKey: 'sk-test',
+          model: 'ft:gpt_custom/model',
+          reasoningEffort: 'none',
+          targetLanguage: 'Japanese',
+          tone: 'technical',
+        },
+        session: {
+          async get(keys) {
+            const result = {};
+            for (const key of Array.isArray(keys) ? keys : [keys]) {
+              if (Object.hasOwn(sessionStored, key)) result[key] = sessionStored[key];
+            }
+            return result;
+          },
+          async set(values) { Object.assign(sessionStored, values); },
         },
       });
-      global.chrome = {
-        runtime: {
-          onInstalled: { addListener() {} },
-          onStartup: { addListener() {} },
-          onMessage: {
-            addListener(listener) {
-              messageListener = listener;
-            },
+      const platform = {
+        chrome,
+        fetch: async () => ({
+          ok: true,
+          async json() {
+            return createCompletedResponse(JSON.stringify({
+              translations: [{ id: record.id, template: record.template }],
+            }));
           },
-          sendMessage() {
-            return Promise.resolve();
-          },
-        },
-        action: { onClicked: { addListener() {} } },
-        commands: { onCommand: { addListener() {} } },
-        sidePanel: {
-          async setPanelBehavior() {},
-          async setOptions() {},
-          async open() {},
-        },
-        scripting: { async executeScript() {} },
-        storage: {
-          session: {
-            async get(keys) {
-              const result = {};
-              for (const key of Array.isArray(keys) ? keys : [keys]) {
-                if (Object.hasOwn(sessionStored, key)) result[key] = sessionStored[key];
-              }
-              return result;
-            },
-            async set(values) { Object.assign(sessionStored, values); },
-          },
-          local: {
-            async get(keys) {
-              if (keys === null) return { ...stored };
-              if (keys === 'settings' || keys?.includes?.('settings')) return {
-                settings: {
-                  apiKey: 'sk-test',
-                  model: 'ft:gpt_custom/model',
-                  reasoningEffort: 'none',
-                  targetLanguage: 'Japanese',
-                  tone: 'technical',
-                },
-              };
-              const result = {};
-              for (const key of Array.isArray(keys) ? keys : [keys]) {
-                if (Object.hasOwn(stored, key)) result[key] = stored[key];
-              }
-              return result;
-            },
-            async set(values) { Object.assign(stored, values); },
-            async remove(keys) {
-              for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
-            },
-          },
-        },
+        }),
       };
+      // Every message here comes from the page, so every one of them carries the tab the
+      // correlation is scoped to. A token answered under any other tab is refused.
+      const sender = { tab: { id: 7 } };
 
-      try {
-        delete require.cache[modulePath];
-        require('../extension/background.js');
-        const responses = [];
-        messageListener(
-          {
-            type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
-            operationId: 42,
-            records: [record],
+      const worker = helpers.createBackgroundWorker(platform);
+      const [batchResponse] = await collectWorkerResponses(worker, [{
+        type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        operationId: 42,
+        records: [record],
+      }], sender);
+
+      assert.equal(batchResponse.ok, true);
+      const translated = batchResponse.results[0];
+      assert.equal(translated.id, record.id);
+      assert.equal(typeof translated.correlationToken, 'string');
+
+      // The MV3 service-worker restart between the translation and the DOM outcome: a second
+      // construction on the same platform. It has its own empty correlation map and its own
+      // per-tab state, so anything it answers below it read back out of session storage.
+      const restarted = helpers.createBackgroundWorker(platform);
+
+      const [runtimeResponse] = await collectWorkerResponses(restarted, [{
+        type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+        operationId: 42,
+        outcomes: [{
+          code: 'runtime.apply_failed',
+          correlationToken: translated.correlationToken,
+          diagnosticCorrelation: {
+            sourceFingerprint: 'must not persist forged fingerprint',
+            model: 'must not persist forged model',
+            extensionVersion: 'must not persist forged version',
           },
-          { tab: { id: 7 } },
-          (response) => responses.push(response)
-        );
-        for (let index = 0; index < 10 && !responses.length; index += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
+          source: 'must not persist',
+          template: 'must not persist',
+        }],
+      }], sender);
 
-        assert.equal(responses[0].ok, true);
-        const translated = responses[0].results[0];
-        assert.equal(translated.id, record.id);
-        assert.equal(typeof translated.correlationToken, 'string');
+      assert.deepEqual(runtimeResponse, { ok: true });
+      const runtimeRun = Object.values(stored).find((value) =>
+        value?.blocks?.[0]?.terminalCode === 'runtime.apply_failed'
+      );
+      assert.equal(runtimeRun.model, 'ft:gpt_custom/model');
+      assert.equal(runtimeRun.targetLanguageCode, '');
+      assert.match(runtimeRun.blocks[0].parentRunId, /^run-/);
+      assert.match(runtimeRun.blocks[0].parentDiagnosticId, /^run-.*\/b1$/);
+      assert.match(runtimeRun.blocks[0].sourceFingerprint, /^hmac-sha256:/);
+      assert.equal(JSON.stringify(runtimeRun).includes('must not persist'), false);
 
-        // Simulate an MV3 service-worker restart between translation and DOM outcome.
-        delete require.cache[modulePath];
-        messageListener = null;
-        require('../extension/background.js');
-        assert.equal(typeof messageListener, 'function');
+      const [replayResponse] = await collectWorkerResponses(restarted, [{
+        type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+        operationId: 42,
+        outcomes: [{ code: 'runtime.apply_failed', correlationToken: translated.correlationToken }],
+      }], sender);
+      assert.deepEqual(replayResponse, { ok: false });
 
-        const runtimeResponses = [];
-        messageListener({
-          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
-          operationId: 42,
-          outcomes: [{
-            code: 'runtime.apply_failed',
-            correlationToken: translated.correlationToken,
-            diagnosticCorrelation: {
-              sourceFingerprint: 'must not persist forged fingerprint',
-              model: 'must not persist forged model',
-              extensionVersion: 'must not persist forged version',
-            },
-            source: 'must not persist',
-            template: 'must not persist',
-          }],
-        }, { tab: { id: 7 } }, (response) => runtimeResponses.push(response));
-        for (let index = 0; index < 10 && !runtimeResponses.length; index += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        assert.deepEqual(runtimeResponses, [{ ok: true }]);
-        const runtimeRun = Object.values(stored).find((value) =>
-          value?.blocks?.[0]?.terminalCode === 'runtime.apply_failed'
-        );
-        assert.equal(runtimeRun.model, 'ft:gpt_custom/model');
-        assert.equal(runtimeRun.targetLanguageCode, '');
-        assert.match(runtimeRun.blocks[0].parentRunId, /^run-/);
-        assert.match(runtimeRun.blocks[0].parentDiagnosticId, /^run-.*\/b1$/);
-        assert.match(runtimeRun.blocks[0].sourceFingerprint, /^hmac-sha256:/);
-        assert.equal(JSON.stringify(runtimeRun).includes('must not persist'), false);
-
-        const replayResponses = [];
-        messageListener({
-          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
-          operationId: 42,
-          outcomes: [{ code: 'runtime.apply_failed', correlationToken: translated.correlationToken }],
-        }, { tab: { id: 7 } }, (response) => replayResponses.push(response));
-        for (let index = 0; index < 10 && !replayResponses.length; index += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        assert.deepEqual(replayResponses, [{ ok: false }]);
-
-        const bulkEntries = {};
-        const bulkOutcomes = [];
-        for (let index = 0; index < 500; index += 1) {
-          const token = `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
-          bulkEntries[token] = {
-            expiresAt: Date.now() + 60000,
-            runId: 'run-123-bulk',
-            diagnosticId: `run-123-bulk/b${index}`,
-            sourceFingerprint: `hmac-sha256:${'A'.repeat(43)}`,
-            contractFingerprint: `hmac-sha256:${'B'.repeat(43)}`,
-            model: 'gpt-5.4-mini',
-            targetLanguageCode: 'ko',
-            extensionVersion: 'test',
-            tabId: 7,
-            operationId: 99,
-          };
-          bulkOutcomes.push({ code: 'runtime.apply_failed', correlationToken: token });
-        }
-        sessionStored['inlineRuntimeCorrelations:v1'] = bulkEntries;
-        const bulkResponses = [];
-        messageListener({
-          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+      const bulkEntries = {};
+      const bulkOutcomes = [];
+      for (let index = 0; index < 500; index += 1) {
+        const token = `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
+        bulkEntries[token] = {
+          expiresAt: Date.now() + 60000,
+          runId: 'run-123-bulk',
+          diagnosticId: `run-123-bulk/b${index}`,
+          sourceFingerprint: `hmac-sha256:${'A'.repeat(43)}`,
+          contractFingerprint: `hmac-sha256:${'B'.repeat(43)}`,
+          model: 'gpt-5.4-mini',
+          targetLanguageCode: 'ko',
+          extensionVersion: 'test',
+          tabId: 7,
           operationId: 99,
-          outcomes: bulkOutcomes,
-        }, { tab: { id: 7 } }, (response) => bulkResponses.push(response));
-        for (let index = 0; index < 10 && !bulkResponses.length; index += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        assert.deepEqual(bulkResponses, [{ ok: true }]);
-        const bulkRun = Object.values(stored).find((value) => value?.summary?.failed === 500);
-        assert.equal(bulkRun.blocks.length, 100);
-        assert.equal(Object.keys(sessionStored['inlineRuntimeCorrelations:v1']).length, 0);
+        };
+        bulkOutcomes.push({ code: 'runtime.apply_failed', correlationToken: token });
+      }
+      sessionStored['inlineRuntimeCorrelations:v1'] = bulkEntries;
+      const [bulkResponse] = await collectWorkerResponses(restarted, [{
+        type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+        operationId: 99,
+        outcomes: bulkOutcomes,
+      }], sender);
+      assert.deepEqual(bulkResponse, { ok: true });
+      const bulkRun = Object.values(stored).find((value) => value?.summary?.failed === 500);
+      assert.equal(bulkRun.blocks.length, 100);
+      assert.equal(Object.keys(sessionStored['inlineRuntimeCorrelations:v1']).length, 0);
 
-        const localResponses = [];
-        messageListener({
-          type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
-          diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
-          operationId: 123,
-          settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
-          diagnostics: [
-            {
-              code: 'runtime.block_too_large',
-              template: 'x'.repeat(8000),
-              contract: {
-                codecVersion: 1,
-                literalTokens: Array.from({ length: 24 }, (_, index) => ({
-                  value: `${index}-${'y'.repeat(195)}`,
-                  count: 1,
-                })),
-              },
+      const [localResponse] = await collectWorkerResponses(restarted, [{
+        type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+        diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
+        operationId: 123,
+        settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
+        diagnostics: [
+          {
+            code: 'runtime.block_too_large',
+            template: 'x'.repeat(8000),
+            contract: {
+              codecVersion: 1,
+              literalTokens: Array.from({ length: 24 }, (_, index) => ({
+                value: `${index}-${'y'.repeat(195)}`,
+                count: 1,
+              })),
             },
-            {
-              code: 'runtime.block_too_large',
-              template: record.template,
-              contract: record.contract,
-              evidence: { recordCost: 13000, limit: 12000, raw: 'ignored' },
-            },
-          ],
-        }, { tab: { id: 7 } }, (response) => localResponses.push(response));
-        for (let index = 0; index < 10 && !localResponses.length; index += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        assert.deepEqual(localResponses, [{ ok: true }]);
-        const localRun = Object.values(stored).find((value) =>
-          value?.blocks?.[0]?.terminalCode === 'runtime.block_too_large'
-        );
-        assert.equal(localRun.summary.requested, 1);
-        assert.equal(localRun.blocks[0].quality.evidence.recordCost, 13000);
-        assert.equal(localRun.blocks[0].quality.evidence.limit, 12000);
-        const expectedFingerprints = await require('../extension/translation-diagnostics.js')
-          .fingerprintBlock(global.chrome, record.template, record.contract);
-        assert.equal(localRun.blocks[0].sourceFingerprint, expectedFingerprints.sourceFingerprint);
-        assert.equal(localRun.blocks[0].contractFingerprint, expectedFingerprints.contractFingerprint);
-        assert.equal(JSON.stringify(localRun).includes(record.template), false);
-
-        const duplicateResponses = [];
-        messageListener({
-          type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
-          diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
-          operationId: 123,
-          settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
-          diagnostics: [{
+          },
+          {
             code: 'runtime.block_too_large',
             template: record.template,
             contract: record.contract,
-            evidence: { recordCost: 13000, limit: 12000 },
-          }],
-        }, { tab: { id: 7 } }, (response) => duplicateResponses.push(response));
-        for (let index = 0; index < 10 && !duplicateResponses.length; index += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        assert.deepEqual(duplicateResponses, [{ ok: true }]);
-        const localRunId = 'local-7-123-11111111-1111-4111-8111-111111111111';
-        assert.equal(stored['inlineDiagnostics:v2:index'].filter((id) => id === localRunId).length, 1);
-        assert.equal(Object.keys(stored).filter((key) => key === `inlineDiagnostics:v2:run:${localRunId}`).length, 1);
+            evidence: { recordCost: 13000, limit: 12000, raw: 'ignored' },
+          },
+        ],
+      }], sender);
+      assert.deepEqual(localResponse, { ok: true });
+      const localRun = Object.values(stored).find((value) =>
+        value?.blocks?.[0]?.terminalCode === 'runtime.block_too_large'
+      );
+      assert.equal(localRun.summary.requested, 1);
+      assert.equal(localRun.blocks[0].quality.evidence.recordCost, 13000);
+      assert.equal(localRun.blocks[0].quality.evidence.limit, 12000);
+      const expectedFingerprints = await require('../extension/translation-diagnostics.js')
+        .fingerprintBlock(chrome, record.template, record.contract);
+      assert.equal(localRun.blocks[0].sourceFingerprint, expectedFingerprints.sourceFingerprint);
+      assert.equal(localRun.blocks[0].contractFingerprint, expectedFingerprints.contractFingerprint);
+      assert.equal(JSON.stringify(localRun).includes(record.template), false);
 
-        const conflictResponses = [];
-        messageListener({
-          type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
-          diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
-          operationId: 123,
-          settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
-          diagnostics: [{
-            code: 'runtime.session_too_large',
-            evidence: { sessionCost: 60000, limit: 60000 },
-          }],
-        }, { tab: { id: 7 } }, (response) => conflictResponses.push(response));
-        for (let index = 0; index < 10 && !conflictResponses.length; index += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        assert.deepEqual(conflictResponses, [{ ok: false }]);
-        assert.equal(stored[`inlineDiagnostics:v2:run:${localRunId}`].blocks[0].terminalCode, 'runtime.block_too_large');
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-        delete require.cache[modulePath];
-        if (originalModule) require.cache[modulePath] = originalModule;
-      }
+      const [duplicateResponse] = await collectWorkerResponses(restarted, [{
+        type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+        diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
+        operationId: 123,
+        settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
+        diagnostics: [{
+          code: 'runtime.block_too_large',
+          template: record.template,
+          contract: record.contract,
+          evidence: { recordCost: 13000, limit: 12000 },
+        }],
+      }], sender);
+      assert.deepEqual(duplicateResponse, { ok: true });
+      const localRunId = 'local-7-123-11111111-1111-4111-8111-111111111111';
+      assert.equal(stored['inlineDiagnostics:v2:index'].filter((id) => id === localRunId).length, 1);
+      assert.equal(Object.keys(stored).filter((key) => key === `inlineDiagnostics:v2:run:${localRunId}`).length, 1);
+
+      const [conflictResponse] = await collectWorkerResponses(restarted, [{
+        type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+        diagnosticBatchId: '11111111-1111-4111-8111-111111111111',
+        operationId: 123,
+        settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
+        diagnostics: [{
+          code: 'runtime.session_too_large',
+          evidence: { sessionCost: 60000, limit: 60000 },
+        }],
+      }], sender);
+      assert.deepEqual(conflictResponse, { ok: false });
+      assert.equal(stored[`inlineDiagnostics:v2:run:${localRunId}`].blocks[0].terminalCode, 'runtime.block_too_large');
     },
   },
   {
     // The text-node path outlived its only caller for 62 commits because nothing asserted
     // that a retired name stays retired. Every message the text-node path used is listed
     // here, so reviving one half of it fails loudly instead of sitting in the tree.
+    //
+    // A worker with nothing but a network is the point rather than an economy: each of these
+    // messages has to be turned away before anything is reached, so an answer that took any
+    // other path would fail on the namespace it went looking for instead of quietly passing.
     name: 'does not answer any retired text-node translation message',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
-      const modulePath = require.resolve('../extension/background.js');
-      const originalModule = require.cache[modulePath];
-      let messageListener = null;
       let fetchCount = 0;
-
-      global.fetch = async () => {
-        fetchCount += 1;
-        return {
-          ok: true,
-          async json() {
-            return createCompletedResponse(JSON.stringify({
-              translations: [{ id: 'n1', translation: '안녕하세요.' }],
-            }));
-          },
-        };
-      };
-
-      global.chrome = {
-        runtime: {
-          onInstalled: { addListener() {} },
-          onStartup: { addListener() {} },
-          onMessage: {
-            addListener(listener) {
-              messageListener = listener;
+      const worker = helpers.createBackgroundWorker({
+        fetch: async () => {
+          fetchCount += 1;
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse(JSON.stringify({
+                translations: [{ id: 'n1', translation: '안녕하세요.' }],
+              }));
             },
-          },
-          sendMessage() {
-            return Promise.resolve();
-          },
+          };
         },
-        action: { onClicked: { addListener() {} } },
-        commands: { onCommand: { addListener() {} } },
-        sidePanel: {
-          async setPanelBehavior() {},
-          async setOptions() {},
-          async open() {},
+      });
+
+      const retiredMessages = [
+        {
+          type: 'TRANSLATE_TEXT_NODES',
+          records: [{ id: 'n1', text: 'Hello world.' }],
         },
-        scripting: {
-          async executeScript() {},
+        {
+          type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
+          records: [{ id: 'v1', text: 'Hello world.' }],
+          settingsSnapshot: null,
         },
-        storage: {
-          local: {
-            async get() {
-              return {
-                settings: {
-                  apiKey: 'sk-test',
-                  model: 'gpt-5.4-mini',
-                  targetLanguage: 'Korean',
-                  tone: 'technical',
-                  chunkMaxChars: 12000,
-                },
-              };
-            },
-            async set() {},
-          },
+        {
+          type: 'INLINE_TRANSLATION_PROGRESS',
+          operationId: 1,
+          progress: { stage: 'queued', recordCount: 1, chunkCount: 1 },
         },
-      };
+      ];
 
-      try {
-        delete require.cache[modulePath];
-        require('../extension/background.js');
-        assert.equal(typeof messageListener, 'function');
+      // One message at a time, because the assertion names the message it failed on and three
+      // identical answers collected together could only be matched back to it by position.
+      for (const message of retiredMessages) {
+        const [response] = await collectWorkerResponses(worker, [message]);
 
-        const retiredMessages = [
-          {
-            type: 'TRANSLATE_TEXT_NODES',
-            records: [{ id: 'n1', text: 'Hello world.' }],
-          },
-          {
-            type: 'TRANSLATE_VISIBLE_TEXT_BATCH',
-            records: [{ id: 'v1', text: 'Hello world.' }],
-            settingsSnapshot: null,
-          },
-          {
-            type: 'INLINE_TRANSLATION_PROGRESS',
-            operationId: 1,
-            progress: { stage: 'queued', recordCount: 1, chunkCount: 1 },
-          },
-        ];
-
-        for (const message of retiredMessages) {
-          const responses = [];
-          messageListener(message, {}, (response) => responses.push(response));
-
-          for (let i = 0; i < 10 && responses.length < 1; i += 1) {
-            await new Promise((resolve) => setTimeout(resolve, 0));
-          }
-
-          assert.deepEqual(
-            responses,
-            [{ ok: false, error: { message: 'Unknown message' } }],
-            `${message.type} is answered again`
-          );
-        }
-
-        assert.equal(fetchCount, 0);
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-        delete require.cache[modulePath];
-        if (originalModule) require.cache[modulePath] = originalModule;
+        assert.deepEqual(
+          response,
+          { ok: false, error: { message: 'Unknown message' } },
+          `${message.type} is answered again`
+        );
       }
+
+      assert.equal(fetchCount, 0);
     },
   },
   {
     name: 'isolates a malformed repair response and preserves its protocol code',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
       const first = createBlockApiRecord('first');
       const second = createBlockApiRecord('second');
       const firstTranslation = first.template
@@ -2303,33 +2211,25 @@ exports.tests = [
         .replace(' like ', '와 같은 ')
         .replace(' use internal reasoning tokens.', '은 내부 추론 토큰을 사용합니다.');
       let call = 0;
-      global.chrome = {
-        storage: { local: { async get(key) {
-          if (Array.isArray(key) && key.includes('settings')) return { settings: { apiKey: 'sk-test', model: 'gpt-5.4-mini', targetLanguage: 'Korean' } };
-          return {};
-        }, async set() {}, async remove() {} } },
-        runtime: { getManifest() { return { version: 'test' }; } },
-      };
-      global.fetch = async () => {
-        call += 1;
-        if (call === 2) {
-          return { ok: true, async json() { return createCompletedResponse('{invalid'); } };
-        }
-        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
-          translations: [
-            { id: first.id, template: firstTranslation },
-            { id: second.id, template: second.template },
-          ],
-        })); } };
-      };
-      try {
-        const results = await helpers.translateVisibleBlockBatch([first, second]);
-        assert.equal(results.find((result) => result.id === first.id).disposition, 'apply');
-        assert.equal(results.find((result) => result.id === second.id).terminalCode, 'protocol.invalid_json');
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-      }
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome(),
+        fetch: async () => {
+          call += 1;
+          if (call === 2) {
+            return { ok: true, async json() { return createCompletedResponse('{invalid'); } };
+          }
+          return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+            translations: [
+              { id: first.id, template: firstTranslation },
+              { id: second.id, template: second.template },
+            ],
+          })); } };
+        },
+      });
+
+      const results = await worker.translateVisibleBlockBatch([first, second]);
+      assert.equal(results.find((result) => result.id === first.id).disposition, 'apply');
+      assert.equal(results.find((result) => result.id === second.id).terminalCode, 'protocol.invalid_json');
     },
   },
   {
@@ -2339,98 +2239,76 @@ exports.tests = [
     // consumed — the shape of failure ADR-0003 was written about.
     name: 'reports the second real request a repair makes as attemptCount 2',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
       const repaired = createTestPlainBlockRecord('needs-repair');
       repaired.template = 'Hello world.';
       const clean = createTestPlainBlockRecord('first-time');
       clean.template = 'Hello world.';
-      let call = 0;
-      global.chrome = {
-        storage: { local: {
-          async get(keys) {
-            if (Array.isArray(keys) ? keys.includes('settings') : keys === 'settings') {
-              return { settings: { apiKey: 'sk-test', model: 'gpt-5.4-mini', targetLanguage: 'Korean' } };
-            }
-            return {};
-          },
-          async set() {},
-          async remove() {},
-        } },
-        runtime: { getManifest() { return { version: 'test' }; } },
-      };
-      global.fetch = async () => {
-        call += 1;
-        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
-          translations: [{ id: repaired.id, template: call === 1 ? repaired.template : '한국어 문장입니다.' }],
-        })); } };
-      };
 
-      try {
-        const repairedResults = await helpers.translateVisibleBlockBatch([repaired]);
+      let repairCalls = 0;
+      const repairWorker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome(),
+        fetch: async () => {
+          repairCalls += 1;
+          return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+            translations: [{
+              id: repaired.id,
+              template: repairCalls === 1 ? repaired.template : '한국어 문장입니다.',
+            }],
+          })); } };
+        },
+      });
 
-        assert.equal(call, 2);
-        assert.equal(repairedResults[0].disposition, 'apply');
-        assert.equal(repairedResults[0].attemptCount, 2);
+      const repairedResults = await repairWorker.translateVisibleBlockBatch([repaired]);
 
-        // The control: one request, and nothing for the content script to charge twice.
-        call = 0;
-        global.fetch = async () => {
-          call += 1;
+      assert.equal(repairCalls, 2);
+      assert.equal(repairedResults[0].disposition, 'apply');
+      assert.equal(repairedResults[0].attemptCount, 2);
+
+      // The control: one request, and nothing for the content script to charge twice. What
+      // separates it from the case above is the answers, and the network a worker translates
+      // against is fixed when the worker is built, so the control gets a worker of its own.
+      let cleanCalls = 0;
+      const cleanWorker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome(),
+        fetch: async () => {
+          cleanCalls += 1;
           return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
             translations: [{ id: clean.id, template: '한국어 문장입니다.' }],
           })); } };
-        };
-        const cleanResults = await helpers.translateVisibleBlockBatch([clean]);
+        },
+      });
 
-        assert.equal(call, 1);
-        assert.equal(cleanResults[0].disposition, 'apply');
-        assert.equal(cleanResults[0].attemptCount, 1);
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-      }
+      const cleanResults = await cleanWorker.translateVisibleBlockBatch([clean]);
+
+      assert.equal(cleanCalls, 1);
+      assert.equal(cleanResults[0].disposition, 'apply');
+      assert.equal(cleanResults[0].attemptCount, 1);
     },
   },
   {
     name: 'persists repaired detail and falls back to compact final when fingerprints fail',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
       const diagnostics = require('../extension/translation-diagnostics.js');
       const previousFingerprintBlock = diagnostics.fingerprintBlock;
       const stored = {};
       let record = createTestPlainBlockRecord('repair-success');
       record.template = 'Hello world.';
       let call = 0;
-      global.chrome = {
-        storage: { local: {
-          async get(keys) {
-            if (Array.isArray(keys) && keys.includes('settings')) {
-              return { settings: { apiKey: 'sk-test', model: 'gpt-5.4-mini', targetLanguage: 'Korean' } };
-            }
-            if (keys === null) return { ...stored };
-            const result = {};
-            for (const key of Array.isArray(keys) ? keys : [keys]) {
-              if (Object.hasOwn(stored, key)) result[key] = stored[key];
-            }
-            return result;
-          },
-          async set(values) { Object.assign(stored, values); },
-          async remove(keys) {
-            for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
-          },
-        } },
-        runtime: { getManifest() { return { version: 'test' }; } },
-      };
-      global.fetch = async () => {
-        call += 1;
-        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
-          translations: [{ id: record.id, template: call === 1 ? record.template : '한국어 문장입니다.' }],
-        })); } };
-      };
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({ stored }),
+        fetch: async () => {
+          call += 1;
+          return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+            translations: [{ id: record.id, template: call === 1 ? record.template : '한국어 문장입니다.' }],
+          })); } };
+        },
+      });
+
+      // Fingerprinting is the one thing here that is still borrowed rather than handed over:
+      // it lives in the diagnostics module, which closes over its own global scope, so making
+      // it fail means replacing it and putting it back afterwards.
       try {
-        const detailedResults = await helpers.translateVisibleBlockBatch([record]);
+        const detailedResults = await worker.translateVisibleBlockBatch([record]);
         const detailedRun = Object.values(stored).find((value) => value?.blocks?.length === 1);
         assert.equal(detailedResults[0].disposition, 'apply');
         assert.equal(detailedResults[0].diagnosticsUnavailable, undefined);
@@ -2443,7 +2321,7 @@ exports.tests = [
         record.template = 'Hello world.';
         call = 0;
         diagnostics.fingerprintBlock = async () => { throw new Error('fingerprint unavailable'); };
-        const fallbackResults = await helpers.translateVisibleBlockBatch([record]);
+        const fallbackResults = await worker.translateVisibleBlockBatch([record]);
         const compactRun = Object.values(stored).find((value) =>
           value?.outcome === 'done' && Array.isArray(value.blocks) && value.blocks.length === 0
         );
@@ -2452,64 +2330,52 @@ exports.tests = [
         assert.ok(compactRun);
       } finally {
         diagnostics.fingerprintBlock = previousFingerprintBlock;
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
       }
     },
   },
   {
     name: 'names the model and the batch size in the run a failed request leaves behind',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousFetch = global.fetch;
       const stored = {};
       const first = createTestPlainBlockRecord('failed-first');
       const second = createTestPlainBlockRecord('failed-second');
       first.template = 'Hello world.';
       second.template = 'Goodbye world.';
-      global.chrome = {
-        storage: { local: {
-          async get(keys) {
-            if (Array.isArray(keys) && keys.includes('settings')) {
-              return { settings: { apiKey: 'sk-test', model: 'gpt-5.4-mini', targetLanguage: 'Korean' } };
-            }
-            if (keys === null) return { ...stored };
-            const result = {};
-            for (const key of Array.isArray(keys) ? keys : [keys]) {
-              if (Object.hasOwn(stored, key)) result[key] = stored[key];
-            }
-            return result;
-          },
-          async set(values) { Object.assign(stored, values); },
-          async remove(keys) {
-            for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
-          },
-        } },
-        runtime: { getManifest() { return { version: 'test' }; } },
-      };
-      global.fetch = async () => { throw new Error('network is down'); };
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({ stored }),
+        fetch: async () => { throw new Error('network is down'); },
+      });
 
-      try {
-        await assert.rejects(
-          helpers.translateVisibleBlockBatch([first, second]),
-          /network is down/
-        );
-        const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
-        assert.ok(failedRun, 'the failed request is written to diagnostics');
-        assert.equal(failedRun.model, 'gpt-5.4-mini');
-        assert.equal(failedRun.summary.requested, 2);
-        assert.equal(failedRun.summary.failed, 2);
-      } finally {
-        global.chrome = previousChrome;
-        global.fetch = previousFetch;
-      }
+      await assert.rejects(
+        worker.translateVisibleBlockBatch([first, second]),
+        /network is down/
+      );
+      const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
+      assert.ok(failedRun, 'the failed request is written to diagnostics');
+      assert.equal(failedRun.model, 'gpt-5.4-mini');
+      assert.equal(failedRun.summary.requested, 2);
+      assert.equal(failedRun.summary.failed, 2);
     },
   },
   {
+    // Two runs of one tab can start in the same millisecond, so the timestamp cannot be the
+    // whole id. The crypto is the whole platform here, and handing over one that answers
+    // differently every time is what makes the check say that: the worker has to ask it per
+    // id rather than once per millisecond, which is the only way two ids stamped 1234 differ.
     name: 'creates collision-resistant runtime diagnostic ids within one millisecond',
     fn() {
-      const first = helpers.createRuntimeDiagnosticId(1234);
-      const second = helpers.createRuntimeDiagnosticId(1234);
+      let issued = 0;
+      const worker = helpers.createBackgroundWorker({
+        crypto: {
+          randomUUID() {
+            issued += 1;
+            return `00000000-0000-4000-8000-${String(issued).padStart(12, '0')}`;
+          },
+        },
+      });
+
+      const first = worker.createRuntimeDiagnosticId(1234);
+      const second = worker.createRuntimeDiagnosticId(1234);
       assert.notEqual(first, second);
       assert.match(first, /^runtime-1234-/);
     },
