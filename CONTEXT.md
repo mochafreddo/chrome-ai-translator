@@ -1,6 +1,6 @@
 # Chrome AI Translator
 
-A personal Chrome extension that translates web pages with the OpenAI Responses API. It offers two distinct translation experiences over the same page, and most of the vocabulary below exists to keep those two apart.
+A personal Chrome extension that translates web pages with the OpenAI Responses API. It offers two distinct translation experiences over the same page, and most of the vocabulary below exists to keep those two apart. One term is shared by both, and its entry says so.
 
 ## Language
 
@@ -19,6 +19,10 @@ _Avoid_: in-page translation, overlay translation, live translation, text-node t
 **Semantic Block**:
 The unit Inline Translation works in: one paragraph, heading, list item, or table cell, taken whole. Progress counts, size limits, and retries are all expressed in these. Not a Translation Chunk, which belongs to the other translation and holds many of these.
 _Avoid_: node, chunk, segment, fragment
+
+**Placeholder Token**:
+The stand-in a translation sends in place of a link, emphasis, or code span, so that the model may reorder the words around it without rewriting what it stands for. A translation replaces each one before sending, requires every one of them back byte-for-byte and exactly once, and puts the original span back afterwards. This is the one term both translations share, and it is shared because they meet the same problem rather than because they resemble each other: the same contract, the same four failures — a token lost, repeated, invented, or crossed — and, from #48, one implementation behind both. The reader is never shown this name. A failed check says "a link or code marker", which is a deliberate paraphrase and not a fifth vocabulary for the same thing.
+_Avoid_: bare `token`, which in this project already means two other things — a model token, which is what the reader is billed for and what `maxOutputTokens` bounds, and a correlation token, which pairs an inline result with the request that asked for it. Also marker, tag, sentinel, protected span.
 
 **Inline Translation Session**:
 The span the Session Budget is counted over: one page visit. It begins when the page loads and ends when the page is reloaded or left. It is not ended by **Original text** and not ended by stopping — both carry the Session Budget forward, so neither is a way to start spending afresh. It bounds one visit to one page, not the reader's spending: a reader who reloads three times has three of these and pays for all three.
