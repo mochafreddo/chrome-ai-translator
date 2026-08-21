@@ -14,18 +14,21 @@ Every module in `extension/` publishes itself twice: onto `globalThis` under a `
 
 ## Adding an extension file
 
-Four hand-maintained lists decide whether a new `extension/*.js` file is loaded and checked, and none of them is derived from the directory:
+Five hand-maintained lists decide whether a new `extension/*.js` file is loaded and checked, and none of them is derived from the directory:
 
 - `check:syntax` in `package.json`.
+- The `importScripts` calls at the top of `extension/background.js`, if it runs in the worker. Order matters — a module that resolves a dependency as it loads has to come in after that dependency.
 - `getInlineContentScriptFiles()` in `extension/background.js`, if it runs in the page. Order matters — dependencies come before `content.js`.
 - The `<script>` tags in `extension/sidepanel.html` or `options.html`, if it runs in the side panel or the options page.
 - The suite list in `tests/run.js`, for its test file. See `tests/README.md`.
 
-`tests/static-assets.test.js` guards parts of this, but it spot-checks `check:syntax` against five named files rather than the whole directory, so an omission there passes.
+A module both runtimes reach is in two of those lists at once and has to be ordered correctly in each, which is what `extension/placeholder-tokens.js` is: the worker imports it for both codecs, and the page gets it from the injected list.
+
+`tests/static-assets.test.js` guards parts of this, but it spot-checks `check:syntax` against six named files rather than the whole directory, so an omission there passes.
 
 ## Adding a browser-driven check
 
-`tests/integration/harness.mjs` holds the CDP wiring and the gotchas that come with driving this extension from outside a browser — import it rather than rebuilding it from a header comment. A new check under `tests/integration/` is reached only through its own `package.json` script; none of the four lists above covers it. One that needs a real API key reads it through `tests/integration/live-key.mjs`, which never returns the value to a caller, and belongs behind `verify:live` rather than `test:integration`.
+`tests/integration/harness.mjs` holds the CDP wiring and the gotchas that come with driving this extension from outside a browser — import it rather than rebuilding it from a header comment. A new check under `tests/integration/` is reached only through its own `package.json` script; none of the five lists above covers it. One that needs a real API key reads it through `tests/integration/live-key.mjs`, which never returns the value to a caller, and belongs behind `verify:live` rather than `test:integration`.
 
 ## Version
 
