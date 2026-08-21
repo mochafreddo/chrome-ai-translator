@@ -138,7 +138,7 @@ exports.tests = [
       // The codec now decides these four in the module it shares with the inline codec and
       // spells them in one map on the way out, so both shapes are read: the map's values, and
       // any code still raised as a literal. Either is a code the reader can be shown.
-      const source = readExtensionFile('full-page-markdown.js');
+      const source = readExtensionFile('markdown-rehydration.js');
       const raised = new Set([
         ...Array.from(
           source.matchAll(/^\s+token_[a-z_]+: '([^']+)',$/gm),

@@ -1,13 +1,26 @@
-(function exposeFullPageMarkdown(globalScope) {
+// The page, read once, as the Markdown document model Side Panel Translation translates.
+//
+// This is the only part of the Side Panel Translation codec the content script runs, and the
+// only part that touches a DOM. It walks the article the content script picked, drops what a
+// reader would not call the article — navigation, site chrome, hidden and editable subtrees —
+// and returns a document model: an ordered list of blocks, each carrying the Markdown the
+// model will be asked to translate (`template`, with a Placeholder Token where every link and
+// code span was) beside the untranslated Markdown for the same block (`originalMarkdown`,
+// with the spans written out), plus the entries the tokens stand for.
+//
+// Nothing here cuts the document into Translation Chunks and nothing here reads a
+// translation back: those run in the worker, from `extension/translation-chunks.js` and
+// `extension/markdown-rehydration.js`. The page loads neither.
+(function exposeMarkdownDocument(globalScope) {
   'use strict';
 
-  // The Placeholder Token contract, which this codec shares with the inline-block one. In the
-  // worker it is already loaded — background.js imports it ahead of this file — and under a
-  // CommonJS loader it comes in by require, which is how the unit suite reaches it.
-  const placeholderTokens =
-    globalScope?.ChromeAiTranslatorPlaceholderTokens ||
+  // How a Placeholder Token entry is written back out as Markdown, shared with the
+  // rehydration half so the two agree. In the page it is already loaded — the content script
+  // list puts it ahead of this file — and under a CommonJS loader it comes in by require.
+  const markdownEntries =
+    globalScope?.ChromeAiTranslatorMarkdownEntries ||
     (typeof module !== 'undefined' && module.exports
-      ? require('./placeholder-tokens.js')
+      ? require('./markdown-entries.js')
       : null);
 
   function getTagName(node) {
@@ -160,27 +173,6 @@
     const value = normalizeInlineText(label);
     return Boolean(value && isCodeLikeInlineText(value));
   }
-
-  function longestBacktickRun(value) {
-    return (String(value || '').match(/`+/g) || []).reduce(
-      (max, run) => Math.max(max, run.length),
-      0
-    );
-  }
-
-  function renderCode(entry) {
-    const fence = '`'.repeat(Math.max(3, longestBacktickRun(entry.value) + 1));
-    if (entry.display === 'block') {
-      return `${fence}${entry.language || ''}\n${entry.value}\n${fence}`;
-    }
-    const padding = entry.value.includes('`') ? ' ' : '';
-    return `${fence}${padding}${entry.value}${padding}${fence}`;
-  }
-
-  function renderDestination(value) {
-    return `<${String(value || '').replace(/\\/g, '\\\\').replace(/>/g, '\\>')}>`;
-  }
-
   function createNamespace(root, options) {
     if (options?.namespace != null) {
       const supplied = String(options.namespace);
@@ -267,7 +259,7 @@
       return {
         template: value,
         original: options.escapeMarkdownLinkText
-          ? escapeMarkdownLinkLabel(value)
+          ? markdownEntries.escapeMarkdownLinkLabel(value)
           : value,
       };
     }
@@ -280,7 +272,10 @@
     if (tagName === 'BR') return { template: ' ', original: ' ' };
     if (tagName === 'CODE' || tagName === 'KBD' || tagName === 'SAMP') {
       const entry = addCodeEntry(context, getVisibleText(node), 'inline', '');
-      return { template: entry.token, original: renderCode(entry) };
+      return {
+        template: entry.token,
+        original: markdownEntries.renderCode(entry),
+      };
     }
     if (tagName === 'A') {
       const destination = String(node.getAttribute?.('href') || '');
@@ -289,9 +284,9 @@
         const entry = addCodeEntry(context, label, 'inline', '', destination);
         return {
           template: entry.token,
-          original: `[${escapeMarkdownLinkLabel(label)}](${renderDestination(
-            entry.destination
-          )})`,
+          original: `[${markdownEntries.escapeMarkdownLinkLabel(
+            label
+          )}](${markdownEntries.renderDestination(entry.destination)})`,
         };
       }
       const entry = addLinkEntry(context, destination);
@@ -301,7 +296,7 @@
       });
       return {
         template: `${entry.openToken}${labelResult.template}${entry.closeToken}`,
-        original: `[${labelResult.original}](${renderDestination(
+        original: `[${labelResult.original}](${markdownEntries.renderDestination(
           entry.destination
         )})`,
       };
@@ -573,7 +568,7 @@
       'code',
       {
         template: entry.token,
-        original: renderCode(entry),
+        original: markdownEntries.renderCode(entry),
         entryStart,
       },
       {},
@@ -733,359 +728,10 @@
       .join('\n\n');
   }
 
-  function createValidationError(code) {
-    const error = new Error(code);
-    error.code = code;
-    return error;
-  }
-
-  function getChunkEntries(chunk) {
-    const candidates = chunk?.entries || chunk?.contract?.entries || [];
-    return Array.from(candidates).filter(
-      (entry) => entry && typeof entry === 'object'
-    );
-  }
-
-  // This codec's half of the adapter onto the shared contract: a link entry is a pair, a code
-  // entry is an atom, and a block entry carries no Placeholder Token at all.
-  function classifyChunkEntry(entry) {
-    if (entry.kind === 'link') return placeholderTokens.PAIR;
-    if (entry.kind === 'code') return placeholderTokens.ATOM;
-    return null;
-  }
-
-  // The four failures in this codec's spelling. The shared module answers with the bare code,
-  // and the `markdown.` prefix is what the side panel keys the reader's four sentences on and
-  // what background.js reads to decide whether a chunk is worth one repair attempt, so the
-  // prefix is applied here rather than in the module both codecs share.
-  const TOKEN_FAILURE_CODES = Object.freeze({
-    token_missing: 'markdown.token_missing',
-    token_duplicate: 'markdown.token_duplicate',
-    token_unknown: 'markdown.token_unknown',
-    token_nesting_invalid: 'markdown.token_nesting_invalid',
-  });
-
-  function escapeMarkdownLinkLabel(value) {
-    return String(value || '')
-      .replace(/\\/g, '\\\\')
-      .replace(/\[/g, '\\[')
-      .replace(/\]/g, '\\]');
-  }
-
-  function escapeLinkWrapperContent(value, entry) {
-    const openIndex = value.indexOf(entry.openToken);
-    const contentStart = openIndex + entry.openToken.length;
-    const closeIndex = value.indexOf(entry.closeToken, contentStart);
-    return `${value.slice(0, contentStart)}${escapeMarkdownLinkLabel(
-      value.slice(contentStart, closeIndex)
-    )}${value.slice(closeIndex)}`;
-  }
-
-  function validateAndRehydrateChunk(output, chunk) {
-    const value = String(output || '');
-    const entries = getChunkEntries(chunk);
-    const expectedTokens = placeholderTokens.enumerateExpectedTokens(
-      entries,
-      classifyChunkEntry
-    );
-    // A chunk's namespace is the whole vocabulary the model was given, so anything left in it
-    // once the chunk's own tokens are removed is a token the model invented. This codec asks
-    // that before it counts, which is not the order the inline codec uses and is left alone:
-    // an answer that both loses a token and invents one has two things wrong with it, and
-    // which of the two each translation names first is not a difference worth chasing.
-    const namespace = String(chunk?.contract?.namespace || '');
-    if (
-      placeholderTokens.hasUnexpectedNamespaceResidue(
-        value,
-        namespace,
-        expectedTokens
-      )
-    ) {
-      throw createValidationError(TOKEN_FAILURE_CODES.token_unknown);
-    }
-    const countFailure = placeholderTokens.findCountFailure(
-      value,
-      expectedTokens
-    );
-    if (countFailure) {
-      throw createValidationError(TOKEN_FAILURE_CODES[countFailure]);
-    }
-
-    // The walk without parents enforced: a chunk's entries do not record which entry they sat
-    // inside, so balance and nesting is all this codec can ask. The tree it returns is unused
-    // here — rehydration works from the entries, not from the answer's shape.
-    const walked = placeholderTokens.walkExpectedTokens(value, expectedTokens);
-    if (!walked.ok) {
-      throw createValidationError(TOKEN_FAILURE_CODES[walked.reason]);
-    }
-
-    let result = value;
-    for (const entry of entries) {
-      if (entry.kind === 'link') {
-        result = escapeLinkWrapperContent(result, entry);
-      }
-    }
-    for (const entry of entries) {
-      if (entry.kind === 'code') {
-        const replacement = Object.prototype.hasOwnProperty.call(
-          entry,
-          'destination'
-        )
-          ? `[${escapeMarkdownLinkLabel(entry.value)}](${renderDestination(
-              entry.destination
-            )})`
-          : renderCode(entry);
-        result = result.split(entry.token).join(replacement);
-      } else if (entry.kind === 'link') {
-        result = result.split(entry.openToken).join('[');
-        result = result
-          .split(entry.closeToken)
-          .join(`](${renderDestination(entry.destination)})`);
-      }
-    }
-    return result;
-  }
-
-  const sentenceBoundary = /(?<=[.!?。！？])\s+/u;
-  const whitespaceBoundary = /\s+/u;
-
-  function createChunkingError(code, message = code) {
-    const error = new Error(message);
-    error.code = code;
-    throw error;
-  }
-
-  function normalizeChunkLimit(maxChars) {
-    const limit = Math.floor(Number(maxChars));
-    if (!Number.isFinite(limit) || limit < 1) {
-      throw new TypeError('maxChars must be a positive finite number');
-    }
-    return limit;
-  }
-
-  function getEntryTokens(entry) {
-    return [entry?.token, entry?.openToken, entry?.closeToken].filter(Boolean);
-  }
-
-  function getAtomicSpans(template, entries) {
-    const spans = [];
-    for (const entry of entries) {
-      if (entry.kind === 'link') {
-        const start = template.indexOf(entry.openToken);
-        const close = template.indexOf(entry.closeToken, start + entry.openToken.length);
-        if (start >= 0 && close >= 0) {
-          spans.push({ start, end: close + entry.closeToken.length });
-        }
-      } else if (entry.kind === 'code') {
-        const start = template.indexOf(entry.token);
-        if (start >= 0) spans.push({ start, end: start + entry.token.length });
-      }
-    }
-    return spans.sort((left, right) => left.start - right.start);
-  }
-
-  function overlapsAtomicSpan(start, end, atomicSpans) {
-    return atomicSpans.some(
-      (span) => start < span.end && end > span.start
-    );
-  }
-
-  function findLastSafeBoundary(
-    template,
-    start,
-    limitEnd,
-    boundary,
-    atomicSpans
-  ) {
-    const expression = new RegExp(boundary.source, 'gu');
-    expression.lastIndex = start;
-    let selected = null;
-    for (let match = expression.exec(template); match; match = expression.exec(template)) {
-      const boundaryStart = match.index;
-      const boundaryEnd = boundaryStart + match[0].length;
-      if (boundaryStart > limitEnd) break;
-      if (
-        boundaryStart > start &&
-        boundaryStart <= limitEnd &&
-        !overlapsAtomicSpan(boundaryStart, boundaryEnd, atomicSpans)
-      ) {
-        selected = { cut: boundaryStart, next: boundaryEnd };
-      }
-    }
-    return selected;
-  }
-
-  function splitOversizedBlock(block, entries, maxChars) {
-    const template = String(block?.template || '');
-    if (template.length <= maxChars) return [block];
-    const atomicSpans = getAtomicSpans(template, entries);
-    const fragments = [];
-    let start = 0;
-
-    while (start < template.length) {
-      while (/\s/u.test(template[start] || '')) start += 1;
-      if (start >= template.length) break;
-      if (template.length - start <= maxChars) {
-        fragments.push(template.slice(start).trimEnd());
-        break;
-      }
-
-      const limitEnd = start + maxChars;
-      const boundary =
-        findLastSafeBoundary(
-          template,
-          start,
-          limitEnd,
-          sentenceBoundary,
-          atomicSpans
-        ) ||
-        findLastSafeBoundary(
-          template,
-          start,
-          limitEnd,
-          whitespaceBoundary,
-          atomicSpans
-        );
-      if (!boundary) {
-        createChunkingError(
-          'markdown.segment_too_large',
-          'A Markdown segment is too large to split safely.'
-        );
-      }
-      const fragment = template.slice(start, boundary.cut).trimEnd();
-      if (!fragment || fragment.length > maxChars) {
-        createChunkingError(
-          'markdown.segment_too_large',
-          'A Markdown segment is too large to split safely.'
-        );
-      }
-      fragments.push(fragment);
-      start = boundary.next;
-    }
-
-    return fragments.map((templateFragment, index) => {
-      const fragmentEntryIds = entries
-        .filter((entry) =>
-          getEntryTokens(entry).some((token) => templateFragment.includes(token))
-        )
-        .map((entry) => entry.id);
-      const { originalMarkdown: _originalMarkdown, ...blockShape } = block;
-      return {
-        ...blockShape,
-        id: `${block.id || 'block'}-fragment-${index + 1}`,
-        template: templateFragment,
-        entries: fragmentEntryIds,
-      };
-    });
-  }
-
-  function createChunksFromBlocks(blocks, namespace, entries, maxChars) {
-    const limit = normalizeChunkLimit(maxChars);
-    const entryById = new Map(entries.map((entry) => [entry.id, entry]));
-    const prepared = [];
-    for (const block of blocks) {
-      const blockEntries = Array.from(block?.entries || [], (id) => entryById.get(id))
-        .filter(Boolean);
-      prepared.push(...splitOversizedBlock(block, blockEntries, limit));
-    }
-
-    const grouped = [];
-    let current = [];
-    for (const block of prepared) {
-      const candidate = [...current, block]
-        .map((item) => String(item.template || ''))
-        .join('\n\n');
-      if (current.length && candidate.length > limit) {
-        grouped.push(current);
-        current = [block];
-      } else {
-        current.push(block);
-      }
-    }
-    if (current.length) grouped.push(current);
-
-    return grouped.map((chunkBlocks, index) => {
-      const template = chunkBlocks
-        .map((block) => String(block.template || ''))
-        .join('\n\n');
-      if (template.length > limit) {
-        createChunkingError(
-          'markdown.segment_too_large',
-          'A Markdown chunk exceeds its character limit.'
-        );
-      }
-      const referencedIds = new Set(
-        chunkBlocks.flatMap((block) => Array.from(block?.entries || []))
-      );
-      const chunkEntries = entries.filter((entry) => referencedIds.has(entry.id));
-      for (const entry of chunkEntries) {
-        if (!getEntryTokens(entry).every((token) => template.includes(token))) {
-          createChunkingError(
-            'markdown.segment_too_large',
-            'A protected Markdown span cannot be split safely.'
-          );
-        }
-      }
-      return {
-        id: `${namespace || 'markdown'}:chunk:${index + 1}`,
-        template,
-        blocks: chunkBlocks,
-        contract: { namespace: String(namespace || ''), entries: chunkEntries },
-        maxChars: limit,
-      };
-    });
-  }
-
-  function createTranslationChunks(documentModel, maxChars) {
-    return createChunksFromBlocks(
-      Array.from(documentModel?.blocks || []),
-      documentModel?.namespace,
-      Array.from(documentModel?.entries || []),
-      maxChars
-    );
-  }
-
-  function splitChunkForRecovery(chunk) {
-    if ((Number(chunk?.recoveryDepth) || 0) >= 1) {
-      createChunkingError(
-        'response.recovery_exhausted',
-        'Translation recovery was already used.'
-      );
-    }
-    const childLimit = Math.max(
-      1,
-      Math.floor(normalizeChunkLimit(chunk?.maxChars) / 2)
-    );
-    let children;
-    try {
-      children = createChunksFromBlocks(
-        Array.from(chunk?.blocks || []),
-        chunk?.contract?.namespace,
-        getChunkEntries(chunk),
-        childLimit
-      );
-    } catch (error) {
-      if (error?.code !== 'markdown.segment_too_large') throw error;
-      createChunkingError(
-        'response.recovery_unavailable',
-        'Translation recovery could not produce smaller chunks.'
-      );
-    }
-    if (children.length < 2) {
-      createChunkingError(
-        'response.recovery_unavailable',
-        'Translation recovery could not produce smaller chunks.'
-      );
-    }
-    return children.map((child) => ({ ...child, recoveryDepth: 1 }));
-  }
   const api = {
-    createTranslationChunks,
     renderOriginalMarkdown,
     serializeMarkdownDocument,
-    splitChunkForRecovery,
-    validateAndRehydrateChunk,
   };
-  globalScope.ChromeAiTranslatorFullPageMarkdown = api;
+  globalScope.ChromeAiTranslatorMarkdownDocument = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

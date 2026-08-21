@@ -1,5 +1,11 @@
 const assert = require('node:assert/strict');
-const markdown = require('../extension/full-page-markdown.js');
+// One file for three modules. Side Panel Translation's codec was split along the line its
+// callers already ran on — the page builds the document model, the worker chunks it and reads
+// the answers back — but every check below still needs a document model as its fixture, so a
+// file per module would be a fake DOM per module and the round trips would have no home.
+const markdownDocument = require('../extension/markdown-document.js');
+const markdownRehydration = require('../extension/markdown-rehydration.js');
+const translationChunks = require('../extension/translation-chunks.js');
 
 function createTestDocument() {
   class TestNode {
@@ -154,7 +160,7 @@ function createProtectedNaturalLinkTest(tagName) {
           )
         )
       );
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_TEST' }
@@ -162,9 +168,9 @@ function createProtectedNaturalLinkTest(tagName) {
       const block = documentModel.blocks[0];
       const expected = `[Before \\[raw\\]\\\\ \`\`\`${protectedValue}\`\`\` after](<${destination}>)`;
 
-      assert.equal(markdown.renderOriginalMarkdown(documentModel), expected);
+      assert.equal(markdownDocument.renderOriginalMarkdown(documentModel), expected);
       assert.equal(
-        markdown.validateAndRehydrateChunk(
+        markdownRehydration.validateAndRehydrateChunk(
           block.template,
           createChunk(documentModel, block)
         ),
@@ -180,18 +186,18 @@ function createProtectedNaturalLinkTest(tagName) {
   };
 }
 
-exports.name = 'full-page Markdown contract';
+exports.name = 'Side Panel Translation Markdown codec';
 exports.tests = [
   {
     name: 'groups protected blocks into source-ordered bounded chunks',
     fn() {
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         createProtectedFixture(),
         {},
         { namespace: 'CAT_TEST' }
       );
 
-      const chunks = markdown.createTranslationChunks(documentModel, 120);
+      const chunks = translationChunks.createTranslationChunks(documentModel, 120);
 
       assert.equal(chunks.length > 1, true);
       for (const chunk of chunks) {
@@ -227,14 +233,14 @@ exports.tests = [
           )
         )
       );
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_TEST' }
       );
       const source = documentModel.blocks[0].template;
 
-      const chunks = markdown.createTranslationChunks(documentModel, 52);
+      const chunks = translationChunks.createTranslationChunks(documentModel, 52);
 
       assert.equal(chunks.length >= 3, true);
       assert.equal(
@@ -280,7 +286,7 @@ exports.tests = [
 
       assert.throws(
         () =>
-          markdown.createTranslationChunks(
+          translationChunks.createTranslationChunks(
             documentModel,
             protectedLink.length - 1
           ),
@@ -292,14 +298,14 @@ exports.tests = [
     name: 'rejects an indivisible oversized prose segment before chunking',
     fn() {
       const { element, text } = createTestDocument();
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         element('main', {}, element('p', {}, text('x'.repeat(121)))),
         {},
         { namespace: 'CAT_TEST' }
       );
 
       assert.throws(
-        () => markdown.createTranslationChunks(documentModel, 60),
+        () => translationChunks.createTranslationChunks(documentModel, 60),
         (error) => error.code === 'markdown.segment_too_large'
       );
     },
@@ -308,7 +314,7 @@ exports.tests = [
     name: 'splits a chunk once for recovery at half its original limit',
     fn() {
       const { element, text } = createTestDocument();
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         element(
           'main',
           {},
@@ -319,9 +325,9 @@ exports.tests = [
         {},
         { namespace: 'CAT_TEST' }
       );
-      const [chunk] = markdown.createTranslationChunks(documentModel, 120);
+      const [chunk] = translationChunks.createTranslationChunks(documentModel, 120);
 
-      const recovery = markdown.splitChunkForRecovery(chunk);
+      const recovery = translationChunks.splitChunkForRecovery(chunk);
 
       assert.equal(recovery.length >= 2, true);
       assert.equal(recovery.every((child) => child.maxChars === 60), true);
@@ -330,7 +336,7 @@ exports.tests = [
         true
       );
       assert.throws(
-        () => markdown.splitChunkForRecovery(recovery[0]),
+        () => translationChunks.splitChunkForRecovery(recovery[0]),
         (error) => error.code === 'response.recovery_exhausted'
       );
     },
@@ -339,15 +345,15 @@ exports.tests = [
     name: 'reports unavailable recovery when the half limit cannot split safely',
     fn() {
       const { element, text } = createTestDocument();
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         element('main', {}, element('p', {}, text('x'.repeat(80)))),
         {},
         { namespace: 'CAT_TEST' }
       );
-      const [chunk] = markdown.createTranslationChunks(documentModel, 120);
+      const [chunk] = translationChunks.createTranslationChunks(documentModel, 120);
 
       assert.throws(
-        () => markdown.splitChunkForRecovery(chunk),
+        () => translationChunks.splitChunkForRecovery(chunk),
         (error) => error.code === 'response.recovery_unavailable'
       );
     },
@@ -355,7 +361,7 @@ exports.tests = [
   {
     name: 'protects destinations and code while preserving document structure',
     fn() {
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         createProtectedFixture(),
         {
           title: 'Guide',
@@ -364,7 +370,7 @@ exports.tests = [
         },
         { namespace: 'CAT_TEST' }
       );
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
       const modelInput = documentModel.blocks
         .map((block) => block.template)
         .join('\n\n');
@@ -407,7 +413,7 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         article,
         {},
         { namespace: 'CAT_TEST' }
@@ -417,7 +423,7 @@ exports.tests = [
       assert.equal(modelInput.includes('visible.test'), false);
       assert.equal(modelInput.includes('destination.test'), false);
       assert.match(
-        markdown.renderOriginalMarkdown(documentModel),
+        markdownDocument.renderOriginalMarkdown(documentModel),
         /\[https:\/\/visible\.test\/private\]\(<https:\/\/destination\.test\/private>\)/
       );
     },
@@ -425,7 +431,7 @@ exports.tests = [
   {
     name: 'rehydrates valid protected output and rejects corrupted tokens',
     fn() {
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         createProtectedFixture(),
         {},
         { namespace: 'CAT_TEST' }
@@ -447,7 +453,7 @@ exports.tests = [
       const validOutput = `읽기 ${link.openToken}가이드${link.closeToken}.\n\n지금 ${code.token} 실행.`;
 
       assert.equal(
-        markdown
+        markdownRehydration
           .validateAndRehydrateChunk(validOutput, chunk)
           .includes('https://example.test/a_(b)?token=secret#part'),
         true
@@ -470,7 +476,7 @@ exports.tests = [
       ];
       for (const [badOutput, codeValue] of invalidCases) {
         assert.throws(
-          () => markdown.validateAndRehydrateChunk(badOutput, chunk),
+          () => markdownRehydration.validateAndRehydrateChunk(badOutput, chunk),
           (error) => error.code === codeValue
         );
       }
@@ -481,7 +487,7 @@ exports.tests = [
     fn() {
       const { element, text } = createTestDocument();
       const foreignLiteral = '⟦FOREIGN_SOURCE:ATOM:C9⟧';
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         element('main', {}, element('p', {}, text(`Keep ${foreignLiteral}.`))),
         {},
         { namespace: 'CAT_ACTIVE' }
@@ -498,7 +504,7 @@ exports.tests = [
       };
 
       assert.equal(
-        markdown.validateAndRehydrateChunk(block.template, chunk),
+        markdownRehydration.validateAndRehydrateChunk(block.template, chunk),
         `Keep ${foreignLiteral}.`
       );
       for (const injected of [
@@ -506,7 +512,7 @@ exports.tests = [
         `${block.template} ⟦CAT_ACTIVE:ATOM:C999`,
       ]) {
         assert.throws(
-          () => markdown.validateAndRehydrateChunk(injected, chunk),
+          () => markdownRehydration.validateAndRehydrateChunk(injected, chunk),
           (error) => error.code === 'markdown.token_unknown'
         );
       }
@@ -559,12 +565,12 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_EXCLUSION' }
       );
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
       const modelInput = documentModel.blocks.map((block) => block.template).join('\n\n');
 
       assert.equal(original, 'Visible prose.');
@@ -583,12 +589,12 @@ exports.tests = [
         element('p', {}, text('Article body.'))
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_SITE_CHROME' }
       );
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
       const modelInput = documentModel.blocks.map((block) => block.template).join('\n\n');
 
       assert.equal(original, 'Article body.');
@@ -612,7 +618,7 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_DECORATIVE' }
@@ -624,7 +630,7 @@ exports.tests = [
         'After nested block.',
       ].join('\n\n');
 
-      assert.equal(markdown.renderOriginalMarkdown(documentModel), expected);
+      assert.equal(markdownDocument.renderOriginalMarkdown(documentModel), expected);
       assert.equal(
         documentModel.blocks.map((block) => block.template).join('\n\n'),
         expected
@@ -680,12 +686,12 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_TABLE_VISIBILITY' }
       );
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
       const modelInput = documentModel.blocks.map((block) => block.template).join('\n\n');
 
       assert.equal(
@@ -715,13 +721,13 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_ATOMIC_VISIBLE' }
       );
       const modelInput = documentModel.blocks[0].template;
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
 
       assert.equal(
         original,
@@ -784,12 +790,12 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_CODE_VISIBLE' }
       );
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
       const modelInput = documentModel.blocks.map((block) => block.template).join('\n\n');
 
       assert.deepEqual(
@@ -825,12 +831,12 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         { title: 'Guide' },
         { namespace: 'CAT_LIST_TITLE' }
       );
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
 
       assert.equal(
         original,
@@ -845,7 +851,7 @@ exports.tests = [
     name: 'removes later equivalent H1 blocks when the first H1 already matches the title',
     fn() {
       const { element, text } = createTestDocument();
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         element(
           'main',
           {},
@@ -857,7 +863,7 @@ exports.tests = [
         { title: 'Guide' },
         { namespace: 'CAT_TITLE_DEDUP' }
       );
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
 
       assert.equal(
         original,
@@ -889,8 +895,8 @@ exports.tests = [
         )
       );
 
-      const result = markdown.renderOriginalMarkdown(
-        markdown.serializeMarkdownDocument(root, {}, { namespace: 'CAT_TEST' })
+      const result = markdownDocument.renderOriginalMarkdown(
+        markdownDocument.serializeMarkdownDocument(root, {}, { namespace: 'CAT_TEST' })
       );
 
       assert.equal(
@@ -908,7 +914,7 @@ exports.tests = [
         {},
         element('a', { href: '' }, text('https://visible.test'))
       );
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         element('main', {}, root),
         {},
         { namespace: 'CAT_TEST' }
@@ -916,7 +922,7 @@ exports.tests = [
       const block = documentModel.blocks[0];
 
       assert.equal(
-        markdown.validateAndRehydrateChunk(
+        markdownRehydration.validateAndRehydrateChunk(
           block.template,
           createChunk(documentModel, block)
         ),
@@ -938,7 +944,7 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_TEST' }
@@ -963,7 +969,7 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_TEST' }
@@ -971,7 +977,7 @@ exports.tests = [
 
       assert.equal(documentModel.blocks[0].template, '> First\n>\n> Second');
       assert.equal(
-        markdown.renderOriginalMarkdown(documentModel),
+        markdownDocument.renderOriginalMarkdown(documentModel),
         '> First\n>\n> Second'
       );
     },
@@ -989,7 +995,7 @@ exports.tests = [
           element('a', { href: 'https://safe.test' }, text('safe label'))
         )
       );
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_TEST' }
@@ -999,7 +1005,7 @@ exports.tests = [
       const output = `${link.openToken}](https://evil.test)[x${link.closeToken}`;
 
       assert.equal(
-        markdown.validateAndRehydrateChunk(
+        markdownRehydration.validateAndRehydrateChunk(
           output,
           createChunk(documentModel, block)
         ),
@@ -1022,7 +1028,7 @@ exports.tests = [
           element('a', { href: '#part' }, text('Page section'))
         )
       );
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         { url: 'https://page.test/docs/current/index.html?private=1' },
         { namespace: 'CAT_TEST' }
@@ -1038,7 +1044,7 @@ exports.tests = [
       const modelInput = documentModel.blocks[0].template;
       assert.equal(modelInput.includes('../guide'), false);
       assert.equal(modelInput.includes('#part'), false);
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
       assert.equal(original.includes('../guide'), false);
       assert.equal(
         original.includes('https://page.test/docs/guide'),
@@ -1067,7 +1073,7 @@ exports.tests = [
         )
       );
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         { url: 'https://page.test/fallback/index.html' },
         { namespace: 'CAT_TEST' }
@@ -1078,7 +1084,7 @@ exports.tests = [
         'https://assets.test/base/guide'
       );
       assert.equal(
-        markdown
+        markdownDocument
           .renderOriginalMarkdown(documentModel)
           .includes('https://assets.test/base/guide'),
         true
@@ -1135,14 +1141,14 @@ exports.tests = [
         '> | One | 1 |',
       ].join('\n');
 
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_TEST' }
       );
 
       assert.equal(documentModel.blocks[0].template, expected);
-      assert.equal(markdown.renderOriginalMarkdown(documentModel), expected);
+      assert.equal(markdownDocument.renderOriginalMarkdown(documentModel), expected);
     },
   },
   {
@@ -1168,21 +1174,21 @@ exports.tests = [
           )
         )
       );
-      const documentModel = markdown.serializeMarkdownDocument(
+      const documentModel = markdownDocument.serializeMarkdownDocument(
         root,
         {},
         { namespace: 'CAT_TEST' }
       );
       const block = documentModel.blocks[0];
       const atomic = documentModel.entries.find((entry) => entry.kind === 'code');
-      const original = markdown.renderOriginalMarkdown(documentModel);
+      const original = markdownDocument.renderOriginalMarkdown(documentModel);
 
       assert.equal(
         original,
         '[read \\](https://evil.test)\\[ this](<https://safe.test/natural>) and [https://visible.test/\\](https://evil.test)\\[x](<https://safe.test/atomic>)'
       );
       assert.equal(
-        markdown.validateAndRehydrateChunk(
+        markdownRehydration.validateAndRehydrateChunk(
           block.template,
           createChunk(documentModel, block)
         ),

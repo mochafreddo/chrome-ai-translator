@@ -319,10 +319,18 @@ exports.tests = [
         packageJson.scripts['check:syntax'],
         /node --check extension\/openai-response\.js/
       );
-      assert.match(
-        packageJson.scripts['check:syntax'],
-        /node --check extension\/full-page-markdown\.js/
-      );
+      for (const file of [
+        'markdown-entries',
+        'markdown-document',
+        'markdown-rehydration',
+        'translation-chunks',
+      ]) {
+        assert.match(
+          packageJson.scripts['check:syntax'],
+          new RegExp(`node --check extension/${file}\\.js`),
+          file
+        );
+      }
       assert.match(
         packageJson.scripts['check:syntax'],
         /node --check extension\/page-access\.js/
@@ -338,12 +346,17 @@ exports.tests = [
     },
   },
   {
-    name: 'loads the shared Placeholder Token contract ahead of both codecs that read it',
+    name: 'loads every shared module ahead of the modules that read it as they load',
     fn() {
-      // Both codecs resolve the contract as they load, so a list that puts it after either of
-      // them leaves that codec holding null and failing on the first answer it validates —
-      // in the worker or in the page, whichever list is the one that was missed. Neither list
-      // is derived from the directory, and there are two of them here rather than one.
+      // A module resolved at load time and listed after its dependency leaves the reader
+      // holding null and failing on the first page it is asked about — in the worker or in the
+      // page, whichever list is the one that was missed. Neither list is derived from the
+      // directory, and a module both runtimes reach appears in both of them.
+      //
+      // Two shared modules are guarded here. The Placeholder Token contract is read by the
+      // inline codec, which runs in both, and by Side Panel Translation's rehydration half,
+      // which runs only in the worker. The Markdown entry module is read by the two halves of
+      // Side Panel Translation's codec that render a span, which sit one on each side.
       const backgroundJs = fs.readFileSync(
         path.join(__dirname, '..', 'extension', 'background.js'),
         'utf8'
@@ -351,28 +364,33 @@ exports.tests = [
       const filesMatch = backgroundJs.match(
         /function getInlineContentScriptFiles\(\) \{\s*return \[([^\]]+)\]/s
       );
-
-      assert.equal(
-        fs.existsSync(
-          path.join(__dirname, '..', 'extension', 'placeholder-tokens.js')
-        ),
-        true
-      );
       assert.ok(filesMatch);
-      for (const reader of ['inline-block.js', 'full-page-markdown.js']) {
-        assert.notEqual(filesMatch[1].indexOf(`'${reader}'`), -1, reader);
+
+      const inWorker = (file) => backgroundJs.indexOf(`importScripts('${file}')`);
+      const inPage = (file) => filesMatch[1].indexOf(`'${file}'`);
+      const dependencies = [
+        ['placeholder-tokens.js', 'inline-block.js', ['worker', 'page']],
+        ['placeholder-tokens.js', 'markdown-rehydration.js', ['worker']],
+        ['markdown-entries.js', 'markdown-rehydration.js', ['worker']],
+        ['markdown-entries.js', 'translation-chunks.js', ['worker']],
+        ['markdown-entries.js', 'markdown-document.js', ['page']],
+      ];
+
+      for (const [shared, reader, runtimes] of dependencies) {
         assert.equal(
-          filesMatch[1].indexOf("'placeholder-tokens.js'") <
-            filesMatch[1].indexOf(`'${reader}'`),
+          fs.existsSync(path.join(__dirname, '..', 'extension', shared)),
           true,
-          `content script list: placeholder-tokens.js after ${reader}`
+          shared
         );
-        assert.equal(
-          backgroundJs.indexOf("importScripts('placeholder-tokens.js')") <
-            backgroundJs.indexOf(`importScripts('${reader}')`),
-          true,
-          `worker imports: placeholder-tokens.js after ${reader}`
-        );
+        for (const runtime of runtimes) {
+          const position = runtime === 'worker' ? inWorker : inPage;
+          assert.notEqual(position(reader), -1, `${runtime}: ${reader}`);
+          assert.equal(
+            position(shared) < position(reader),
+            true,
+            `${runtime}: ${shared} after ${reader}`
+          );
+        }
       }
     },
   },
@@ -412,8 +430,11 @@ exports.tests = [
     },
   },
   {
-    name: 'loads the full-page Markdown codec before the content script',
+    name: 'loads the Markdown document model codec before the content script',
     fn() {
+      // The page runs one of the codec's three parts and is given nothing else from it: the
+      // chunker and the rehydration half are the worker's, and listing either here would ship
+      // the page code it never calls.
       const backgroundJs = fs.readFileSync(
         path.join(__dirname, '..', 'extension', 'background.js'),
         'utf8'
@@ -424,17 +445,23 @@ exports.tests = [
 
       assert.equal(
         fs.existsSync(
-          path.join(__dirname, '..', 'extension', 'full-page-markdown.js')
+          path.join(__dirname, '..', 'extension', 'markdown-document.js')
         ),
         true
       );
       assert.ok(filesMatch);
-      assert.notEqual(filesMatch[1].indexOf("'full-page-markdown.js'"), -1);
+      assert.notEqual(filesMatch[1].indexOf("'markdown-document.js'"), -1);
       assert.equal(
-        filesMatch[1].indexOf("'full-page-markdown.js'") <
+        filesMatch[1].indexOf("'markdown-document.js'") <
           filesMatch[1].indexOf("'content.js'"),
         true
       );
+      for (const workerOnly of [
+        'translation-chunks.js',
+        'markdown-rehydration.js',
+      ]) {
+        assert.equal(filesMatch[1].indexOf(`'${workerOnly}'`), -1, workerOnly);
+      }
     },
   },
 ];
