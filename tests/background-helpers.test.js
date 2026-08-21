@@ -1,6 +1,4 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
 const fullPageMarkdown = require('../extension/full-page-markdown.js');
@@ -422,6 +420,70 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    // The platform contract, and the reason every check below can name the namespaces its
+    // path touches and be believed: what a worker was handed is all it can reach. There is
+    // no global scope behind it, so a namespace left out of a platform is not quietly
+    // supplied by the one this suite happens to run in — the call fails saying which piece
+    // it was built without. Before that, a worker built with no network made this suite's
+    // one real request to api.openai.com, and a worker built with no `chrome` read whatever
+    // `global.chrome` a check in another file had left behind.
+    //
+    // This is the whole reason the platform is an argument, so it is asserted rather than
+    // assumed. Restoring either fallback fails here and nowhere else.
+    name: 'reaches no platform beyond the one it was constructed with',
+    async fn() {
+      const worker = helpers.createBackgroundWorker();
+
+      await assert.rejects(
+        () => worker.openaiTranslateChunk({
+          apiKey: 'sk-test',
+          model: 'gpt-5.4-mini',
+          instructions: 'Translate.',
+          input: 'Hello world.',
+        }),
+        /built without a network/
+      );
+      await assert.rejects(() => worker.ensureSidePanel(11), /built without chrome/);
+      await assert.rejects(
+        () => worker.syncButtonVisibilityRegistration({ showFloatingButton: 'always' }),
+        /built without chrome/
+      );
+      await assert.rejects(
+        () => worker.sendInlineInstruction(11, 'translate'),
+        /built without chrome/
+      );
+
+      // Nor is there a worker to reach without building one. Eleven of the functions this
+      // module exported were an instance's, backed by one built at import against whatever
+      // global scope it found — the same fallback, in the one place no check could hand a
+      // platform to instead. So the export surface is stated whole rather than by the names
+      // that left it: everything below either builds a worker or only reasons, and an export
+      // arriving here that needs a platform is an ambient worker come back.
+      assert.deepEqual(Object.keys(helpers).sort(), [
+        'INLINE_TRANSLATION_SHORTCUT_COMMAND',
+        'assertFullPageTranslationBudget',
+        'buildBlockInstructions',
+        'buildBlockResponseFormat',
+        'classifyContentScriptFailure',
+        'createBackgroundWorker',
+        'describeInlineTranslationControlFailure',
+        'getBlockBatchMaxOutputTokens',
+        'getBlockRecordCost',
+        'getInlineContentScriptFiles',
+        'getInlineInstructions',
+        'mergeSettingsWithExisting',
+        'mergeVisibleBatchSettingsSnapshot',
+        'normalizeChunkMaxChars',
+        'normalizeMaxOutputTokens',
+        'normalizeVisibleBlockBatchRecords',
+        'planInlineTranslationControl',
+        'planInvocation',
+        'safeError',
+        'sanitizePublicTabState',
+      ]);
+    },
+  },
   {
     name: 'recovers one incomplete full-page chunk with ordered protected children',
     async fn() {
@@ -1364,30 +1426,71 @@ exports.tests = [
     },
   },
   {
-    // The worker used to carry an `assertInlineBlockSessionBudget` that nothing called,
-    // and this suite's green check on it was the only thing making it look live. ADR-0003
-    // gave the session cap to the content script, where `tests/content-helpers.test.js`
-    // already checks it holds. Checking the export alone would only catch the one shape
-    // that was there before, so the worker's source is read too: a re-added constant, or
-    // an assert kept out of `module.exports`, has to fail here as well.
+    // The worker used to carry an `assertInlineBlockSessionBudget` and a 60,000-character
+    // `INLINE_BLOCK_MAX_SESSION_COST` that nothing called, and this suite's green check on
+    // them was the only thing making them look live. ADR-0003 gave the session cap to the
+    // content script, where `tests/content-helpers.test.js` checks it holds. What kept the
+    // pair out until now was a read of `background.js`'s own source text for their two
+    // names, because a worker that found its platform by name offered nothing else to ask:
+    // an assert kept out of `module.exports` was invisible to any assertion about the
+    // module. A worker is built now, so the guarantee is stated as behaviour instead — one
+    // worker translates six batches that cost more together than the retired cap, and every
+    // one of them is translated. A session cap re-added anywhere on this path fails here,
+    // whether it is a module constant, this instance's own accounting, or exported at all.
+    //
+    // Six batches rather than one over-long one, because the per-batch and per-record caps
+    // of 12,000 are real and stay. It is the session across batches that the worker does not
+    // account for, and one worker is what makes these six batches one session.
     name: 'leaves the Semantic Block session cap to the content script',
-    fn() {
-      assert.equal(helpers.assertInlineBlockSessionBudget, undefined);
+    async fn() {
+      const RETIRED_SESSION_COST_CAP = 60000;
+      // Just under the 12,000-character record cap, so six batches cost past the retired one
+      // together and no single batch is refused for a reason this check is not about.
+      const template = `Hello world. ${'word '.repeat(2377)}`.trim();
+      // One block per batch, under the same id every time: ids are unique within a batch, and
+      // six batches that differ in nothing but being six is exactly the subject here.
+      const record = {
+        id: 'b1',
+        template,
+        atoms: [],
+        contract: {
+          codecVersion: 1,
+          namespace: 'CAT_SESSION',
+          entries: [],
+          // What the codec would have written for a template this long, so the answer below
+          // is not refused for overrunning a contract the page never would have sent.
+          maxOutputChars: Math.min(48000, Math.max(2000, template.length * 4)),
+          requiresText: true,
+        },
+        repair: null,
+      };
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome(),
+        // In the target language the settings name, so every batch below is applied on its
+        // merits rather than repaired for saying nothing Korean.
+        fetch: async () => ({ ok: true, async json() { return createCompletedResponse(JSON.stringify({
+          translations: [{ id: record.id, template: `한국어 문장입니다. ${'단어 '.repeat(200)}`.trim() }],
+        })); } }),
+      });
 
-      const backgroundJs = fs.readFileSync(
-        path.join(__dirname, '..', 'extension', 'background.js'),
-        'utf8'
-      );
-      for (const retired of [
-        'assertInlineBlockSessionBudget',
-        'INLINE_BLOCK_MAX_SESSION_COST',
-      ]) {
+      let spent = 0;
+      for (let batch = 1; batch <= 6; batch += 1) {
+        spent += helpers.getBlockRecordCost(record);
+
+        const [result] = await worker.translateVisibleBlockBatch([record]);
+
         assert.equal(
-          backgroundJs.includes(retired),
-          false,
-          `${retired} is back in the service worker`
+          result.disposition,
+          'apply',
+          `batch ${batch} was refused ${spent} characters into the session`
         );
       }
+
+      // The batches only say something about the retired cap if they cost more than it did.
+      assert.ok(
+        spent > RETIRED_SESSION_COST_CAP,
+        `six batches cost ${spent} characters, under the retired ${RETIRED_SESSION_COST_CAP}`
+      );
     },
   },
   {

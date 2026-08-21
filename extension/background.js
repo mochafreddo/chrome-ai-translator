@@ -828,43 +828,39 @@ function isDuplicateInlineContentScriptError(error) {
 
 // The worker the extension runs, with the platform it runs on handed to it.
 //
-// `platform` names the three things the worker cannot reach without the browser giving them
-// to it: Chrome's extension namespaces, the network, and the crypto that names a diagnostics
-// run. Leave any of them out and this instance reads it off the global scope at the moment
-// it needs it, which is the ambient path the service worker itself takes and the one every
-// caller of this file's exports has always been on.
+// `platform` names the three things the worker cannot reach on its own: Chrome's extension
+// namespaces, the network, and the crypto that names a diagnostics run. What an instance was
+// handed is all it can reach — there is no global scope behind this. A path that reaches for
+// a namespace its platform does not carry fails saying so, which is the whole point of
+// building the worker rather than letting it find the browser by name: the service worker
+// hands over the platform Chrome gave it at the foot of this file, and a check hands over the
+// namespaces the one path it drives touches and can be certain nothing else was in play.
 //
 // The state below is this instance's rather than the module's — the three long-lived maps
 // and the two promise chains that serialize writes to them — so a second construction is a
 // second worker carrying nothing over. That is what a restarting service worker is, and
-// what a caller wanting a clean one has had to delete the require cache to get.
+// what a caller wanting a clean one used to have to delete the require cache to get.
 function createBackgroundWorker(platform = {}) {
   const givenChrome = platform.chrome ?? null;
   const givenFetch = platform.fetch ?? null;
   const givenCrypto = platform.crypto ?? null;
 
-  // Read when a call needs it rather than captured at construction, because an instance
-  // given no platform has to keep seeing whatever the global scope holds by then — the
-  // service worker's `chrome` arrives after this module is evaluated, not before it. A
-  // call that uses one of these more than once still takes its own local copy first.
+  // Reached through an accessor rather than used directly, so that a path reaching for a
+  // namespace its platform does not carry says which piece it was built without, rather than
+  // failing on an undefined property several frames further in.
+  function missingPlatform(what) {
+    return new Error(`This worker was built without ${what}`);
+  }
+
   function getChrome() {
-    return givenChrome ?? globalThis.chrome;
+    if (!givenChrome) throw missingPlatform('chrome');
+    return givenChrome;
   }
 
-  // This reaches the one place the worker itself names crypto. The diagnostics modules name
-  // it too — `createUuidV4` and the fingerprint signing both close over their own global
-  // scope — so an instance handed a crypto still takes its correlation tokens and its
-  // fingerprints from the ambient one. Closing that needs those modules to accept a
-  // platform as well, which is the contract half of this sequence rather than the expand.
-  function getCrypto() {
-    return givenCrypto ?? globalThis.crypto;
-  }
-
-  // Named `fetch` so the one request in this worker reads as it always has. The ambient
-  // call goes through the global rather than a reference lifted off it: a detached `fetch`
-  // loses the receiver the browser's own binding requires.
+  // Named `fetch` so the one request in this worker reads as it always has.
   function fetch(...args) {
-    return givenFetch ? givenFetch(...args) : globalThis.fetch(...args);
+    if (!givenFetch) throw missingPlatform('a network');
+    return givenFetch(...args);
   }
 
   const inlineRuntimeCorrelations = new Map();
@@ -903,7 +899,12 @@ function createBackgroundWorker(platform = {}) {
       .catch(() => {});
   }
 
-  function createRuntimeDiagnosticId(startedAt, cryptoApi = getCrypto()) {
+  // A platform with no crypto is not an error here: the id has a suffix either way. This is
+  // the one place the worker itself names crypto. The two diagnostics modules name it as well
+  // — `createUuidV4` for a correlation token, the fingerprint signing for a block — and each
+  // reads the global scope it was published into rather than anything handed to it, which is
+  // how every module in this extension is wired and belongs to those modules rather than here.
+  function createRuntimeDiagnosticId(startedAt, cryptoApi = givenCrypto) {
     const suffix = typeof cryptoApi?.randomUUID === 'function'
       ? cryptoApi.randomUUID()
       : Math.random().toString(36).slice(2, 12);
@@ -1197,7 +1198,11 @@ function createBackgroundWorker(platform = {}) {
 
   async function mutateInlineRuntimeCorrelations(mutator) {
     const operation = inlineRuntimeCorrelationMutation.catch(() => {}).then(async () => {
-      const session = getChrome()?.storage?.session;
+      // The namespace is asked for rather than required: a worker whose platform carries no
+      // session storage keeps its correlations in the map below and still honours a token for
+      // as long as it lives. Only surviving its own restart needs the storage. `chrome`
+      // itself is required, because every caller that gets this far already has one.
+      const session = getChrome().storage?.session;
       const storedValue = session
         ? (await session.get([INLINE_RUNTIME_CORRELATION_STORAGE_KEY]))[INLINE_RUNTIME_CORRELATION_STORAGE_KEY] || {}
         : Object.fromEntries(inlineRuntimeCorrelations);
@@ -1705,18 +1710,18 @@ function createBackgroundWorker(platform = {}) {
       }
 
       let translationDocument;
-      let displayExtraction;
+      let extraction;
       let chunks;
       try {
-        const extracted = await extractArticle(tabId);
+        extraction = await extractArticle(tabId);
         if (
-          !extracted ||
-          typeof extracted !== 'object' ||
-          Array.isArray(extracted)
+          !extraction ||
+          typeof extraction !== 'object' ||
+          Array.isArray(extraction)
         ) {
           throw new Error('Article extraction is malformed.');
         }
-        const { title, url, langHint, contentMarkdown } = extracted;
+        const { title, url, langHint, contentMarkdown } = extraction;
         if (
           typeof title !== 'string' ||
           typeof url !== 'string' ||
@@ -1725,7 +1730,7 @@ function createBackgroundWorker(platform = {}) {
         ) {
           throw new Error('Article extraction is malformed.');
         }
-        translationDocument = extracted.translationDocument;
+        translationDocument = extraction.translationDocument;
         if (!translationDocument || !Array.isArray(translationDocument.blocks)) {
           throw new Error(
             'Article extraction did not include a translation document.'
@@ -1736,7 +1741,6 @@ function createBackgroundWorker(platform = {}) {
           translationDocument,
           settings.chunkMaxChars
         );
-        displayExtraction = { title, url, langHint, contentMarkdown };
       } catch (e) {
         setTabState(tabId, {
           status: 'error',
@@ -1748,9 +1752,15 @@ function createBackgroundWorker(platform = {}) {
         return { skipped: true, reason: 'extract_failed' };
       }
 
+      // The whole extraction, narrowed by `sanitizePublicTabState` on the way into tab state
+      // rather than a second time here. Both layers allowlisted the same four fields, and the
+      // copy here was the one no check could fail — deleting it left the suite green, because
+      // the sanitizer every write already passes through covered for it. The rule has one
+      // home now, and what the page handed back beyond those four fields — the translation
+      // document, its atoms and their destinations — reaches tab state in neither reading.
       setTabState(tabId, {
         status: 'translating',
-        extracted: displayExtraction,
+        extracted: extraction,
         translated: null,
         settingsUsed: createPublicSettingsUsed(settings),
       });
@@ -1843,8 +1853,11 @@ function createBackgroundWorker(platform = {}) {
   }
 
   // chrome.runtime.onMessage.
+  //
+  // The platform is reached inside the branch that needs it rather than here: most messages
+  // are answered out of this instance's own state, and a message this worker does not serve
+  // has to be turned away before anything is reached at all.
   function onMessage(msg, sender, sendResponse) {
-    const chrome = getChrome();
     (async () => {
       try {
         if (msg?.type === 'GET_STATE') {
@@ -1885,7 +1898,7 @@ function createBackgroundWorker(platform = {}) {
           // is not a failure worth showing: the panel polls, and only a control the reader
           // pressed has an outcome they are waiting on.
           try {
-            const resp = await chrome.tabs.sendMessage(msg.tabId, {
+            const resp = await getChrome().tabs.sendMessage(msg.tabId, {
               type: 'GET_INLINE_TRANSLATION_STATE',
             });
             sendResponse({
@@ -1939,7 +1952,7 @@ function createBackgroundWorker(platform = {}) {
             return;
           }
           const firstEntry = resolvedOutcomes[0].entry;
-          const persistence = await translationDiagnostics.persistRun(chrome, {
+          const persistence = await translationDiagnostics.persistRun(getChrome(), {
             runId: runtimeRunId,
             startedAt: new Date(startedAt).toISOString(),
             finishedAt: new Date().toISOString(),
@@ -1991,6 +2004,7 @@ function createBackgroundWorker(platform = {}) {
             sendResponse({ ok: false });
             return;
           }
+          const chrome = getChrome();
           const settings = mergeVisibleBatchSettingsSnapshot(
             await getSettings(),
             msg.settingsSnapshot || null
@@ -2112,26 +2126,19 @@ function createBackgroundWorker(platform = {}) {
   };
 }
 
-// The one instance the browser runs, built with no platform on purpose: it reads Chrome,
-// the network, and crypto off the global scope, which is exactly what the service worker
-// offers. Everything this file exports is that instance's, so a caller reaching for an
-// export gets the same worker the browser is driving.
-const backgroundWorker = createBackgroundWorker();
-const {
-  createRuntimeDiagnosticId,
-  ensureSidePanel,
-  openaiTranslateChunk,
-  runInlineTranslationControl,
-  runInvocation,
-  runInvocationPlan,
-  sendInlineInstruction,
-  syncButtonVisibilityRegistration,
-  syncButtonVisibilityRegistrationSafely,
-  translateFullPageChunk,
-  translateVisibleBlockBatch,
-} = backgroundWorker;
-
+// The entry point: the one worker the browser runs, and the platform the service worker has
+// to hand it. Building it here rather than at module scope is what lets the platform be
+// explicit — there is nowhere else in this file where Chrome, the network and crypto are
+// known to exist, and a worker built where they are not would have nothing to be given.
+//
+// `fetch` is wrapped rather than passed by reference because a detached `fetch` loses the
+// receiver the browser's own binding requires.
 if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+  const backgroundWorker = createBackgroundWorker({
+    chrome,
+    fetch: (...args) => globalThis.fetch(...args),
+    crypto: globalThis.crypto,
+  });
   chrome.runtime.onInstalled.addListener(backgroundWorker.handlers.onInstalled);
   chrome.runtime.onStartup.addListener(backgroundWorker.handlers.onStartup);
   chrome.action.onClicked.addListener(backgroundWorker.handlers.onActionClicked);
@@ -2139,6 +2146,10 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener(backgroundWorker.handlers.onMessage);
 }
 
+// What a CommonJS loader gets: the factory, and the functions that only reason and so belong
+// to the module rather than to any one worker. A worker's own surface — every function that
+// touches the browser, the network, or an instance's state — is reached by building one,
+// because there is no instance here to hand out.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     createBackgroundWorker,
@@ -2154,23 +2165,12 @@ if (typeof module !== 'undefined' && module.exports) {
     getBlockRecordCost,
     getInlineContentScriptFiles,
     classifyContentScriptFailure,
-    ensureSidePanel,
     INLINE_TRANSLATION_SHORTCUT_COMMAND,
     planInvocation,
     planInlineTranslationControl,
-    runInlineTranslationControl,
-    sendInlineInstruction,
     describeInlineTranslationControlFailure,
     getInlineInstructions,
-    runInvocation,
-    runInvocationPlan,
     normalizeVisibleBlockBatchRecords,
     normalizeMaxOutputTokens,
-    openaiTranslateChunk,
-    translateFullPageChunk,
-    syncButtonVisibilityRegistration,
-    syncButtonVisibilityRegistrationSafely,
-    translateVisibleBlockBatch,
-    createRuntimeDiagnosticId,
   };
 }
