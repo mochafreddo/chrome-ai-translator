@@ -38,31 +38,65 @@ function atomToken(record) {
 exports.name = 'translation validation';
 exports.tests = [
   {
-    name: 'reports missing response ids with a stable protocol code',
+    // Each protocol failure is a different shape of translations array, not a
+    // paraphrase of the same one. The eight-block missing-id report is only
+    // this first case: a parsed array that simply lacks a requested id.
+    name: 'distinguishes an omitted response id from the other protocol failures',
     fn() {
-      assert.throws(
-        () => validation.validateBlockResponse(
+      const record = plainRecord('b1');
+      const sibling = plainRecord('b2');
+      const cases = [
+        ['not-json', '{', 'protocol.invalid_json'],
+        [
+          'missing translations key',
+          JSON.stringify({ records: [] }),
+          'protocol.missing_translations',
+        ],
+        [
+          'empty translations',
           JSON.stringify({ translations: [] }),
-          [plainRecord()],
-          { targetLanguage: 'Korean' }
-        ),
-        (error) => error.code === 'protocol.missing_id'
-      );
-    },
-  },
-  {
-    name: 'refuses a response id that was never requested',
-    fn() {
-      assert.throws(
-        () => validation.validateBlockResponse(
+          'protocol.missing_id',
+        ],
+        [
+          'omitted id',
           JSON.stringify({
-            translations: [{ id: 'never-asked', template: 'anything' }],
+            translations: [{ id: 'b1', template: '번역문.' }],
           }),
-          [plainRecord()],
-          { targetLanguage: 'Korean' }
-        ),
-        (error) => error.code === 'protocol.unexpected_id'
-      );
+          'protocol.missing_id',
+        ],
+        [
+          'unexpected id',
+          JSON.stringify({
+            translations: [{ id: 'never-asked', template: '번역문.' }],
+          }),
+          'protocol.unexpected_id',
+        ],
+        [
+          'duplicate id',
+          JSON.stringify({
+            translations: [
+              { id: 'b1', template: '하나.' },
+              { id: 'b1', template: '둘.' },
+            ],
+          }),
+          'protocol.duplicate_id',
+        ],
+        [
+          'missing template',
+          JSON.stringify({ translations: [{ id: 'b1' }] }),
+          'protocol.missing_template',
+        ],
+      ];
+      for (const [label, output, code] of cases) {
+        const records = label === 'omitted id' ? [record, sibling] : [record];
+        assert.throws(
+          () => validation.validateBlockResponse(output, records, {
+            targetLanguage: 'Korean',
+          }),
+          (error) => error.code === code,
+          label
+        );
+      }
     },
   },
   {

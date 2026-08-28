@@ -1336,7 +1336,7 @@ exports.tests = [
   {
     name: 'builds the strict semantic block response format and instructions',
     fn() {
-      const format = helpers.buildBlockResponseFormat();
+      const format = helpers.buildBlockResponseFormat(8);
       const instructions = helpers.buildBlockInstructions({
         targetLanguage: 'Korean',
         tone: 'technical',
@@ -1345,6 +1345,8 @@ exports.tests = [
       assert.equal(format.type, 'json_schema');
       assert.equal(format.name, 'inline_block_translations');
       assert.equal(format.strict, true);
+      assert.equal(format.schema.properties.translations.minItems, 8);
+      assert.equal(format.schema.properties.translations.maxItems, 8);
       assert.deepEqual(
         format.schema.properties.translations.items.required,
         ['id', 'template']
@@ -1353,6 +1355,65 @@ exports.tests = [
       assert.match(instructions, /token.*byte-for-byte/i);
       assert.match(instructions, /Do not output HTML/i);
       assert.match(instructions, /repair.*previousErrorCode/i);
+    },
+  },
+  {
+    // Ranked hypotheses, each changed one boundary at a time:
+    // 1. Request assembly dropped an id — falsified: the body still lists all eight.
+    // 2. Response text collection truncated JSON — falsified at parseCompletedResponse.
+    // 3. The validator mis-codes another protocol failure as missing_id — falsified
+    //    by the protocol-shape table in translation-validation.test.js.
+    // 4. Duplicate request ids shrink the expected set — never reaches validation;
+    //    normalizeVisibleBlockBatchRecords refuses them first.
+    // 5. The structured-output schema does not name the batch length, so a
+    //    completed response may legally omit ids — confirmed: minItems and
+    //    maxItems now equal the batch size. A mock fetch still bypasses that
+    //    constraint, which is why this check can still go red on the original
+    //    missing-id symptom.
+    // Smallest load-bearing shape is one requested record whose translations
+    // array lacks that id (see translation-validation.test.js); eight is the
+    // reported size.
+    name: 'fails an eight-block batch when one completed translation id is omitted',
+    async fn() {
+      const records = Array.from({ length: 8 }, (_, index) =>
+        createTestPlainBlockRecord(`b1-${index + 1}`)
+      );
+      const stored = {};
+      let requestBody = null;
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({ stored }),
+        fetch: async (_url, options) => {
+          requestBody = JSON.parse(options.body);
+          const requested = JSON.parse(requestBody.input).records.map((record) => record.id);
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse(JSON.stringify({
+                translations: requested.slice(0, -1).map((id) => ({
+                  id,
+                  template: '번역문입니다.',
+                })),
+              }));
+            },
+          };
+        },
+      });
+
+      await assert.rejects(
+        worker.translateVisibleBlockBatch(records),
+        (error) => error.code === 'protocol.missing_id'
+      );
+
+      const requestedIds = JSON.parse(requestBody.input).records.map((record) => record.id);
+      assert.deepEqual(requestedIds, records.map((record) => record.id));
+      const translationsSchema = requestBody.text.format.schema.properties.translations;
+      assert.equal(translationsSchema.minItems, 8);
+      assert.equal(translationsSchema.maxItems, 8);
+      const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
+      assert.equal(failedRun.summary.requested, 8);
+      assert.equal(failedRun.summary.failed, 8);
+      assert.equal(failedRun.blocks[0].terminalCode, 'protocol.missing_id');
+      assert.equal(failedRun.blocks[0].timeline[0].stage, 'initial_validation');
     },
   },
   {

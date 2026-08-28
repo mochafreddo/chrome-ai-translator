@@ -4,6 +4,27 @@ const responseApi = require('../extension/openai-response.js');
 exports.name = 'OpenAI response boundary';
 exports.tests = [
   {
+    name: 'keeps a completed structured translation payload intact',
+    fn() {
+      const payload = JSON.stringify({
+        translations: Array.from({ length: 8 }, (_, index) => ({
+          id: `b1-${index + 1}`,
+          template: `번역 ${index + 1}.`,
+        })),
+      });
+      assert.equal(
+        responseApi.parseCompletedResponse({
+          status: 'completed',
+          output: [{
+            type: 'message',
+            content: [{ type: 'output_text', text: payload }],
+          }],
+        }),
+        payload
+      );
+    },
+  },
+  {
     name: 'accepts output only from a completed response',
     fn() {
       assert.equal(

@@ -652,7 +652,11 @@ function buildBlockInstructions({ targetLanguage, tone }) {
   return instructions.join('\n');
 }
 
-function buildBlockResponseFormat() {
+function buildBlockResponseFormat(recordCount) {
+  const count = Number(recordCount);
+  if (!Number.isInteger(count) || count < 1) {
+    throw new Error('Semantic Block response format needs a record count');
+  }
   return {
     type: 'json_schema',
     name: 'inline_block_translations',
@@ -663,6 +667,8 @@ function buildBlockResponseFormat() {
       properties: {
         translations: {
           type: 'array',
+          minItems: count,
+          maxItems: count,
           items: {
             type: 'object',
             additionalProperties: false,
@@ -1382,7 +1388,7 @@ function createBackgroundWorker(platform = {}) {
           reasoningEffort: settings.reasoningEffort,
           instructions: buildBlockInstructions(settings),
           input: JSON.stringify({ records: modelRecords }),
-          textFormat: buildBlockResponseFormat(),
+          textFormat: buildBlockResponseFormat(batch.length),
           maxOutputTokens: getBlockBatchMaxOutputTokens(
             batch.reduce((sum, record) => sum + getBlockRecordCost(record), 0)
           ),
