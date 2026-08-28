@@ -1427,6 +1427,132 @@ exports.tests = [
       });
     },
   },
+  {
+    name: 'serializes a disclosure summary as its own semantic block',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const title = text('Disclosure title stays with its summary.');
+      const summary = element('summary', title);
+      const body = element('p', text('Body paragraph remains a separate block.'));
+      const disclosure = element('details', summary, body);
+      document.body.appendChild(disclosure);
+
+      const serialized = codec.serializeBlock(summary);
+
+      assert.equal(serialized.ok, true);
+      assert.equal(
+        serialized.template,
+        'Disclosure title stays with its summary.'
+      );
+      assert.equal(codec.isSemanticBlockElement(summary), true);
+      assert.equal(codec.isSemanticBlockElement(body), true);
+      assert.equal(codec.isSemanticBlockElement(disclosure), false);
+    },
+  },
+  {
+    name: 'applies and restores a disclosure summary without replacing its node',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const title = text('Original disclosure title.');
+      const emphasis = element('em', text('kept'));
+      const summary = element('summary', title, text(' '), emphasis);
+      const body = element('p', text('Body stays outside the summary.'));
+      const disclosure = element('details', summary, body);
+      document.body.appendChild(disclosure);
+      const serialized = codec.serializeBlock(summary);
+      const wrapper = serialized.contract.entries.find(
+        (entry) => entry.kind === 'wrapper'
+      );
+      const originalChildren = [...summary.childNodes];
+      const originalBody = body;
+
+      const plan = codec.createPatchPlan(
+        serialized.snapshot,
+        `번역된 제목 ${wrapper.openToken}유지${wrapper.closeToken}`
+      );
+      assert.equal(plan.ok, true);
+      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      assert.equal(disclosure.childNodes[0], summary);
+      assert.equal(disclosure.childNodes[1], originalBody);
+      assert.equal(summary.textContent, '번역된 제목 유지');
+      assert.equal(emphasis.parentNode, summary);
+      assert.equal(emphasis.textContent, '유지');
+
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.equal(disclosure.childNodes[0], summary);
+      assert.equal(summary.textContent, 'Original disclosure title. kept');
+      assert.deepEqual([...summary.childNodes], originalChildren);
+      assert.equal(title.parentNode, summary);
+      assert.equal(emphasis.parentNode, summary);
+      assert.equal(emphasis.textContent, 'kept');
+    },
+  },
+  {
+    name: 'rejects a summary that is not a direct child of a disclosure',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const orphan = element('summary', text('Orphan summary title.'));
+      const nested = element(
+        'summary',
+        text('Nested summary title.')
+      );
+      const wrapper = element('div', nested);
+      const disclosure = element(
+        'details',
+        wrapper,
+        element('p', text('Body paragraph after a wrapped summary.'))
+      );
+      const enclosing = element(
+        'p',
+        text('Leading '),
+        element('summary', text('inline summary')),
+        text(' text.')
+      );
+      document.body.appendChild(orphan);
+      document.body.appendChild(disclosure);
+      document.body.appendChild(enclosing);
+
+      assert.equal(codec.isSemanticBlockElement(orphan), false);
+      assert.equal(codec.isSemanticBlockElement(nested), false);
+      assert.deepEqual(codec.serializeBlock(orphan), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+      assert.deepEqual(codec.serializeBlock(nested), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+      assert.deepEqual(codec.serializeBlock(enclosing), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'still serializes existing semantic block kinds',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const samples = [
+        ['p', 'Paragraph text stays a paragraph.'],
+        ['h1', 'Heading text stays a heading.'],
+        ['li', 'List item text stays a list item.'],
+        ['blockquote', 'Quotation text stays a quotation.'],
+        ['figcaption', 'Caption text stays a caption.'],
+        ['dt', 'Term text stays a term.'],
+        ['dd', 'Definition text stays a definition.'],
+        ['th', 'Table heading cell stays a table cell.'],
+        ['td', 'Table cell text stays a table cell.'],
+      ];
+
+      for (const [tagName, value] of samples) {
+        const block = element(tagName, text(value));
+        document.body.appendChild(block);
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, true, tagName);
+        assert.equal(serialized.template, value, tagName);
+      }
+    },
+  },
 ];
 
 exports.createTestDocument = createTestDocument;

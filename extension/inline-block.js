@@ -144,8 +144,11 @@
   }
 
   function isSemanticBlockElement(node) {
-    return Boolean(
-      node?.nodeType === 1 && SEMANTIC_BLOCK_TAGS.has(getTagName(node))
+    if (node?.nodeType !== 1) return false;
+    const tagName = getTagName(node);
+    if (SEMANTIC_BLOCK_TAGS.has(tagName)) return true;
+    return (
+      tagName === 'SUMMARY' && getTagName(node.parentElement) === 'DETAILS'
     );
   }
 

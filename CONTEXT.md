@@ -17,7 +17,7 @@ Translation of a page's article content in place, one Semantic Block at a time, 
 _Avoid_: in-page translation, overlay translation, live translation, text-node translation
 
 **Semantic Block**:
-The unit Inline Translation works in: one paragraph, heading, list item, or table cell, taken whole. Progress counts, size limits, and retries are all expressed in these. Not a Translation Chunk, which belongs to the other translation and holds many of these.
+The unit Inline Translation works in: one paragraph, heading, list item, quotation, caption, disclosure summary, term or definition, or table cell, taken whole. Progress counts, size limits, and retries are expressed in these; a Translation Chunk instead belongs to Side Panel Translation and holds many Semantic Blocks.
 _Avoid_: node, chunk, segment, fragment
 
 **Placeholder Token**:
