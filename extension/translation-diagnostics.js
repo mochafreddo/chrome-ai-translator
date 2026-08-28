@@ -1,11 +1,67 @@
 (function initTranslationDiagnostics(globalScope) {
-  const SCHEMA_VERSION = 2;
+  const SCHEMA_VERSION = 3;
   const MAX_RUNS = 20;
   const MAX_PROBLEM_BLOCKS = 100;
-  const INDEX_KEY = 'inlineDiagnostics:v2:index';
-  const RUN_PREFIX = 'inlineDiagnostics:v2:run:';
+  const V2_INDEX_KEY = 'inlineDiagnostics:v2:index';
+  const V2_RUN_PREFIX = 'inlineDiagnostics:v2:run:';
+  const INDEX_KEY = 'inlineDiagnostics:v3:index';
+  const RUN_PREFIX = 'inlineDiagnostics:v3:run:';
   const SECRET_KEY = 'inlineDiagnostics:v2:hmacSecret';
   const CODE_PREFIXES = ['protocol.', 'structure.', 'quality.', 'runtime.'];
+  const TIMELINE_STAGES = [
+    'initial_validation',
+    'repair_validation',
+    'runtime_application',
+    'local_preflight',
+  ];
+  const LOCAL_REJECTION_REASONS = [
+    'invalid_root',
+    'hidden_content',
+    'editable_content',
+    'interactive_content',
+    'custom_element',
+    'nested_semantic_block',
+    'unsupported_descendant',
+    'structure_limit_exceeded',
+    'empty_content',
+  ];
+
+  function nonNegativeCount(value) {
+    return Math.max(0, Number(value) || 0);
+  }
+
+  function nullableModelRequestAttempts(summary = {}) {
+    if (!Object.prototype.hasOwnProperty.call(summary, 'modelRequestAttempts')) return null;
+    if (summary.modelRequestAttempts == null) return null;
+    if (!Number.isFinite(Number(summary.modelRequestAttempts))) return null;
+    return Math.max(0, Number(summary.modelRequestAttempts));
+  }
+
+  function projectSummary(summary = {}) {
+    return {
+      attemptedBlocks: nonNegativeCount(
+        summary.attemptedBlocks != null ? summary.attemptedBlocks : summary.requested
+      ),
+      translatedBlocks: nonNegativeCount(
+        summary.translatedBlocks != null ? summary.translatedBlocks : summary.translated
+      ),
+      translatedWithWarningBlocks: nonNegativeCount(
+        summary.translatedWithWarningBlocks != null
+          ? summary.translatedWithWarningBlocks
+          : summary.translatedWithWarning
+      ),
+      failedBlocks: nonNegativeCount(
+        summary.failedBlocks != null ? summary.failedBlocks : summary.failed
+      ),
+      changedBlocks: nonNegativeCount(
+        summary.changedBlocks != null ? summary.changedBlocks : summary.changed
+      ),
+      repairAttemptedBlocks: nonNegativeCount(
+        summary.repairAttemptedBlocks != null ? summary.repairAttemptedBlocks : summary.repairs
+      ),
+      modelRequestAttempts: nullableModelRequestAttempts(summary),
+    };
+  }
 
   function safeCode(value, fallback = 'runtime.request_failed') {
     const code = String(value || '');
@@ -31,10 +87,21 @@
     return allowed;
   }
 
+  function serializeLocalRejection(value) {
+    if (!value || typeof value !== 'object') return null;
+    const reason = LOCAL_REJECTION_REASONS.includes(value.reason) ? value.reason : '';
+    if (!reason) return null;
+    const tag = typeof value.tag === 'string' && /^[A-Z][A-Z0-9]{0,31}$/.test(value.tag)
+      ? value.tag
+      : '';
+    return tag ? { reason, tag } : { reason };
+  }
+
   function serializeProblemBlock(block = {}) {
     const terminalDisposition = ['apply', 'apply_with_warning', 'reject', 'changed'].includes(block.terminalDisposition)
       ? block.terminalDisposition
       : 'reject';
+    const localRejection = serializeLocalRejection(block.localRejection);
     return {
       diagnosticId: String(block.diagnosticId || '').slice(0, 80),
       parentRunId: String(block.parentRunId || '').slice(0, 80),
@@ -60,8 +127,9 @@
         codes: safeCodes(block.quality?.codes),
         evidence: safeEvidence(block.quality?.evidence),
       },
+      ...(localRejection ? { localRejection } : {}),
       timeline: (block.timeline || []).slice(0, 2).map((entry) => ({
-        stage: ['initial_validation', 'repair_validation', 'runtime_application'].includes(entry.stage)
+        stage: TIMELINE_STAGES.includes(entry.stage)
           ? entry.stage
           : 'initial_validation',
         disposition: ['apply', 'apply_with_warning', 'retry', 'reject', 'changed'].includes(entry.disposition)
@@ -89,14 +157,7 @@
         outcome: ['done', 'partial', 'failed', 'changed', 'interrupted'].includes(run.outcome)
           ? run.outcome
           : 'interrupted',
-        summary: {
-          requested: Math.max(0, Number(run.summary?.requested) || 0),
-          translated: Math.max(0, Number(run.summary?.translated) || 0),
-          translatedWithWarning: Math.max(0, Number(run.summary?.translatedWithWarning) || 0),
-          failed: Math.max(0, Number(run.summary?.failed) || 0),
-          changed: Math.max(0, Number(run.summary?.changed) || 0),
-          repairs: Math.max(0, Number(run.summary?.repairs) || 0),
-        },
+        summary: projectSummary(run.summary),
         blocks: (run.blocks || []).slice(0, MAX_PROBLEM_BLOCKS).map(serializeProblemBlock),
       })),
     };
@@ -114,8 +175,19 @@
   // module rather than moving behind a construction. The options page calls only this.
   async function loadDiagnostics(chromeApi) {
     const stored = await chromeApi.storage.local.get(null);
-    const ids = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
-    return exportDiagnostics(ids.map((id) => stored[`${RUN_PREFIX}${id}`]).filter(Boolean));
+    const v3Ids = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
+    const v2Ids = Array.isArray(stored[V2_INDEX_KEY]) ? stored[V2_INDEX_KEY] : [];
+    const seen = new Set();
+    const runs = [];
+    for (const id of [...v3Ids, ...v2Ids]) {
+      if (!id || seen.has(id)) continue;
+      const record = stored[`${RUN_PREFIX}${id}`] || stored[`${V2_RUN_PREFIX}${id}`];
+      if (!record) continue;
+      seen.add(id);
+      runs.push(record);
+      if (runs.length === MAX_RUNS) break;
+    }
+    return exportDiagnostics(runs);
   }
 
   // Everything that signs or writes, with the crypto it signs with handed over.
@@ -195,17 +267,37 @@
       return operation;
     }
 
+    function validIdempotencyFingerprint(value) {
+      return /^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(value || '');
+    }
+
     function getRunWrite(stored, run) {
       const runId = String(run.runId || '');
-      const previousIds = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
-      const ids = [runId, ...previousIds.filter((id) => id !== runId)].slice(0, MAX_RUNS);
+      const previousV3 = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
+      const previousV2 = Array.isArray(stored[V2_INDEX_KEY]) ? stored[V2_INDEX_KEY] : [];
+      const v3Uncapped = [runId, ...previousV3.filter((id) => id !== runId)];
+      const v2Uncapped = previousV2.slice();
+      const kept = [];
+      const seen = new Set();
+      for (const id of [...v3Uncapped, ...v2Uncapped]) {
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        kept.push(id);
+        if (kept.length === MAX_RUNS) break;
+      }
+      const keptSet = new Set(kept);
+      const v3Ids = v3Uncapped.filter((id) => keptSet.has(id));
+      const v2Ids = v2Uncapped.filter((id) => keptSet.has(id));
       const removal = Object.keys(stored).filter((key) =>
         key === 'inlineTranslationLogs' ||
         key.startsWith('inlineTranslationLogs:') ||
-        (key.startsWith(RUN_PREFIX) && !ids.includes(key.slice(RUN_PREFIX.length)))
+        (key.startsWith(RUN_PREFIX) && !keptSet.has(key.slice(RUN_PREFIX.length))) ||
+        (key.startsWith(V2_RUN_PREFIX) && !keptSet.has(key.slice(V2_RUN_PREFIX.length)))
       );
       return {
-        ids,
+        v3Ids,
+        v2Ids,
+        touchV2Index: Array.isArray(stored[V2_INDEX_KEY]) || v2Ids.length > 0,
         removal,
         runId,
         runKey: `${RUN_PREFIX}${runId}`,
@@ -214,7 +306,12 @@
     }
 
     async function writeRun(storage, write) {
-      await storage.set({ [INDEX_KEY]: write.ids, [write.runKey]: write.sanitized });
+      const values = {
+        [INDEX_KEY]: write.v3Ids,
+        [write.runKey]: write.sanitized,
+      };
+      if (write.touchV2Index) values[V2_INDEX_KEY] = write.v2Ids;
+      await storage.set(values);
       if (write.removal.length && storage.remove) await storage.remove(write.removal);
     }
 
@@ -232,28 +329,39 @@
         const storage = chromeApi.storage.local;
         const stored = await storage.get(null);
         const write = getRunWrite(stored, run);
-        const existing = stored[write.runKey];
-        const validExistingFingerprint = /^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(
-          existing?.idempotencyFingerprint || ''
-        );
-        if (existing && validExistingFingerprint && existing.idempotencyFingerprint !== run.idempotencyFingerprint) {
+        const existingRecords = [
+          stored[write.runKey],
+          stored[`${V2_RUN_PREFIX}${write.runId}`],
+        ].filter(Boolean);
+        const existingFingerprints = existingRecords
+          .map((record) => record.idempotencyFingerprint)
+          .filter((value) => validIdempotencyFingerprint(value));
+        if (existingFingerprints.some((value) => value !== run.idempotencyFingerprint)) {
           return { persisted: false, conflict: true };
         }
         await writeRun(storage, write);
-        return { persisted: true, duplicate: Boolean(existing && validExistingFingerprint) };
+        return {
+          persisted: true,
+          duplicate: existingFingerprints.includes(run.idempotencyFingerprint),
+        };
       }, { persisted: false });
     }
 
     async function discardRun(chromeApi, runId) {
       const operation = storageMutation.catch(() => {}).then(async () => {
         const storage = chromeApi.storage.local;
-        const stored = await storage.get([INDEX_KEY]);
+        const stored = await storage.get([INDEX_KEY, V2_INDEX_KEY]);
         const normalizedRunId = String(runId || '');
-        const ids = Array.isArray(stored[INDEX_KEY])
-          ? stored[INDEX_KEY].filter((id) => id !== normalizedRunId)
-          : [];
-        await storage.set({ [INDEX_KEY]: ids });
-        if (storage.remove) await storage.remove(`${RUN_PREFIX}${normalizedRunId}`);
+        const v3Ids = (Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [])
+          .filter((id) => id !== normalizedRunId);
+        const v2Ids = (Array.isArray(stored[V2_INDEX_KEY]) ? stored[V2_INDEX_KEY] : [])
+          .filter((id) => id !== normalizedRunId);
+        const values = { [INDEX_KEY]: v3Ids };
+        if (Array.isArray(stored[V2_INDEX_KEY])) values[V2_INDEX_KEY] = v2Ids;
+        await storage.set(values);
+        if (storage.remove) {
+          await storage.remove([`${RUN_PREFIX}${normalizedRunId}`, `${V2_RUN_PREFIX}${normalizedRunId}`]);
+        }
         return { discarded: true };
       }).catch(() => ({ discarded: false }));
       storageMutation = operation;

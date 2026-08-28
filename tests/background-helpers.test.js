@@ -1410,8 +1410,8 @@ exports.tests = [
       assert.equal(translationsSchema.minItems, 8);
       assert.equal(translationsSchema.maxItems, 8);
       const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
-      assert.equal(failedRun.summary.requested, 8);
-      assert.equal(failedRun.summary.failed, 8);
+      assert.equal(failedRun.summary.attemptedBlocks, 8);
+      assert.equal(failedRun.summary.failedBlocks, 8);
       assert.equal(failedRun.blocks[0].terminalCode, 'protocol.missing_id');
       assert.equal(failedRun.blocks[0].timeline[0].stage, 'initial_validation');
     },
@@ -2249,7 +2249,7 @@ exports.tests = [
         outcomes: bulkOutcomes,
       }], sender);
       assert.deepEqual(bulkResponse, { ok: true });
-      const bulkRun = Object.values(stored).find((value) => value?.summary?.failed === 500);
+      const bulkRun = Object.values(stored).find((value) => value?.summary?.failedBlocks === 500);
       assert.equal(bulkRun.blocks.length, 100);
       assert.equal(Object.keys(sessionStored['inlineRuntimeCorrelations:v1']).length, 0);
 
@@ -2282,7 +2282,7 @@ exports.tests = [
       const localRun = Object.values(stored).find((value) =>
         value?.blocks?.[0]?.terminalCode === 'runtime.block_too_large'
       );
-      assert.equal(localRun.summary.requested, 1);
+      assert.equal(localRun.summary.attemptedBlocks, 1);
       assert.equal(localRun.blocks[0].quality.evidence.recordCost, 13000);
       assert.equal(localRun.blocks[0].quality.evidence.limit, 12000);
       // A diagnostics module of this check's own, built with the same crypto and reading
@@ -2309,8 +2309,8 @@ exports.tests = [
       }], sender);
       assert.deepEqual(duplicateResponse, { ok: true });
       const localRunId = 'local-7-123-11111111-1111-4111-8111-111111111111';
-      assert.equal(stored['inlineDiagnostics:v2:index'].filter((id) => id === localRunId).length, 1);
-      assert.equal(Object.keys(stored).filter((key) => key === `inlineDiagnostics:v2:run:${localRunId}`).length, 1);
+      assert.equal(stored['inlineDiagnostics:v3:index'].filter((id) => id === localRunId).length, 1);
+      assert.equal(Object.keys(stored).filter((key) => key === `inlineDiagnostics:v3:run:${localRunId}`).length, 1);
 
       const [conflictResponse] = await collectWorkerResponses(restarted, [{
         type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
@@ -2323,7 +2323,7 @@ exports.tests = [
         }],
       }], sender);
       assert.deepEqual(conflictResponse, { ok: false });
-      assert.equal(stored[`inlineDiagnostics:v2:run:${localRunId}`].blocks[0].terminalCode, 'runtime.block_too_large');
+      assert.equal(stored[`inlineDiagnostics:v3:run:${localRunId}`].blocks[0].terminalCode, 'runtime.block_too_large');
     },
   },
   {
@@ -2573,8 +2573,8 @@ exports.tests = [
       const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
       assert.ok(failedRun, 'the failed request is written to diagnostics');
       assert.equal(failedRun.model, 'gpt-5.4-mini');
-      assert.equal(failedRun.summary.requested, 2);
-      assert.equal(failedRun.summary.failed, 2);
+      assert.equal(failedRun.summary.attemptedBlocks, 2);
+      assert.equal(failedRun.summary.failedBlocks, 2);
     },
   },
   {
