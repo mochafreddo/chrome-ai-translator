@@ -1,5 +1,6 @@
-// Unbilled Chrome check: a valid disclosure summary is collected, applied, and restored
-// without replacing the existing summary element or breaking disclosure behaviour.
+// Unbilled Chrome check: a valid disclosure summary and the renderer-wrapped
+// leading-summary form are collected, applied, and restored without replacing
+// the existing summary element or breaking disclosure behaviour.
 //
 // Not part of `npm test`. That suite is pure Node with no browser. Not part of
 // `test:integration` either: that command guards ADR-0001's action click, and folding
@@ -190,6 +191,162 @@ async function main() {
         restoredTitle: result?.restoredTitle,
         restoredChildren: result?.restoredChildren,
         openedAfterRestore: result?.openedAfterRestore,
+      })
+    );
+
+    // The HTML parser would close a paragraph before a nested summary, so the
+    // renderer-wrapped shape is built with the DOM API the way a renderer does.
+    const wrapped = await page.evaluate(`(() => {
+      const codec = ChromeAiTranslatorInlineBlock;
+      const heading = document.getElementById('heading');
+      const title = document.getElementById('title');
+      const body = document.getElementById('body');
+      const details = document.createElement('details');
+      const block = document.createElement('p');
+      const summary = document.createElement('summary');
+      const titleText = document.createTextNode('Wrapped title stays with its body.');
+      const bodyText = document.createTextNode(' Wrapped body stays in the enclosing block.');
+      summary.appendChild(titleText);
+      block.appendChild(summary);
+      block.appendChild(bodyText);
+      details.appendChild(block);
+      document.body.appendChild(details);
+
+      const owners = [];
+      const seen = new Set();
+      const walker = document.createTreeWalker(
+        details,
+        NodeFilter.SHOW_TEXT
+      );
+      let node;
+      while ((node = walker.nextNode())) {
+        const value = String(node.nodeValue || '').replace(/\\s+/g, ' ').trim();
+        if (!/[A-Za-z]/.test(value)) continue;
+        let element = node.parentElement;
+        while (element) {
+          if (codec.isSemanticBlockElement(element)) {
+            if (!seen.has(element)) {
+              seen.add(element);
+              owners.push(element === block ? 'wrapped-block' : (element.id || element.tagName));
+            }
+            break;
+          }
+          element = element.parentElement;
+        }
+      }
+
+      const serialized = codec.serializeBlock(block);
+      const originalChildren = Array.from(block.childNodes);
+      const originalText = block.textContent;
+      const wrapper = serialized.ok
+        ? serialized.contract.entries.find((entry) => entry.tagName === 'SUMMARY')
+        : null;
+      const translated = wrapper
+        ? \`번역된 본문 \${wrapper.openToken}번역된 제목\${wrapper.closeToken}\`
+        : '';
+      const plan = serialized.ok
+        ? codec.createPatchPlan(serialized.snapshot, translated)
+        : { ok: false };
+      const extra = document.createTextNode(' mutated');
+      block.appendChild(extra);
+      const mutatedPlan = serialized.ok
+        ? codec.createPatchPlan(serialized.snapshot, translated)
+        : { ok: false };
+      extra.remove();
+      const applied = plan.ok
+        ? codec.applyPatchPlan(serialized.snapshot, plan)
+        : { ok: false };
+      const firstChildAfterApply = block.childNodes[0];
+      const translatedTitle = summary.textContent;
+      const restored = applied.ok
+        ? codec.restoreBlock(serialized.snapshot)
+        : { ok: false };
+
+      details.open = false;
+      details.open = true;
+      const openedAfterRestore = details.open === true;
+      details.open = false;
+
+      return {
+        owners,
+        serializeOk: serialized.ok === true,
+        placement: wrapper?.placement,
+        titleInsideTokens: Boolean(
+          wrapper &&
+            serialized.template.startsWith(wrapper.openToken) &&
+            serialized.template.includes(
+              wrapper.closeToken + ' Wrapped body stays in the enclosing block.'
+            )
+        ),
+        applyOk: applied.ok === true,
+        mutationRejected: mutatedPlan.errorCode === 'block_changed',
+        firstChildIsSummary: firstChildAfterApply === summary,
+        sameSummary: details.querySelector('summary') === summary,
+        translatedTitle,
+        restoreOk: restored.ok === true,
+        restoredChildren: Array.from(block.childNodes).every(
+          (child, index) => child === originalChildren[index]
+        ),
+        restoredText: block.textContent,
+        originalText,
+        openedAfterRestore,
+        headingStillSeparate: codec.isSemanticBlockElement(heading),
+        standardSummaryStillSeparate: codec.isSemanticBlockElement(title),
+        standardBodyStillSeparate: codec.isSemanticBlockElement(body),
+        nestedSummaryIsNotABlock: codec.isSemanticBlockElement(summary) === false,
+      };
+    })()`);
+
+    check(
+      'collects the wrapped disclosure as one enclosing block',
+      Array.isArray(wrapped?.owners) &&
+        wrapped.owners.join(',') === 'wrapped-block' &&
+        wrapped?.nestedSummaryIsNotABlock === true,
+      JSON.stringify({
+        owners: wrapped?.owners,
+        nestedSummaryIsNotABlock: wrapped?.nestedSummaryIsNotABlock,
+      })
+    );
+    check(
+      'serializes the wrapped title inside anchored summary tokens',
+      wrapped?.serializeOk === true &&
+        wrapped?.placement === 'leading-root' &&
+        wrapped?.titleInsideTokens === true,
+      JSON.stringify({
+        serializeOk: wrapped?.serializeOk,
+        placement: wrapped?.placement,
+        titleInsideTokens: wrapped?.titleInsideTokens,
+      })
+    );
+    check(
+      're-pins the existing summary first and rejects a mutated graph',
+      wrapped?.applyOk === true &&
+        wrapped?.mutationRejected === true &&
+        wrapped?.firstChildIsSummary === true &&
+        wrapped?.sameSummary === true &&
+        wrapped?.translatedTitle === '번역된 제목',
+      JSON.stringify({
+        applyOk: wrapped?.applyOk,
+        mutationRejected: wrapped?.mutationRejected,
+        firstChildIsSummary: wrapped?.firstChildIsSummary,
+        sameSummary: wrapped?.sameSummary,
+        translatedTitle: wrapped?.translatedTitle,
+      })
+    );
+    check(
+      'restore reconstructs the wrapped disclosure graph and behaviour',
+      wrapped?.restoreOk === true &&
+        wrapped?.restoredChildren === true &&
+        wrapped?.restoredText === wrapped?.originalText &&
+        wrapped?.openedAfterRestore === true &&
+        wrapped?.headingStillSeparate === true &&
+        wrapped?.standardSummaryStillSeparate === true &&
+        wrapped?.standardBodyStillSeparate === true,
+      JSON.stringify({
+        restoreOk: wrapped?.restoreOk,
+        restoredChildren: wrapped?.restoredChildren,
+        restoredText: wrapped?.restoredText,
+        openedAfterRestore: wrapped?.openedAfterRestore,
       })
     );
   } finally {
