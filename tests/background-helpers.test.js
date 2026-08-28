@@ -1336,7 +1336,7 @@ exports.tests = [
   {
     name: 'builds the strict semantic block response format and instructions',
     fn() {
-      const format = helpers.buildBlockResponseFormat();
+      const format = helpers.buildBlockResponseFormat(8);
       const instructions = helpers.buildBlockInstructions({
         targetLanguage: 'Korean',
         tone: 'technical',
@@ -1345,6 +1345,8 @@ exports.tests = [
       assert.equal(format.type, 'json_schema');
       assert.equal(format.name, 'inline_block_translations');
       assert.equal(format.strict, true);
+      assert.equal(format.schema.properties.translations.minItems, 8);
+      assert.equal(format.schema.properties.translations.maxItems, 8);
       assert.deepEqual(
         format.schema.properties.translations.items.required,
         ['id', 'template']
@@ -1364,7 +1366,10 @@ exports.tests = [
     // 4. Duplicate request ids shrink the expected set — never reaches validation;
     //    normalizeVisibleBlockBatchRecords refuses them first.
     // 5. The structured-output schema does not name the batch length, so a
-    //    completed response may legally omit ids — confirmed: no minItems.
+    //    completed response may legally omit ids — confirmed: minItems and
+    //    maxItems now equal the batch size. A mock fetch still bypasses that
+    //    constraint, which is why this check can still go red on the original
+    //    missing-id symptom.
     // Smallest load-bearing shape is one requested record whose translations
     // array lacks that id (see translation-validation.test.js); eight is the
     // reported size.
@@ -1401,10 +1406,9 @@ exports.tests = [
 
       const requestedIds = JSON.parse(requestBody.input).records.map((record) => record.id);
       assert.deepEqual(requestedIds, records.map((record) => record.id));
-      assert.equal(
-        requestBody.text.format.schema.properties.translations.minItems,
-        undefined
-      );
+      const translationsSchema = requestBody.text.format.schema.properties.translations;
+      assert.equal(translationsSchema.minItems, 8);
+      assert.equal(translationsSchema.maxItems, 8);
       const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
       assert.equal(failedRun.summary.requested, 8);
       assert.equal(failedRun.summary.failed, 8);
