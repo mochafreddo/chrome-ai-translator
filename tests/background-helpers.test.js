@@ -1412,8 +1412,60 @@ exports.tests = [
       const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
       assert.equal(failedRun.summary.attemptedBlocks, 8);
       assert.equal(failedRun.summary.failedBlocks, 8);
+      assert.equal(failedRun.summary.modelRequestAttempts, 1);
       assert.equal(failedRun.blocks[0].terminalCode, 'protocol.missing_id');
       assert.equal(failedRun.blocks[0].timeline[0].stage, 'initial_validation');
+    },
+  },
+  {
+    name: 'records one model request attempt for an initial batch of several Semantic Blocks',
+    async fn() {
+      const stored = {};
+      const records = ['a', 'b', 'c'].map((id) => {
+        const record = createTestPlainBlockRecord(id);
+        record.template = 'Hello world.';
+        return record;
+      });
+      let calls = 0;
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({ stored }),
+        crypto: globalThis.crypto,
+        fetch: async () => {
+          calls += 1;
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse(JSON.stringify({
+                translations: records.map((record) => ({
+                  id: record.id,
+                  template: '한국어 문장입니다.',
+                })),
+              }));
+            },
+          };
+        },
+      });
+
+      const results = await worker.translateVisibleBlockBatch(records);
+      const run = Object.values(stored).find((value) => value?.outcome === 'done');
+
+      assert.equal(calls, 1);
+      assert.equal(results.length, 3);
+      assert.ok(results.every((result) => result.disposition === 'apply'));
+      assert.equal(run.summary.attemptedBlocks, 3);
+      assert.equal(run.summary.translatedBlocks, 3);
+      assert.equal(run.summary.translatedWithWarningBlocks, 0);
+      assert.equal(run.summary.failedBlocks, 0);
+      assert.equal(run.summary.changedBlocks, 0);
+      assert.equal(run.summary.repairAttemptedBlocks, 0);
+      assert.equal(run.summary.modelRequestAttempts, 1);
+      assert.equal(
+        run.summary.attemptedBlocks,
+        run.summary.translatedBlocks +
+          run.summary.translatedWithWarningBlocks +
+          run.summary.failedBlocks +
+          run.summary.changedBlocks
+      );
     },
   },
   {
@@ -2427,9 +2479,10 @@ exports.tests = [
       const clean = createTestPlainBlockRecord('first-time');
       clean.template = 'Hello world.';
 
+      const repairStored = {};
       let repairCalls = 0;
       const repairWorker = helpers.createBackgroundWorker({
-        chrome: createBlockBatchChrome(),
+        chrome: createBlockBatchChrome({ stored: repairStored }),
         crypto: globalThis.crypto,
         fetch: async () => {
           repairCalls += 1;
@@ -2447,6 +2500,11 @@ exports.tests = [
       assert.equal(repairCalls, 2);
       assert.equal(repairedResults[0].disposition, 'apply');
       assert.equal(repairedResults[0].attemptCount, 2);
+      const repairedRun = Object.values(repairStored).find((value) => value?.outcome === 'done');
+      assert.equal(repairedRun.summary.attemptedBlocks, 1);
+      assert.equal(repairedRun.summary.translatedBlocks, 1);
+      assert.equal(repairedRun.summary.repairAttemptedBlocks, 1);
+      assert.equal(repairedRun.summary.modelRequestAttempts, 2);
 
       // The control: one request, and nothing for the content script to charge twice. What
       // separates it from the case above is the answers, and the network a worker translates
@@ -2468,6 +2526,47 @@ exports.tests = [
       assert.equal(cleanCalls, 1);
       assert.equal(cleanResults[0].disposition, 'apply');
       assert.equal(cleanResults[0].attemptCount, 1);
+    },
+  },
+  {
+    name: 'counts one repair batch as one model request and each repaired Semantic Block once',
+    async fn() {
+      const stored = {};
+      const first = createTestPlainBlockRecord('repair-a');
+      const second = createTestPlainBlockRecord('repair-b');
+      first.template = 'Hello world.';
+      second.template = 'Hello world.';
+      let calls = 0;
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({ stored }),
+        crypto: globalThis.crypto,
+        fetch: async () => {
+          calls += 1;
+          const template = calls === 1 ? 'Hello world.' : '한국어 문장입니다.';
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse(JSON.stringify({
+                translations: [
+                  { id: first.id, template },
+                  { id: second.id, template },
+                ],
+              }));
+            },
+          };
+        },
+      });
+
+      const results = await worker.translateVisibleBlockBatch([first, second]);
+      const run = Object.values(stored).find((value) => value?.outcome === 'done');
+
+      assert.equal(calls, 2);
+      assert.ok(results.every((result) => result.disposition === 'apply'));
+      assert.ok(results.every((result) => result.attemptCount === 2));
+      assert.equal(run.summary.attemptedBlocks, 2);
+      assert.equal(run.summary.translatedBlocks, 2);
+      assert.equal(run.summary.repairAttemptedBlocks, 2);
+      assert.equal(run.summary.modelRequestAttempts, 2);
     },
   },
   {
@@ -2575,6 +2674,77 @@ exports.tests = [
       assert.equal(failedRun.model, 'gpt-5.4-mini');
       assert.equal(failedRun.summary.attemptedBlocks, 2);
       assert.equal(failedRun.summary.failedBlocks, 2);
+      assert.equal(failedRun.summary.modelRequestAttempts, 1);
+    },
+  },
+  {
+    name: 'records zero model request attempts when a batch fails before a request',
+    async fn() {
+      const stored = {};
+      const record = createTestPlainBlockRecord('no-key');
+      record.template = 'Hello world.';
+      let calls = 0;
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({
+          stored,
+          settings: { ...BLOCK_BATCH_SETTINGS, apiKey: '' },
+        }),
+        fetch: async () => {
+          calls += 1;
+          throw new Error('network must not be reached');
+        },
+      });
+
+      await assert.rejects(
+        worker.translateVisibleBlockBatch([record]),
+        /OpenAI API key is not set/
+      );
+      const failedRun = Object.values(stored).find((value) => value?.outcome === 'failed');
+      assert.ok(failedRun, 'the pre-request failure is written to diagnostics');
+      assert.equal(calls, 0);
+      assert.equal(failedRun.summary.attemptedBlocks, 1);
+      assert.equal(failedRun.summary.failedBlocks, 1);
+      assert.equal(failedRun.summary.modelRequestAttempts, 0);
+    },
+  },
+  {
+    name: 'leaves model request attempts unproven on the interrupted preflight write',
+    async fn() {
+      const stored = {};
+      const runWrites = [];
+      const chrome = createBlockBatchChrome({ stored });
+      const originalSet = chrome.storage.local.set;
+      chrome.storage.local.set = async (values) => {
+        await originalSet(values);
+        for (const value of Object.values(values)) {
+          if (value && typeof value === 'object' && value.outcome) {
+            runWrites.push({
+              outcome: value.outcome,
+              modelRequestAttempts: value.summary?.modelRequestAttempts,
+            });
+          }
+        }
+      };
+      const record = createTestPlainBlockRecord('preflight');
+      record.template = 'Hello world.';
+      const worker = helpers.createBackgroundWorker({
+        chrome,
+        crypto: globalThis.crypto,
+        fetch: async () => ({
+          ok: true,
+          async json() {
+            return createCompletedResponse(JSON.stringify({
+              translations: [{ id: record.id, template: '한국어 문장입니다.' }],
+            }));
+          },
+        }),
+      });
+
+      await worker.translateVisibleBlockBatch([record]);
+      assert.equal(runWrites[0].outcome, 'interrupted');
+      assert.equal(runWrites[0].modelRequestAttempts, null);
+      assert.equal(runWrites.at(-1).outcome, 'done');
+      assert.equal(runWrites.at(-1).modelRequestAttempts, 1);
     },
   },
   {
