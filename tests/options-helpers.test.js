@@ -166,4 +166,30 @@ exports.tests = [
       assert.match(formatted, /quality\.english_residue/);
     },
   },
+  {
+    name: 'formats native v3 diagnostics without display failure',
+    fn() {
+      const native = helpers.formatDiagnosticRun({
+        startedAt: '2026-08-28T00:00:00.000Z',
+        outcome: 'failed',
+        model: 'gpt-5.4-mini',
+        summary: {
+          attemptedBlocks: 4,
+          translatedBlocks: 1,
+          translatedWithWarningBlocks: 1,
+          changedBlocks: 1,
+          failedBlocks: 1,
+          repairAttemptedBlocks: 2,
+          modelRequestAttempts: 3,
+        },
+        blocks: [{ terminalCode: 'runtime.request_failed' }],
+      });
+      assert.match(native, /Translated 1/);
+      assert.match(native, /Partial 1/);
+      assert.match(native, /Changed 1/);
+      assert.match(native, /Failed 1/);
+      assert.match(native, /Repairs 2/);
+      assert.match(native, /runtime\.request_failed/);
+    },
+  },
 ];

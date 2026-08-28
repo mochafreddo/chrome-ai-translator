@@ -1334,6 +1334,40 @@ function createBackgroundWorker(platform = {}) {
     });
   }
 
+  function createBlockCountSummary({
+    attemptedBlocks = 0,
+    translatedBlocks = 0,
+    translatedWithWarningBlocks = 0,
+    failedBlocks = 0,
+    changedBlocks = 0,
+    repairAttemptedBlocks = 0,
+    modelRequestAttempts = null,
+  } = {}) {
+    return {
+      attemptedBlocks,
+      translatedBlocks,
+      translatedWithWarningBlocks,
+      failedBlocks,
+      changedBlocks,
+      repairAttemptedBlocks,
+      modelRequestAttempts,
+    };
+  }
+
+  function summarizeBlockBatchResults(results, modelRequestAttempts) {
+    return createBlockCountSummary({
+      attemptedBlocks: results.length,
+      translatedBlocks: results.filter((result) => result.disposition === 'apply').length,
+      translatedWithWarningBlocks: results.filter(
+        (result) => result.disposition === 'apply_with_warning'
+      ).length,
+      failedBlocks: results.filter((result) => result.disposition === 'reject').length,
+      changedBlocks: 0,
+      repairAttemptedBlocks: results.filter((result) => result.attemptCount === 2).length,
+      modelRequestAttempts,
+    });
+  }
+
   async function translateVisibleBlockBatch(
     records,
     settingsSnapshot = null,
@@ -1346,11 +1380,12 @@ function createBackgroundWorker(platform = {}) {
     // Named by the failure diagnostics below, which run after the request that would have
     // reported them itself.
     let requestedModel = '';
-    let requestedCount = 0;
+    let attemptedBlockCount = 0;
+    let modelRequestAttempts = 0;
 
     try {
       const normalized = normalizeVisibleBlockBatchRecords(records);
-      requestedCount = normalized.length;
+      attemptedBlockCount = normalized.length;
 
       if (!normalized.length) {
         return [];
@@ -1370,12 +1405,16 @@ function createBackgroundWorker(platform = {}) {
         model: settings.model,
         targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
         outcome: 'interrupted',
-        summary: { requested: normalized.length },
+        summary: createBlockCountSummary({
+          attemptedBlocks: normalized.length,
+          modelRequestAttempts: null,
+        }),
         blocks: [],
       });
       diagnosticsPersisted = preflight.persisted;
 
       async function requestAndValidate(batch) {
+        modelRequestAttempts += 1;
         const modelRecords = batch.map((record) => ({
           id: record.id,
           template: record.template,
@@ -1485,13 +1524,7 @@ function createBackgroundWorker(platform = {}) {
         : results.some((result) => result.disposition === 'apply_with_warning')
           ? 'partial'
           : 'done';
-      const finalSummary = {
-        requested: results.length,
-        translated: results.filter((result) => result.disposition === 'apply').length,
-        translatedWithWarning: results.filter((result) => result.disposition === 'apply_with_warning').length,
-        failed: results.filter((result) => result.disposition === 'reject').length,
-        repairs: results.filter((result) => result.attemptCount === 2).length,
-      };
+      const finalSummary = summarizeBlockBatchResults(results, modelRequestAttempts);
       async function persistCompactFinal() {
         const persistence = await translationDiagnostics.persistRun(chrome, {
           runId,
@@ -1589,7 +1622,11 @@ function createBackgroundWorker(platform = {}) {
         finishedAt: new Date().toISOString(),
         model: requestedModel,
         outcome: 'failed',
-        summary: { requested: requestedCount, failed: requestedCount },
+        summary: createBlockCountSummary({
+          attemptedBlocks: attemptedBlockCount,
+          failedBlocks: attemptedBlockCount,
+          modelRequestAttempts,
+        }),
         blocks: [{
           diagnosticId: `${runId}/request`,
           terminalCode: error?.code || 'runtime.request_failed',
