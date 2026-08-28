@@ -9,6 +9,30 @@ function createDiagnostics(cryptoApi = globalThis.crypto) {
   return diagnostics.createTranslationDiagnostics(cryptoApi);
 }
 
+function createMemoryChrome(stored = {}) {
+  const ops = [];
+  return {
+    stored,
+    ops,
+    chromeApi: {
+      storage: {
+        local: {
+          async get() { return { ...stored }; },
+          async set(values) {
+            ops.push({ op: 'set', keys: Object.keys(values).sort() });
+            Object.assign(stored, values);
+          },
+          async remove(keys) {
+            const list = Array.isArray(keys) ? keys : [keys];
+            ops.push({ op: 'remove', keys: [...list].sort() });
+            for (const key of list) delete stored[key];
+          },
+        },
+      },
+    },
+  };
+}
+
 exports.name = 'translation diagnostics';
 exports.tests = [
   {
@@ -171,11 +195,122 @@ exports.tests = [
     },
   },
   {
+    name: 'keeps a local preflight timeline stage',
+    fn() {
+      const block = diagnostics.serializeProblemBlock({
+        diagnosticId: 'local',
+        terminalCode: 'runtime.unsupported_block',
+        terminalDisposition: 'reject',
+        timeline: [{
+          stage: 'local_preflight',
+          disposition: 'reject',
+          codes: ['runtime.unsupported_block'],
+        }],
+      });
+      assert.equal(block.timeline[0].stage, 'local_preflight');
+    },
+  },
+  {
+    name: 'allowlists local rejection reason and tag and drops the rest',
+    fn() {
+      const kept = diagnostics.serializeProblemBlock({
+        diagnosticId: 'd1',
+        terminalDisposition: 'reject',
+        localRejection: {
+          reason: 'unsupported_descendant',
+          tag: 'SUMMARY',
+          source: 'page prose',
+          selector: 'div.article > p',
+        },
+      });
+      assert.deepEqual(kept.localRejection, { reason: 'unsupported_descendant', tag: 'SUMMARY' });
+      assert.equal(JSON.stringify(kept).includes('page prose'), false);
+
+      const dropped = diagnostics.serializeProblemBlock({
+        diagnosticId: 'd2',
+        localRejection: {
+          reason: 'forged_reason',
+          tag: 'MY-WIDGET',
+          path: '/html/body/p',
+        },
+      });
+      assert.equal('localRejection' in dropped, false);
+    },
+  },
+  {
     name: 'stamps the schema version on an export with no runs',
     fn() {
       // The options page hands the export straight to the clipboard and to a file, so an
       // empty export still has to say which schema a reader is looking at.
-      assert.equal(diagnostics.exportDiagnostics([]).schemaVersion, 2);
+      assert.equal(diagnostics.exportDiagnostics([]).schemaVersion, 3);
+    },
+  },
+  {
+    name: 'names every summary count by unit and leaves unknown model attempts null',
+    fn() {
+      const exported = diagnostics.exportDiagnostics([{
+        runId: 'v3-run',
+        outcome: 'done',
+        summary: {
+          attemptedBlocks: 4,
+          translatedBlocks: 1,
+          translatedWithWarningBlocks: 1,
+          failedBlocks: 1,
+          changedBlocks: 1,
+          repairAttemptedBlocks: 2,
+          modelRequestAttempts: 3,
+        },
+      }]).runs[0];
+      assert.equal(exported.schemaVersion, 3);
+      assert.equal(exported.summary.attemptedBlocks, 4);
+      assert.equal(exported.summary.translatedBlocks, 1);
+      assert.equal(exported.summary.translatedWithWarningBlocks, 1);
+      assert.equal(exported.summary.failedBlocks, 1);
+      assert.equal(exported.summary.changedBlocks, 1);
+      assert.equal(exported.summary.repairAttemptedBlocks, 2);
+      assert.equal(exported.summary.modelRequestAttempts, 3);
+      assert.equal('requested' in exported.summary, false);
+      assert.equal('repairs' in exported.summary, false);
+      assert.equal(
+        diagnostics.exportDiagnostics([{
+          runId: 'local-only',
+          summary: { attemptedBlocks: 1, failedBlocks: 1, modelRequestAttempts: 0 },
+        }]).runs[0].summary.modelRequestAttempts,
+        0
+      );
+      assert.equal(
+        diagnostics.exportDiagnostics([{
+          runId: 'interrupted',
+          summary: { attemptedBlocks: 1, modelRequestAttempts: null },
+        }]).runs[0].summary.modelRequestAttempts,
+        null
+      );
+    },
+  },
+  {
+    name: 'projects a schema-2 summary into the v3 export shape',
+    fn() {
+      const exported = diagnostics.exportDiagnostics([{
+        schemaVersion: 2,
+        runId: 'legacy',
+        outcome: 'partial',
+        summary: {
+          requested: 3,
+          translated: 1,
+          translatedWithWarning: 1,
+          failed: 1,
+          changed: 0,
+          repairs: 1,
+        },
+      }]).runs[0];
+      assert.equal(exported.schemaVersion, 3);
+      assert.equal(exported.summary.attemptedBlocks, 3);
+      assert.equal(exported.summary.translatedBlocks, 1);
+      assert.equal(exported.summary.translatedWithWarningBlocks, 1);
+      assert.equal(exported.summary.failedBlocks, 1);
+      assert.equal(exported.summary.changedBlocks, 0);
+      assert.equal(exported.summary.repairAttemptedBlocks, 1);
+      assert.equal(exported.summary.modelRequestAttempts, null);
     },
   },
   {
@@ -192,33 +327,35 @@ exports.tests = [
     name: 'discards a provisional run from its record and index',
     async fn() {
       const stored = {
-        'inlineDiagnostics:v2:index': ['provisional', 'kept'],
-        'inlineDiagnostics:v2:run:provisional': { outcome: 'interrupted' },
-        'inlineDiagnostics:v2:run:kept': { outcome: 'done' },
+        'inlineDiagnostics:v3:index': ['provisional', 'kept'],
+        'inlineDiagnostics:v3:run:provisional': { outcome: 'interrupted' },
+        'inlineDiagnostics:v3:run:kept': { outcome: 'done' },
       };
       const chromeApi = { storage: { local: {
-        async get() { return { 'inlineDiagnostics:v2:index': stored['inlineDiagnostics:v2:index'] }; },
+        async get() { return { ...stored }; },
         async set(values) { Object.assign(stored, values); },
-        async remove(key) { delete stored[key]; },
+        async remove(key) {
+          for (const item of Array.isArray(key) ? key : [key]) delete stored[item];
+        },
       } } };
 
       assert.deepEqual(await createDiagnostics().discardRun(chromeApi, 'provisional'), { discarded: true });
-      assert.deepEqual(stored['inlineDiagnostics:v2:index'], ['kept']);
-      assert.equal(stored['inlineDiagnostics:v2:run:provisional'], undefined);
+      assert.deepEqual(stored['inlineDiagnostics:v3:index'], ['kept']);
+      assert.equal(stored['inlineDiagnostics:v3:run:provisional'], undefined);
     },
   },
   {
     name: 'repairs idempotent run indexes and replaces corrupt records',
     async fn() {
       const fingerprint = `hmac-sha256:${'A'.repeat(43)}`;
-      const runKey = 'inlineDiagnostics:v2:run:local-test';
+      const runKey = 'inlineDiagnostics:v3:run:local-test';
       const stored = {
-        'inlineDiagnostics:v2:index': [],
+        'inlineDiagnostics:v3:index': [],
         [runKey]: {
           runId: 'wrong-run',
           idempotencyFingerprint: fingerprint,
           outcome: 'interrupted',
-          summary: { failed: 999 },
+          summary: { failedBlocks: 999 },
         },
       };
       const chromeApi = { storage: { local: {
@@ -241,10 +378,12 @@ exports.tests = [
         persisted: true,
         duplicate: true,
       });
-      assert.deepEqual(stored['inlineDiagnostics:v2:index'], ['local-test']);
+      assert.deepEqual(stored['inlineDiagnostics:v3:index'], ['local-test']);
       assert.equal(stored[runKey].runId, 'local-test');
       assert.equal(stored[runKey].outcome, 'failed');
-      assert.equal(stored[runKey].summary.failed, 1);
+      assert.equal(stored[runKey].summary.failedBlocks, 1);
+      assert.equal(stored[runKey].summary.attemptedBlocks, 1);
+      assert.equal(stored[runKey].summary.modelRequestAttempts, null);
 
       stored[runKey] = { runId: 'local-test', idempotencyFingerprint: 'corrupt', outcome: 'interrupted' };
       assert.deepEqual(await writing.persistRunIdempotent(chromeApi, run), {
@@ -264,8 +403,212 @@ exports.tests = [
         summary: { requested: 2, changed: 2, failed: 0 },
       }]).runs[0];
       assert.equal(exported.outcome, 'changed');
-      assert.equal(exported.summary.changed, 2);
-      assert.equal(exported.summary.failed, 0);
+      assert.equal(exported.summary.changedBlocks, 2);
+      assert.equal(exported.summary.failedBlocks, 0);
+    },
+  },
+  {
+    name: 'loads schema-2 history through the v3 export shape',
+    async fn() {
+      const stored = {
+        'inlineDiagnostics:v2:index': ['legacy'],
+        'inlineDiagnostics:v2:run:legacy': {
+          runId: 'legacy',
+          startedAt: '2026-08-01T00:00:00.000Z',
+          outcome: 'failed',
+          summary: { requested: 2, translated: 0, failed: 2, repairs: 0 },
+        },
+      };
+      const payload = await diagnostics.loadDiagnostics(createMemoryChrome(stored).chromeApi);
+      assert.equal(payload.schemaVersion, 3);
+      assert.equal(payload.runs.length, 1);
+      assert.equal(payload.runs[0].runId, 'legacy');
+      assert.equal(payload.runs[0].summary.attemptedBlocks, 2);
+      assert.equal(payload.runs[0].summary.failedBlocks, 2);
+      assert.equal(payload.runs[0].summary.modelRequestAttempts, null);
+    },
+  },
+  {
+    name: 'merges mixed history newest first and prefers v3 for a duplicate run id',
+    async fn() {
+      const stored = {
+        'inlineDiagnostics:v2:index': ['older', 'shared'],
+        'inlineDiagnostics:v2:run:older': {
+          runId: 'older',
+          startedAt: '2026-08-01T00:00:00.000Z',
+          outcome: 'done',
+          summary: { requested: 1, translated: 1 },
+        },
+        'inlineDiagnostics:v2:run:shared': {
+          runId: 'shared',
+          startedAt: '2026-08-02T00:00:00.000Z',
+          outcome: 'failed',
+          summary: { requested: 1, failed: 1 },
+        },
+        'inlineDiagnostics:v3:index': ['newest', 'shared'],
+        'inlineDiagnostics:v3:run:newest': {
+          runId: 'newest',
+          startedAt: '2026-08-03T00:00:00.000Z',
+          outcome: 'done',
+          summary: { attemptedBlocks: 1, translatedBlocks: 1, modelRequestAttempts: 1 },
+        },
+        'inlineDiagnostics:v3:run:shared': {
+          runId: 'shared',
+          startedAt: '2026-08-02T00:00:00.000Z',
+          outcome: 'done',
+          summary: { attemptedBlocks: 1, translatedBlocks: 1, modelRequestAttempts: 1 },
+        },
+      };
+      const payload = await diagnostics.loadDiagnostics(createMemoryChrome(stored).chromeApi);
+      assert.deepEqual(payload.runs.map((run) => run.runId), ['newest', 'shared', 'older']);
+      assert.equal(payload.runs[1].outcome, 'done');
+      assert.equal(payload.runs[1].summary.modelRequestAttempts, 1);
+    },
+  },
+  {
+    name: 'caps mixed history at twenty unique runs',
+    async fn() {
+      const stored = { 'inlineDiagnostics:v3:index': [], 'inlineDiagnostics:v2:index': [] };
+      for (let index = 0; index < 12; index += 1) {
+        const id = `v3-${index}`;
+        stored['inlineDiagnostics:v3:index'].push(id);
+        stored[`inlineDiagnostics:v3:run:${id}`] = { runId: id, outcome: 'done' };
+      }
+      for (let index = 0; index < 12; index += 1) {
+        const id = `v2-${index}`;
+        stored['inlineDiagnostics:v2:index'].push(id);
+        stored[`inlineDiagnostics:v2:run:${id}`] = { runId: id, outcome: 'done' };
+      }
+      const payload = await diagnostics.loadDiagnostics(createMemoryChrome(stored).chromeApi);
+      assert.equal(payload.runs.length, 20);
+      assert.deepEqual(payload.runs.map((run) => run.runId), [
+        ...Array.from({ length: 12 }, (_, index) => `v3-${index}`),
+        ...Array.from({ length: 8 }, (_, index) => `v2-${index}`),
+      ]);
+    },
+  },
+  {
+    name: 'writes only v3 records and keeps the installation HMAC key where it was',
+    async fn() {
+      const memory = createMemoryChrome({
+        'inlineDiagnostics:v2:hmacSecret': 'keep-this-secret-record',
+      });
+      await createDiagnostics().persistRun(memory.chromeApi, {
+        runId: 'fresh',
+        outcome: 'done',
+        summary: { requested: 1, translated: 1 },
+      });
+      assert.equal(memory.stored['inlineDiagnostics:v2:hmacSecret'], 'keep-this-secret-record');
+      assert.equal(memory.stored['inlineDiagnostics:v3:hmacSecret'], undefined);
+      assert.deepEqual(memory.stored['inlineDiagnostics:v3:index'], ['fresh']);
+      assert.equal(memory.stored['inlineDiagnostics:v2:index'], undefined);
+      assert.equal(memory.stored['inlineDiagnostics:v3:run:fresh'].schemaVersion, 3);
+      assert.equal(memory.stored['inlineDiagnostics:v2:run:fresh'], undefined);
+    },
+  },
+  {
+    name: 'evicts globally after writing retained indexes and records',
+    async fn() {
+      const stored = {
+        'inlineDiagnostics:v2:index': Array.from({ length: 20 }, (_, index) => `old-${index}`),
+      };
+      for (let index = 0; index < 20; index += 1) {
+        stored[`inlineDiagnostics:v2:run:old-${index}`] = { runId: `old-${index}`, outcome: 'done' };
+      }
+      const memory = createMemoryChrome(stored);
+      await createDiagnostics().persistRun(memory.chromeApi, {
+        runId: 'fresh',
+        outcome: 'done',
+        summary: { attemptedBlocks: 1, translatedBlocks: 1, modelRequestAttempts: 1 },
+      });
+      assert.equal(memory.ops[0].op, 'set');
+      assert.deepEqual(memory.ops[0].keys, [
+        'inlineDiagnostics:v2:index',
+        'inlineDiagnostics:v3:index',
+        'inlineDiagnostics:v3:run:fresh',
+      ]);
+      assert.equal(memory.ops[1].op, 'remove');
+      assert.deepEqual(memory.ops[1].keys, ['inlineDiagnostics:v2:run:old-19']);
+      assert.equal(memory.stored['inlineDiagnostics:v3:run:fresh'].runId, 'fresh');
+      assert.equal(memory.stored['inlineDiagnostics:v2:run:old-19'], undefined);
+      assert.equal(memory.stored['inlineDiagnostics:v2:index'].includes('old-19'), false);
+      assert.equal(memory.stored['inlineDiagnostics:v2:index'].length, 19);
+    },
+  },
+  {
+    name: 'does not remove evicted records when the retained write fails',
+    async fn() {
+      const stored = {
+        'inlineDiagnostics:v2:index': [
+          ...Array.from({ length: 19 }, (_, index) => `keep-${index}`),
+          'drop',
+        ],
+      };
+      for (const id of stored['inlineDiagnostics:v2:index']) {
+        stored[`inlineDiagnostics:v2:run:${id}`] = { runId: id, outcome: 'done' };
+      }
+      let removed = false;
+      const chromeApi = { storage: { local: {
+        async get() { return { ...stored }; },
+        async set() { throw new Error('quota'); },
+        async remove() { removed = true; },
+      } } };
+      assert.deepEqual(await createDiagnostics().persistRun(chromeApi, {
+        runId: 'fresh',
+        outcome: 'done',
+      }), { persisted: false });
+      assert.equal(removed, false);
+      assert.ok(stored['inlineDiagnostics:v2:run:drop']);
+    },
+  },
+  {
+    name: 'treats a matching v2 fingerprint as a duplicate represented in v3',
+    async fn() {
+      const fingerprint = `hmac-sha256:${'B'.repeat(43)}`;
+      const memory = createMemoryChrome({
+        'inlineDiagnostics:v2:index': ['local-test'],
+        'inlineDiagnostics:v2:run:local-test': {
+          runId: 'local-test',
+          idempotencyFingerprint: fingerprint,
+          outcome: 'failed',
+          summary: { requested: 1, failed: 1 },
+        },
+      });
+      const result = await createDiagnostics().persistRunIdempotent(memory.chromeApi, {
+        runId: 'local-test',
+        idempotencyFingerprint: fingerprint,
+        outcome: 'failed',
+        summary: { requested: 1, failed: 1 },
+      });
+      assert.deepEqual(result, { persisted: true, duplicate: true });
+      assert.equal(memory.stored['inlineDiagnostics:v3:run:local-test'].summary.failedBlocks, 1);
+      assert.equal(memory.stored['inlineDiagnostics:v2:run:local-test'].runId, 'local-test');
+    },
+  },
+  {
+    name: 'conflicts when the same run id already exists with a different fingerprint',
+    async fn() {
+      const memory = createMemoryChrome({
+        'inlineDiagnostics:v2:index': ['local-test'],
+        'inlineDiagnostics:v2:run:local-test': {
+          runId: 'local-test',
+          idempotencyFingerprint: `hmac-sha256:${'C'.repeat(43)}`,
+          outcome: 'failed',
+          summary: { requested: 1, failed: 1 },
+        },
+      });
+      const result = await createDiagnostics().persistRunIdempotent(memory.chromeApi, {
+        runId: 'local-test',
+        idempotencyFingerprint: `hmac-sha256:${'D'.repeat(43)}`,
+        outcome: 'failed',
+        summary: { requested: 1, failed: 1 },
+      });
+      assert.deepEqual(result, { persisted: false, conflict: true });
+      assert.equal(memory.stored['inlineDiagnostics:v3:run:local-test'], undefined);
+      assert.equal(
+        memory.stored['inlineDiagnostics:v2:run:local-test'].idempotencyFingerprint,
+        `hmac-sha256:${'C'.repeat(43)}`
+      );
     },
   },
 ];
