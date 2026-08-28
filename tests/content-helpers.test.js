@@ -2104,6 +2104,70 @@ exports.tests = [
     },
   },
   {
+    name: 'collects a wrapped disclosure as one enclosing block',
+    fn() {
+      const previous = {
+        document: global.document,
+        HTMLElement: global.HTMLElement,
+        window: global.window,
+      };
+      const { document, element, text } = createTestDocument();
+      const summary = element(
+        'summary',
+        text('Wrapped disclosure title.')
+      );
+      const block = element(
+        'p',
+        summary,
+        text(' Body prose stays in the enclosing block.')
+      );
+      const extra = element('p', text('Sibling paragraph stays distinct.'));
+      const disclosure = element('details', block, extra);
+      const heading = element('h2', text('Ordinary heading stays a heading.'));
+      const root = element('div', heading, disclosure);
+      document.body.appendChild(root);
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => {
+        throw new Error('range unavailable');
+      };
+      global.document = document;
+      global.HTMLElement = root.constructor;
+      global.window = {
+        innerWidth: 500,
+        innerHeight: 300,
+        getComputedStyle() {
+          return {
+            display: 'block',
+            visibility: 'visible',
+            opacity: '1',
+          };
+        },
+      };
+
+      try {
+        const store = helpers.createInlineViewportStore(12);
+        const queued = helpers.collectVisibleInlineBlocks(root, store);
+
+        assert.equal(queued.length, 3);
+        assert.deepEqual(
+          queued.map((record) => record.blockElement),
+          [heading, block, extra]
+        );
+        assert.equal(store.byBlock.has(summary), false);
+        assert.equal(store.byBlock.has(disclosure), false);
+        assert.equal(queued[1].template.includes('Wrapped disclosure title.'), true);
+        assert.equal(
+          queued[1].template.includes('Body prose stays in the enclosing block.'),
+          true
+        );
+      } finally {
+        global.document = previous.document;
+        global.HTMLElement = previous.HTMLElement;
+        global.window = previous.window;
+      }
+    },
+  },
+  {
     name: 'fails closed when a block contains a nested semantic block',
     fn() {
       const { document, element, text } = createTestDocument();

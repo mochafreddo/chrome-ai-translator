@@ -1529,6 +1529,185 @@ exports.tests = [
     },
   },
   {
+    name: 'serializes a leading wrapped disclosure summary with body prose outside its tokens',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const title = text('Wrapped disclosure title.');
+      const summary = element('summary', title);
+      const leadingSpace = text('\n  ');
+      const body = text(' Body prose stays outside the summary.');
+      const block = element('p', leadingSpace, summary, body);
+      const disclosure = element('details', block);
+      document.body.appendChild(disclosure);
+
+      const serialized = codec.serializeBlock(block);
+      const wrapper = serialized.contract.entries.find(
+        (entry) => entry.kind === 'wrapper' && entry.tagName === 'SUMMARY'
+      );
+
+      assert.equal(serialized.ok, true);
+      assert.equal(codec.isSemanticBlockElement(block), true);
+      assert.equal(codec.isSemanticBlockElement(summary), false);
+      assert.equal(wrapper.placement, 'leading-root');
+      assert.equal(
+        serialized.template,
+        `\n  ${wrapper.openToken}Wrapped disclosure title.${wrapper.closeToken} Body prose stays outside the summary.`
+      );
+      assert.equal(
+        serialized.template.includes(
+          `${wrapper.closeToken} Body prose stays outside the summary.`
+        ),
+        true
+      );
+      const cacheIdentity = JSON.parse(serialized.cacheKey);
+      assert.equal(
+        cacheIdentity.entries.find((entry) => entry.id === wrapper.id)
+          .placement,
+        'leading-root'
+      );
+    },
+  },
+  {
+    name: 'keeps a movable wrapper cache identity distinct from an anchored summary',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const emphasis = element('em', text('Movable title.'));
+      const movable = element('p', emphasis, text(' Body prose.'));
+      document.body.appendChild(movable);
+      const movableKey = JSON.parse(codec.serializeBlock(movable).cacheKey);
+
+      assert.equal(
+        movableKey.entries.some((entry) => entry.placement),
+        false
+      );
+    },
+  },
+  {
+    name: 're-pins a moved wrapped summary as the first child without a repair',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const title = text('Original wrapped title.');
+      const emphasis = element('em', text('kept'));
+      const summary = element('summary', title, text(' '), emphasis);
+      const body = text(' Original wrapped body.');
+      const block = element('p', summary, body);
+      const disclosure = element('details', block);
+      document.body.appendChild(disclosure);
+      const serialized = codec.serializeBlock(block);
+      const wrapper = serialized.contract.entries.find(
+        (entry) => entry.kind === 'wrapper' && entry.tagName === 'SUMMARY'
+      );
+      const inner = serialized.contract.entries.find(
+        (entry) => entry.parentId === wrapper.id
+      );
+      const originalChildren = [...block.childNodes];
+      const originalSummaryChildren = [...summary.childNodes];
+      const translated = `번역된 본문 ${wrapper.openToken}번역된 제목 ${inner.openToken}유지${inner.closeToken}${wrapper.closeToken}`;
+
+      const plan = codec.createPatchPlan(serialized.snapshot, translated);
+      assert.equal(plan.ok, true);
+      assert.equal(plan.rootChildren[0], summary);
+      assert.equal(
+        plan.rootChildren.includes(summary),
+        true
+      );
+      assert.equal(
+        plan.rootChildren.filter((node) => node === summary).length,
+        1
+      );
+
+      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      assert.equal(block.childNodes[0], summary);
+      assert.equal(summary.textContent, '번역된 제목 유지');
+      assert.equal(emphasis.parentNode, summary);
+      assert.equal(emphasis.textContent, '유지');
+      assert.equal(block.textContent, '번역된 제목 유지번역된 본문 ');
+
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.equal(block.childNodes[0], summary);
+      assert.deepEqual([...block.childNodes], originalChildren);
+      assert.deepEqual([...summary.childNodes], originalSummaryChildren);
+      assert.equal(title.parentNode, summary);
+      assert.equal(emphasis.parentNode, summary);
+      assert.equal(emphasis.textContent, 'kept');
+      assert.equal(
+        block.textContent,
+        'Original wrapped title. kept Original wrapped body.'
+      );
+    },
+  },
+  {
+    name: 'rejects a second, non-leading, nested, or out-of-disclosure wrapped summary',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const second = element(
+        'p',
+        element('summary', text('First title.')),
+        text(' body '),
+        element('summary', text('Second title.'))
+      );
+      const nonLeading = element(
+        'p',
+        text('Lead-in '),
+        element('summary', text('Non-leading title.')),
+        text(' body.')
+      );
+      const nested = element(
+        'p',
+        element('span', element('summary', text('Nested title.'))),
+        text(' Nested body.')
+      );
+      const outside = element(
+        'p',
+        element('summary', text('Outside title.')),
+        text(' Outside body.')
+      );
+      document.body.appendChild(element('details', second));
+      document.body.appendChild(element('details', nonLeading));
+      document.body.appendChild(element('details', nested));
+      document.body.appendChild(outside);
+
+      assert.deepEqual(codec.serializeBlock(second), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+      assert.deepEqual(codec.serializeBlock(nonLeading), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+      assert.deepEqual(codec.serializeBlock(nested), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+      assert.deepEqual(codec.serializeBlock(outside), {
+        ok: false,
+        errorCode: 'unsupported_block',
+      });
+    },
+  },
+  {
+    name: 'fails ownership safely when a wrapped disclosure mutates before apply',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const summary = element('summary', text('Mutable wrapped title.'));
+      const block = element('p', summary, text(' Mutable wrapped body.'));
+      document.body.appendChild(element('details', block));
+      const serialized = codec.serializeBlock(block);
+      const wrapper = serialized.contract.entries.find(
+        (entry) => entry.kind === 'wrapper'
+      );
+      block.appendChild(text(' mutated'));
+
+      assert.deepEqual(
+        codec.createPatchPlan(
+          serialized.snapshot,
+          `${wrapper.openToken}번역된 제목${wrapper.closeToken} 번역된 본문.`
+        ),
+        { ok: false, errorCode: 'block_changed' }
+      );
+    },
+  },
+  {
     name: 'still serializes existing semantic block kinds',
     fn() {
       const { document, element, text } = createTestDocument();

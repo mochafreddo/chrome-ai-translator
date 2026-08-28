@@ -152,6 +152,32 @@
     );
   }
 
+  function isInsideDisclosure(node) {
+    for (
+      let current = node?.parentElement;
+      current;
+      current = current.parentElement
+    ) {
+      if (getTagName(current) === 'DETAILS') return true;
+    }
+    return false;
+  }
+
+  function isIgnorableWhitespace(node) {
+    return node?.nodeType === 3 && !String(node.nodeValue || '').trim();
+  }
+
+  function findAnchoredLeadingSummary(block) {
+    if (!isInsideDisclosure(block)) return null;
+    const children = getChildNodes(block);
+    const summaries = children.filter(
+      (child) => child?.nodeType === 1 && getTagName(child) === 'SUMMARY'
+    );
+    if (summaries.length !== 1) return null;
+    const leading = children.find((child) => !isIgnorableWhitespace(child));
+    return leading === summaries[0] ? leading : null;
+  }
+
   function getChildNodes(node) {
     return Array.from(node?.childNodes || []);
   }
@@ -465,6 +491,7 @@
     const originalTextValues = new Map();
     const atoms = [];
     const literalTokenCounts = new Map();
+    const anchoredSummary = findAnchoredLeadingSummary(block);
     let wrapperIndex = 0;
     let atomIndex = 0;
     let failed = null;
@@ -562,7 +589,9 @@
         return token;
       }
 
-      const pairedWrapper = tagName === 'A' || WRAPPER_TAGS.has(tagName);
+      const anchoredWrapper = node === anchoredSummary;
+      const pairedWrapper =
+        tagName === 'A' || WRAPPER_TAGS.has(tagName) || anchoredWrapper;
       if (!pairedWrapper) {
         failed = 'unsupported_block';
         return '';
@@ -580,6 +609,7 @@
         openToken,
         closeToken,
       };
+      if (anchoredWrapper) entry.placement = 'leading-root';
       contractEntries.push(entry);
       snapshotEntries.set(id, { ...entry, node });
       rememberContainer(node);
@@ -626,6 +656,7 @@
         tagName: entry.tagName,
         parentId: entry.parentId,
         atomKind: entry.atomKind || '',
+        ...(entry.placement ? { placement: entry.placement } : {}),
       })),
       atoms: atoms.map((atom) => ({
         kind: atom.kind,
@@ -807,6 +838,22 @@
     return true;
   }
 
+  function pinLeadingRootWrappers(rootChildren, snapshot) {
+    const anchoredNodes = [];
+    for (const entry of snapshot?.contract?.entries || []) {
+      if (entry.kind !== 'wrapper' || entry.placement !== 'leading-root') {
+        continue;
+      }
+      const registered = snapshot.entries.get(entry.id);
+      if (registered?.node) anchoredNodes.push(registered.node);
+    }
+    if (!anchoredNodes.length) return rootChildren;
+    const remainder = rootChildren.filter(
+      (node) => !anchoredNodes.includes(node)
+    );
+    return [...anchoredNodes, ...remainder];
+  }
+
   function createPatchPlan(snapshot, translatedTemplate) {
     if (!matchesOriginalOwnership(snapshot)) {
       return validationError('block_changed');
@@ -857,7 +904,10 @@
       return children;
     }
 
-    const rootChildren = buildChildren(validated.tree);
+    const rootChildren = pinLeadingRootWrappers(
+      buildChildren(validated.tree),
+      snapshot
+    );
     if (failed) return validationError(failed);
     return {
       ok: true,
