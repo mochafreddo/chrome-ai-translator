@@ -357,6 +357,32 @@ exports.tests = [
     },
   },
   {
+    name: 'ignores legacy summary field names on a current v3 write',
+    fn() {
+      const exported = diagnostics.exportDiagnostics([{
+        runId: 'current',
+        outcome: 'failed',
+        summary: {
+          requested: 3,
+          translated: 1,
+          translatedWithWarning: 1,
+          failed: 2,
+          changed: 1,
+          repairs: 4,
+        },
+      }]).runs[0];
+      assert.equal(exported.schemaVersion, 3);
+      assert.equal(exported.summary.attemptedBlocks, 0);
+      assert.equal(exported.summary.translatedBlocks, 0);
+      assert.equal(exported.summary.translatedWithWarningBlocks, 0);
+      assert.equal(exported.summary.failedBlocks, 0);
+      assert.equal(exported.summary.changedBlocks, 0);
+      assert.equal(exported.summary.repairAttemptedBlocks, 0);
+      assert.equal(exported.summary.modelRequestAttempts, null);
+      assert.equal('requested' in exported.summary, false);
+    },
+  },
+  {
     name: 'exports canonical newest-first run order',
     fn() {
       const exported = diagnostics.exportDiagnostics([
@@ -412,7 +438,7 @@ exports.tests = [
         runId: 'local-test',
         idempotencyFingerprint: fingerprint,
         outcome: 'failed',
-        summary: { requested: 1, failed: 1 },
+        summary: { attemptedBlocks: 1, failedBlocks: 1, modelRequestAttempts: 0 },
         blocks: [],
       };
       const writing = createDiagnostics();
@@ -426,7 +452,7 @@ exports.tests = [
       assert.equal(stored[runKey].outcome, 'failed');
       assert.equal(stored[runKey].summary.failedBlocks, 1);
       assert.equal(stored[runKey].summary.attemptedBlocks, 1);
-      assert.equal(stored[runKey].summary.modelRequestAttempts, null);
+      assert.equal(stored[runKey].summary.modelRequestAttempts, 0);
 
       stored[runKey] = { runId: 'local-test', idempotencyFingerprint: 'corrupt', outcome: 'interrupted' };
       assert.deepEqual(await writing.persistRunIdempotent(chromeApi, run), {
@@ -443,7 +469,7 @@ exports.tests = [
       const exported = diagnostics.exportDiagnostics([{
         runId: 'changed-run',
         outcome: 'changed',
-        summary: { requested: 2, changed: 2, failed: 0 },
+        summary: { attemptedBlocks: 2, changedBlocks: 2, failedBlocks: 0, modelRequestAttempts: 0 },
       }]).runs[0];
       assert.equal(exported.outcome, 'changed');
       assert.equal(exported.summary.changedBlocks, 2);
@@ -539,13 +565,16 @@ exports.tests = [
       await createDiagnostics().persistRun(memory.chromeApi, {
         runId: 'fresh',
         outcome: 'done',
-        summary: { requested: 1, translated: 1 },
+        summary: { attemptedBlocks: 1, translatedBlocks: 1, modelRequestAttempts: 1 },
       });
       assert.equal(memory.stored['inlineDiagnostics:v2:hmacSecret'], 'keep-this-secret-record');
       assert.equal(memory.stored['inlineDiagnostics:v3:hmacSecret'], undefined);
       assert.deepEqual(memory.stored['inlineDiagnostics:v3:index'], ['fresh']);
       assert.equal(memory.stored['inlineDiagnostics:v2:index'], undefined);
       assert.equal(memory.stored['inlineDiagnostics:v3:run:fresh'].schemaVersion, 3);
+      assert.equal(memory.stored['inlineDiagnostics:v3:run:fresh'].summary.attemptedBlocks, 1);
+      assert.equal(memory.stored['inlineDiagnostics:v3:run:fresh'].summary.translatedBlocks, 1);
+      assert.equal('requested' in memory.stored['inlineDiagnostics:v3:run:fresh'].summary, false);
       assert.equal(memory.stored['inlineDiagnostics:v2:run:fresh'], undefined);
     },
   },
@@ -621,7 +650,7 @@ exports.tests = [
         runId: 'local-test',
         idempotencyFingerprint: fingerprint,
         outcome: 'failed',
-        summary: { requested: 1, failed: 1 },
+        summary: { attemptedBlocks: 1, failedBlocks: 1, modelRequestAttempts: 0 },
       });
       assert.deepEqual(result, { persisted: true, duplicate: true });
       assert.equal(memory.stored['inlineDiagnostics:v3:run:local-test'].summary.failedBlocks, 1);
@@ -644,7 +673,7 @@ exports.tests = [
         runId: 'local-test',
         idempotencyFingerprint: `hmac-sha256:${'D'.repeat(43)}`,
         outcome: 'failed',
-        summary: { requested: 1, failed: 1 },
+        summary: { attemptedBlocks: 1, failedBlocks: 1, modelRequestAttempts: 0 },
       });
       assert.deepEqual(result, { persisted: false, conflict: true });
       assert.equal(memory.stored['inlineDiagnostics:v3:run:local-test'], undefined);

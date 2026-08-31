@@ -28,6 +28,13 @@ It stops short of asserting on translation output on purpose. Doing that needs a
 
 The CDP gotchas involved are written up in and handled by `tests/integration/harness.mjs`. Read that header before concluding the driver is broken; several of the failures look like something other than what they are.
 
+## Unbilled Chrome checks that are not `test:integration`
+
+Two more commands launch a real Chrome without an API key. Each has its own `package.json` script, for the same reason `test:integration` is not folded into `npm test`: a different reason to start a browser is a different command.
+
+- `npm run test:integration:disclosure-summary` — a local fixture with a standard disclosure and the renderer-wrapped leading-summary form. Collection ownership, apply, anchored placement, disclosure behaviour, and exact restore. No model, no key.
+- `npm run test:integration:ai-hero-disclosure` — the reported AI Hero page, read-only. Injects the local serializer and a deterministic translated template, then proves apply and restore. No model, no key. The billed live commands are skipped for this defect: it happens before a request is assembled, so paying for model output would not test the decision being changed.
+
 ## `npm run verify:live` — the checks that spend money
 
 Two checks, one per translation, and the extension has two that share nothing but the page:

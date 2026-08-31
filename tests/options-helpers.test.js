@@ -159,7 +159,14 @@ exports.tests = [
         startedAt: '2026-07-11T00:00:00.000Z',
         outcome: 'partial',
         model: 'gpt-5.4-mini',
-        summary: { translated: 0, translatedWithWarning: 1, failed: 0, repairs: 1 },
+        summary: {
+          attemptedBlocks: 1,
+          translatedBlocks: 0,
+          translatedWithWarningBlocks: 1,
+          failedBlocks: 0,
+          repairAttemptedBlocks: 1,
+          modelRequestAttempts: null,
+        },
         blocks: [{ terminalCode: 'quality.english_residue' }],
       });
       assert.match(formatted, /Partial 1/);

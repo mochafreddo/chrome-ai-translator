@@ -91,11 +91,11 @@ async function applyButtonVisibilityAccess(chromeApi, visibility) {
 function formatDiagnosticRun(run) {
   const summary = run?.summary || {};
   const codes = (run?.blocks || []).map((block) => block.terminalCode).filter(Boolean);
-  const translated = summary.translatedBlocks ?? summary.translated ?? 0;
-  const partial = summary.translatedWithWarningBlocks ?? summary.translatedWithWarning ?? 0;
-  const changed = summary.changedBlocks ?? summary.changed ?? 0;
-  const failed = summary.failedBlocks ?? summary.failed ?? 0;
-  const repairs = summary.repairAttemptedBlocks ?? summary.repairs ?? 0;
+  const translated = summary.translatedBlocks || 0;
+  const partial = summary.translatedWithWarningBlocks || 0;
+  const changed = summary.changedBlocks || 0;
+  const failed = summary.failedBlocks || 0;
+  const repairs = summary.repairAttemptedBlocks || 0;
   return [
     `${run?.startedAt || '(unknown time)'} ${run?.outcome || 'interrupted'} model=${run?.model || '(unset)'}`,
     `  Translated ${translated} · Partial ${partial} · Changed ${changed} · Failed ${failed} · Repairs ${repairs}`,
