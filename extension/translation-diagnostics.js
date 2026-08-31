@@ -37,30 +37,34 @@
     return Math.max(0, Number(summary.modelRequestAttempts));
   }
 
-  function projectSummary(summary = {}) {
+  function projectV2Summary(summary = {}) {
     return {
-      attemptedBlocks: nonNegativeCount(
-        summary.attemptedBlocks != null ? summary.attemptedBlocks : summary.requested
-      ),
-      translatedBlocks: nonNegativeCount(
-        summary.translatedBlocks != null ? summary.translatedBlocks : summary.translated
-      ),
-      translatedWithWarningBlocks: nonNegativeCount(
-        summary.translatedWithWarningBlocks != null
-          ? summary.translatedWithWarningBlocks
-          : summary.translatedWithWarning
-      ),
-      failedBlocks: nonNegativeCount(
-        summary.failedBlocks != null ? summary.failedBlocks : summary.failed
-      ),
-      changedBlocks: nonNegativeCount(
-        summary.changedBlocks != null ? summary.changedBlocks : summary.changed
-      ),
-      repairAttemptedBlocks: nonNegativeCount(
-        summary.repairAttemptedBlocks != null ? summary.repairAttemptedBlocks : summary.repairs
-      ),
+      attemptedBlocks: nonNegativeCount(summary.requested),
+      translatedBlocks: nonNegativeCount(summary.translated),
+      translatedWithWarningBlocks: nonNegativeCount(summary.translatedWithWarning),
+      failedBlocks: nonNegativeCount(summary.failed),
+      changedBlocks: nonNegativeCount(summary.changed),
+      repairAttemptedBlocks: nonNegativeCount(summary.repairs),
+      modelRequestAttempts: null,
+    };
+  }
+
+  function normalizeV3Summary(summary = {}) {
+    return {
+      attemptedBlocks: nonNegativeCount(summary.attemptedBlocks),
+      translatedBlocks: nonNegativeCount(summary.translatedBlocks),
+      translatedWithWarningBlocks: nonNegativeCount(summary.translatedWithWarningBlocks),
+      failedBlocks: nonNegativeCount(summary.failedBlocks),
+      changedBlocks: nonNegativeCount(summary.changedBlocks),
+      repairAttemptedBlocks: nonNegativeCount(summary.repairAttemptedBlocks),
       modelRequestAttempts: nullableModelRequestAttempts(summary),
     };
+  }
+
+  function projectSummary(run = {}) {
+    return Number(run.schemaVersion) === 2
+      ? projectV2Summary(run.summary || {})
+      : normalizeV3Summary(run.summary || {});
   }
 
   function safeCode(value, fallback = 'runtime.request_failed') {
@@ -158,7 +162,7 @@
         outcome: ['done', 'partial', 'failed', 'changed', 'interrupted'].includes(run.outcome)
           ? run.outcome
           : 'interrupted',
-        summary: projectSummary(run.summary),
+        summary: projectSummary(run),
         blocks: (run.blocks || []).slice(0, MAX_PROBLEM_BLOCKS).map(serializeProblemBlock),
       })),
     };
@@ -182,10 +186,12 @@
     const runs = [];
     for (const id of [...v3Ids, ...v2Ids]) {
       if (!id || seen.has(id)) continue;
-      const record = stored[`${RUN_PREFIX}${id}`] || stored[`${V2_RUN_PREFIX}${id}`];
+      const current = stored[`${RUN_PREFIX}${id}`];
+      const legacy = stored[`${V2_RUN_PREFIX}${id}`];
+      const record = current || legacy;
       if (!record) continue;
       seen.add(id);
-      runs.push(record);
+      runs.push(current ? record : { ...record, schemaVersion: 2 });
       if (runs.length === MAX_RUNS) break;
     }
     return exportDiagnostics(runs);

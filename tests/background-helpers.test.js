@@ -2268,6 +2268,11 @@ exports.tests = [
       assert.match(runtimeRun.blocks[0].parentDiagnosticId, /^run-.*\/b1$/);
       assert.match(runtimeRun.blocks[0].sourceFingerprint, /^hmac-sha256:/);
       assert.equal(JSON.stringify(runtimeRun).includes('must not persist'), false);
+      assert.equal(runtimeRun.summary.attemptedBlocks, 1);
+      assert.equal(runtimeRun.summary.failedBlocks, 1);
+      assert.equal(runtimeRun.summary.changedBlocks, 0);
+      assert.equal(runtimeRun.summary.modelRequestAttempts, null);
+      assert.equal('requested' in runtimeRun.summary, false);
 
       const [replayResponse] = await collectWorkerResponses(restarted, [{
         type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',

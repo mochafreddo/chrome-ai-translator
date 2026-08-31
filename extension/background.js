@@ -2047,11 +2047,12 @@ function createBackgroundWorker(platform = {}) {
             model: firstEntry.model,
             targetLanguageCode: firstEntry.targetLanguageCode,
             outcome: failedCount > 0 ? 'failed' : 'changed',
-            summary: {
-              requested: outcomes.length,
-              failed: failedCount,
-              changed: changedCount,
-            },
+            summary: createBlockCountSummary({
+              attemptedBlocks: outcomes.length,
+              failedBlocks: failedCount,
+              changedBlocks: changedCount,
+              modelRequestAttempts: null,
+            }),
             blocks: resolvedOutcomes.map(({ outcome, entry }, index) => ({
               diagnosticId: `${runtimeRunId}/${index}`,
               parentRunId: entry.runId,
