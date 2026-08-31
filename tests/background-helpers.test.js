@@ -2379,6 +2379,52 @@ exports.tests = [
     },
   },
   {
+    name: 'records a local preflight rejection in v3 count units',
+    async fn() {
+      const stored = {};
+      let fetchCount = 0;
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({ stored }),
+        crypto: globalThis.crypto,
+        fetch: async () => {
+          fetchCount += 1;
+          throw new Error('model must not be reached');
+        },
+      });
+
+      const [response] = await collectWorkerResponses(worker, [{
+        type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+        diagnosticBatchId: '22222222-2222-4222-8222-222222222222',
+        operationId: 7,
+        settingsSnapshot: { model: 'gpt-5.4-mini', targetLanguage: 'Korean' },
+        diagnostics: [{
+          code: 'runtime.unsupported_block',
+          localRejection: {
+            reason: 'nested_semantic_block',
+            tag: 'P',
+            source: 'Nested paragraph text.',
+            selector: 'li > p',
+          },
+        }],
+      }], { tab: { id: 3 } });
+
+      assert.deepEqual(response, { ok: true });
+      assert.equal(fetchCount, 0);
+      const run = stored['inlineDiagnostics:v3:run:local-3-7-22222222-2222-4222-8222-222222222222'];
+      assert.equal(run.summary.attemptedBlocks, 1);
+      assert.equal(run.summary.failedBlocks, 1);
+      assert.equal(run.summary.modelRequestAttempts, 0);
+      assert.equal(run.blocks.length, 1);
+      assert.equal(run.blocks[0].timeline[0].stage, 'local_preflight');
+      assert.deepEqual(run.blocks[0].localRejection, {
+        reason: 'nested_semantic_block',
+        tag: 'P',
+      });
+      assert.equal(JSON.stringify(run).includes('Nested paragraph text.'), false);
+      assert.equal(JSON.stringify(run).includes('li > p'), false);
+    },
+  },
+  {
     // The text-node path outlived its only caller for 62 commits because nothing asserted
     // that a retired name stays retired. Every message the text-node path used is listed
     // here, so reviving one half of it fails loudly instead of sitting in the tree.

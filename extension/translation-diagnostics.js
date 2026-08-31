@@ -91,6 +91,7 @@
     if (!value || typeof value !== 'object') return null;
     const reason = LOCAL_REJECTION_REASONS.includes(value.reason) ? value.reason : '';
     if (!reason) return null;
+    if (reason === 'custom_element') return { reason };
     const tag = typeof value.tag === 'string' && /^[A-Z][A-Z0-9]{0,31}$/.test(value.tag)
       ? value.tag
       : '';
@@ -383,6 +384,7 @@
     exportDiagnostics,
     loadDiagnostics,
     serializeProblemBlock,
+    serializeLocalRejection,
   };
   globalScope.ChromeAiTranslatorDiagnostics = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

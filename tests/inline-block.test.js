@@ -136,6 +136,19 @@ function createTestDocument() {
   return { document, element, text };
 }
 
+function unsupportedBlock(reason, tag) {
+  return {
+    ok: false,
+    errorCode: 'unsupported_block',
+    localRejection: tag ? { reason, tag } : { reason },
+  };
+}
+
+function assertReaderFacingUnsupported(result) {
+  assert.equal(result.ok, false);
+  assert.equal(result.errorCode, 'unsupported_block');
+}
+
 function createReasoningFixture() {
   const { document, element, text } = createTestDocument();
   const strong = element('strong', text('Reasoning models'));
@@ -154,6 +167,101 @@ function createReasoningFixture() {
 
 exports.name = 'inline block codec';
 exports.tests = [
+  {
+    name: 'names every local preflight rejection with a safe tag only',
+    fn() {
+      const { document, element, text } = createTestDocument();
+
+      const invalidRoot = element('div', text('Not a semantic block.'));
+      document.body.appendChild(invalidRoot);
+      assert.deepEqual(
+        codec.serializeBlock(invalidRoot),
+        unsupportedBlock('invalid_root', 'DIV')
+      );
+
+      const hidden = element('p', text('Hidden article prose.'));
+      hidden.hidden = true;
+      document.body.appendChild(hidden);
+      assert.deepEqual(
+        codec.serializeBlock(hidden),
+        unsupportedBlock('hidden_content', 'P')
+      );
+
+      const editable = element('p', text('Draft article prose.'));
+      editable.setAttribute('contenteditable', 'true');
+      document.body.appendChild(editable);
+      assert.deepEqual(
+        codec.serializeBlock(editable),
+        unsupportedBlock('editable_content', 'P')
+      );
+
+      const interactive = element(
+        'p',
+        text('Press '),
+        element('button', text('Save')),
+        text('.')
+      );
+      document.body.appendChild(interactive);
+      assert.deepEqual(
+        codec.serializeBlock(interactive),
+        unsupportedBlock('interactive_content', 'BUTTON')
+      );
+
+      const custom = document.createElement('my-widget');
+      custom.appendChild(text('Custom widget copy.'));
+      const withCustom = element('p', text('See '), custom, text('.'));
+      document.body.appendChild(withCustom);
+      assert.deepEqual(
+        codec.serializeBlock(withCustom),
+        unsupportedBlock('custom_element')
+      );
+      assert.equal(
+        JSON.stringify(codec.serializeBlock(withCustom)).includes('MY-WIDGET'),
+        false
+      );
+
+      const nested = element(
+        'li',
+        text('Outer item text.'),
+        element('p', text('Nested paragraph text.'))
+      );
+      document.body.appendChild(nested);
+      assert.deepEqual(
+        codec.serializeBlock(nested),
+        unsupportedBlock('nested_semantic_block', 'P')
+      );
+
+      const descendant = element(
+        'p',
+        text('Leading '),
+        element('div', text('boxed')),
+        text(' text.')
+      );
+      document.body.appendChild(descendant);
+      assert.deepEqual(
+        codec.serializeBlock(descendant),
+        unsupportedBlock('unsupported_descendant', 'DIV')
+      );
+
+      let child = text('Deep article text.');
+      for (let index = 0; index < 12000; index += 1) {
+        child = element('span', child);
+      }
+      const limited = element('p', child);
+      document.body.appendChild(limited);
+      assert.deepEqual(
+        codec.serializeBlock(limited),
+        unsupportedBlock('structure_limit_exceeded', 'P')
+      );
+
+      const empty = element('p', text('   '));
+      document.body.appendChild(empty);
+      assert.deepEqual(
+        codec.serializeBlock(empty),
+        unsupportedBlock('empty_content', 'P')
+      );
+    },
+  },
   {
     name: 'classifies protected technical link labels conservatively',
     fn() {
@@ -590,14 +698,8 @@ exports.tests = [
       const editableFixture = createReasoningFixture();
       editableFixture.block.setAttribute('contenteditable', 'true');
 
-      assert.deepEqual(codec.serializeBlock(hiddenFixture.block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
-      assert.deepEqual(codec.serializeBlock(editableFixture.block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(hiddenFixture.block));
+      assertReaderFacingUnsupported(codec.serializeBlock(editableFixture.block));
     },
   },
   {
@@ -609,10 +711,7 @@ exports.tests = [
       editor.setAttribute('contenteditable', 'true');
       document.body.appendChild(editor);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -683,10 +782,7 @@ exports.tests = [
       );
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -699,10 +795,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -715,10 +808,7 @@ exports.tests = [
       const block = element('p', text('Use '), link, text(' today.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -749,10 +839,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -783,10 +870,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -820,10 +904,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -900,10 +981,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -994,10 +1072,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -1037,10 +1112,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -1081,10 +1153,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -1167,10 +1236,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -1214,10 +1280,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -1258,10 +1321,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -1303,10 +1363,7 @@ exports.tests = [
       const block = element('p', text('Run '), code, text(' now.'));
       document.body.appendChild(block);
 
-      assert.deepEqual(codec.serializeBlock(block), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(block));
     },
   },
   {
@@ -1396,10 +1453,7 @@ exports.tests = [
       assert.doesNotThrow(() => {
         result = codec.serializeBlock(block);
       });
-      assert.deepEqual(result, {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assert.deepEqual(result, unsupportedBlock('structure_limit_exceeded', 'P'));
     },
   },
   {
@@ -1514,18 +1568,9 @@ exports.tests = [
 
       assert.equal(codec.isSemanticBlockElement(orphan), false);
       assert.equal(codec.isSemanticBlockElement(nested), false);
-      assert.deepEqual(codec.serializeBlock(orphan), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
-      assert.deepEqual(codec.serializeBlock(nested), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
-      assert.deepEqual(codec.serializeBlock(enclosing), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(orphan));
+      assertReaderFacingUnsupported(codec.serializeBlock(nested));
+      assertReaderFacingUnsupported(codec.serializeBlock(enclosing));
     },
   },
   {
@@ -1667,22 +1712,10 @@ exports.tests = [
       document.body.appendChild(element('details', nested));
       document.body.appendChild(outside);
 
-      assert.deepEqual(codec.serializeBlock(second), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
-      assert.deepEqual(codec.serializeBlock(nonLeading), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
-      assert.deepEqual(codec.serializeBlock(nested), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
-      assert.deepEqual(codec.serializeBlock(outside), {
-        ok: false,
-        errorCode: 'unsupported_block',
-      });
+      assertReaderFacingUnsupported(codec.serializeBlock(second));
+      assertReaderFacingUnsupported(codec.serializeBlock(nonLeading));
+      assertReaderFacingUnsupported(codec.serializeBlock(nested));
+      assertReaderFacingUnsupported(codec.serializeBlock(outside));
     },
   },
   {

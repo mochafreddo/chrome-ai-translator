@@ -2192,11 +2192,55 @@ exports.tests = [
         helpers.flushInlineLocalDiagnostics(store);
         assert.equal(messages[0].type, 'RECORD_INLINE_LOCAL_DIAGNOSTIC');
         assert.equal(messages[0].diagnostics[0].code, 'runtime.unsupported_block');
+        assert.deepEqual(messages[0].diagnostics[0].localRejection, {
+          reason: 'nested_semantic_block',
+          tag: 'P',
+        });
         assert.equal(messages[0].diagnostics[0].template, undefined);
       } finally {
         global.chrome = previousChrome;
       }
       assert.equal(store.queue.length, 0);
+    },
+  },
+  {
+    name: 'queues only allowlisted local rejection metadata',
+    fn() {
+      const protocol = require('../extension/inline-diagnostics-protocol.js');
+      const previousChrome = global.chrome;
+      const messages = [];
+      global.chrome = { runtime: { sendMessage(message) {
+        messages.push(message);
+        return Promise.resolve({ ok: true });
+      } } };
+      const store = helpers.createInlineViewportStore(15);
+      try {
+        for (const reason of protocol.localRejectionReasons) {
+          helpers.queueInlineLocalDiagnostic(
+            store,
+            { state: 'failed' },
+            'runtime.unsupported_block',
+            {},
+            {
+              reason,
+              tag: reason === 'custom_element' ? 'MY-WIDGET' : 'P',
+              source: 'page prose',
+              selector: 'div > p',
+            }
+          );
+        }
+        helpers.flushInlineLocalDiagnostics(store);
+        assert.equal(messages[0].diagnostics.length, protocol.localRejectionReasons.length);
+        assert.deepEqual(
+          messages[0].diagnostics.map((entry) => entry.localRejection),
+          protocol.localRejectionReasons.map((reason) => (
+            reason === 'custom_element' ? { reason } : { reason, tag: 'P' }
+          ))
+        );
+        assert.equal(JSON.stringify(messages[0]).includes('page prose'), false);
+      } finally {
+        global.chrome = previousChrome;
+      }
     },
   },
   {

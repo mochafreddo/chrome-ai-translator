@@ -238,6 +238,49 @@ exports.tests = [
     },
   },
   {
+    name: 'exports every local rejection reason and omits unsafe tags',
+    fn() {
+      const reasons = [
+        'invalid_root',
+        'hidden_content',
+        'editable_content',
+        'interactive_content',
+        'custom_element',
+        'nested_semantic_block',
+        'unsupported_descendant',
+        'structure_limit_exceeded',
+        'empty_content',
+      ];
+      const exported = diagnostics.exportDiagnostics([{
+        runId: 'local-reasons',
+        blocks: reasons.map((reason) => ({
+          diagnosticId: reason,
+          terminalCode: 'runtime.unsupported_block',
+          terminalDisposition: 'reject',
+          localRejection: {
+            reason,
+            tag: reason === 'custom_element' ? 'MY-WIDGET' : 'P',
+            source: 'page prose',
+            extra: true,
+          },
+        })),
+      }]).runs[0];
+      assert.deepEqual(
+        exported.blocks.map((block) => block.localRejection),
+        reasons.map((reason) => (
+          reason === 'custom_element' ? { reason } : { reason, tag: 'P' }
+        ))
+      );
+      assert.equal(JSON.stringify(exported).includes('page prose'), false);
+      assert.equal(JSON.stringify(exported).includes('MY-WIDGET'), false);
+
+      const malformed = diagnostics.serializeProblemBlock({
+        localRejection: { reason: 'hidden_content', tag: 'p' },
+      });
+      assert.deepEqual(malformed.localRejection, { reason: 'hidden_content' });
+    },
+  },
+  {
     name: 'stamps the schema version on an export with no runs',
     fn() {
       // The options page hands the export straight to the clipboard and to a file, so an
