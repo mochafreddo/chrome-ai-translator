@@ -2128,8 +2128,11 @@ function createBackgroundWorker(platform = {}) {
               terminalDisposition: 'reject',
               attemptCount: 1,
               quality: { status: 'uncertain', codes: [], evidence: entry.evidence || {} },
+              ...(entry.localRejection ? { localRejection: entry.localRejection } : {}),
               timeline: [{
-                stage: 'runtime_application',
+                stage: entry.code === 'runtime.unsupported_block'
+                  ? 'local_preflight'
+                  : 'runtime_application',
                 disposition: 'reject',
                 codes: [entry.code],
               }],
@@ -2144,7 +2147,11 @@ function createBackgroundWorker(platform = {}) {
             targetLanguageCode,
             idempotencyFingerprint,
             outcome: 'failed',
-            summary: { requested: diagnostics.length, failed: diagnostics.length },
+            summary: {
+              attemptedBlocks: diagnostics.length,
+              failedBlocks: diagnostics.length,
+              modelRequestAttempts: 0,
+            },
             blocks,
           });
           sendResponse({ ok: persistence.persisted });

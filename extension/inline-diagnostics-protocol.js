@@ -9,6 +9,17 @@
       'runtime.block_too_large',
       'runtime.session_too_large',
     ]),
+    localRejectionReasons: Object.freeze([
+      'invalid_root',
+      'hidden_content',
+      'editable_content',
+      'interactive_content',
+      'custom_element',
+      'nested_semantic_block',
+      'unsupported_descendant',
+      'structure_limit_exceeded',
+      'empty_content',
+    ]),
     limits: Object.freeze({
       maxRecords: 500,
       maxRecordCost: 12000,
@@ -31,6 +42,16 @@
       bytes[8] = (bytes[8] & 0x3f) | 0x80;
       const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
       return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
+    },
+    serializeLocalRejection(value) {
+      if (!value || typeof value !== 'object') return null;
+      const reason = protocol.localRejectionReasons.includes(value.reason) ? value.reason : '';
+      if (!reason) return null;
+      if (reason === 'custom_element') return { reason };
+      const tag = typeof value.tag === 'string' && /^[A-Z][A-Z0-9]{0,31}$/.test(value.tag)
+        ? value.tag
+        : '';
+      return tag ? { reason, tag } : { reason };
     },
   });
 

@@ -379,25 +379,52 @@
     }
   }
 
-  function isUnsupportedElement(node) {
+  function describeLocalRejection(reason, node) {
+    const rejection = { reason };
+    if (reason === 'custom_element') return rejection;
+    const tag = getTagName(node);
+    if (/^[A-Z][A-Z0-9]{0,31}$/.test(tag)) rejection.tag = tag;
+    return rejection;
+  }
+
+  function classifyUnsupportedElement(node) {
+    if (node?.nodeType !== 1) return describeLocalRejection('unsupported_descendant', node);
     const tagName = getTagName(node);
-    if (!tagName || tagName.includes('-')) return true;
-    if (INTERACTIVE_TAGS.has(tagName)) return true;
-    if (node?.hidden || hasAttribute(node, 'hidden')) return true;
-    if (getAttribute(node, 'aria-hidden').toLowerCase() === 'true') return true;
-    if (hasHiddenComputedStyle(node)) return true;
-    if (isEffectivelyEditable(node)) return true;
+    if (!tagName || tagName.includes('-')) {
+      return describeLocalRejection(tagName.includes('-') ? 'custom_element' : 'invalid_root', node);
+    }
+    if (INTERACTIVE_TAGS.has(tagName)) {
+      return describeLocalRejection('interactive_content', node);
+    }
+    if (node?.hidden || hasAttribute(node, 'hidden')) {
+      return describeLocalRejection('hidden_content', node);
+    }
+    if (getAttribute(node, 'aria-hidden').toLowerCase() === 'true') {
+      return describeLocalRejection('hidden_content', node);
+    }
+    if (hasHiddenComputedStyle(node)) {
+      return describeLocalRejection('hidden_content', node);
+    }
+    if (isEffectivelyEditable(node)) {
+      return describeLocalRejection('editable_content', node);
+    }
     if (
       hasAttribute(node, 'tabindex') &&
       Number(getAttribute(node, 'tabindex')) >= 0
     ) {
-      return true;
+      return describeLocalRejection('interactive_content', node);
     }
-    if (hasAttribute(node, 'onclick')) return true;
+    if (hasAttribute(node, 'onclick')) {
+      return describeLocalRejection('interactive_content', node);
+    }
     if (EXCLUDED_ROLES.has(getAttribute(node, 'role').toLowerCase())) {
-      return true;
+      return describeLocalRejection('interactive_content', node);
     }
-    return false;
+    return null;
+  }
+
+  function isUnsupportedElement(node) {
+    return classifyUnsupportedElement(node) != null;
   }
 
   function hashText(value) {
@@ -469,21 +496,25 @@
     return namespace;
   }
 
-  function createUnsupportedResult(errorCode = 'unsupported_block') {
-    return { ok: false, errorCode };
+  function createUnsupportedResult(localRejectionValue) {
+    const result = { ok: false, errorCode: 'unsupported_block' };
+    if (localRejectionValue?.reason) result.localRejection = localRejectionValue;
+    return result;
   }
 
   function serializeBlock(block) {
-    if (!block || block.nodeType !== 1) return createUnsupportedResult();
-    if (
-      !isSemanticBlockElement(block) ||
-      isUnsupportedElement(block)
-    ) {
-      return createUnsupportedResult();
+    if (!block || block.nodeType !== 1) {
+      return createUnsupportedResult(describeLocalRejection('invalid_root', block));
     }
-
+    if (!isSemanticBlockElement(block)) {
+      return createUnsupportedResult(describeLocalRejection('invalid_root', block));
+    }
     const sourceFingerprint = getStructureFingerprint(block);
-    if (sourceFingerprint == null) return createUnsupportedResult();
+    if (sourceFingerprint == null) {
+      return createUnsupportedResult(describeLocalRejection('structure_limit_exceeded', block));
+    }
+    const unsupportedRoot = classifyUnsupportedElement(block);
+    if (unsupportedRoot) return createUnsupportedResult(unsupportedRoot);
     const namespace = createTokenNamespace(block, sourceFingerprint);
     const contractEntries = [];
     const snapshotEntries = new Map();
@@ -516,13 +547,13 @@
           originalTextValues.set(current, String(current.nodeValue || ''));
           continue;
         }
-        if (
-          current?.nodeType !== 1 ||
-          isUnsupportedElement(current) ||
-          (current !== root &&
-            !OPAQUE_DESCENDANT_TAGS.has(getTagName(current)))
-        ) {
-          return false;
+        if (current?.nodeType !== 1) {
+          return describeLocalRejection('unsupported_descendant', current);
+        }
+        const unsupported = classifyUnsupportedElement(current);
+        if (unsupported) return unsupported;
+        if (current !== root && !OPAQUE_DESCENDANT_TAGS.has(getTagName(current))) {
+          return describeLocalRejection('unsupported_descendant', current);
         }
         rememberContainer(current);
         const children = getChildNodes(current);
@@ -530,7 +561,7 @@
           stack.push(children[index]);
         }
       }
-      return true;
+      return null;
     }
 
     function visit(node, parentId) {
@@ -541,22 +572,28 @@
         rememberLiteralTokens(value);
         return value;
       }
-      if (node?.nodeType !== 1 || isUnsupportedElement(node)) {
-        failed = 'unsupported_block';
+      if (node?.nodeType !== 1) {
+        failed = describeLocalRejection('unsupported_descendant', node);
+        return '';
+      }
+      const unsupported = classifyUnsupportedElement(node);
+      if (unsupported) {
+        failed = unsupported;
         return '';
       }
 
       const tagName = getTagName(node);
       if (isSemanticBlockElement(node)) {
-        failed = 'unsupported_block';
+        failed = describeLocalRejection('nested_semantic_block', node);
         return '';
       }
 
       const protectedLink =
         tagName === 'A' && isProtectedAtomicLinkLabel(node.textContent);
       if (ATOM_TAGS.has(tagName) || protectedLink) {
-        if (!rememberOpaqueSubtree(node)) {
-          failed = 'unsupported_block';
+        const opaqueFailure = rememberOpaqueSubtree(node);
+        if (opaqueFailure) {
+          failed = opaqueFailure;
           return '';
         }
         atomIndex += 1;
@@ -593,7 +630,7 @@
       const pairedWrapper =
         tagName === 'A' || WRAPPER_TAGS.has(tagName) || anchoredWrapper;
       if (!pairedWrapper) {
-        failed = 'unsupported_block';
+        failed = describeLocalRejection('unsupported_descendant', node);
         return '';
       }
 
@@ -624,7 +661,9 @@
       .map((child) => visit(child, 'ROOT'))
       .join('');
     if (failed) return createUnsupportedResult(failed);
-    if (!template.trim()) return createUnsupportedResult();
+    if (!template.trim()) {
+      return createUnsupportedResult(describeLocalRejection('empty_content', block));
+    }
 
     const contract = {
       codecVersion: CODEC_VERSION,

@@ -48,6 +48,54 @@ module.exports = {
       },
     },
     {
+      name: 'allowlists local rejection metadata and drops forged fields',
+      fn() {
+        const reasons = protocol.localRejectionReasons;
+        const diagnostics = controller.normalizeLocalDiagnostics(
+          reasons.map((reason) => ({
+            code: 'runtime.unsupported_block',
+            localRejection: {
+              reason,
+              tag: reason === 'custom_element' ? 'MY-WIDGET' : 'P',
+              source: 'page prose',
+              selector: 'div > p',
+              path: '/html/body/p',
+              className: 'secret',
+            },
+          })),
+          protocol
+        );
+
+        assert.equal(diagnostics.length, reasons.length);
+        assert.deepEqual(
+          diagnostics.map((entry) => entry.localRejection),
+          reasons.map((reason) => (
+            reason === 'custom_element' ? { reason } : { reason, tag: 'P' }
+          ))
+        );
+        assert.equal(JSON.stringify(diagnostics).includes('page prose'), false);
+        assert.equal(JSON.stringify(diagnostics).includes('MY-WIDGET'), false);
+
+        const dropped = controller.normalizeLocalDiagnostics([
+          {
+            code: 'runtime.unsupported_block',
+            localRejection: { reason: 'forged_reason', tag: 'P' },
+          },
+          {
+            code: 'runtime.unsupported_block',
+            localRejection: { reason: 'hidden_content', tag: 'p' },
+          },
+          {
+            code: 'runtime.unsupported_block',
+            localRejection: { reason: 'hidden_content', tag: 'P'.repeat(40) },
+          },
+        ], protocol);
+        assert.equal('localRejection' in dropped[0], false);
+        assert.deepEqual(dropped[1].localRejection, { reason: 'hidden_content' });
+        assert.deepEqual(dropped[2].localRejection, { reason: 'hidden_content' });
+      },
+    },
+    {
       name: 'drops diagnostic payloads over the shared record limit',
       fn() {
         const diagnostics = controller.normalizeLocalDiagnostics([{

@@ -56,7 +56,13 @@
       for (const key of ['recordCost', 'sessionCost', 'limit']) {
         if (Number.isFinite(entry.evidence?.[key])) evidence[key] = Math.max(0, Number(entry.evidence[key]));
       }
-      diagnostics.push({ code: entry.code, ...(template && contract ? { template, contract } : {}), evidence });
+      const localRejection = protocol.serializeLocalRejection?.(entry.localRejection);
+      diagnostics.push({
+        code: entry.code,
+        ...(template && contract ? { template, contract } : {}),
+        evidence,
+        ...(localRejection ? { localRejection } : {}),
+      });
     }
     return diagnostics;
   }

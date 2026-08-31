@@ -127,13 +127,15 @@ function markInlineTerminalTransition(store, record) {
   return record.terminalSequence;
 }
 
-function queueInlineLocalDiagnostic(store, record, code, evidence = {}) {
+function queueInlineLocalDiagnostic(store, record, code, evidence = {}, localRejection = null) {
   if (!store?.localDiagnostics) return;
+  const sanitizedRejection = inlineDiagnosticsProtocol.serializeLocalRejection(localRejection);
   store.localDiagnostics.push({
     code,
     ...(typeof record?.template === 'string' ? { template: record.template } : {}),
     ...(record?.contract ? { contract: record.contract } : {}),
     evidence,
+    ...(sanitizedRejection ? { localRejection: sanitizedRejection } : {}),
   });
 }
 
@@ -746,7 +748,13 @@ function queueInlineViewportBlock(store, blockElement, options = {}) {
       errorCode: serialized.errorCode || 'unsupported_block',
     });
     markInlineTerminalTransition(store, failedRecord);
-    queueInlineLocalDiagnostic(store, failedRecord, 'runtime.unsupported_block');
+    queueInlineLocalDiagnostic(
+      store,
+      failedRecord,
+      'runtime.unsupported_block',
+      {},
+      serialized.localRejection
+    );
     return failedRecord;
   }
   const record = createQueuedInlineBlockRecordFromSerialized(
@@ -1993,6 +2001,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineBlockRecordCost,
     getInlineBlockReservedRecordCost,
     queueInlineViewportBlock,
+    queueInlineLocalDiagnostic,
     takeInlineViewportBlockBatch,
     applyInlineViewportBlockResults,
     releaseInlineRuntimeTokensFromStaleResponse,
