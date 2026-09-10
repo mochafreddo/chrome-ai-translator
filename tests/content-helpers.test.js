@@ -1906,6 +1906,150 @@ exports.tests = [
     },
   },
   {
+    name: 'collects data-as paragraphs once and preserves inline elements through apply and restore',
+    fn() {
+      const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
+      const { document, element, text } = createTestDocument();
+      const link = element('a', text('the guide'));
+      link.setAttribute('href', '/guide');
+      const emphasis = element('em', text('carefully'));
+      const code = element('code', text('/advisor'));
+      const block = element('span', text('Read '), link, text(' '), emphasis, text(' before using '), code, text('.'));
+      block.setAttribute('data-as', 'p');
+      const root = element('div', block);
+      document.body.appendChild(root);
+      const original = [...block.childNodes];
+      const originalText = block.textContent;
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => { throw new Error('range unavailable'); };
+      global.document = document;
+      global.HTMLElement = block.constructor;
+      global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
+      try {
+        const store = helpers.createInlineViewportStore(12);
+        const records = helpers.collectVisibleInlineBlocks(root, store);
+        assert.equal(records.length, 1);
+        const [record] = records;
+        assert.equal(record.state, 'queued');
+        assert.equal(record.blockElement, block);
+        helpers.collectVisibleInlineBlocks(root, store);
+        assert.equal(store.records.length, 1);
+        assert.equal(store.queue.length, 1);
+        const [anchor, em, atom] = record.contract.entries;
+        const translated = `${atom.token} 사용 전에 ${em.openToken}주의 깊게${em.closeToken} ${anchor.openToken}안내서${anchor.closeToken}를 읽으세요.`;
+        helpers.applyInlineViewportBlockResults([record], [{ id: record.id, disposition: 'apply', template: translated }], 12, store);
+        assert.equal(record.state, 'translated');
+        assert.equal(block.textContent, '/advisor 사용 전에 주의 깊게 안내서를 읽으세요.');
+        assert.equal(block.childNodes[0], code);
+        assert.equal(link.parentNode, block);
+        assert.equal(emphasis.parentNode, block);
+        assert.equal(link.getAttribute('href'), '/guide');
+        assert.equal(block.getAttribute('data-as'), 'p');
+        assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+        assert.deepEqual(block.childNodes, original);
+        assert.equal(block.textContent, originalText);
+      } finally {
+        Object.assign(global, previous);
+      }
+    },
+  },
+  {
+    name: 'keeps data-as paragraph scope and existing local preflight rejections',
+    fn() {
+      const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
+      const { document, element, text } = createTestDocument();
+      const paragraph = (...children) => {
+        const node = element('span', ...children);
+        node.setAttribute('data-as', 'p');
+        return node;
+      };
+      const ordinary = element('p', text('An ordinary paragraph stays supported.'));
+      const unsupported = [element('div', text('Not a paragraph.')), element('span', text('Not a paragraph.'))];
+      for (const [tag, value] of [['div', 'p'], ['span', 'div'], ['span', 'P'], ['span', ' p ']]) {
+        const node = element(tag, text('Not a supported paragraph marker.'));
+        node.setAttribute('data-as', value);
+        unsupported.push(node);
+      }
+      const hidden = element('span', text('Hidden prose must not be sent.'));
+      hidden.hidden = true;
+      const editor = element('span', text('Editable prose must not be sent.'));
+      editor.setAttribute('contenteditable', 'true');
+      const rejected = [hidden, element('button', text('Press me')), editor].map(child =>
+        paragraph(text('Visible prose before the child. '), child));
+      const inner = paragraph(text('Inner paragraph has its own owner.'));
+      const outer = paragraph(text('Outer prose cannot absorb an inner paragraph. '), inner);
+      const root = element('div', ordinary, ...unsupported, ...rejected, outer);
+      document.body.appendChild(root);
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => { throw new Error('range unavailable'); };
+      global.document = document;
+      global.HTMLElement = root.constructor;
+      global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
+      try {
+        const store = helpers.createInlineViewportStore(13);
+        helpers.collectVisibleInlineBlocks(root, store);
+        helpers.collectVisibleInlineBlocks(root, store);
+        assert.deepEqual(store.queue.map(record => record.blockElement), [ordinary, inner]);
+        assert.equal(store.records.length, 6);
+        for (const node of unsupported) assert.equal(store.byBlock.has(node), false);
+        for (const node of [...rejected, outer]) assert.equal(store.byBlock.get(node).state, 'failed');
+        assert.deepEqual(store.localDiagnostics.map(item => item.localRejection), [
+          { reason: 'hidden_content', tag: 'SPAN' },
+          { reason: 'interactive_content', tag: 'BUTTON' },
+          { reason: 'editable_content', tag: 'SPAN' },
+          { reason: 'nested_semantic_block', tag: 'SPAN' },
+        ]);
+      } finally {
+        Object.assign(global, previous);
+      }
+    },
+  },
+  {
+    name: 'rejects overlapping data-as paragraphs inside protected links and code atoms',
+    fn() {
+      const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
+      try {
+        for (const tag of ['a', 'code', 'kbd', 'samp']) {
+          const { document, element, text } = createTestDocument();
+          const inner = element('span', text('Responses API'));
+          inner.setAttribute('data-as', 'p');
+          const atom = element(tag, inner);
+          if (tag === 'a') atom.setAttribute('href', '/docs');
+          const outer = element('p', text('Read this documentation: '), atom);
+          document.body.appendChild(outer);
+          const original = [...outer.childNodes];
+          const originalText = outer.textContent;
+          document.documentElement = { clientWidth: 0, clientHeight: 0 };
+          document.createRange = () => { throw new Error('range unavailable'); };
+          global.document = document;
+          global.HTMLElement = outer.constructor;
+          global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
+          const store = helpers.createInlineViewportStore(14);
+          helpers.collectVisibleInlineBlocks(outer, store);
+          helpers.collectVisibleInlineBlocks(outer, store);
+          assert.equal(store.byBlock.get(outer)?.state, 'failed', tag);
+          assert.deepEqual(store.localDiagnostics.map(item => item.localRejection), [
+            { reason: 'nested_semantic_block', tag: 'SPAN' },
+          ], tag);
+          assert.deepEqual(store.queue.map(record => record.blockElement), tag === 'a' ? [inner] : [], tag);
+          if (tag === 'a') {
+            const record = store.byBlock.get(inner);
+            helpers.applyInlineViewportBlockResults([record], [{ id: record.id, disposition: 'apply', template: '응답 API' }], 14, store);
+            assert.equal(record.state, 'translated');
+            assert.equal(outer.textContent, 'Read this documentation: 응답 API');
+            assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+            assert.equal(atom.getAttribute('href'), '/docs');
+          }
+          assert.deepEqual(outer.childNodes, original);
+          assert.equal(atom.childNodes[0], inner);
+          assert.equal(outer.textContent, originalText);
+        }
+      } finally {
+        Object.assign(global, previous);
+      }
+    },
+  },
+  {
     name: 'collects a heading with a local permalink and restores its exact graph',
     fn() {
       const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };

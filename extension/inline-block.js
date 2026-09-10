@@ -147,6 +147,7 @@
     if (node?.nodeType !== 1) return false;
     const tagName = getTagName(node);
     if (SEMANTIC_BLOCK_TAGS.has(tagName)) return true;
+    if (tagName === 'SPAN' && getAttribute(node, 'data-as') === 'p') return true;
     return (
       tagName === 'SUMMARY' && getTagName(node.parentElement) === 'DETAILS'
     );
@@ -515,6 +516,8 @@
         continue;
       }
       if (item.depth > MAX_STRUCTURE_DEPTH) return null;
+      // Attribute-driven paragraph boundaries can change without replacing a node.
+      if (isSemanticBlockElement(current) && !append('BLOCK:')) return null;
       if (!append(`${getTagName(current)}[`)) return null;
       const children = getChildNodes(current);
       scheduledNodes += children.length;
@@ -604,6 +607,9 @@
         if (unsupported) return unsupported;
         if (!localControl && current !== root && !OPAQUE_DESCENDANT_TAGS.has(getTagName(current))) {
           return describeLocalRejection('unsupported_descendant', current);
+        }
+        if (!localControl && isSemanticBlockElement(current)) {
+          return describeLocalRejection('nested_semantic_block', current);
         }
         rememberContainer(current);
         const children = getChildNodes(current);

@@ -6,6 +6,7 @@
     "test:integration:disclosure-summary": "node tests/integration/disclosure-summary.test.mjs",
     "test:integration:ai-hero-disclosure": "node tests/integration/ai-hero-disclosure.smoke.test.mjs",
     "test:integration:heading-permalink": "node tests/integration/heading-permalink.test.mjs",
+    "test:integration:data-as-paragraph": "node tests/integration/data-as-paragraph.test.mjs",
     "verify:live": "failed=0; npm run --silent verify:live:inline || failed=1; npm run --silent verify:live:sidepanel || failed=1; exit $failed",
     "verify:live:inline": "node tests/integration/inline-translation.live.test.mjs",
     "verify:live:sidepanel": "node tests/integration/sidepanel-translation.live.test.mjs",

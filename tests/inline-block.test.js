@@ -195,6 +195,38 @@ function createHeadingControlFixture(trailing = false) {
 exports.name = 'inline block codec';
 exports.tests = [
   {
+    name: 'refuses apply and restore when data-as changes Semantic Block ownership',
+    fn() {
+      for (const stage of ['apply', 'restore']) {
+        for (const target of ['root', 'descendant']) {
+          const { document, element, text } = createTestDocument();
+          const wrapper = element('span', text('A paragraph with an inline wrapper.'));
+          const block = element('span', wrapper);
+          block.setAttribute('data-as', 'p');
+          document.body.appendChild(block);
+          const serialized = codec.serializeBlock(block);
+          assert.equal(serialized.ok, true);
+          const entry = serialized.contract.entries[0];
+          const plan = codec.createPatchPlan(serialized.snapshot, `${entry.openToken}번역된 문단${entry.closeToken}`);
+          assert.equal(plan.ok, true);
+          if (stage === 'restore') assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+          if (target === 'root') block.setAttribute('data-as', 'div');
+          else wrapper.setAttribute('data-as', 'p');
+          const children = [...block.childNodes];
+          const content = block.textContent;
+          if (stage === 'apply') {
+            assert.equal(codec.createPatchPlan(serialized.snapshot, plan.translatedTemplate).errorCode, 'block_changed');
+            assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).errorCode, 'block_changed');
+          } else {
+            assert.equal(codec.restoreBlock(serialized.snapshot).errorCode, 'block_changed');
+          }
+          assert.deepEqual(block.childNodes, children);
+          assert.equal(block.textContent, content);
+        }
+      }
+    },
+  },
+  {
     name: 'pins trailing heading controls while preserving their original objects',
     fn() {
       const { block, control, link } = createHeadingControlFixture(true);
