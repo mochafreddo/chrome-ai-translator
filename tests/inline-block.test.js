@@ -36,6 +36,16 @@ function createTestDocument() {
       return node;
     }
 
+    insertBefore(node, reference) {
+      if (reference == null) return this.appendChild(node);
+      if (node.parentNode) node.parentNode.removeChild(node);
+      const index = this.childNodes.indexOf(reference);
+      if (index < 0) throw new Error('reference is not a child');
+      this.childNodes.splice(index, 0, node);
+      node.parentNode = this;
+      return node;
+    }
+
     removeChild(node) {
       const index = this.childNodes.indexOf(node);
       if (index < 0) throw new Error('node is not a child');
@@ -165,8 +175,102 @@ function createReasoningFixture() {
   return { document, block, strong, link, serialized: codec.serializeBlock(block) };
 }
 
+function createHeadingControlFixture(trailing = false) {
+  const { document, element, text } = createTestDocument();
+  const icon = element('svg', element('path'));
+  icon.setAttribute('aria-hidden', 'true');
+  const link = element('a', text('\u200b'), element('div', icon));
+  link.setAttribute('href', '#heading');
+  link.setAttribute('aria-label', 'Navigate to header');
+  link.computedStyle = { opacity: '0' };
+  const control = element('div', link);
+  control.rect = { top: 20, bottom: 44, left: 10, right: 10, width: 0, height: 24 };
+  const prose = text('Visible heading');
+  const block = element('h2', ...(trailing ? [prose, control] : [control, prose]));
+  block.setAttribute('id', 'heading');
+  document.body.appendChild(block);
+  return { document, element, text, block, control, link, icon };
+}
+
 exports.name = 'inline block codec';
 exports.tests = [
+  {
+    name: 'pins trailing heading controls while preserving their original objects',
+    fn() {
+      const { block, control, link } = createHeadingControlFixture(true);
+      const original = [...block.childNodes];
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      assert.equal(serialized.template, 'Visible heading');
+      assert.deepEqual(serialized.atoms, []);
+      assert.deepEqual(serialized.contract.entries, []);
+      assert.equal(codec.applyPatchPlan(serialized.snapshot,
+        codec.createPatchPlan(serialized.snapshot, '번역된 제목')).ok, true);
+      assert.equal(block.childNodes.at(-1), control);
+      assert.equal(control.childNodes[0], link);
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, original);
+    },
+  },
+  {
+    name: 'does not let heading controls bypass hidden prose or interactive exclusions',
+    fn() {
+      const mutations = [
+        ({ control, element, text }) => { const hidden = element('span', text('Secret prose')); hidden.hidden = true; control.appendChild(hidden); },
+        ({ link, text }) => link.appendChild(text('Ordinary prose link')),
+        ({ control }) => control.setAttribute('contenteditable', 'true'),
+        ({ control, element }) => control.appendChild(element('button')),
+        ({ control, element }) => { const interactive = element('span'); interactive.setAttribute('role', 'checkbox'); control.appendChild(interactive); },
+        ({ link }) => link.setAttribute('href', '#another-heading'),
+        ({ link }) => link.setAttribute('href', '#%broken'),
+        ({ link }) => link.setAttribute('aria-label', ''),
+        ({ control, element }) => control.appendChild(element('my-control')),
+        ({ block, element, text }) => { const hidden = element('span', text('Hidden heading prose')); hidden.hidden = true; block.appendChild(hidden); },
+        ({ block, control, text }) => block.insertBefore(text('Interior '), control),
+        ({ block }) => { block.tagName = 'P'; },
+      ];
+      for (const mutate of mutations) {
+        const fixture = createHeadingControlFixture();
+        mutate(fixture);
+        assertReaderFacingUnsupported(codec.serializeBlock(fixture.block));
+      }
+    },
+  },
+  {
+    name: 'rejects changed heading control ownership before apply and restore',
+    fn() {
+      for (const afterApply of [false, true]) {
+        for (const change of ['replace-control', 'replace-icon', 'hidden-prose', 'editable', 'destination']) {
+          const fixture = createHeadingControlFixture();
+          const { block, control, link, icon, element, text } = fixture;
+          const serialized = codec.serializeBlock(block);
+          assert.equal(serialized.ok, true);
+          const plan = codec.createPatchPlan(serialized.snapshot, '번역된 제목');
+          assert.equal(plan.ok, true);
+          if (afterApply) assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+          if (change === 'replace-control') {
+            const replacement = createHeadingControlFixture().control;
+            block.insertBefore(replacement, control);
+            block.removeChild(control);
+          } else if (change === 'replace-icon') {
+            icon.replaceChildren(element('path'));
+          } else if (change === 'hidden-prose') {
+            const hidden = element('span', text('New hidden prose')); hidden.hidden = true; link.appendChild(hidden);
+          } else if (change === 'editable') {
+            link.setAttribute('contenteditable', 'true');
+          } else {
+            link.setAttribute('href', '#different');
+          }
+          const changedChildren = [...block.childNodes];
+          const changedText = block.textContent;
+          const result = afterApply ? codec.restoreBlock(serialized.snapshot) : codec.applyPatchPlan(serialized.snapshot, plan);
+          assert.deepEqual(result, { ok: false, errorCode: 'block_changed' }, `${change}, applied=${afterApply}`);
+          assert.deepEqual(block.childNodes, changedChildren);
+          assert.equal(block.textContent, changedText);
+        }
+      }
+    },
+  },
   {
     name: 'names every local preflight rejection with a safe tag only',
     fn() {

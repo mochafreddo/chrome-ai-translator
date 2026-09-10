@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Heading permalink regression</title>
+<style>
+  body { margin: 80px; font: 18px sans-serif; }
+  h2 { position: relative; }
+  .control { position: absolute; width: 0; }
+  .control a { position: absolute; left: -32px; opacity: 0; }
+  .control a:focus, h2:hover .control a { opacity: 1; }
+</style>
+<h2 id="leading"><div class="control" tabindex="-1"><a href="#leading" aria-label="Navigate to header">​<div><svg width="18" height="18" aria-hidden="true"><path d="M0 0L18 18" /></svg></div></a></div><span>Visible heading</span></h2>
+<h2 id="trailing"><span>Another heading</span><div class="control"><a href="#trailing" aria-label="Link to this section">​<svg width="18" height="18" aria-hidden="true"><circle cx="9" cy="9" r="6" /></svg></a></div></h2>
+</html>

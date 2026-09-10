@@ -1906,6 +1906,60 @@ exports.tests = [
     },
   },
   {
+    name: 'collects a heading with a local permalink and restores its exact graph',
+    fn() {
+      const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
+      const { document, element, text } = createTestDocument();
+      const link = element('a', text('\u200b'), element('svg', element('path')));
+      link.setAttribute('href', '#heading');
+      link.setAttribute('aria-label', 'Link to this heading');
+      const control = element('div', link);
+      control.rect = { top: 20, bottom: 44, left: 10, right: 10, width: 0, height: 24 };
+      const emphasis = element('em', text('advisor'));
+      const proseLink = element('a', text('guide'));
+      proseLink.setAttribute('href', '/guide');
+      const block = element('h2', control, text('Use the '), emphasis, text(' '), proseLink);
+      block.setAttribute('id', 'heading');
+      const original = [...block.childNodes];
+      const originalText = block.textContent;
+      document.body.appendChild(block);
+      document.documentElement = { clientWidth: 0, clientHeight: 0 };
+      document.createRange = () => { throw new Error('range unavailable'); };
+      global.document = document;
+      global.HTMLElement = block.constructor;
+      global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
+      try {
+        const store = helpers.createInlineViewportStore(12);
+        const records = helpers.collectVisibleInlineBlocks(block, store);
+        assert.equal(records.length, 1);
+        const [record] = records;
+        assert.equal(record.state, 'queued');
+        assert.equal(record.blockElement, block);
+        const request = JSON.stringify({ template: record.template, atoms: record.atoms, contract: record.contract });
+        for (const local of ['Link to this heading', '#heading', '\u200b', 'DIV', 'SVG']) {
+          assert.equal(request.includes(local), false, local);
+        }
+        const [em, anchor] = record.contract.entries;
+        assert.equal(em.tagName, 'EM');
+        assert.equal(anchor.tagName, 'A');
+        const translated = `${anchor.openToken}안내${anchor.closeToken}: ${em.openToken}조언자${em.closeToken} 사용`;
+        assert.equal(inlineBlockCodec.applyPatchPlan(record.snapshot,
+          inlineBlockCodec.createPatchPlan(record.snapshot, translated)).ok, true);
+        assert.equal(block.childNodes[0], control);
+        assert.equal(control.childNodes[0], link);
+        assert.equal(link.getAttribute('href'), '#heading');
+        assert.equal(link.getAttribute('aria-label'), 'Link to this heading');
+        assert.equal(block.childNodes[1], proseLink);
+        assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+        assert.deepEqual(block.childNodes, original);
+        assert.equal(block.textContent, originalText);
+        assert.equal(control.childNodes[0], link);
+      } finally {
+        Object.assign(global, previous);
+      }
+    },
+  },
+  {
     name: 'uses short prose around inline code to discover a block',
     fn() {
       const previous = {
