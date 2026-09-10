@@ -30,10 +30,14 @@ The CDP gotchas involved are written up in and handled by `tests/integration/har
 
 ## Unbilled Chrome checks that are not `test:integration`
 
-Two more commands launch a real Chrome without an API key. Each has its own `package.json` script, for the same reason `test:integration` is not folded into `npm test`: a different reason to start a browser is a different command.
+Three more commands launch a real Chrome without an API key. Each has its own `package.json` script, for the same reason `test:integration` is not folded into `npm test`: a different reason to start a browser is a different command.
 
 - `npm run test:integration:disclosure-summary` — a local fixture with a standard disclosure and the renderer-wrapped leading-summary form. Collection ownership, apply, anchored placement, disclosure behaviour, and exact restore. No model, no key.
 - `npm run test:integration:ai-hero-disclosure` — the reported AI Hero page, read-only. Injects the local serializer and a deterministic translated template, then proves apply and restore. No model, no key. The billed live commands are skipped for this defect: it happens before a request is assembled, so paying for model output would not test the decision being changed.
+
+- `npm run test:integration:heading-permalink` — checks a deterministic local heading fixture and the reported [advisor page](https://code.claude.com/docs/en/advisor). It uses the content script's actual Semantic Block collection, then applies deterministic output and restores the exact DOM graph. It checks that permalink controls stay at the heading edge with the same nodes, attributes, focus, and click behavior. The run reports the observed number of affected visible headings; the page's current count is not a permanent assertion. No API key is read and no translation request is sent. This establishes local DOM handling, not model translation quality or full extension startup behavior.
+
+The 2026-09-10 heading-permalink run observed 2 local fixture headings and 16 affected headings on the reported page. Against the pre-fix codec at `3d4848b`, all 18 were rejected with `hidden_content / DIV`; with the fix, all 18 passed collection, deterministic apply, control behavior, and exact restoration. The browser-free suite also checks hidden prose, editable and unsupported interactive content, and DOM ownership changes before apply and restore. Support is intentionally limited to labelled self-fragment controls at a heading's leading or trailing edge; controls embedded between prose need a stable placement rule before they can be preserved safely.
 
 ## `npm run verify:live` — the checks that spend money
 

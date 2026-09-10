@@ -178,6 +178,53 @@
     return leading === summaries[0] ? leading : null;
   }
 
+  // A heading's edge control is local UI, never a translatable atom. Requiring
+  // one labelled self-fragment link and no prose prevents a hidden-subtree bypass.
+  // TODO: #59 - Interior controls need a stable prose anchor before they can be supported.
+  function getHeadingControlPlacement(node, block) {
+    if (!/^H[1-6]$/.test(getTagName(block)) || node?.parentNode !== block) return null;
+    const id = getAttribute(block, 'id');
+    if (!id) return null;
+    const siblings = getChildNodes(block).filter((child) => !isIgnorableWhitespace(child));
+    const placement = siblings[0] === node
+      ? 'leading'
+      : siblings[siblings.length - 1] === node ? 'trailing' : null;
+    if (!placement) return null;
+    const allowed = new Set([
+      'DIV', 'SPAN', 'A', 'SVG', 'G', 'PATH', 'CIRCLE', 'RECT', 'LINE',
+      'POLYLINE', 'POLYGON', 'ELLIPSE',
+    ]);
+    const stack = [node];
+    let links = 0;
+    let visited = 0;
+    while (stack.length) {
+      const current = stack.pop();
+      if (++visited > MAX_STRUCTURE_NODES) return null;
+      if (current?.nodeType === 3) {
+        if (!/^[\s\u200b#¶🔗]*$/u.test(String(current.nodeValue || ''))) return null;
+        continue;
+      }
+      const tag = getTagName(current);
+      if (current?.nodeType !== 1 || !allowed.has(tag) || isEffectivelyEditable(current)) return null;
+      if (hasAttribute(current, 'onclick')) return null;
+      const role = getAttribute(current, 'role').toLowerCase();
+      if (!['', 'link', 'img', 'none', 'presentation'].includes(role)) return null;
+      if (tag !== 'A' && hasAttribute(current, 'tabindex') && Number(getAttribute(current, 'tabindex')) >= 0) return null;
+      if (tag === 'A') {
+        const href = getAttribute(current, 'href');
+        if (!href.startsWith('#') || !getAttribute(current, 'aria-label').trim()) return null;
+        try {
+          if (decodeURIComponent(href.slice(1)) !== id) return null;
+        } catch {
+          return null;
+        }
+        if (++links > 1) return null;
+      }
+      stack.push(...getChildNodes(current));
+    }
+    return links === 1 ? placement : null;
+  }
+
   function getChildNodes(node) {
     return Array.from(node?.childNodes || []);
   }
@@ -523,6 +570,8 @@
     const atoms = [];
     const literalTokenCounts = new Map();
     const anchoredSummary = findAnchoredLeadingSummary(block);
+    const localControls = [];
+    const localControlNodes = new Set();
     let wrapperIndex = 0;
     let atomIndex = 0;
     let failed = null;
@@ -539,7 +588,7 @@
       }
     }
 
-    function rememberOpaqueSubtree(root) {
+    function rememberOpaqueSubtree(root, localControl = false) {
       const stack = [root];
       while (stack.length) {
         const current = stack.pop();
@@ -550,9 +599,10 @@
         if (current?.nodeType !== 1) {
           return describeLocalRejection('unsupported_descendant', current);
         }
-        const unsupported = classifyUnsupportedElement(current);
+        if (localControl) localControlNodes.add(current);
+        const unsupported = localControl ? null : classifyUnsupportedElement(current);
         if (unsupported) return unsupported;
-        if (current !== root && !OPAQUE_DESCENDANT_TAGS.has(getTagName(current))) {
+        if (!localControl && current !== root && !OPAQUE_DESCENDANT_TAGS.has(getTagName(current))) {
           return describeLocalRejection('unsupported_descendant', current);
         }
         rememberContainer(current);
@@ -574,6 +624,12 @@
       }
       if (node?.nodeType !== 1) {
         failed = describeLocalRejection('unsupported_descendant', node);
+        return '';
+      }
+      const placement = parentId === 'ROOT' && getHeadingControlPlacement(node, block);
+      if (placement) {
+        localControls.push({ node, placement });
+        rememberOpaqueSubtree(node, true);
         return '';
       }
       const unsupported = classifyUnsupportedElement(node);
@@ -708,6 +764,8 @@
       entries: snapshotEntries,
       originalContainers,
       originalTextValues,
+      localControls,
+      localControlNodes,
       originalSignature,
       contract,
       template,
@@ -868,7 +926,11 @@
 
   function matchesSupportedClassification(snapshot) {
     if (isUnsupportedElement(snapshot?.blockElement)) return false;
+    for (const control of snapshot?.localControls || []) {
+      if (getHeadingControlPlacement(control.node, snapshot.blockElement) !== control.placement) return false;
+    }
     for (const container of snapshot?.originalContainers || []) {
+      if (snapshot.localControlNodes?.has(container.node)) continue;
       if (isUnsupportedElement(container.node)) return false;
     }
     for (const entry of snapshot?.entries?.values?.() || []) {
@@ -948,6 +1010,10 @@
       snapshot
     );
     if (failed) return validationError(failed);
+    for (const control of snapshot.localControls || []) {
+      if (control.placement === 'leading') rootChildren.unshift(control.node);
+      else rootChildren.push(control.node);
+    }
     return {
       ok: true,
       translatedTemplate,
@@ -958,7 +1024,22 @@
     };
   }
 
-  function replaceNodeChildren(node, children) {
+  function replaceNodeChildren(node, children, localControls = []) {
+    if (sameNodeList(node, children)) return;
+    const retained = new Set(localControls.map((control) => control.node));
+    if (retained.size) {
+      // Never detach the control: focus, listeners, and icon state stay live.
+      for (const child of getChildNodes(node)) {
+        if (!retained.has(child)) node.removeChild(child);
+      }
+      let next = null;
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (!retained.has(child)) node.insertBefore(child, next);
+        next = child;
+      }
+      return;
+    }
     if (typeof node?.replaceChildren === 'function') {
       node.replaceChildren(...children);
       return;
@@ -972,7 +1053,8 @@
       node.nodeValue = value;
     }
     for (const container of snapshot.originalContainers || []) {
-      replaceNodeChildren(container.node, container.children);
+      replaceNodeChildren(container.node, container.children,
+        container.node === snapshot.blockElement ? snapshot.localControls : []);
     }
     snapshot.appliedOwnership = null;
     snapshot.translatedSignature = null;
@@ -994,7 +1076,7 @@
       for (const container of plan.containerPlans) {
         replaceNodeChildren(container.node, container.children);
       }
-      replaceNodeChildren(snapshot.blockElement, plan.rootChildren);
+      replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.localControls);
       snapshot.appliedOwnership = captureAppliedOwnership(snapshot, plan);
       const translatedFingerprint = getStructureFingerprint(
         snapshot.blockElement
