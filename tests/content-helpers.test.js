@@ -191,7 +191,241 @@ async function flushMicrotasks(count = 8) {
   }
 }
 
+// Drive the production controls, scan, and Chrome request caller with the codec's DOM
+// fixture. Only browser services are substituted; responses stay pending across controls.
+async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
+  return withFakeViewportDom(async () => {
+    const fixture = createReasoningFixture();
+    const { document, block } = fixture;
+    const state = helpers.createInlineTranslationState();
+    const messages = [];
+    const pending = [];
+    let warming = true;
+    const previousObserver = global.MutationObserver;
+    global.MutationObserver = class {
+      observe() {}
+      disconnect() {}
+    };
+    global.document = document;
+    global.HTMLElement = block.constructor;
+    document.querySelector = () => document.body;
+    document.documentElement = { clientWidth: 0, clientHeight: 0 };
+    document.createRange = () => { throw new Error('range unavailable'); };
+    global.window.addEventListener = () => {};
+    global.window.removeEventListener = () => {};
+    global.chrome = { runtime: { sendMessage(message) {
+      messages.push(message);
+      if (message.type === 'GET_SETTINGS') {
+        return Promise.resolve({ ok: true, settings: { apiKey: 'synthetic-test-key' } });
+      }
+      if (message.type !== 'TRANSLATE_VISIBLE_BLOCK_BATCH') {
+        return Promise.resolve({ ok: true });
+      }
+      if (warming) {
+        return Promise.resolve({ ok: true, results: message.records.map(({ id }) => ({
+          id, disposition: 'reject', terminalCode: 'protocol.invalid_json', attemptCount: 1,
+        })) });
+      }
+      return new Promise((resolve, reject) => pending.push({ message, resolve, reject }));
+    } } };
+
+    async function instruct(instruction, target = state) {
+      const replies = [];
+      helpers.handleInlineContentMessage(
+        { type: 'RUN_INLINE_INSTRUCTION', instruction },
+        (reply) => replies.push(reply),
+        target
+      );
+      assert.deepEqual(replies, [{ ok: true }]);
+      await flushMicrotasks(256);
+    }
+
+    function paragraph(cost) {
+      const node = document.createElement('p');
+      const overhead = helpers.getInlineBlockRecordCost({ template: '', atoms: [] });
+      const length = cost - overhead;
+      node.textContent = 'An article sentence with ordinary prose. '.repeat(
+        Math.ceil(length / 40)
+      ).slice(0, length - 1) + '.';
+      return node;
+    }
+
+    try {
+      // Spend through real admission first, leaving room for a chosen number of copies
+      // of the fixture. Paired one-attempt cases prove that later admission really fits.
+      const recordCost = helpers.getInlineBlockRecordCost(fixture.serialized);
+      document.body.replaceChildren();
+      let remaining = headroom === null ? 0 : INLINE_SESSION_BUDGET - headroom * recordCost;
+      while (remaining > 0) {
+        const cost = Math.min(4000, remaining);
+        document.body.appendChild(paragraph(cost));
+        remaining -= cost;
+      }
+      await instruct('grantInlineTranslationAuthorization');
+      await instruct('startInlineTranslation');
+      assert.equal(state.status, 'active', state.error);
+      assert.equal(state.viewport.records.every((record) => record.errorCode === 'protocol.invalid_json'), true);
+      warming = false;
+      document.body.replaceChildren(block);
+      helpers.runInlineViewportScan(state);
+      await flushMicrotasks();
+      assert.equal(pending.length, 1, 'the original Semantic Block request is admitted');
+      await fn({ ...fixture, state, messages, pending, instruct, paragraph, recordCost });
+    } finally {
+      helpers.detachInlineViewportWatchers(state);
+      if (previousObserver === undefined) delete global.MutationObserver;
+      else global.MutationObserver = previousObserver;
+    }
+  }, { setTimeout: () => 1, clearTimeout: () => {} });
+}
+
 exports.tests = [
+  ...[
+    { name: 'current one-attempt response', attemptCount: 1, controls: [] },
+    { name: 'current repaired response', attemptCount: 2, controls: [] },
+    { name: 'current repair charged exactly once', attemptCount: 2, controls: [], headroom: 3 },
+    { name: 'repair exceeds the submitted budget', attemptCount: 2, controls: [], headroom: 1 },
+    { name: 'Original text then one-attempt response', attemptCount: 1, controls: ['restoreInlineOriginal'] },
+    { name: 'Original text then repaired response', attemptCount: 2, controls: ['restoreInlineOriginal'] },
+    { name: 'Stop then repaired response', attemptCount: 2, controls: ['stopInlineTranslation'] },
+    { name: 'Stop and Start then repaired response', attemptCount: 2, controls: ['stopInlineTranslation', 'startInlineTranslation'] },
+    { name: 'Original text and Start then repaired response', attemptCount: 2, controls: ['restoreInlineOriginal', 'startInlineTranslation'] },
+    { name: 'repeated replacements then repaired response', attemptCount: 2, controls: ['restoreInlineOriginal', 'startInlineTranslation', 'stopInlineTranslation', 'startInlineTranslation', 'restoreInlineOriginal', 'startInlineTranslation'] },
+  ].map(({ name, attemptCount, controls, headroom = 2 }) => ({
+    name: `settles Session Budget through controls: ${name}`,
+    async fn() {
+      await withInlineRequestLifecycle(async ({ block, strong, link, document, state, messages, pending, instruct, paragraph, recordCost }) => {
+        const originalText = block.textContent;
+        const originalChildren = [...block.childNodes];
+        const request = pending[0];
+        const record = request.message.records[0];
+        // Keep the old block offscreen so restarting cannot submit it a second time.
+        block.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
+        for (const control of controls) await instruct(control);
+        const before = state.viewport?.records.map(({ id, state }) => ({ id, state })) || [];
+        const statusBefore = helpers.getInlineTranslationStatusSnapshot(state);
+        request.resolve({ ok: true, results: [{
+          id: record.id,
+          disposition: 'apply',
+          template: getReasoningTranslatedTemplate(record),
+          attemptCount,
+          correlationToken: 'lifecycle-token',
+        }] });
+        await flushMicrotasks(32);
+
+        if (controls.length) {
+          assert.equal(block.textContent, originalText);
+          assert.deepEqual(block.childNodes, originalChildren);
+          assert.deepEqual(state.viewport.records.map(({ id, state }) => ({ id, state })), before);
+          assert.deepEqual(helpers.getInlineTranslationStatusSnapshot(state), statusBefore);
+          assert.equal(pending.length, 1, 'obsolete work cannot re-enter the queue');
+        } else {
+          assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
+          assert.equal(state.viewport.records.find((candidate) => candidate.id === record.id).state, 'translated');
+          assert.equal(strong.parentElement, block);
+          assert.equal(link.parentElement, block);
+          assert.equal(link.getAttribute('href'), '/api/docs/models/gpt-5.5');
+        }
+        assert.deepEqual(messages.filter((message) => message.releaseTokens?.includes('lifecycle-token')), [{
+          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+          operationId: request.message.operationId,
+          outcomes: [],
+          releaseTokens: ['lifecycle-token'],
+        }]);
+
+        if (state.status !== 'active') await instruct('startInlineTranslation');
+        const next = paragraph(recordCost);
+        document.body.appendChild(next);
+        helpers.runInlineViewportScan(state);
+        await flushMicrotasks(32);
+        if (headroom <= attemptCount) {
+          assert.equal(pending.length, 1, 'reported repair must refuse the next request');
+          assert.match(helpers.getInlineTranslationStatusSnapshot(state).error, /reached this page visit's limit/);
+        } else {
+          assert.equal(pending.length, 2, 'only reported attempts consume the remaining room');
+          // Its initial charge must consume the remaining room, even before a response.
+          document.body.appendChild(paragraph(recordCost));
+          helpers.runInlineViewportScan(state);
+          await flushMicrotasks();
+          assert.equal(pending.length, 2, 'initial requests are charged at assembly');
+        }
+      }, { headroom });
+    },
+  })),
+  {
+    name: 'settles only originating records once despite duplicate and unrelated repair results',
+    async fn() {
+      await withInlineRequestLifecycle(async ({ document, state, pending, paragraph, recordCost }) => {
+        const request = pending[0];
+        const { id } = request.message.records[0];
+        const repaired = { id, disposition: 'reject', terminalCode: 'protocol.invalid_json', attemptCount: 2 };
+        request.resolve({ ok: true, results: [
+          { ...repaired, id: 'unrelated-record' }, repaired, repaired,
+        ] });
+        await flushMicrotasks(32);
+        document.body.appendChild(paragraph(recordCost));
+        helpers.runInlineViewportScan(state);
+        await flushMicrotasks();
+        assert.equal(pending.length, 2, 'one reported repair leaves room for one more record');
+        document.body.appendChild(paragraph(recordCost));
+        helpers.runInlineViewportScan(state);
+        await flushMicrotasks();
+        assert.equal(pending.length, 2, 'the matching rejected repair still costs one attempt');
+      }, { headroom: 3 });
+    },
+  },
+  ...['request error', 'unsuccessful batch', 'missing results'].map((failure) => ({
+    name: `retains initial Session Budget through the request caller after ${failure}`,
+    async fn() {
+      await withInlineRequestLifecycle(async ({ block, document, state, pending, instruct, paragraph, recordCost }) => {
+        if (failure === 'request error') pending[0].reject(new Error('synthetic transport failure'));
+        else pending[0].resolve(failure === 'unsuccessful batch'
+          ? { ok: false, results: [{ id: pending[0].message.records[0].id, attemptCount: 2 }] }
+          : { ok: true });
+        await flushMicrotasks(32);
+        assert.equal(state.viewport.records.at(-1).state, 'failed');
+        block.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
+        await instruct('restoreInlineOriginal');
+        await instruct('startInlineTranslation');
+        document.body.appendChild(paragraph(recordCost));
+        helpers.runInlineViewportScan(state);
+        await flushMicrotasks();
+        assert.equal(pending.length, 2, 'failure retains the initial cost without guessing a repair');
+        document.body.appendChild(paragraph(recordCost));
+        helpers.runInlineViewportScan(state);
+        await flushMicrotasks();
+        assert.equal(pending.length, 2, 'the failed request is not refunded');
+      }, { headroom: 2 });
+    },
+  })),
+  {
+    name: 'reuses repaired cache output at an exhausted budget and gives a fresh content instance its own budget',
+    async fn() {
+      await withInlineRequestLifecycle(async ({ block, state, pending, instruct }) => {
+        const record = pending[0].message.records[0];
+        pending[0].resolve({ ok: true, results: [{
+          id: record.id, disposition: 'apply', attemptCount: 2,
+          template: getReasoningTranslatedTemplate(record),
+        }] });
+        await flushMicrotasks(32);
+        const translated = block.textContent;
+        assert.match(translated, /추론 모델/);
+        await instruct('restoreInlineOriginal');
+        await instruct('startInlineTranslation');
+        assert.equal(pending.length, 1, 'historical repair metadata sends no new request');
+        assert.equal(block.textContent, translated);
+        await instruct('restoreInlineOriginal');
+        const fresh = helpers.createInlineTranslationState();
+        try {
+          await instruct('grantInlineTranslationAuthorization', fresh);
+          await instruct('startInlineTranslation', fresh);
+          assert.equal(pending.length, 2, 'a fresh content-side lifetime admits the same page');
+        } finally {
+          helpers.detachInlineViewportWatchers(fresh);
+        }
+      }, { headroom: 2 });
+    },
+  },
   {
     name: 'detects excluded inline code tags',
     fn() {
@@ -1440,8 +1674,8 @@ exports.tests = [
     fn() {
       // Pressing Start on a run that is already under way is the only thing the reader can
       // do that would pay for the same page twice, so `translateInlinePage` rescans instead
-      // whenever this holds. Once the run has stopped there is nothing in flight to
-      // duplicate, and Start begins a new one.
+      // whenever this holds. A stopped run no longer admits work; Start begins a new
+      // operation while already submitted requests can still settle.
       assert.equal(
         helpers.isInlineTranslationRunLive({
           status: 'active',
@@ -2463,7 +2697,7 @@ exports.tests = [
       assert.equal(second.state, 'translating');
       assert.equal(store.inFlight, 1);
       assert.equal(
-        store.sessionRecordCost,
+        store.sessionBudget.recordCost,
         helpers.getInlineBlockRecordCost(first) +
           helpers.getInlineBlockRecordCost(second)
       );
@@ -2516,7 +2750,7 @@ exports.tests = [
         ) <= 12000,
         true
       );
-      assert.equal(store.sessionRecordCost <= INLINE_SESSION_BUDGET, true);
+      assert.equal(store.sessionBudget.recordCost <= INLINE_SESSION_BUDGET, true);
       assert.equal(
         store.records.filter((record) => record.state === 'failed').length,
         0
@@ -2530,7 +2764,7 @@ exports.tests = [
     fn() {
       const cache = new Map();
       const firstStore = helpers.createInlineViewportStore(14, cache);
-      firstStore.sessionRecordCost = INLINE_SESSION_BUDGET;
+      firstStore.sessionBudget.recordCost = INLINE_SESSION_BUDGET;
       const state = {
         status: 'active',
         operationId: 14,
@@ -2541,7 +2775,7 @@ exports.tests = [
 
       helpers.restoreInlineViewportRecords(state);
 
-      assert.equal(state.viewport.sessionRecordCost, INLINE_SESSION_BUDGET);
+      assert.equal(state.viewport.sessionBudget.recordCost, INLINE_SESSION_BUDGET);
       const { block } = createReasoningFixture();
       const record = helpers.queueInlineViewportBlock(state.viewport, block);
       assert.deepEqual(
@@ -2584,7 +2818,7 @@ exports.tests = [
         store.records.filter((record) => record.errorCode === 'session_too_large').length,
         0
       );
-      assert.equal(store.sessionRecordCost, actualTotal);
+      assert.equal(store.sessionBudget.recordCost, actualTotal);
       assert.equal(helpers.getInlineTerminalReason(store.records), '');
     },
   },
@@ -2612,39 +2846,7 @@ exports.tests = [
       );
       // Headroom, not a near miss: the page fits even if every one of its blocks had needed
       // a repair request, which is twice what this page can possibly cost.
-      assert.equal(store.sessionRecordCost * 2 <= INLINE_SESSION_BUDGET, true);
-    },
-  },
-  {
-    name: 'charges the repair request a semantic block needed on top of the first one',
-    fn() {
-      function spendOnOneBlock(operationId, attemptCount) {
-        const { block } = createReasoningFixture();
-        const store = helpers.createInlineViewportStore(operationId);
-        const record = helpers.queueInlineViewportBlock(store, block);
-        const batch = helpers.takeInlineViewportBlockBatch(store);
-        const spentAtAssembly = store.sessionRecordCost;
-        helpers.applyInlineViewportBlockResults(
-          batch,
-          [{
-            id: record.id,
-            disposition: 'apply',
-            template: getReasoningTranslatedTemplate(record),
-            attemptCount,
-          }],
-          operationId,
-          store
-        );
-        assert.equal(record.state, 'translated');
-        return { spentAtAssembly, spent: store.sessionRecordCost };
-      }
-
-      const once = spendOnOneBlock(142, 1);
-      const repaired = spendOnOneBlock(143, 2);
-
-      assert.equal(once.spent, once.spentAtAssembly);
-      assert.equal(repaired.spent > repaired.spentAtAssembly, true);
-      assert.equal(repaired.spent > once.spent, true);
+      assert.equal(store.sessionBudget.recordCost * 2 <= INLINE_SESSION_BUDGET, true);
     },
   },
   {
@@ -2673,59 +2875,27 @@ exports.tests = [
       // The cache replays `attemptCount: 2` with no request sent, so nothing is charged for
       // it — here or on the next batch the store takes.
       assert.equal(secondStore.records[0].attemptCount, 2);
-      assert.equal(secondStore.sessionRecordCost, 0);
+      assert.equal(secondStore.sessionBudget.recordCost, 0);
       assert.deepEqual(helpers.takeInlineViewportBlockBatch(secondStore), []);
-      assert.equal(secondStore.sessionRecordCost, 0);
+      assert.equal(secondStore.sessionBudget.recordCost, 0);
     },
   },
   {
-    name: 'releases no session budget when a batch fails or a response is outrun',
+    name: 'releases no session budget when a batch fails',
     fn() {
       const firstFixture = createReasoningFixture();
-      const secondFixture = createReasoningFixture();
       const store = helpers.createInlineViewportStore(146);
       const first = helpers.queueInlineViewportBlock(store, firstFixture.block);
       const batch = helpers.takeInlineViewportBlockBatch(store);
-      const spent = store.sessionRecordCost;
+      const spent = store.sessionBudget.recordCost;
       assert.equal(spent > 0, true);
 
       helpers.markInlineViewportBatchFailed(batch, 146, store);
 
       assert.equal(first.state, 'failed');
-      assert.equal(store.sessionRecordCost, spent);
+      assert.equal(store.sessionBudget.recordCost, spent);
 
-      store.inFlight = 0;
-      const second = helpers.queueInlineViewportBlock(store, secondFixture.block);
-      helpers.takeInlineViewportBlockBatch(store);
 
-      assert.equal(
-        store.sessionRecordCost,
-        spent + helpers.getInlineBlockRecordCost(second)
-      );
-
-      // Nor does a response the page has outrun release anything. Its record belongs to an
-      // operation **Original text** or a restart has already replaced, so the result is
-      // ignored — but the repair request it reports was really sent, and the budget spans the
-      // page visit rather than the operation, so it is still charged.
-      store.inFlight = 0;
-      const spentBeforeStaleResponse = store.sessionRecordCost;
-      const stale = helpers.applyInlineViewportBlockResults(
-        [second],
-        [{
-          id: second.id,
-          disposition: 'reject',
-          terminalCode: 'protocol.invalid_json',
-          attemptCount: 2,
-        }],
-        147,
-        store
-      );
-
-      assert.equal(stale.ignored, 1);
-      assert.equal(
-        store.sessionRecordCost,
-        spentBeforeStaleResponse + helpers.getInlineBlockRecordCost(second)
-      );
     },
   },
   {
@@ -2753,7 +2923,7 @@ exports.tests = [
       assert.deepEqual(helpers.takeInlineViewportBlockBatch(store, 12000), []);
       assert.equal(oversized.state, 'failed');
       assert.equal(oversized.errorCode, 'block_too_large');
-      assert.equal(store.sessionRecordCost, 0);
+      assert.equal(store.sessionBudget.recordCost, 0);
 
       // The per-batch cap keeps its unit too: two blocks whose actual costs would fit one
       // request are still split across two, because their reserved costs do not.

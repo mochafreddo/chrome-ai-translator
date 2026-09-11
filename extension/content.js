@@ -86,7 +86,7 @@ function createInlineViewportStore(
   operationId,
   translationByOriginal = null,
   translationSettings = null,
-  sessionRecordCost = 0
+  sessionBudget = { recordCost: 0 }
 ) {
   const translationSettingsSnapshot = translationSettings
     ? createInlineTranslationSettingsSnapshot(translationSettings)
@@ -105,7 +105,8 @@ function createInlineViewportStore(
     localDiagnostics: [],
     localDiagnosticsInFlight: null,
     localDiagnosticRetryTimer: null,
-    sessionRecordCost: Math.max(0, Number(sessionRecordCost) || 0),
+    // One owner per page visit, shared by every operation, including pending requests.
+    sessionBudget,
     translationByOriginal:
       translationByOriginal instanceof Map ? translationByOriginal : new Map(),
     scanTimer: null,
@@ -259,8 +260,8 @@ function stopInlineViewportTranslation(state = inlineState) {
 // stops it. Pressing Start again while it is — from either of the two homes, both of which
 // leave Start pressable — is the only thing the reader can do that would pay for the same
 // page twice, so `translateInlinePage` answers it with a rescan of what has scrolled into
-// view rather than a second run. A stopped run leaves nothing in flight to duplicate, and
-// Start begins a new one.
+// view rather than a second run. A stopped run no longer admits work; Start begins a new
+// operation while submitted requests can still settle against the same Session Budget.
 function isInlineTranslationRunLive(state = inlineState) {
   return state?.status === 'active' && !state?.viewport?.stopped;
 }
@@ -622,9 +623,14 @@ function getInlineBlockReservedRecordCost(record) {
 // The 2 is exact rather than `>= 2` because the worker sends at most two requests per record
 // and reports nothing else. If a third attempt is ever added, this charge has to be revisited
 // rather than silently counting it as the second.
-function chargeInlineBlockRepairRequest(store, record, result) {
-  if (!store || Number(result?.attemptCount) !== 2) return;
-  store.sessionRecordCost += getInlineBlockRecordCost(record);
+function settleInlineBlockRequest(store, records, response) {
+  if (!response?.ok || !Array.isArray(response.results)) return;
+  const byId = new Map(response.results.map((result) => [result.id, result]));
+  for (const record of records) {
+    if (Number(byId.get(record.id)?.attemptCount) === 2) {
+      store.sessionBudget.recordCost += getInlineBlockRecordCost(record);
+    }
+  }
 }
 
 // The id carries the operation that minted it, so a record minted here cannot collide with
@@ -810,14 +816,14 @@ function takeInlineViewportBlockBatch(
     // cost. Two units for the same record in adjacent lines is deliberate: reserved cost
     // over-counts so one request can never exceed the cap it was checked against, and a
     // cumulative budget needs no such guarantee. See ADR-0007.
-    if (store.sessionRecordCost + cost > INLINE_BLOCK_SESSION_MAX_RECORD_COST) {
+    if (store.sessionBudget.recordCost + cost > INLINE_BLOCK_SESSION_MAX_RECORD_COST) {
       store.queue.shift();
       record.state = 'failed';
       record.errorCode = 'session_too_large';
       markInlineTerminalTransition(store, record);
       queueInlineLocalDiagnostic(store, record, 'runtime.session_too_large', {
         recordCost: cost,
-        sessionCost: store.sessionRecordCost,
+        sessionCost: store.sessionBudget.recordCost,
         limit: INLINE_BLOCK_SESSION_MAX_RECORD_COST,
       });
       continue;
@@ -828,7 +834,7 @@ function takeInlineViewportBlockBatch(
     record.state = 'translating';
     batch.push(record);
     batchCost += reservedCost;
-    store.sessionRecordCost += cost;
+    store.sessionBudget.recordCost += cost;
     if (batchCost >= limit) break;
   }
   if (batch.length) store.inFlight += 1;
@@ -902,12 +908,6 @@ function applyInlineViewportBlockResults(
 
   for (const record of records || []) {
     const result = byId.get(record.id);
-    // Charged ahead of everything this loop decides, including the record whose operation the
-    // page has already replaced: the repair request was sent whatever the answer turned out
-    // to be worth, and there is no refund for what was sent. `store.sessionRecordCost` spans
-    // the page visit rather than the operation, so the charge lands on the right accumulator
-    // even when the answer arrives for an operation that is over.
-    chargeInlineBlockRepairRequest(store, record, result);
     if (record.operationId !== operationId) {
       summary.ignored += 1;
       continue;
@@ -1152,10 +1152,6 @@ async function toggleInlineTranslatorMenu(
 
 function restoreInlineViewportRecords(state = inlineState) {
   const viewport = state.viewport;
-  const sessionRecordCost = Math.max(
-    0,
-    Number(viewport?.sessionRecordCost) || 0
-  );
   if (viewport?.observer) {
     viewport.observer.disconnect();
   }
@@ -1192,7 +1188,7 @@ function restoreInlineViewportRecords(state = inlineState) {
     state.operationId,
     state.translationCache,
     null,
-    sessionRecordCost
+    viewport?.sessionBudget
   );
 }
 
@@ -1727,6 +1723,9 @@ async function drainInlineViewportQueue(state = inlineState) {
         })),
       })
       .then((resp) => {
+        // Settle submitted work against the page visit before checking page eligibility.
+        // A replaced operation still owns its request, but cannot apply or requeue it.
+        settleInlineBlockRequest(store, batch, resp);
         if (!isInlineViewportOperationCurrent(state, store, operationId)) {
           releaseInlineRuntimeTokensFromStaleResponse(resp, operationId);
           return;
@@ -1838,17 +1837,13 @@ async function translateInlinePage(state = inlineState) {
     state,
     settingsSnapshot
   );
-  const sessionRecordCost = Math.max(
-    0,
-    Number(state.viewport?.sessionRecordCost) || 0
-  );
   state.operationId = (Number(state.operationId) || 0) + 1;
   state.status = 'active';
   state.viewport = createInlineViewportStore(
     state.operationId,
     translationCache,
     settingsSnapshot,
-    sessionRecordCost
+    state.viewport?.sessionBudget
   );
   state.viewport.root = root;
   seedInlineViewportStoreWithRestorableRecords(
