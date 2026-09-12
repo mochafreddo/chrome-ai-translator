@@ -2,9 +2,31 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 exports.name = 'static assets';
 exports.tests = [
+  {
+    name: 'loads worker diagnostics as classic scripts and Options diagnostics independently',
+    async fn() {
+      const extension = path.join(__dirname, '..', 'extension');
+      const workerScope = vm.createContext({ TextEncoder, Buffer });
+      const load = (scope, name) => vm.runInContext(
+        fs.readFileSync(path.join(extension, name), 'utf8'), scope, { filename: name }
+      );
+      workerScope.importScripts = (...names) => names.forEach(name => load(workerScope, name));
+      load(workerScope, 'background.js');
+      const chrome = { storage: { local: { async get() { return {}; } } } };
+      const worker = workerScope.createBackgroundWorker({ chrome });
+      assert.equal((await worker.translateVisibleBlockBatch([])).length, 0);
+
+      const optionsScope = vm.createContext({});
+      load(optionsScope, 'translation-diagnostics.js');
+      const payload = await optionsScope.ChromeAiTranslatorDiagnostics.loadDiagnostics(chrome);
+      assert.equal(payload.schemaVersion, 3);
+      assert.equal(payload.runs.length, 0);
+    },
+  },
   {
     name: 'ships the stylesheet referenced by extension HTML',
     fn() {

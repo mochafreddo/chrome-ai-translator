@@ -2410,17 +2410,25 @@ exports.tests = [
             source: 'Nested paragraph text.',
             selector: 'li > p',
           },
+        }, {
+          code: 'runtime.block_too_large',
+          evidence: { recordCost: 13000, limit: 12000 },
+        }, {
+          code: 'runtime.session_too_large',
+          evidence: { sessionCost: 150000, limit: 150000 },
         }],
       }], { tab: { id: 3 } });
 
       assert.deepEqual(response, { ok: true });
       assert.equal(fetchCount, 0);
       const run = stored['inlineDiagnostics:v3:run:local-3-7-22222222-2222-4222-8222-222222222222'];
-      assert.equal(run.summary.attemptedBlocks, 1);
-      assert.equal(run.summary.failedBlocks, 1);
+      assert.equal(run.summary.attemptedBlocks, 3);
+      assert.equal(run.summary.failedBlocks, 3);
       assert.equal(run.summary.modelRequestAttempts, 0);
-      assert.equal(run.blocks.length, 1);
-      assert.equal(run.blocks[0].timeline[0].stage, 'local_preflight');
+      assert.equal(run.blocks.length, 3);
+      assert.deepEqual(run.blocks.map(block => block.timeline[0].stage), [
+        'local_preflight', 'local_preflight', 'local_preflight',
+      ]);
       assert.deepEqual(run.blocks[0].localRejection, {
         reason: 'nested_semantic_block',
         tag: 'P',
@@ -2798,29 +2806,7 @@ exports.tests = [
       assert.equal(runWrites.at(-1).modelRequestAttempts, 1);
     },
   },
-  {
-    // Two runs of one tab can start in the same millisecond, so the timestamp cannot be the
-    // whole id. The crypto is the whole platform here, and handing over one that answers
-    // differently every time is what makes the check say that: the worker has to ask it per
-    // id rather than once per millisecond, which is the only way two ids stamped 1234 differ.
-    name: 'creates collision-resistant runtime diagnostic ids within one millisecond',
-    fn() {
-      let issued = 0;
-      const worker = helpers.createBackgroundWorker({
-        crypto: {
-          randomUUID() {
-            issued += 1;
-            return `00000000-0000-4000-8000-${String(issued).padStart(12, '0')}`;
-          },
-        },
-      });
 
-      const first = worker.createRuntimeDiagnosticId(1234);
-      const second = worker.createRuntimeDiagnosticId(1234);
-      assert.notEqual(first, second);
-      assert.match(first, /^runtime-1234-/);
-    },
-  },
   {
     name: 'plans the side panel as the first step for both triggers',
     fn() {

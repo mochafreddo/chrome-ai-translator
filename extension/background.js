@@ -106,8 +106,6 @@ const {
   require('./inline-translation-controls.js');
 const { MISSING_PAGE_ACCESS_MESSAGES } =
   globalThis.ChromeAiTranslatorPageAccess || require('./page-access.js');
-const translationDiagnosticsModule =
-  globalThis.ChromeAiTranslatorDiagnostics || require('./translation-diagnostics.js');
 const inlineDiagnosticsProtocol =
   globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol || require('./inline-diagnostics-protocol.js');
 const inlineDiagnosticsController =
@@ -164,33 +162,6 @@ const INLINE_BLOCK_MAX_BATCH_COST = 12000;
 // script's, and only it knows when one starts, resets, or resumes. See ADR-0003.
 const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
 const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
-const INLINE_RUNTIME_CORRELATION_TTL_MS = 5 * 60 * 1000;
-const INLINE_RUNTIME_CORRELATION_LIMIT = 1000;
-const INLINE_RUNTIME_CORRELATION_STORAGE_KEY = 'inlineRuntimeCorrelations:v1';
-
-function normalizeInlineRuntimeCorrelationEntries(value) {
-  const normalized = Object.create(null);
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return normalized;
-  for (const [token, entry] of Object.entries(value)) {
-    const runId = typeof entry?.runId === 'string' ? entry.runId : '';
-    if (
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token) ||
-      !entry || typeof entry !== 'object' || Array.isArray(entry) ||
-      !Number.isFinite(entry.expiresAt) || entry.expiresAt <= 0 ||
-      !/^run-\d+-[a-z0-9]{1,12}$/.test(runId) ||
-      typeof entry.diagnosticId !== 'string' || !entry.diagnosticId.startsWith(`${runId}/`) ||
-      !/^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(entry.sourceFingerprint) ||
-      !/^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(entry.contractFingerprint) ||
-      !/^[A-Za-z0-9._:/-]{1,80}$/.test(entry.model) ||
-      !(entry.targetLanguageCode === '' || /^[a-z]{2,16}$/i.test(entry.targetLanguageCode)) ||
-      !/^[0-9A-Za-z.-]{0,40}$/.test(entry.extensionVersion) ||
-      !(entry.tabId === null || Number.isInteger(entry.tabId)) ||
-      !(entry.operationId === null || Number.isInteger(entry.operationId))
-    ) continue;
-    normalized[token] = entry;
-  }
-  return normalized;
-}
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 const MIN_MAX_OUTPUT_TOKENS = 256;
 const MAX_MAX_OUTPUT_TOKENS = 128000;
@@ -898,24 +869,10 @@ function createBackgroundWorker(platform = {}) {
     return givenFetch(...args);
   }
 
-  // This worker's diagnostics module, signing and seeding with the crypto the worker was
-  // built with. A second construction of the worker is a second one of these, with its own
-  // installation secret, its own key cache and its own write chain — which is what a
-  // restarting service worker is, and what a check gets by building a worker.
-  const translationDiagnostics =
-    translationDiagnosticsModule.createTranslationDiagnostics(givenCrypto);
-
-  // The correlation token a batch hands the page, from the same crypto. Unlike the runtime
-  // diagnostic id below, a worker with no crypto cannot mint one at all: the page's report
-  // is matched back against the protocol's UUID pattern, so there is no lesser token to
-  // fall back to. The one caller already treats a failure here as diagnostics being
-  // unavailable for the batch, which is what it is.
-  function createInlineRuntimeCorrelationToken() {
-    return inlineDiagnosticsProtocol.createUuidV4(givenCrypto);
-  }
-
-  const inlineRuntimeCorrelations = new Map();
-  let inlineRuntimeCorrelationMutation = Promise.resolve();
+  const inlineDiagnostics = inlineDiagnosticsController.createInlineDiagnostics({
+    chrome: givenChrome,
+    crypto: givenCrypto,
+  });
 
   // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
   const stateByTab = new Map();
@@ -948,17 +905,6 @@ function createBackgroundWorker(platform = {}) {
     chrome.runtime
       .sendMessage({ type: 'STATE_UPDATED', tabId, state: next })
       .catch(() => {});
-  }
-
-  // A platform with no crypto is not an error here: the id has a suffix either way, and a
-  // timestamp with a weak suffix still names a run. That tolerance is this function's alone
-  // — the two other places the crypto is spent, the correlation token above and the
-  // fingerprint signing behind the diagnostics module, both fail without one.
-  function createRuntimeDiagnosticId(startedAt, cryptoApi = givenCrypto) {
-    const suffix = typeof cryptoApi?.randomUUID === 'function'
-      ? cryptoApi.randomUUID()
-      : Math.random().toString(36).slice(2, 12);
-    return `runtime-${startedAt}-${suffix}`;
   }
 
   // ADR-0001. Applied on install and on startup, and never re-enabled from a translation path.
@@ -1246,146 +1192,17 @@ function createBackgroundWorker(platform = {}) {
     }
   }
 
-  async function mutateInlineRuntimeCorrelations(mutator) {
-    const operation = inlineRuntimeCorrelationMutation.catch(() => {}).then(async () => {
-      // The namespace is asked for rather than required: a worker whose platform carries no
-      // session storage keeps its correlations in the map below and still honours a token for
-      // as long as it lives. Only surviving its own restart needs the storage. `chrome`
-      // itself is required, because every caller that gets this far already has one.
-      const session = getChrome().storage?.session;
-      const storedValue = session
-        ? (await session.get([INLINE_RUNTIME_CORRELATION_STORAGE_KEY]))[INLINE_RUNTIME_CORRELATION_STORAGE_KEY] || {}
-        : Object.fromEntries(inlineRuntimeCorrelations);
-      const stored = normalizeInlineRuntimeCorrelationEntries(storedValue);
-      const result = await mutator(stored);
-      if (session) await session.set({ [INLINE_RUNTIME_CORRELATION_STORAGE_KEY]: stored });
-      else {
-        inlineRuntimeCorrelations.clear();
-        for (const [token, entry] of Object.entries(stored)) inlineRuntimeCorrelations.set(token, entry);
-      }
-      return result;
-    });
-    inlineRuntimeCorrelationMutation = operation;
-    return operation;
-  }
-
-  async function issueInlineRuntimeCorrelations(items, context = {}) {
-    return mutateInlineRuntimeCorrelations((entries) => {
-      const now = Date.now();
-      for (const [token, entry] of Object.entries(entries)) {
-        if (entry.expiresAt <= now) delete entries[token];
-      }
-      if (Object.keys(entries).length + items.length > INLINE_RUNTIME_CORRELATION_LIMIT) {
-        throw new Error('Inline runtime correlation capacity exceeded');
-      }
-      const issued = new Map();
-      for (const { id, metadata } of items) {
-        const token = createInlineRuntimeCorrelationToken();
-        entries[token] = {
-          ...metadata,
-          tabId: Number.isInteger(context.tabId) ? context.tabId : null,
-          operationId: context.operationId ?? null,
-          expiresAt: now + INLINE_RUNTIME_CORRELATION_TTL_MS,
-        };
-        issued.set(id, token);
-      }
-      return issued;
-    });
-  }
-
-  async function consumeInlineRuntimeCorrelations(outcomes, releaseTokens, context = {}) {
-    return mutateInlineRuntimeCorrelations((entries) => {
-      const now = Date.now();
-      const resolved = [];
-      const tokens = new Set();
-      const validated = [];
-      const requested = [
-        ...outcomes.map((outcome) => ({ token: outcome?.correlationToken, outcome })),
-        ...releaseTokens.map((token) => ({ token, outcome: null })),
-      ];
-      for (const item of requested) {
-        const token = String(item.token || '');
-        const entry = Object.hasOwn(entries, token) ? entries[token] : null;
-        if (
-          !token || tokens.has(token) || !entry || entry.expiresAt <= now || entry.reservedAt ||
-          entry.tabId !== (Number.isInteger(context.tabId) ? context.tabId : null) ||
-          entry.operationId !== (context.operationId ?? null)
-        ) return null;
-        tokens.add(token);
-        validated.push({ token, outcome: item.outcome, entry });
-      }
-      if (validated.some(({ entry }) => entry.runId !== validated[0].entry.runId)) return null;
-      for (const item of validated) {
-        if (item.outcome) {
-          item.entry.reservedAt = now;
-          resolved.push(item);
-        } else delete entries[item.token];
-      }
-      return resolved;
-    });
-  }
-
-  async function finalizeInlineRuntimeCorrelations(resolved, persisted) {
-    return mutateInlineRuntimeCorrelations((entries) => {
-      for (const { token } of resolved) {
-        if (persisted) delete entries[token];
-        else if (entries[token]) delete entries[token].reservedAt;
-      }
-    });
-  }
-
-  function createBlockCountSummary({
-    attemptedBlocks = 0,
-    translatedBlocks = 0,
-    translatedWithWarningBlocks = 0,
-    failedBlocks = 0,
-    changedBlocks = 0,
-    repairAttemptedBlocks = 0,
-    modelRequestAttempts = null,
-  } = {}) {
-    return {
-      attemptedBlocks,
-      translatedBlocks,
-      translatedWithWarningBlocks,
-      failedBlocks,
-      changedBlocks,
-      repairAttemptedBlocks,
-      modelRequestAttempts,
-    };
-  }
-
-  function summarizeBlockBatchResults(results, modelRequestAttempts) {
-    return createBlockCountSummary({
-      attemptedBlocks: results.length,
-      translatedBlocks: results.filter((result) => result.disposition === 'apply').length,
-      translatedWithWarningBlocks: results.filter(
-        (result) => result.disposition === 'apply_with_warning'
-      ).length,
-      failedBlocks: results.filter((result) => result.disposition === 'reject').length,
-      changedBlocks: 0,
-      repairAttemptedBlocks: results.filter((result) => result.attemptCount === 2).length,
-      modelRequestAttempts,
-    });
-  }
-
   async function translateVisibleBlockBatch(
     records,
     settingsSnapshot = null,
     options = {}
   ) {
-    const chrome = getChrome();
-    const startedAtMs = Date.now();
-    const runId = `run-${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
-    let diagnosticsPersisted = true;
-    // Named by the failure diagnostics below, which run after the request that would have
-    // reported them itself.
-    let requestedModel = '';
-    let attemptedBlockCount = 0;
-    let modelRequestAttempts = 0;
+    getChrome();
+    const run = inlineDiagnostics.beginTranslation(options.correlationContext);
 
     try {
       const normalized = normalizeVisibleBlockBatchRecords(records);
-      attemptedBlockCount = normalized.length;
+      run.describe({ records: normalized });
 
       if (!normalized.length) {
         return [];
@@ -1395,26 +1212,15 @@ function createBackgroundWorker(platform = {}) {
         await getSettings(),
         settingsSnapshot
       );
-      requestedModel = settings.model;
+      run.describe({ model: settings.model });
       if (!settings.apiKey) {
         throw new Error('OpenAI API key is not set. Open Options and paste your key.');
       }
-      const preflight = await translationDiagnostics.persistRun(chrome, {
-        runId,
-        startedAt: new Date(startedAtMs).toISOString(),
-        model: settings.model,
-        targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-        outcome: 'interrupted',
-        summary: createBlockCountSummary({
-          attemptedBlocks: normalized.length,
-          modelRequestAttempts: null,
-        }),
-        blocks: [],
-      });
-      diagnosticsPersisted = preflight.persisted;
+      run.describe({ targetLanguageCode: getTargetLanguageCode(settings.targetLanguage) });
+      await run.preflight();
 
       async function requestAndValidate(batch) {
-        modelRequestAttempts += 1;
+        run.modelAttempt();
         const modelRecords = batch.map((record) => ({
           id: record.id,
           template: record.template,
@@ -1519,126 +1325,9 @@ function createBackgroundWorker(platform = {}) {
           },
         };
       });
-      const finalOutcome = results.some((result) => result.disposition === 'reject')
-        ? 'failed'
-        : results.some((result) => result.disposition === 'apply_with_warning')
-          ? 'partial'
-          : 'done';
-      const finalSummary = summarizeBlockBatchResults(results, modelRequestAttempts);
-      async function persistCompactFinal() {
-        const persistence = await translationDiagnostics.persistRun(chrome, {
-          runId,
-          startedAt: new Date(startedAtMs).toISOString(),
-          finishedAt: new Date().toISOString(),
-          extensionVersion: chrome.runtime?.getManifest?.().version || '',
-          model: settings.model,
-          targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-          outcome: finalOutcome,
-          summary: finalSummary,
-          blocks: [],
-        });
-        if (!persistence.persisted) await translationDiagnostics.discardRun(chrome, runId);
-        return persistence;
-      }
-      const correlationsById = new Map();
-      const normalizedById = new Map(normalized.map((record) => [record.id, record]));
-      try {
-        const correlationEntries = await Promise.all(results.map(async (result) => {
-          const record = normalizedById.get(result.id);
-          const fingerprints = await translationDiagnostics.fingerprintBlock(
-            chrome,
-            record?.template,
-            record?.contract
-          );
-          return [result.id, {
-            runId,
-            diagnosticId: `${runId}/${result.id}`,
-            ...fingerprints,
-            extensionVersion: chrome.runtime?.getManifest?.().version || '',
-            model: settings.model,
-            targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-          }];
-        }));
-        for (const [id, correlation] of correlationEntries) correlationsById.set(id, correlation);
-      const problemResults = results.filter(
-        (result) => result.attemptCount === 2 || result.disposition !== 'apply'
-      );
-      const diagnosticBlocks = problemResults.map((result) => {
-        const correlation = correlationsById.get(result.id) || {};
-        return {
-          diagnosticId: correlation.diagnosticId,
-          sourceFingerprint: correlation.sourceFingerprint,
-          contractFingerprint: correlation.contractFingerprint,
-          terminalCode: result.terminalCode,
-          terminalDisposition: result.disposition,
-          attemptCount: result.attemptCount,
-          structure: result.diagnostic.structure,
-          quality: result.diagnostic.quality,
-          timeline: result.diagnostic.timeline,
-        };
-      });
-        const persistence = await translationDiagnostics.persistRun(chrome, {
-        runId,
-        startedAt: new Date(startedAtMs).toISOString(),
-        finishedAt: new Date().toISOString(),
-        extensionVersion: chrome.runtime?.getManifest?.().version || '',
-        model: settings.model,
-        targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
-        outcome: finalOutcome,
-        summary: finalSummary,
-          blocks: diagnosticBlocks,
-        });
-        diagnosticsPersisted = persistence.persisted;
-        if (!persistence.persisted) await persistCompactFinal();
-      } catch {
-        // Diagnostics must never change an otherwise valid translation result.
-        await persistCompactFinal();
-        diagnosticsPersisted = false;
-      }
-      let issuedTokens = new Map();
-      if (diagnosticsPersisted) {
-        try {
-          issuedTokens = await issueInlineRuntimeCorrelations(
-            results
-              .filter((result) => correlationsById.has(result.id))
-              .map((result) => ({ id: result.id, metadata: correlationsById.get(result.id) })),
-            options.correlationContext
-          );
-        } catch {
-          diagnosticsPersisted = false;
-        }
-      }
-      return results.map(({ diagnostic, ...result }) => ({
-        ...result,
-        ...(issuedTokens.has(result.id)
-          ? { correlationToken: issuedTokens.get(result.id) }
-          : {}),
-        ...(!diagnosticsPersisted ? { diagnosticsUnavailable: true } : {}),
-      }));
+      return await run.complete(results);
     } catch (error) {
-      await translationDiagnostics.persistRun(chrome, {
-        runId,
-        startedAt: new Date(startedAtMs).toISOString(),
-        finishedAt: new Date().toISOString(),
-        model: requestedModel,
-        outcome: 'failed',
-        summary: createBlockCountSummary({
-          attemptedBlocks: attemptedBlockCount,
-          failedBlocks: attemptedBlockCount,
-          modelRequestAttempts,
-        }),
-        blocks: [{
-          diagnosticId: `${runId}/request`,
-          terminalCode: error?.code || 'runtime.request_failed',
-          terminalDisposition: 'reject',
-          attemptCount: 1,
-          timeline: [{
-            stage: 'initial_validation',
-            disposition: 'reject',
-            codes: [error?.code || 'runtime.request_failed'],
-          }],
-        }],
-      });
+      await run.fail(error);
       throw error;
     }
   }
@@ -2014,148 +1703,33 @@ function createBackgroundWorker(platform = {}) {
           return;
         }
         if (msg?.type === inlineDiagnosticsProtocol.messages.recordRuntime) {
-          const outcomes = Array.isArray(msg.outcomes)
-            ? msg.outcomes.slice(0, inlineDiagnosticsProtocol.limits.maxRecords)
-            : [];
-          const releaseTokens = Array.isArray(msg.releaseTokens)
-            ? msg.releaseTokens.slice(0, inlineDiagnosticsProtocol.limits.maxRecords)
-            : [];
-          const startedAt = Date.now();
-          const runtimeRunId = createRuntimeDiagnosticId(startedAt);
-          const changedCount = outcomes.filter(
-            (outcome) => outcome?.code === 'runtime.page_changed'
-          ).length;
-          const failedCount = outcomes.length - changedCount;
-          const resolvedOutcomes = await consumeInlineRuntimeCorrelations(outcomes, releaseTokens, {
+          sendResponse(await inlineDiagnostics.recordRuntime({
             tabId: sender?.tab?.id,
             operationId: msg.operationId ?? null,
-          });
-          if (!resolvedOutcomes) {
-            sendResponse({ ok: false });
-            return;
-          }
-          if (!resolvedOutcomes.length) {
-            sendResponse({ ok: true });
-            return;
-          }
-          const firstEntry = resolvedOutcomes[0].entry;
-          const persistence = await translationDiagnostics.persistRun(getChrome(), {
-            runId: runtimeRunId,
-            startedAt: new Date(startedAt).toISOString(),
-            finishedAt: new Date().toISOString(),
-            extensionVersion: firstEntry.extensionVersion,
-            model: firstEntry.model,
-            targetLanguageCode: firstEntry.targetLanguageCode,
-            outcome: failedCount > 0 ? 'failed' : 'changed',
-            summary: createBlockCountSummary({
-              attemptedBlocks: outcomes.length,
-              failedBlocks: failedCount,
-              changedBlocks: changedCount,
-              modelRequestAttempts: null,
-            }),
-            blocks: resolvedOutcomes.map(({ outcome, entry }, index) => ({
-              diagnosticId: `${runtimeRunId}/${index}`,
-              parentRunId: entry.runId,
-              parentDiagnosticId: entry.diagnosticId,
-              sourceFingerprint: entry.sourceFingerprint,
-              contractFingerprint: entry.contractFingerprint,
-              terminalCode: outcome?.code,
-              terminalDisposition: outcome?.code === 'runtime.page_changed' ? 'changed' : 'reject',
-              attemptCount: 1,
-              timeline: [{
-                stage: 'runtime_application',
-                disposition: outcome?.code === 'runtime.page_changed' ? 'changed' : 'reject',
-                codes: [outcome?.code],
-              }],
-            })),
-          });
-          await finalizeInlineRuntimeCorrelations(resolvedOutcomes, persistence.persisted);
-          sendResponse({ ok: persistence.persisted });
+            outcomes: msg.outcomes,
+            releaseTokens: msg.releaseTokens,
+          }));
           return;
         }
         if (msg?.type === inlineDiagnosticsProtocol.messages.recordLocal) {
-          const diagnosticBatchId = String(msg.diagnosticBatchId || '');
-          const senderTabId = sender?.tab?.id;
-          const operationId = msg.operationId;
-          if (
-            !inlineDiagnosticsProtocol.uuidV4Pattern.test(diagnosticBatchId) ||
-            !Number.isInteger(senderTabId) || !Number.isInteger(operationId)
-          ) {
+          const report = inlineDiagnostics.prepareLocal({
+            tabId: sender?.tab?.id,
+            operationId: msg.operationId,
+            diagnosticBatchId: msg.diagnosticBatchId,
+            diagnostics: msg.diagnostics,
+          });
+          if (!report) {
             sendResponse({ ok: false });
             return;
           }
-          const diagnostics = inlineDiagnosticsController.normalizeLocalDiagnostics(
-            msg.diagnostics,
-            inlineDiagnosticsProtocol
-          );
-          if (!diagnostics.length) {
-            sendResponse({ ok: false });
-            return;
-          }
-          const chrome = getChrome();
           const settings = mergeVisibleBatchSettingsSnapshot(
             await getSettings(),
             msg.settingsSnapshot || null
           );
-          const startedAt = Date.now();
-          const runId = `local-${senderTabId}-${operationId}-${diagnosticBatchId}`.slice(0, 80);
-          const extensionVersion = chrome.runtime?.getManifest?.().version || '';
-          const targetLanguageCode = getTargetLanguageCode(settings.targetLanguage);
-          const idempotencyFingerprint = (await translationDiagnostics.fingerprintBlock(
-            chrome,
-            JSON.stringify({
-              diagnostics,
-              model: settings.model,
-              targetLanguageCode,
-              extensionVersion,
-            }),
-            {}
-          )).sourceFingerprint;
-          const blocks = await Promise.all(diagnostics.slice(0, 100).map(async (entry, index) => {
-            let fingerprints = {};
-            if (typeof entry.template === 'string' && entry.contract) {
-              try {
-                fingerprints = await translationDiagnostics.fingerprintBlock(
-                  chrome,
-                  entry.template,
-                  entry.contract
-                );
-              } catch {}
-            }
-            return {
-              diagnosticId: `${runId}/${index}`,
-              ...fingerprints,
-              terminalCode: entry.code,
-              terminalDisposition: 'reject',
-              attemptCount: 1,
-              quality: { status: 'uncertain', codes: [], evidence: entry.evidence || {} },
-              ...(entry.localRejection ? { localRejection: entry.localRejection } : {}),
-              timeline: [{
-                stage: entry.code === 'runtime.unsupported_block'
-                  ? 'local_preflight'
-                  : 'runtime_application',
-                disposition: 'reject',
-                codes: [entry.code],
-              }],
-            };
-          }));
-          const persistence = await translationDiagnostics.persistRunIdempotent(chrome, {
-            runId,
-            startedAt: new Date(startedAt).toISOString(),
-            finishedAt: new Date().toISOString(),
-            extensionVersion,
+          sendResponse(await report.persist({
             model: settings.model,
-            targetLanguageCode,
-            idempotencyFingerprint,
-            outcome: 'failed',
-            summary: {
-              attemptedBlocks: diagnostics.length,
-              failedBlocks: diagnostics.length,
-              modelRequestAttempts: 0,
-            },
-            blocks,
-          });
-          sendResponse({ ok: persistence.persisted });
+            targetLanguageCode: getTargetLanguageCode(settings.targetLanguage),
+          }));
           return;
         }
         if (msg?.type === 'GET_INLINE_STARTUP_INSTRUCTIONS') {
@@ -2207,7 +1781,6 @@ function createBackgroundWorker(platform = {}) {
     },
     // Everything below is what this file already exported, backed by this instance so that an
     // export and the worker the browser is running are the same thing.
-    createRuntimeDiagnosticId,
     ensureSidePanel,
     openaiTranslateChunk,
     runInlineTranslationControl,

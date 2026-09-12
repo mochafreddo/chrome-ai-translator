@@ -10,6 +10,8 @@ The wall is what a check *needs*, not which module it imports, and two checks ma
 
 Both of those exist because a billed check that reasons wrongly reports a clean run, which is worse than not running at all. The judgement a billed check makes belongs here, where it is free to check; only the browser and the bill belong up there.
 
+`inline-diagnostics-controller.test.js` exercises the diagnostic run, local rejection, and runtime outcome interfaces with fake Chrome storage and injected crypto. It reads saved results through the same diagnostics loader as Options. Failure checks distinguish an uncommitted record from a retained write whose cleanup failed, and cover compact fallback, discard, reservation release, and finalization failure. Worker checks retain the actual request-counting and message wiring; the diagnostics module does not execute model requests or decide repairs.
+
 `tests/run.js` holds an explicit list of suites, and **a test file that is not in that list does not run.** A file exporting `name` and `tests` is not picked up by discovery; there is no discovery.
 
 This has bitten once already. `tests/qa-issue-003.regression-1.test.js` was written against `node:test` instead of this harness and was never added to the list, so from the day it landed until it was converted and registered it never ran — a file calling itself a regression test caught nothing for two months. It runs now. When adding a suite, add it to the list and confirm its checks appear in the output.
