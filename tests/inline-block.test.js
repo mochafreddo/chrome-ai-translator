@@ -1207,6 +1207,149 @@ exports.tests = [
     },
   },
   {
+    name: 'preserves a CSS-hidden responsive alternative label outside the model template',
+    fn() {
+      for (const hiddenLabel of ['short', 'long']) {
+        const { document, element, text } = createTestDocument();
+        const shortText = text('/implement');
+        const short = element('span', shortText);
+        short.setAttribute('class', 'mobile-label min-[901px]:hidden');
+        const longText = text('The /implement Skill');
+        const long = element('span', longText);
+        long.setAttribute(
+          'class',
+          'desktop-label hidden min-[901px]:inline'
+        );
+        const hidden = hiddenLabel === 'short' ? short : long;
+        const visible = hiddenLabel === 'short' ? long : short;
+        hidden.computedStyle = {
+          display: 'none',
+          visibility: 'visible',
+          opacity: '1',
+          contentVisibility: 'visible',
+        };
+        visible.computedStyle = {
+          display: 'inline',
+          visibility: 'visible',
+          opacity: '1',
+          contentVisibility: 'visible',
+        };
+        const labels = element('span', short, long);
+        const block = element('p', labels);
+        document.body.appendChild(block);
+        const originalBlockChildren = [...block.childNodes];
+        const originalLabelChildren = [...labels.childNodes];
+        const hiddenChildren = [...hidden.childNodes];
+        const hiddenClass = hidden.getAttribute('class');
+
+        const serialized = codec.serializeBlock(block);
+
+        assert.equal(serialized.ok, true, hiddenLabel);
+        assert.equal(serialized.template.includes(visible.textContent), true);
+        assert.equal(
+          serialized.template.split(hidden.textContent).length - 1,
+          visible.textContent.includes(hidden.textContent) ? 1 : 0
+        );
+        const hiddenEntry = serialized.contract.entries.find(
+          (entry) => entry.kind === 'atom' && entry.tagName === 'SPAN'
+        );
+        assert.ok(hiddenEntry);
+        assert.equal(serialized.atoms.find(
+          (atom) => atom.token === hiddenEntry.token
+        )?.preserveText, false);
+
+        const plan = codec.createPatchPlan(
+          serialized.snapshot,
+          serialized.template.replace(
+            visible.textContent,
+            hiddenLabel === 'short'
+              ? '번역된 /implement 스킬'
+              : '/implement 번역'
+          )
+        );
+        assert.equal(plan.ok, true);
+        assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+        assert.equal(hidden.parentNode, labels);
+        assert.equal(hidden.childNodes[0], hiddenChildren[0]);
+        assert.equal(hidden.getAttribute('class'), hiddenClass);
+        assert.equal(hidden.textContent, hiddenLabel === 'short'
+          ? '/implement'
+          : 'The /implement Skill');
+
+        assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+        assert.deepEqual(block.childNodes, originalBlockChildren);
+        assert.deepEqual(labels.childNodes, originalLabelChildren);
+        assert.deepEqual(hidden.childNodes, hiddenChildren);
+        assert.equal(short.childNodes[0], shortText);
+        assert.equal(long.childNodes[0], longText);
+      }
+    },
+  },
+  {
+    name: 'does not treat unsafe hidden prose as a responsive alternative label',
+    fn() {
+      const unsafeMutations = [
+        ({ hidden }) => hidden.setAttribute('aria-label', 'Accessible label'),
+        ({ hidden }) => hidden.setAttribute('contenteditable', 'true'),
+        ({ hidden, element }) => hidden.appendChild(element('button')),
+        ({ hidden, element }) => {
+          const action = element('span');
+          action.setAttribute('onclick', 'run()');
+          hidden.appendChild(action);
+        },
+      ];
+      for (const mutate of unsafeMutations) {
+        const { document, element, text } = createTestDocument();
+        const visible = element('span', text('The /implement Skill'));
+        visible.setAttribute('class', 'hidden min-[901px]:inline');
+        const hidden = element('span', text('/implement'));
+        hidden.setAttribute('class', 'min-[901px]:hidden');
+        hidden.computedStyle = {
+          display: 'none',
+          visibility: 'visible',
+          opacity: '1',
+          contentVisibility: 'visible',
+        };
+        mutate({ hidden, element });
+        const block = element('p', element('span', hidden, visible));
+        document.body.appendChild(block);
+
+        assertReaderFacingUnsupported(codec.serializeBlock(block));
+      }
+
+      const { document, element, text } = createTestDocument();
+      const hiddenProse = element('span', text('Unrelated private prose'));
+      hiddenProse.computedStyle = {
+        display: 'none',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+      };
+      const arbitrary = element(
+        'p',
+        text('Visible documentation text. '),
+        hiddenProse
+      );
+      document.body.appendChild(arbitrary);
+      assertReaderFacingUnsupported(codec.serializeBlock(arbitrary));
+
+      const pairedVisible = element('span', text('Visible label'));
+      const pairedHidden = element('span', text('Unrelated private prose'));
+      pairedHidden.computedStyle = {
+        display: 'none',
+        visibility: 'visible',
+        opacity: '1',
+        contentVisibility: 'visible',
+      };
+      const arbitraryPair = element(
+        'p',
+        element('span', pairedHidden, pairedVisible)
+      );
+      document.body.appendChild(arbitraryPair);
+      assertReaderFacingUnsupported(codec.serializeBlock(arbitraryPair));
+    },
+  },
+  {
     name: 'rejects hidden descendants inside atomic code elements',
     fn() {
       const { document, element, text } = createTestDocument();

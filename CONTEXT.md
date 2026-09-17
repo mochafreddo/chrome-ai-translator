@@ -29,7 +29,7 @@ The unit Inline Translation works in: one paragraph, heading, list item, quotati
 _Avoid_: node, chunk, segment, fragment
 
 **Inert Page Node**:
-A page-owned DOM node inside a Semantic Block that carries no visible or accessible language and exposes no role, focus, action, or editing semantics through the page DOM, but whose identity must survive Inline Translation, such as a React separator comment or a text-free image or SVG decoration. A node with a role declaration, accessible label, observable focus or action semantics, editable state, or prose descendant is not inert.
+A page-owned DOM node inside a Semantic Block that carries no language visible in the current viewport or exposed to accessibility APIs, and exposes no role, focus, action, or editing semantics through the page DOM, but whose identity must survive Inline Translation, such as a React separator comment, a text-free image or SVG decoration, or the hidden half of a responsive alternative-label pair. A responsive alternative may contain page-owned text, but that text is excluded from the model request while its viewport counterpart is visible. A node with a role declaration, accessible label, observable focus or action semantics, editable state, or prose that is not part of such a structurally identified responsive alternative is not inert.
 _Avoid_: decorative atom, trusted node, opaque node
 
 **Placeholder Token**:

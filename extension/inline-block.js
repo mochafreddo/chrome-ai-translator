@@ -595,6 +595,136 @@
     }
   }
 
+  function hasSafeResponsiveLabelSubtree(node) {
+    const stack = [node];
+    let visited = 0;
+    while (stack.length) {
+      const current = stack.pop();
+      if (++visited > MAX_STRUCTURE_NODES) return false;
+      if (current?.nodeType === 8) continue;
+      if (current?.nodeType === 3) continue;
+      if (
+        current?.nodeType !== 1 ||
+        !WRAPPER_TAGS.has(getTagName(current)) ||
+        isEffectivelyEditable(current) ||
+        hasInlineActionSemantics(current)
+      ) {
+        return false;
+      }
+      const attributeNames = typeof current.getAttributeNames === 'function'
+        ? current.getAttributeNames()
+        : [];
+      const hasAccessibleMetadata = attributeNames.some((name) => {
+        const normalizedName = String(name).toLowerCase();
+        return (
+          normalizedName.startsWith('aria-') &&
+          getAttribute(current, name).trim()
+        );
+      });
+      if (
+        hasAccessibleMetadata ||
+        hasAttribute(current, 'href') ||
+        hasAttribute(current, 'usemap') ||
+        hasAttribute(current, 'tabindex') ||
+        hasAttribute(current, 'focusable') ||
+        hasAttribute(current, 'role') ||
+        ['alt', 'title'].some((name) => getAttribute(current, name).trim())
+      ) {
+        return false;
+      }
+      stack.push(...getChildNodes(current));
+    }
+    return true;
+  }
+
+  function hasComplementaryResponsiveDisplayClasses(first, second) {
+    const firstClasses = new Set(
+      getAttribute(first, 'class').split(/\s+/).filter(Boolean)
+    );
+    const secondClasses = new Set(
+      getAttribute(second, 'class').split(/\s+/).filter(Boolean)
+    );
+    const shownDisplays = ['block', 'inline', 'inline-block', 'flex', 'grid'];
+    const isPair = (responsiveHidden, baseHidden) => {
+      if (!baseHidden.has('hidden')) return false;
+      for (const token of responsiveHidden) {
+        if (!token.endsWith(':hidden')) continue;
+        const prefix = token.slice(0, -':hidden'.length);
+        if (shownDisplays.some((display) =>
+          baseHidden.has(`${prefix}:${display}`)
+        )) {
+          return true;
+        }
+      }
+      return false;
+    };
+    return isPair(firstClasses, secondClasses) ||
+      isPair(secondClasses, firstClasses);
+  }
+
+  function isCssDisplayNone(node) {
+    if (
+      node?.nodeType !== 1 ||
+      node?.hidden ||
+      hasAttribute(node, 'hidden') ||
+      hasAttribute(node, 'aria-hidden')
+    ) {
+      return false;
+    }
+    const getComputedStyle = node?.ownerDocument?.defaultView?.getComputedStyle;
+    if (typeof getComputedStyle !== 'function') return false;
+    try {
+      return String(
+        getComputedStyle.call(node.ownerDocument.defaultView, node)?.display || ''
+      ).toLowerCase() === 'none';
+    } catch {
+      return false;
+    }
+  }
+
+  // Responsive title controls commonly render their compact and full labels as
+  // sibling spans and let a media query display exactly one. This deliberately
+  // recognizes only that label-group shape: arbitrary hidden prose elsewhere
+  // remains unsupported, as do labels with accessibility or action semantics.
+  function isResponsiveAlternativeLabel(node) {
+    if (
+      getTagName(node) !== 'SPAN' ||
+      getTagName(node?.parentElement) !== 'SPAN' ||
+      !isCssDisplayNone(node) ||
+      !normalizeVisibleLabel(node.textContent) ||
+      !hasSafeResponsiveLabelSubtree(node)
+    ) {
+      return false;
+    }
+    const siblings = getChildNodes(node.parentElement);
+    const labels = siblings.filter(
+      (child) =>
+        child?.nodeType === 1 && normalizeVisibleLabel(child.textContent)
+    );
+    if (
+      labels.length !== 2 ||
+      labels.some((label) => getTagName(label) !== 'SPAN') ||
+      labels.filter(isCssDisplayNone).length !== 1
+    ) {
+      return false;
+    }
+    const visible = labels.find((label) => label !== node);
+    if (
+      !visible ||
+      hasHiddenComputedStyle(visible) ||
+      !hasSafeResponsiveLabelSubtree(visible) ||
+      !hasComplementaryResponsiveDisplayClasses(node, visible)
+    ) {
+      return false;
+    }
+    return siblings.every(
+      (child) =>
+        isIgnorableWhitespace(child) ||
+        labels.includes(child) ||
+        isInertPageNode(child)
+    );
+  }
+
   function describeLocalRejection(reason, node) {
     const rejection = { reason };
     if (reason === 'custom_element') return rejection;
@@ -839,6 +969,21 @@
         return '';
       }
       const tagName = getTagName(node);
+      if (isResponsiveAlternativeLabel(node)) {
+        inertPageNodes.add(node);
+        const opaqueFailure = rememberOpaqueSubtree(node, opaqueAtomNodes);
+        if (opaqueFailure) {
+          failed = opaqueFailure;
+          return '';
+        }
+        return registerAtom(
+          node,
+          parentId,
+          tagName,
+          'responsive-label',
+          false
+        );
+      }
       if (isInertPageNode(node)) {
         inertPageNodes.add(node);
         const opaqueFailure = rememberOpaqueSubtree(node, opaqueAtomNodes);
@@ -1150,7 +1295,12 @@
       if (getHeadingControlPlacement(control.node, snapshot.blockElement) !== control.placement) return false;
     }
     for (const node of snapshot?.inertPageNodes || []) {
-      if (!isInertPageNode(node)) return false;
+      if (
+        !isInertPageNode(node) &&
+        !isResponsiveAlternativeLabel(node)
+      ) {
+        return false;
+      }
     }
     for (const container of snapshot?.originalContainers || []) {
       if (
