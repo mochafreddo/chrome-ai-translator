@@ -32,6 +32,14 @@ function createReasoningRecord(id = 'reasoning') {
   };
 }
 
+function getReasoningTranslatedTemplate(record) {
+  const wrapper = record.contract.entries.find(
+    (entry) => entry.kind === 'wrapper'
+  );
+  const atom = record.contract.entries.find((entry) => entry.kind === 'atom');
+  return `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
+}
+
 function createPlainRecord(template, id) {
   return {
     id,
@@ -153,7 +161,7 @@ exports.tests = [
       const partialTemplate = `${wrapper.openToken}Reasoning models!${wrapper.closeToken}와 ${atom.token}은 내부 추론 토큰을 사용합니다.`;
       assertRefused(record, partialTemplate, 'quality.english_residue');
 
-      const translatedTemplate = `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
+      const translatedTemplate = getReasoningTranslatedTemplate(record);
       assertApplied(record, translatedTemplate);
 
       for (const [id, source, output, qualityCode] of [
@@ -354,6 +362,7 @@ exports.tests = [
       // settings the snapshot is merged into and the diagnostics run it writes, and the
       // network for the two requests a repair makes. Correlations stay in this worker's own
       // state, which is what leaves the token below on every result.
+      let requestCount = 0;
       const worker = background.createBackgroundWorker({
         chrome: {
           storage: {
@@ -376,17 +385,21 @@ exports.tests = [
         // The correlation token asserted below is minted from this, and so is the
         // fingerprint on the run behind it.
         crypto: globalThis.crypto,
-        fetch: async () => ({
-          ok: true,
-          async json() {
-            return createCompletedResponse(JSON.stringify({
-              translations: [{ id: record.id, template: record.template }],
-            }));
-          },
-        }),
+        fetch: async () => {
+          requestCount += 1;
+          return {
+            ok: true,
+            async json() {
+              return createCompletedResponse(JSON.stringify({
+                translations: [{ id: record.id, template: record.template }],
+              }));
+            },
+          };
+        },
       });
 
       for (const settingsSnapshot of [null, { tone: 'formal' }]) {
+        const requestsBefore = requestCount;
         const results = await worker.translateVisibleBlockBatch(
           [record],
           settingsSnapshot,
@@ -406,15 +419,20 @@ exports.tests = [
           /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
         );
         assert.equal(Object.hasOwn(results[0], 'template'), false);
+        assert.equal(requestCount, requestsBefore + 2);
       }
     },
   },
   {
-    name: 'does not requeue a terminal repaired wrong-language rejection',
+    name: 'keeps a repaired wrong-language block original while applying its sibling',
     fn() {
-      const { block } = createReasoningFixture();
+      const failedFixture = createReasoningFixture();
+      const siblingFixture = createReasoningFixture();
       const store = content.createInlineViewportStore(303);
-      content.queueInlineViewportBlock(store, block);
+      const failedOriginal = failedFixture.block.textContent;
+      const siblingOriginal = siblingFixture.block.textContent;
+      content.queueInlineViewportBlock(store, failedFixture.block);
+      content.queueInlineViewportBlock(store, siblingFixture.block);
 
       const firstBatch = content.takeInlineViewportBlockBatch(store);
       // The rejection handed to the content script is the one the live path really
@@ -438,6 +456,7 @@ exports.tests = [
         repairedDecision.terminalCode,
         'quality.target_language_missing'
       );
+      const siblingTranslation = getReasoningTranslatedTemplate(firstBatch[1]);
 
       const firstSummary = content.applyInlineViewportBlockResults(
         firstBatch,
@@ -448,12 +467,19 @@ exports.tests = [
             terminalCode: repairedDecision.terminalCode,
             attemptCount: 2,
           },
+          {
+            id: firstBatch[1].id,
+            disposition: 'apply',
+            template: siblingTranslation,
+            attemptCount: 1,
+          },
         ],
         303,
         store
       );
       assert.equal(firstSummary.retried, 0);
       assert.equal(firstSummary.failed, 1);
+      assert.equal(firstSummary.applied, 1);
       assert.equal(store.queue.length, 0);
       assert.equal(firstBatch[0].state, 'failed');
       assert.equal(
@@ -461,6 +487,25 @@ exports.tests = [
         'quality.target_language_missing'
       );
       assert.equal(firstBatch[0].attemptCount, 2);
+      assert.equal(firstBatch[1].state, 'translated');
+      assert.equal(failedFixture.block.textContent, failedOriginal);
+      assert.notEqual(siblingFixture.block.textContent, siblingOriginal);
+
+      const readerMessage = content.formatInlineViewportErrorText(store.records);
+      assert.equal(
+        readerMessage,
+        'The model did not return the target language, so the original was kept.'
+      );
+      for (const privateValue of [
+        'quality.target_language_missing',
+        firstBatch[0].template,
+        siblingTranslation,
+        failedOriginal,
+        'correlation',
+        'fingerprint',
+      ]) {
+        assert.equal(readerMessage.includes(privateValue), false);
+      }
     },
   },
 ];

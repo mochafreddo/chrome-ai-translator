@@ -16,6 +16,10 @@ _Avoid_: batch, section, page part
 Translation of a page's article content in place, one Semantic Block at a time, as the reader scrolls. Inline elements such as links, emphasis, and code survive the replacement and may move to match the translated word order.
 _Avoid_: in-page translation, overlay translation, live translation, text-node translation
 
+**Failed Semantic Block**:
+An Inline Translation Semantic Block for which no acceptable result could be safely applied, so its original is kept, progress reports it as `Failed`, and sibling Semantic Blocks continue independently. It is not a wholly failed Inline Translation, because other Semantic Blocks may still succeed, and it is not a Partial Translation, because no result was applied.
+_Avoid_: failed translation, rejected result, request failure
+
 **Semantic Block**:
 The unit Inline Translation works in: one paragraph, heading, list item, quotation, caption, disclosure summary, term or definition, or table cell, taken whole. Progress counts, size limits, and retries are expressed in these; a Translation Chunk instead belongs to Side Panel Translation and holds many Semantic Blocks.
 _Avoid_: node, chunk, segment, fragment
