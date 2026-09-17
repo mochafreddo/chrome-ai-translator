@@ -1874,7 +1874,7 @@ exports.tests = [
           state: 'translated_with_warning',
           terminalCode: 'quality.english_residue',
         }]),
-        /Partial translation: Some source-language prose remained/
+        /Partial translation \(1 block\): Some source-language prose remained/
       );
       assert.match(
         helpers.getInlineTerminalReason([{
@@ -1895,7 +1895,7 @@ exports.tests = [
           state: 'failed',
           terminalCode: 'quality.target_language_missing',
         }]),
-        'The model did not return the target language, so the original was kept.'
+        'Translation failed (1 block): The model did not return the target language, so the original was kept.'
       );
       assert.match(
         helpers.getInlineTerminalReason([{
@@ -1915,7 +1915,7 @@ exports.tests = [
     },
   },
   {
-    name: 'selects the most recently completed unsuperseded terminal reason',
+    name: 'aggregates terminal reasons in a stable reader-facing order',
     fn() {
       const records = [
         {
@@ -1929,16 +1929,49 @@ exports.tests = [
           terminalSequence: 2,
         },
         {
-          state: 'failed',
-          terminalCode: 'protocol.invalid_json',
+          state: 'stale',
+          errorCode: 'block_changed',
           terminalSequence: 4,
           supersededByRetryId: 'retry-1',
         },
+        {
+          state: 'failed',
+          terminalCode: 'quality.target_language_missing',
+          terminalSequence: 5,
+        },
+        {
+          state: 'translated_with_warning',
+          terminalCode: 'quality.english_residue',
+          terminalSequence: 1,
+        },
+        {
+          state: 'stale',
+          errorCode: 'block_changed',
+          terminalSequence: 6,
+        },
+        { state: 'failed', terminalCode: 'protocol.invalid_json', terminalSequence: 12 },
+        { state: 'failed', terminalCode: 'runtime.apply_failed', terminalSequence: 11 },
+        { state: 'failed', errorCode: 'unsupported_block', terminalSequence: 10 },
+        { state: 'failed', errorCode: 'block_too_large', terminalSequence: 9 },
+        { state: 'failed', errorCode: 'session_too_large', terminalSequence: 8 },
+        { state: 'failed', errorCode: 'request_failed', terminalSequence: 7 },
       ];
 
-      assert.match(
-        helpers.getInlineTerminalReason(records),
-        /Partial translation: Some source-language prose remained/
+      assert.equal(
+        helpers.formatInlineViewportErrorText(records, true),
+        [
+          'Translation failed (1 block): The model did not return the target language, so the original was kept.',
+          'Partial translation (2 blocks): Some source-language prose remained after one repair attempt.',
+          'Translation failed (1 block): Protected page structure could not be preserved, so the original was kept.',
+          'Translation failed (1 block): The model response was malformed or incomplete.',
+          'Translation failed (1 block): The page rejected the translated update, so the original was kept.',
+          'Translation failed (1 block): This page block has unsupported structure, so no request was sent.',
+          'Translation failed (1 block): This page block exceeds the 12,000-character request limit, so no request was sent.',
+          'Translation failed (1 block): The visible translation reached this page visit\'s limit, so no request was sent. Reload the page to continue.',
+          'Changed (1 block): Page changed before translation could be applied.',
+          'Translation failed (1 block): The translation request could not be completed.',
+          'Diagnostics could not be saved.',
+        ].join('\n')
       );
     },
   },
@@ -2914,9 +2947,10 @@ exports.tests = [
 
       assert.match(message, /no request was sent/);
       assert.match(message, /Reload the page/);
+      assert.match(message, /\(1 block\)/);
       // The retired message named 60,000 characters, which is not a number the reader can
-      // count. Any figure here would be the same false promise under a different value.
-      assert.equal(/\d/.test(message), false);
+      // count. The only figure now is the issue summary's affected-block count.
+      assert.equal(/\d/.test(message.replace('(1 block)', '')), false);
     },
   },
   {
@@ -3124,7 +3158,7 @@ exports.tests = [
       );
       assert.equal(
         helpers.getInlineTerminalReason(store.records),
-        'Page changed before translation could be applied.'
+        'Changed (1 block): Page changed before translation could be applied.'
       );
     },
   },
@@ -3164,7 +3198,7 @@ exports.tests = [
       );
       assert.equal(
         helpers.getInlineTerminalReason(store.records),
-        'Page changed before translation could be applied.'
+        'Changed (1 block): Page changed before translation could be applied.'
       );
     },
   },
@@ -3254,7 +3288,7 @@ exports.tests = [
       );
       assert.equal(
         helpers.getInlineTerminalReason(secondStore.records),
-        'Page changed before translation could be applied.'
+        'Changed (1 block): Page changed before translation could be applied.'
       );
     },
   },

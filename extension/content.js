@@ -1064,47 +1064,102 @@ function formatInlineViewportStatusMessage(counts, status = 'active') {
   ].join('\n');
 }
 
-function getInlineTerminalReason(records) {
-  const candidates = (records || []).filter(
-    (record) =>
-      !record.supersededByRetryId &&
-      ['translated_with_warning', 'failed', 'stale'].includes(record.state)
-  );
-  const record = candidates.reduce((latest, candidate) =>
-    !latest || (Number(candidate.terminalSequence) || 0) >= (Number(latest.terminalSequence) || 0)
-      ? candidate
-      : latest
-  , null);
-  if (!record) return '';
+function getInlineTerminalReasonCategory(record) {
+  if (
+    !record ||
+    record.supersededByRetryId ||
+    !['translated_with_warning', 'failed', 'stale'].includes(record.state)
+  ) {
+    return '';
+  }
   const code = String(record.terminalCode || record.errorCode || '');
+  if (code === 'quality.target_language_missing') {
+    return 'target_language_missing';
+  }
   if (record.state === 'translated_with_warning') {
-    return 'Partial translation: Some source-language prose remained after one repair attempt.';
+    return 'residual_source_prose';
   }
   if (record.state === 'stale' || code === 'runtime.page_changed') {
-    return 'Page changed before translation could be applied.';
+    return 'page_changed';
   }
   if (code.startsWith('structure.')) {
-    return 'Translation failed: Protected page structure could not be preserved, so the original was kept.';
+    return 'protected_structure';
   }
   if (code.startsWith('protocol.')) {
-    return 'Translation failed: The model response was malformed or incomplete.';
-  }
-  if (code === 'quality.target_language_missing') {
-    return 'The model did not return the target language, so the original was kept.';
+    return 'malformed_response';
   }
   if (code === 'runtime.apply_failed') {
-    return 'Translation failed: The page rejected the translated update, so the original was kept.';
+    return 'application_failed';
   }
   if (code === 'runtime.unsupported_block' || code === 'unsupported_block') {
-    return 'Translation failed: This page block has unsupported structure, so no request was sent.';
+    return 'unsupported_block';
   }
   if (code === 'runtime.block_too_large' || code === 'block_too_large') {
-    return 'Translation failed: This page block exceeds the 12,000-character request limit, so no request was sent.';
+    return 'block_too_large';
   }
   if (code === 'runtime.session_too_large' || code === 'session_too_large') {
-    return 'Translation failed: The visible translation reached this page visit\'s limit, so no request was sent. Reload the page to continue.';
+    return 'session_too_large';
   }
-  return 'Translation failed: The translation request could not be completed.';
+  return 'request_failed';
+}
+
+const INLINE_TERMINAL_REASON_CATEGORIES = Object.freeze([
+  {
+    key: 'target_language_missing',
+    message: 'Translation failed ({count}): The model did not return the target language, so the original was kept.',
+  },
+  {
+    key: 'residual_source_prose',
+    message: 'Partial translation ({count}): Some source-language prose remained after one repair attempt.',
+  },
+  {
+    key: 'protected_structure',
+    message: 'Translation failed ({count}): Protected page structure could not be preserved, so the original was kept.',
+  },
+  {
+    key: 'malformed_response',
+    message: 'Translation failed ({count}): The model response was malformed or incomplete.',
+  },
+  {
+    key: 'application_failed',
+    message: 'Translation failed ({count}): The page rejected the translated update, so the original was kept.',
+  },
+  {
+    key: 'unsupported_block',
+    message: 'Translation failed ({count}): This page block has unsupported structure, so no request was sent.',
+  },
+  {
+    key: 'block_too_large',
+    message: 'Translation failed ({count}): This page block exceeds the 12,000-character request limit, so no request was sent.',
+  },
+  {
+    key: 'session_too_large',
+    message: 'Translation failed ({count}): The visible translation reached this page visit\'s limit, so no request was sent. Reload the page to continue.',
+  },
+  {
+    key: 'page_changed',
+    message: 'Changed ({count}): Page changed before translation could be applied.',
+  },
+  {
+    key: 'request_failed',
+    message: 'Translation failed ({count}): The translation request could not be completed.',
+  },
+]);
+
+function getInlineTerminalReason(records) {
+  const counts = new Map();
+  for (const record of records || []) {
+    const category = getInlineTerminalReasonCategory(record);
+    if (category) counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  return INLINE_TERMINAL_REASON_CATEGORIES
+    .filter(({ key }) => counts.has(key))
+    .map(({ key, message }) => {
+      const count = counts.get(key);
+      const affectedBlocks = `${count} ${count === 1 ? 'block' : 'blocks'}`;
+      return message.replace('{count}', affectedBlocks);
+    })
+    .join('\n');
 }
 
 // What the Floating Translate Button shows. Progress and errors are deliberately absent:

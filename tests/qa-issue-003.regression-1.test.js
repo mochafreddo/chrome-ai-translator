@@ -494,7 +494,7 @@ exports.tests = [
       const readerMessage = content.formatInlineViewportErrorText(store.records);
       assert.equal(
         readerMessage,
-        'The model did not return the target language, so the original was kept.'
+        'Translation failed (1 block): The model did not return the target language, so the original was kept.'
       );
       for (const privateValue of [
         'quality.target_language_missing',
