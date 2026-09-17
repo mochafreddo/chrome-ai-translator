@@ -1890,6 +1890,13 @@ exports.tests = [
         }]),
         /model response was malformed or incomplete/
       );
+      assert.equal(
+        helpers.getInlineTerminalReason([{
+          state: 'failed',
+          terminalCode: 'quality.target_language_missing',
+        }]),
+        'The model did not return the target language, so the original was kept.'
+      );
       assert.match(
         helpers.getInlineTerminalReason([{
           state: 'stale',

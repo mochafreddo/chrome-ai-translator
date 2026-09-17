@@ -1089,6 +1089,9 @@ function getInlineTerminalReason(records) {
   if (code.startsWith('protocol.')) {
     return 'Translation failed: The model response was malformed or incomplete.';
   }
+  if (code === 'quality.target_language_missing') {
+    return 'The model did not return the target language, so the original was kept.';
+  }
   if (code === 'runtime.apply_failed') {
     return 'Translation failed: The page rejected the translated update, so the original was kept.';
   }
