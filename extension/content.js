@@ -1103,7 +1103,7 @@ function getInlineTerminalReasonCategory(record) {
   return 'request_failed';
 }
 
-const INLINE_TERMINAL_REASON_CATEGORIES = Object.freeze([
+var INLINE_TERMINAL_REASON_CATEGORIES = Object.freeze([
   {
     key: 'target_language_missing',
     message: 'Translation failed ({count}): The model did not return the target language, so the original was kept.',
