@@ -34,25 +34,28 @@
     const known = new Set([
       'token_missing', 'token_duplicate', 'token_unknown',
       'token_nesting_invalid', 'token_parent_changed', 'output_too_long',
-      'output_parse_failed',
+      'output_parse_failed', 'source_syntax_changed',
     ]);
     return `structure.${known.has(code) ? code : 'output_parse_failed'}`;
   }
 
-  function words(value) {
-    const proseOnly = String(value || '').replace(
-        /\b[A-Za-z0-9_-]+\.(?:md|json|ya?ml|toml|js|ts|tsx?|jsx?|py|rb|go|rs)\b/gi,
-        ' '
-      );
+  function words(value, contract = null) {
+    const sourceSyntax = Array.isArray(contract?.sourceSyntax)
+      ? contract.sourceSyntax.map((item) => item?.value).filter(Boolean)
+      : [];
+    const proseOnly = codec.stripSourceSyntax(
+      String(value || ''),
+      sourceSyntax
+    );
     return Array.from(
       proseOnly.matchAll(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g),
       (match) => match[0]
     );
   }
 
-  function sharedEnglishEvidence(source, output) {
-    const sourceWords = words(source);
-    const outputWords = words(output).map((word) => word.toLowerCase());
+  function sharedEnglishEvidence(source, output, contract = null) {
+    const sourceWords = words(source, contract);
+    const outputWords = words(output, contract).map((word) => word.toLowerCase());
     let longest = 0;
     let count = 0;
     for (let length = Math.min(4, sourceWords.length); length >= 2; length -= 1) {
@@ -114,7 +117,7 @@
     if (!output.trim()) {
       return { status: 'partial', codes: [QUALITY_CODES.EMPTY_PROSE], evidence };
     }
-    const sourceProseWordCount = words(source).filter(
+    const sourceProseWordCount = words(source, contract).filter(
       (word) => !/^[A-Z0-9_]{2,}$/.test(word)
     ).length;
     const outputLetterCount = countUnicodeLetters(output);
@@ -137,7 +140,7 @@
       };
     }
     if (!/^en(?:glish)?\b/i.test(String(targetLanguage || '').trim())) {
-      const shared = sharedEnglishEvidence(source, output);
+      const shared = sharedEnglishEvidence(source, output, contract);
       evidence.sharedEnglishSequenceLength = shared.longest;
       evidence.sharedEnglishSequenceCount = shared.count;
       if (shared.count) {

@@ -52,6 +52,7 @@
     'SPAN',
   ]);
   const ATOM_TAGS = new Set(['CODE', 'KBD', 'SAMP', 'BR', 'WBR']);
+  const INERT_PAGE_NODE_TAGS = new Set(['IMG', 'SVG']);
   const OPAQUE_DESCENDANT_TAGS = new Set([
     'A',
     ...WRAPPER_TAGS,
@@ -82,14 +83,19 @@
   // deciding whether a link label is a protected atom, and the content script, deciding
   // whether a candidate text node is worth scanning at all. It lives here because the codec
   // already owns what a protected atom is, and one home is what keeps the two answers equal.
+  function hasSourcePathFileExtension(value) {
+    return /\.[\p{L}][\p{L}\p{N}]{0,9}$/u.test(
+      String(value || '')
+    );
+  }
+
   function isCodeLikeInlineText(text) {
     const value = String(text || '').trim();
     if (!value) return true;
     if (/^https?:\/\//i.test(value)) return true;
     if (
-      /^[\w./-]+\.(md|js|ts|tsx|jsx|json|ya?ml|css|html|py|rb|go|rs|java|kt|swift|sh)$/i.test(
-        value
-      )
+      /^[\w./-]+$/i.test(value) &&
+      hasSourcePathFileExtension(value)
     ) {
       return true;
     }
@@ -281,6 +287,96 @@
     ];
   }
 
+  function getSourceSyntaxLiterals(value, contextualLiterals = []) {
+    const counts = new Map();
+    const add = (literal) => {
+      const normalized = String(literal || '');
+      if (!normalized) return;
+      const count = String(value || '').split(normalized).length - 1;
+      if (count > 0) counts.set(normalized, count);
+    };
+    const text = String(value || '');
+    for (const match of text.matchAll(/\[[^\]\r\n|]+\|[^\]\r\n]+\]/g)) {
+      add(match[0]);
+    }
+    for (const match of text.matchAll(
+      /(^|[\s([{"'`])((?:~\/|\.{1,2}\/|\/)[\p{L}\p{N}._~+@%-]+(?:\/[\p{L}\p{N}._~+@%-]+)*)/gu
+    )) {
+      add(match[2].replace(/[.,;:!?]+$/u, ''));
+    }
+    for (const match of text.matchAll(
+      /(^|[^\p{L}\p{N}_.~+@%/-])([\p{L}\p{N}_.~+@%-]+(?:\/[\p{L}\p{N}_.~+@%-]+)*)(?=$|[^\p{L}\p{N}_.~+@%/-])/gu
+    )) {
+      const literal = match[2].replace(/[.,;:!?]+$/u, '');
+      if (hasSourcePathFileExtension(literal)) {
+        add(literal);
+      }
+    }
+    for (const literal of contextualLiterals || []) add(literal);
+    return counts;
+  }
+
+  function stripSourceSyntax(value, contextualLiterals = []) {
+    let text = String(value || '');
+    for (const literal of getSourceSyntaxLiterals(
+      text,
+      contextualLiterals
+    ).keys()) {
+      text = text.split(literal).join(' ');
+    }
+    return text;
+  }
+
+  function isSourceSyntaxContinuation(text, index, direction) {
+    const value = String(text || '');
+    const character = value[index] || '';
+    if (/[A-Za-z0-9_~+@%/-]/.test(character)) return true;
+    if (character !== '.') return false;
+    const adjacent = value[index + direction] || '';
+    return /[\p{L}\p{N}]/u.test(adjacent);
+  }
+
+  function countPreservedSourceSyntax(value, literal) {
+    const text = String(value || '');
+    const expected = String(literal || '');
+    let count = 0;
+    let from = 0;
+    while (expected && from <= text.length - expected.length) {
+      const index = text.indexOf(expected, from);
+      if (index < 0) break;
+      const before = index - 1;
+      const after = index + expected.length;
+      if (
+        !isSourceSyntaxContinuation(text, before, -1) &&
+        !isSourceSyntaxContinuation(text, after, 1)
+      ) {
+        count += 1;
+      }
+      from = index + expected.length;
+    }
+    return count;
+  }
+
+  function getLinkedSourceSyntax(node) {
+    if (getTagName(node) !== 'A') return '';
+    const label = normalizeVisibleLabel(node.textContent);
+    if (
+      !/^[\p{L}\p{N}_.~+@%-]+(?:\/[\p{L}\p{N}_.~+@%-]+)+$/u.test(label)
+    ) {
+      return '';
+    }
+    const href = getAttribute(node, 'href');
+    if (!href) return '';
+    try {
+      const path = decodeURIComponent(
+        new URL(href, 'https://source-syntax.invalid').pathname
+      ).replace(/^\/+|\/+$/g, '');
+      return path === label || path.endsWith(`/${label}`) ? label : '';
+    } catch {
+      return '';
+    }
+  }
+
   function hasAttribute(node, name) {
     return Boolean(node?.hasAttribute?.(name));
   }
@@ -296,6 +392,78 @@
       return getAttribute(current, 'contenteditable').toLowerCase() !== 'false';
     }
     return false;
+  }
+
+  function hasInlineActionSemantics(node) {
+    const attributeNames = typeof node?.getAttributeNames === 'function'
+      ? node.getAttributeNames()
+      : ['onclick'];
+    if (attributeNames.some((name) =>
+      /^on/i.test(String(name)) && hasAttribute(node, name)
+    )) {
+      return true;
+    }
+    for (
+      let owner = node;
+      owner && owner !== Object.prototype;
+      owner = Object.getPrototypeOf(owner)
+    ) {
+      for (const name of Object.getOwnPropertyNames(owner)) {
+        if (!/^on/i.test(name)) continue;
+        try {
+          if (typeof node[name] === 'function') return true;
+        } catch {}
+      }
+    }
+    return false;
+  }
+
+  function isInertPageNode(node) {
+    if (
+      node?.nodeType !== 1 ||
+      !INERT_PAGE_NODE_TAGS.has(getTagName(node))
+    ) {
+      return false;
+    }
+    const stack = [node];
+    while (stack.length) {
+      const current = stack.pop();
+      if (current?.nodeType === 8) continue;
+      if (current?.nodeType === 3) {
+        if (normalizeVisibleLabel(current.nodeValue)) return false;
+        continue;
+      }
+      if (current?.nodeType !== 1) return false;
+      const tagName = getTagName(current);
+      const attributeNames = typeof current.getAttributeNames === 'function'
+        ? current.getAttributeNames()
+        : [];
+      const hasAccessibleMetadata = attributeNames.some((name) => {
+        const normalizedName = String(name).toLowerCase();
+        const value = getAttribute(current, name).trim();
+        if (!normalizedName.startsWith('aria-') || !value) return false;
+        return normalizedName !== 'aria-hidden' || value.toLowerCase() !== 'true';
+      });
+      if (
+        INTERACTIVE_TAGS.has(tagName) ||
+        tagName === 'A' ||
+        isEffectivelyEditable(current) ||
+        hasInlineActionSemantics(current) ||
+        hasAttribute(current, 'href') ||
+        hasAttribute(current, 'usemap') ||
+        hasAttribute(current, 'tabindex') ||
+        hasAttribute(current, 'focusable') ||
+        hasAttribute(current, 'role') ||
+        hasAccessibleMetadata ||
+        ['alt', 'title'].some((name) =>
+          getAttribute(current, name).trim()
+        )
+      ) {
+        return false;
+      }
+      stack.push(...getChildNodes(current));
+    }
+    return true;
   }
 
   function hasHiddenComputedStyle(node) {
@@ -511,6 +679,10 @@
         if (!append(`T(${String(current.nodeValue || '')})`)) return null;
         continue;
       }
+      if (current?.nodeType === 8) {
+        if (!append(`C(${String(current.nodeValue || '')})`)) return null;
+        continue;
+      }
       if (current?.nodeType !== 1) {
         if (!append(`N${current?.nodeType || 0}`)) return null;
         continue;
@@ -575,6 +747,9 @@
     const anchoredSummary = findAnchoredLeadingSummary(block);
     const localControls = [];
     const localControlNodes = new Set();
+    const opaqueAtomNodes = new Set();
+    const inertPageNodes = new Set();
+    const contextualSourceSyntax = new Set();
     let wrapperIndex = 0;
     let atomIndex = 0;
     let failed = null;
@@ -591,24 +766,24 @@
       }
     }
 
-    function rememberOpaqueSubtree(root, localControl = false) {
+    function rememberOpaqueSubtree(root, prevalidatedNodes = null) {
       const stack = [root];
       while (stack.length) {
         const current = stack.pop();
-        if (current?.nodeType === 3) {
+        if (current?.nodeType === 3 || current?.nodeType === 8) {
           originalTextValues.set(current, String(current.nodeValue || ''));
           continue;
         }
         if (current?.nodeType !== 1) {
           return describeLocalRejection('unsupported_descendant', current);
         }
-        if (localControl) localControlNodes.add(current);
-        const unsupported = localControl ? null : classifyUnsupportedElement(current);
+        if (prevalidatedNodes) prevalidatedNodes.add(current);
+        const unsupported = prevalidatedNodes ? null : classifyUnsupportedElement(current);
         if (unsupported) return unsupported;
-        if (!localControl && current !== root && !OPAQUE_DESCENDANT_TAGS.has(getTagName(current))) {
+        if (!prevalidatedNodes && current !== root && !OPAQUE_DESCENDANT_TAGS.has(getTagName(current))) {
           return describeLocalRejection('unsupported_descendant', current);
         }
-        if (!localControl && isSemanticBlockElement(current)) {
+        if (!prevalidatedNodes && isSemanticBlockElement(current)) {
           return describeLocalRejection('nested_semantic_block', current);
         }
         rememberContainer(current);
@@ -620,6 +795,27 @@
       return null;
     }
 
+    function registerAtom(node, parentId, tagName, atomKind, preserveText) {
+      atomIndex += 1;
+      const id = `A${atomIndex}`;
+      const token = `⟦${namespace}:ATOM:${id}⟧`;
+      const entry = {
+        id,
+        kind: 'atom',
+        tagName,
+        parentId,
+        token,
+        atomKind,
+        preserveText,
+      };
+      contractEntries.push(entry);
+      snapshotEntries.set(id, { ...entry, node });
+      const metadata = { token, kind: atomKind, preserveText };
+      if (preserveText) metadata.label = normalizeVisibleLabel(node.textContent);
+      atoms.push(metadata);
+      return token;
+    }
+
     function visit(node, parentId) {
       if (failed) return '';
       if (node?.nodeType === 3) {
@@ -628,6 +824,10 @@
         rememberLiteralTokens(value);
         return value;
       }
+      if (node?.nodeType === 8) {
+        originalTextValues.set(node, String(node.nodeValue || ''));
+        return registerAtom(node, parentId, '#COMMENT', 'comment', false);
+      }
       if (node?.nodeType !== 1) {
         failed = describeLocalRejection('unsupported_descendant', node);
         return '';
@@ -635,8 +835,24 @@
       const placement = parentId === 'ROOT' && getHeadingControlPlacement(node, block);
       if (placement) {
         localControls.push({ node, placement });
-        rememberOpaqueSubtree(node, true);
+        rememberOpaqueSubtree(node, localControlNodes);
         return '';
+      }
+      const tagName = getTagName(node);
+      if (isInertPageNode(node)) {
+        inertPageNodes.add(node);
+        const opaqueFailure = rememberOpaqueSubtree(node, opaqueAtomNodes);
+        if (opaqueFailure) {
+          failed = opaqueFailure;
+          return '';
+        }
+        return registerAtom(
+          node,
+          parentId,
+          tagName,
+          tagName.toLowerCase(),
+          false
+        );
       }
       const unsupported = classifyUnsupportedElement(node);
       if (unsupported) {
@@ -644,7 +860,6 @@
         return '';
       }
 
-      const tagName = getTagName(node);
       if (isSemanticBlockElement(node)) {
         failed = describeLocalRejection('nested_semantic_block', node);
         return '';
@@ -658,34 +873,13 @@
           failed = opaqueFailure;
           return '';
         }
-        atomIndex += 1;
-        const id = `A${atomIndex}`;
-        const token = `⟦${namespace}:ATOM:${id}⟧`;
         const structural = tagName === 'BR' || tagName === 'WBR';
         const atomKind = protectedLink
           ? 'protected-link'
           : structural
             ? 'line-break'
             : tagName.toLowerCase();
-        const entry = {
-          id,
-          kind: 'atom',
-          tagName,
-          parentId,
-          token,
-          atomKind,
-          preserveText: !structural,
-        };
-        contractEntries.push(entry);
-        snapshotEntries.set(id, { ...entry, node });
-        const metadata = {
-          token,
-          kind: atomKind,
-          preserveText: !structural,
-        };
-        if (!structural) metadata.label = normalizeVisibleLabel(node.textContent);
-        atoms.push(metadata);
-        return token;
+        return registerAtom(node, parentId, tagName, atomKind, !structural);
       }
 
       const anchoredWrapper = node === anchoredSummary;
@@ -712,6 +906,8 @@
       contractEntries.push(entry);
       snapshotEntries.set(id, { ...entry, node });
       rememberContainer(node);
+      const linkedSourceSyntax = getLinkedSourceSyntax(node);
+      if (linkedSourceSyntax) contextualSourceSyntax.add(linkedSourceSyntax);
       const inner = getChildNodes(node)
         .map((child) => visit(child, id))
         .join('');
@@ -727,6 +923,10 @@
       return createUnsupportedResult(describeLocalRejection('empty_content', block));
     }
 
+    const sourceSyntax = Array.from(
+      getSourceSyntaxLiterals(template, contextualSourceSyntax),
+      ([value, count]) => ({ value, count })
+    );
     const contract = {
       codecVersion: CODEC_VERSION,
       namespace,
@@ -747,6 +947,7 @@
         count,
       })),
     };
+    if (sourceSyntax.length) contract.sourceSyntax = sourceSyntax;
     const originalSignature = hashText(sourceFingerprint);
     const cacheKey = JSON.stringify({
       codecVersion: CODEC_VERSION,
@@ -772,6 +973,8 @@
       originalTextValues,
       localControls,
       localControlNodes,
+      opaqueAtomNodes,
+      inertPageNodes,
       originalSignature,
       contract,
       template,
@@ -823,6 +1026,17 @@
       template.length > contract.maxOutputChars
     ) {
       return validationError('output_too_long');
+    }
+    for (const item of contract.sourceSyntax || []) {
+      if (
+        typeof item?.value !== 'string' ||
+        !item.value ||
+        !Number.isInteger(item.count) ||
+        item.count < 1 ||
+        countPreservedSourceSyntax(template, item.value) !== item.count
+      ) {
+        return validationError('source_syntax_changed');
+      }
     }
 
     const expectedTokens = placeholderTokens.enumerateExpectedTokens(
@@ -935,11 +1149,21 @@
     for (const control of snapshot?.localControls || []) {
       if (getHeadingControlPlacement(control.node, snapshot.blockElement) !== control.placement) return false;
     }
+    for (const node of snapshot?.inertPageNodes || []) {
+      if (!isInertPageNode(node)) return false;
+    }
     for (const container of snapshot?.originalContainers || []) {
-      if (snapshot.localControlNodes?.has(container.node)) continue;
+      if (
+        snapshot.localControlNodes?.has(container.node) ||
+        snapshot.opaqueAtomNodes?.has(container.node)
+      ) continue;
       if (isUnsupportedElement(container.node)) return false;
     }
     for (const entry of snapshot?.entries?.values?.() || []) {
+      if (
+        entry.node?.nodeType === 8 ||
+        snapshot.opaqueAtomNodes?.has(entry.node)
+      ) continue;
       if (isUnsupportedElement(entry.node)) return false;
     }
     return true;
@@ -1140,6 +1364,7 @@
     serializeBlock,
     isCodeLikeInlineText,
     isProtectedAtomicLinkLabel,
+    stripSourceSyntax,
     restoreBlock,
     validateTranslatedTemplate,
   };

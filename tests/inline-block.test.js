@@ -1,6 +1,22 @@
 const assert = require('node:assert/strict');
 const codec = require('../extension/inline-block.js');
 
+const LINGUISTIC_SLASH_PROSE = Object.freeze([
+  'and/or',
+  'his/her',
+  'input/output',
+  'yes/no',
+  'he/she',
+  'read/write',
+  'he/she/they',
+  'and/or/both',
+  'input/output/error',
+  'mattpocock/skills',
+  'version1/version2',
+  'input/output-v2/error',
+  'alpha/beta2/gamma',
+]);
+
 function createTestDocument() {
   class TestNode {
     constructor(nodeType, ownerDocument) {
@@ -71,6 +87,13 @@ function createTestDocument() {
     }
   }
 
+  class TestComment extends TestNode {
+    constructor(value, ownerDocument) {
+      super(8, ownerDocument);
+      this.nodeValue = String(value);
+    }
+  }
+
   class TestElement extends TestNode {
     constructor(tagName, ownerDocument) {
       super(1, ownerDocument);
@@ -85,6 +108,10 @@ function createTestDocument() {
 
     hasAttribute(name) {
       return this.attributes.has(String(name).toLowerCase());
+    }
+
+    getAttributeNames() {
+      return Array.from(this.attributes.keys());
     }
 
     setAttribute(name, value) {
@@ -133,6 +160,10 @@ function createTestDocument() {
 
     createTextNode(value) {
       return new TestText(value, this);
+    }
+
+    createComment(value) {
+      return new TestComment(value, this);
     }
   }
 
@@ -399,6 +430,173 @@ exports.tests = [
     },
   },
   {
+    name: 'preserves React separator comments through apply and restore',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const directComment = document.createComment(' ');
+      const codeComment = document.createComment(' ');
+      const code = element('code', text('/'), codeComment, text('skill'));
+      const block = element(
+        'p',
+        text('Run '),
+        directComment,
+        code,
+        text('.')
+      );
+      document.body.appendChild(block);
+      const originalChildren = [...block.childNodes];
+      const originalCodeChildren = [...code.childNodes];
+
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const translated = `실행 ${serialized.contract.entries
+        .map((entry) => entry.token)
+        .filter(Boolean)
+        .join('')}.`;
+      const plan = codec.createPatchPlan(serialized.snapshot, translated);
+      assert.equal(plan.ok, true);
+      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      assert.equal(directComment.parentNode, block);
+      assert.equal(codeComment.parentNode, code);
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, originalChildren);
+      assert.deepEqual(code.childNodes, originalCodeChildren);
+    },
+  },
+  {
+    name: 'preserves text-free image and SVG decorations but rejects hidden prose',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const image = element('img');
+      image.setAttribute('alt', '');
+      const heading = element('h1', image, text('Title'));
+      const icon = element('svg', element('path'));
+      icon.setAttribute('aria-hidden', 'true');
+      const paragraph = element('p', icon, text('Privacy'));
+      document.body.appendChild(heading);
+      document.body.appendChild(paragraph);
+
+      for (const [block, decoration] of [
+        [heading, image],
+        [paragraph, icon],
+      ]) {
+        const originalChildren = [...block.childNodes];
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, true);
+        const atom = serialized.contract.entries.find(
+          (entry) => entry.kind === 'atom'
+        );
+        assert.ok(atom);
+        const plan = codec.createPatchPlan(
+          serialized.snapshot,
+          `${atom.token} 번역`
+        );
+        assert.equal(plan.ok, true);
+        assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+        assert.equal(decoration.parentNode, block);
+        assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+        assert.deepEqual(block.childNodes, originalChildren);
+      }
+
+      const hidden = element('span', text('Hidden prose'));
+      hidden.setAttribute('aria-hidden', 'true');
+      const unsafe = element('p', text('Visible prose'), hidden);
+      document.body.appendChild(unsafe);
+      assert.deepEqual(
+        codec.serializeBlock(unsafe),
+        unsupportedBlock('hidden_content', 'SPAN')
+      );
+    },
+  },
+  {
+    name: 'rejects image and SVG nodes that are not inert',
+    fn() {
+      for (const makeDecoration of [
+        ({ element }) => {
+          const image = element('img');
+          image.setAttribute('alt', 'Architecture diagram');
+          return image;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('aria-label', 'Open menu');
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('aria-hidden', 'false');
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('tabindex', '0');
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('tabindex', '-1');
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('focusable', 'true');
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('focusable', 'false');
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('aria-valuetext', 'Half');
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('onclick', 'openMenu()');
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.onclick = () => {};
+          return icon;
+        },
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('role', 'link');
+          return icon;
+        },
+        ...['img', 'presentation', 'none', 'generic'].map((role) =>
+          ({ element }) => {
+            const icon = element('svg', element('path'));
+            icon.setAttribute('role', role);
+            return icon;
+          }
+        ),
+        ({ element }) => {
+          const icon = element('svg', element('path'));
+          icon.setAttribute('onkeydown', 'openMenu()');
+          return icon;
+        },
+        ({ element }) => {
+          const editable = element('span');
+          editable.setAttribute('contenteditable', 'true');
+          return element('svg', editable);
+        },
+      ]) {
+        const { document, element, text } = createTestDocument();
+        const block = element(
+          'p',
+          makeDecoration({ element }),
+          text('Visible prose')
+        );
+        document.body.appendChild(block);
+        assertReaderFacingUnsupported(codec.serializeBlock(block));
+      }
+    },
+  },
+  {
     name: 'classifies protected technical link labels conservatively',
     fn() {
       assert.equal(codec.isProtectedAtomicLinkLabel('GPT-5.5'), true);
@@ -410,6 +608,93 @@ exports.tests = [
       assert.equal(codec.isProtectedAtomicLinkLabel('Read 2 examples'), false);
       assert.equal(codec.isProtectedAtomicLinkLabel('Version 5 overview'), false);
       assert.equal(codec.isProtectedAtomicLinkLabel('Model o3'), true);
+    },
+  },
+  {
+    name: 'preserves Source Syntax while allowing linguistic slash prose to translate',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const repositoryLink = element('a', text('mattpocock/skills'));
+      repositoryLink.setAttribute(
+        'href',
+        'https://github.com/mattpocock/skills'
+      );
+      const repository = element('dd', repositoryLink);
+      document.body.appendChild(repository);
+      const serialized = codec.serializeBlock(repository);
+      assert.equal(serialized.ok, true);
+      const link = serialized.contract.entries.find(
+        (entry) => entry.tagName === 'A'
+      );
+      assert.equal(
+        codec.validateTranslatedTemplate(
+          `${link.openToken}저장소 mattpocock/skills${link.closeToken}`,
+          serialized.contract
+        ).ok,
+        true
+      );
+      assert.equal(
+        codec.validateTranslatedTemplate(
+          `${link.openToken}mattpocock/skills는 저장소${link.closeToken}`,
+          serialized.contract
+        ).ok,
+        true
+      );
+      assert.deepEqual(
+        codec.validateTranslatedTemplate(
+          `${link.openToken}저장소 other/project${link.closeToken}`,
+          serialized.contract
+        ),
+        { ok: false, errorCode: 'source_syntax_changed' }
+      );
+
+      for (const [source, changedValues] of [
+        [
+          '/usr/local/bin',
+          ['usr/local/bin', '/usr/local/bin-old', '/usr/local/bin/extra'],
+        ],
+        ['./docs/guide.md', ['docs/guide.md']],
+        ['문서/안내.md', ['docs/guide.md']],
+        ['README.md', ['README.txt', 'README.md-old']],
+      ]) {
+        const syntax = element('p', text(source));
+        document.body.appendChild(syntax);
+        const syntaxRecord = codec.serializeBlock(syntax);
+        assert.equal(syntaxRecord.ok, true);
+        for (const changed of changedValues) {
+          assert.deepEqual(
+            codec.validateTranslatedTemplate(
+              changed,
+              syntaxRecord.contract
+            ),
+            { ok: false, errorCode: 'source_syntax_changed' },
+            `${source} -> ${changed}`
+          );
+        }
+      }
+
+      const punctuatedPath = element('p', text('Run /usr/local/bin.'));
+      document.body.appendChild(punctuatedPath);
+      const punctuatedRecord = codec.serializeBlock(punctuatedPath);
+      assert.equal(punctuatedRecord.ok, true);
+      assert.deepEqual(punctuatedRecord.contract.sourceSyntax, [
+        { value: '/usr/local/bin', count: 1 },
+      ]);
+
+      for (const source of LINGUISTIC_SLASH_PROSE) {
+        const prose = element('p', text(`Choose ${source}.`));
+        document.body.appendChild(prose);
+        const proseRecord = codec.serializeBlock(prose);
+        assert.equal(proseRecord.ok, true);
+        assert.equal(
+          codec.validateTranslatedTemplate(
+            '하나를 선택하세요.',
+            proseRecord.contract
+          ).ok,
+          true,
+          source
+        );
+      }
     },
   },
   {
@@ -1905,3 +2190,4 @@ exports.tests = [
 
 exports.createTestDocument = createTestDocument;
 exports.createReasoningFixture = createReasoningFixture;
+exports.LINGUISTIC_SLASH_PROSE = LINGUISTIC_SLASH_PROSE;

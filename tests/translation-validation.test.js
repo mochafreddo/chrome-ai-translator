@@ -1,6 +1,11 @@
 const assert = require('node:assert/strict');
+const codec = require('../extension/inline-block.js');
 const validation = require('../extension/translation-validation.js');
-const { createReasoningFixture } = require('./inline-block.test');
+const {
+  createReasoningFixture,
+  createTestDocument,
+  LINGUISTIC_SLASH_PROSE,
+} = require('./inline-block.test');
 
 function plainRecord(id = 'b1', template = 'This is source prose.') {
   return {
@@ -135,6 +140,42 @@ exports.tests = [
     },
   },
   {
+    name: 'reports changed Source Syntax as an unsafe structure',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const link = element('a', text('mattpocock/skills'));
+      link.setAttribute('href', 'https://github.com/mattpocock/skills');
+      const block = element('dd', link);
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+
+      const result = validation.validateBlockResponse(
+        JSON.stringify({
+          translations: [{
+            id: 'repository',
+            template: serialized.template.replace(
+              'mattpocock/skills',
+              'other/project'
+            ),
+          }],
+        }),
+        [{
+          id: 'repository',
+          template: serialized.template,
+          atoms: serialized.atoms,
+          contract: serialized.contract,
+        }],
+        { targetLanguage: 'Korean' }
+      );
+      assert.equal(result.records[0].structure.status, 'unsafe');
+      assert.deepEqual(result.records[0].structure.codes, [
+        'structure.source_syntax_changed',
+      ]);
+      assert.equal(result.records[0].quality.status, 'uncertain');
+    },
+  },
+  {
     name: 'separates safe structure from partial translation quality',
     fn() {
       const record = plainRecord();
@@ -234,6 +275,46 @@ exports.tests = [
           .codes[0],
         'quality.target_language_missing'
       );
+      const { document, element, text } = createTestDocument();
+      const link = element('a', text('mattpocock/skills'));
+      link.setAttribute('href', 'https://github.com/mattpocock/skills');
+      const block = element('dd', link);
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      const result = validation.validateBlockResponse(
+        JSON.stringify({
+          translations: [{
+            id: 'repository',
+            template: serialized.template,
+          }],
+        }),
+        [{
+          id: 'repository',
+          template: serialized.template,
+          atoms: serialized.atoms,
+          contract: serialized.contract,
+        }],
+        { targetLanguage: 'Korean' }
+      );
+      assert.equal(result.records[0].quality.status, 'complete');
+    },
+  },
+  {
+    name: 'treats linguistic slash compounds as source-language prose',
+    fn() {
+      for (const source of LINGUISTIC_SLASH_PROSE) {
+        const result = validation.assessTranslationQuality(
+          source,
+          source,
+          'Korean'
+        );
+        assert.equal(result.status, 'partial', source);
+        assert.deepEqual(
+          result.codes,
+          ['quality.target_language_missing'],
+          source
+        );
+      }
     },
   },
 ];

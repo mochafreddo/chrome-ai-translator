@@ -20,13 +20,25 @@ _Avoid_: in-page translation, overlay translation, live translation, text-node t
 An Inline Translation Semantic Block for which no acceptable result could be safely applied, so its original is kept, progress reports it as `Failed`, and sibling Semantic Blocks continue independently. It is not a wholly failed Inline Translation, because other Semantic Blocks may still succeed, and it is not a Partial Translation, because no result was applied.
 _Avoid_: failed translation, rejected result, request failure
 
+**Partial Translation**:
+An Inline Translation result applied after its one repair still leaves a material amount of source-language prose. Progress reports the Semantic Block as `Partial`; isolated technical names and Source Syntax do not make a translation partial.
+_Avoid_: warning, degraded translation, incomplete result
+
 **Semantic Block**:
 The unit Inline Translation works in: one paragraph, heading, list item, quotation, caption, disclosure summary, term or definition, or table cell, taken whole. Progress counts, size limits, and retries are expressed in these; a Translation Chunk instead belongs to Side Panel Translation and holds many Semantic Blocks.
 _Avoid_: node, chunk, segment, fragment
 
+**Inert Page Node**:
+A page-owned DOM node inside a Semantic Block that carries no visible or accessible language and exposes no role, focus, action, or editing semantics through the page DOM, but whose identity must survive Inline Translation, such as a React separator comment or a text-free image or SVG decoration. A node with a role declaration, accessible label, observable focus or action semantics, editable state, or prose descendant is not inert.
+_Avoid_: decorative atom, trusted node, opaque node
+
 **Placeholder Token**:
-The stand-in a translation sends in place of a link, emphasis, or code span, so that the model may reorder the words around it without rewriting what it stands for. A translation replaces each one before sending, requires every one of them back byte-for-byte and exactly once, and puts the original span back afterwards. This is the one term both translations share, and it is shared because they meet the same problem rather than because they resemble each other: the same contract, the same four failures — a token lost, repeated, invented, or crossed — and one implementation behind both, `extension/placeholder-tokens.js`, which each translation reaches through an adapter naming its own entry kinds. The reader is never shown this name. A failed check says "a link or code marker", which is a deliberate paraphrase and not a fifth vocabulary for the same thing.
+The stand-in a translation sends in place of page-owned structure it must preserve, such as a link, emphasis, code span, or Inert Page Node, so that the model may reorder the words around it without rewriting what it stands for. A translation replaces each one before sending, requires every one of them back byte-for-byte and exactly once, and puts the original page node back afterwards. This is the one term both translations share, and it is shared because they meet the same problem rather than because they resemble each other: the same contract, the same four failures — a token lost, repeated, invented, or crossed — and one implementation behind both, `extension/placeholder-tokens.js`, which each translation reaches through an adapter naming its own entry kinds. The reader is never shown this name. A failed check says "a link or code marker", which is a deliberate paraphrase and not a fifth vocabulary for the same thing.
 _Avoid_: bare `token`, which in this project already means two other things — a model token, which is what the reader is billed for and what `maxOutputTokens` bounds, and a correlation token, which pairs an inline result with the request that asked for it. Also marker, tag, sentinel, protected span.
+
+**Source Syntax**:
+Visible, page-owned notation whose spelling and delimiters carry meaning and therefore remains byte-for-byte unchanged during translation, identifiable from unambiguous syntax or a linked destination; examples include `mattpocock/skills`, `/usr/local/bin`, `./docs/guide.md`, and `[lite|full|ultra]`. Target-language grammar may touch its boundary without changing those bytes, while an ambiguous unlinked slash expression remains source-language prose and is translated; Source Syntax is content from the page, not a Placeholder Token inserted by the translation.
+_Avoid_: code, literal token, protected text, technical term
 
 **Inline Translation Session**:
 The span the Session Budget is counted over: one page visit. It begins when the page loads and ends when the page is reloaded or left. It is not ended by **Original text** and not ended by stopping — both carry the Session Budget forward, so neither is a way to start spending afresh. It bounds one visit to one page, not the reader's spending: a reader who reloads three times has three of these and pays for all three.
