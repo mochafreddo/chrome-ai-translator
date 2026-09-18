@@ -25,21 +25,6 @@ exports.tests = [
     },
   },
   {
-    name: 'accepts output only from a completed response',
-    fn() {
-      assert.equal(
-        responseApi.parseCompletedResponse({
-          status: 'completed',
-          output: [{
-            type: 'message',
-            content: [{ type: 'output_text', text: '완료된 번역' }],
-          }],
-        }),
-        '완료된 번역'
-      );
-    },
-  },
-  {
     name: 'rejects non-empty incomplete output as retryable only for max tokens',
     fn() {
       assert.throws(

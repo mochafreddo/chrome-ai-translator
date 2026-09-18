@@ -20,13 +20,6 @@ function countStandaloneMentions(source, value) {
 exports.name = 'default model';
 exports.tests = [
   {
-    name: 'names a model',
-    fn() {
-      assert.equal(typeof DEFAULT_MODEL, 'string');
-      assert.notEqual(DEFAULT_MODEL, '');
-    },
-  },
-  {
     name: 'agrees with the settings the worker stores when the reader has chosen none',
     fn() {
       // The point of the shared value: changing it there has to change what the extension

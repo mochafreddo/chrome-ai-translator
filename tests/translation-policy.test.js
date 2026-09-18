@@ -6,15 +6,24 @@ exports.tests = [
   {
     name: 'implements the exhaustive two-attempt disposition table',
     fn() {
+      // Every combination, which is what pins README's "structurally unsafe output is
+      // never applied": unsafe decides on its own and never reaches the quality branch,
+      // so the unsafe rows have to span all three qualities. Listing only the complete
+      // one leaves a policy that applies unsafe output at partial quality — a change the
+      // rest of this suite cannot see.
       const cases = [
         [1, 'safe', 'complete', 'apply', null],
         [1, 'safe', 'partial', 'retry', 'quality'],
         [1, 'safe', 'uncertain', 'retry', 'quality'],
         [1, 'unsafe', 'complete', 'retry', 'structure'],
+        [1, 'unsafe', 'partial', 'retry', 'structure'],
+        [1, 'unsafe', 'uncertain', 'retry', 'structure'],
         [2, 'safe', 'complete', 'apply', null],
         [2, 'safe', 'partial', 'apply_with_warning', null],
         [2, 'safe', 'uncertain', 'apply_with_warning', null],
         [2, 'unsafe', 'complete', 'reject', null],
+        [2, 'unsafe', 'partial', 'reject', null],
+        [2, 'unsafe', 'uncertain', 'reject', null],
       ];
       for (const [attempt, structure, quality, disposition, repairKind] of cases) {
         const result = decideBlockDisposition({
@@ -23,18 +32,6 @@ exports.tests = [
         }, attempt);
         assert.equal(result.disposition, disposition);
         assert.equal(result.repairKind, repairKind);
-      }
-    },
-  },
-  {
-    name: 'never applies structurally unsafe output',
-    fn() {
-      for (const attempt of [1, 2]) {
-        const result = decideBlockDisposition({
-          structure: { status: 'unsafe', codes: ['structure.token_missing'] },
-          quality: { status: 'complete', codes: [] },
-        }, attempt);
-        assert.equal(result.disposition === 'apply' || result.disposition === 'apply_with_warning', false);
       }
     },
   },

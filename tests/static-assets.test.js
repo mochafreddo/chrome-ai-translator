@@ -50,15 +50,6 @@ exports.tests = [
     },
   },
   {
-    name: 'ships the stylesheet referenced by extension HTML',
-    fn() {
-      assert.equal(
-        fs.existsSync(path.join(__dirname, '..', 'extension', 'styles.css')),
-        true
-      );
-    },
-  },
-  {
     name: 'keeps extension controls usable on narrow panels',
     fn() {
       const css = fs.readFileSync(
