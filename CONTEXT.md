@@ -44,6 +44,10 @@ _Avoid_: code, literal token, protected text, technical term
 The span the Session Budget is counted over: one page visit. It begins when the page loads and ends when the page is reloaded or left. It is not ended by **Original text** and not ended by stopping — both carry the Session Budget forward, so neither is a way to start spending afresh. It bounds one visit to one page, not the reader's spending: a reader who reloads three times has three of these and pays for all three.
 _Avoid_: reading session, run, operation, tab session
 
+**Inline Translation Operation**:
+One stretch of Inline Translation within an Inline Translation Session, from a Start that finds nothing already translating until the reader stops it or chooses **Original text**; pressing Start while one is live rescans what is in view instead of beginning another. Only the current one may apply or retry a result, though a request an earlier one sent still counts against the same Session Budget when it comes back, and Semantic Blocks a stopped one translated carry into the next when the translation settings are unchanged.
+_Avoid_: run, which the diagnostics already use for one batch request; session, which is the whole page visit
+
 **Session Budget**:
 What one Inline Translation Session may spend, counted as the serialized size of the Semantic Block records sent — the initial request for each block, plus a second charge for a block whose answer needed a repair. It is a runaway guard, not a spending ceiling: its job is to catch an accounting slip or a pathological page before it empties the reader's account, and no spending ceiling exists in this extension. A page that reaches it is refused its next batch and told to reload; nothing is refunded, and the guard says no figure to the reader because the figure counts serialized records rather than anything on the page they can see (ADR-0007).
 _Avoid_: character limit, quota, spending limit, budget cap
