@@ -483,7 +483,7 @@ exports.tests = [
       assert.equal(store.queue.length, 0);
       assert.equal(firstBatch[0].state, 'failed');
       assert.equal(
-        firstBatch[0].terminalCode,
+        firstBatch[0].code,
         'quality.target_language_missing'
       );
       assert.equal(firstBatch[0].attemptCount, 2);

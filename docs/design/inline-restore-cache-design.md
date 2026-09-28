@@ -46,7 +46,7 @@ from the block's serialized form. Each entry stores:
 - `codecVersion`: the codec that produced the entry;
 - `translatedTemplate`: the translated template, tokens and all;
 - `state`: `translated` or `translated_with_warning`;
-- `terminalCode`: the warning's code, when the state carries one;
+- `code`: the warning's code, when the state carries one;
 - `attemptCount`: how many attempts the translation took.
 
 This keeps the responsibilities distinct:

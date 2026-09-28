@@ -264,7 +264,7 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
       await instruct('grantInlineTranslationAuthorization');
       await instruct('startInlineTranslation');
       assert.equal(state.status, 'active', state.error);
-      assert.equal(state.viewport.records.every((record) => record.errorCode === 'protocol.invalid_json'), true);
+      assert.equal(state.viewport.records.every((record) => record.code === 'protocol.invalid_json'), true);
       warming = false;
       document.body.replaceChildren(block);
       helpers.runInlineViewportScan(state);
@@ -384,6 +384,7 @@ exports.tests = [
           : { ok: true });
         await flushMicrotasks(32);
         assert.equal(state.viewport.records.at(-1).state, 'failed');
+        assert.equal(state.viewport.records.at(-1).code, 'runtime.request_failed');
         block.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
         await instruct('restoreInlineOriginal');
         await instruct('startInlineTranslation');
@@ -396,6 +397,60 @@ exports.tests = [
         await flushMicrotasks();
         assert.equal(pending.length, 2, 'the failed request is not refunded');
       }, { headroom: 2 });
+    },
+  })),
+  // What the page files after a batch, per outcome. The worker has already recorded its own
+  // verdicts and the results it could not produce, so those only release their tokens; the
+  // page files an application failure and a change that no retry supersedes.
+  ...[
+    {
+      name: 'an application failure',
+      result: () => ({ disposition: 'apply', template: 'no tokens survive', attemptCount: 1 }),
+      sent: [{ outcomes: [{ code: 'runtime.token_missing', correlationToken: 'outcome-token' }], releaseTokens: [] }],
+    },
+    {
+      name: 'a worker verdict',
+      result: () => ({ disposition: 'reject', terminalCode: 'structure.token_missing', attemptCount: 2 }),
+      sent: [{ outcomes: [], releaseTokens: ['outcome-token'] }],
+    },
+    {
+      name: 'a missing result',
+      result: null,
+      sent: [],
+    },
+    {
+      name: 'a changed block a retry supersedes',
+      change: ({ block, document }) => block.appendChild(document.createTextNode(' Edited.')),
+      result: (record) => ({ disposition: 'apply', template: getReasoningTranslatedTemplate(record), attemptCount: 1 }),
+      sent: [{ outcomes: [], releaseTokens: ['outcome-token'] }],
+    },
+    {
+      name: 'a changed block no retry supersedes',
+      change: ({ document }) => document.body.replaceChildren(),
+      result: (record) => ({ disposition: 'apply', template: getReasoningTranslatedTemplate(record), attemptCount: 1 }),
+      sent: [{ outcomes: [{ code: 'runtime.page_changed', correlationToken: 'outcome-token' }], releaseTokens: [] }],
+    },
+  ].map(({ name, change, result, sent }) => ({
+    name: `files runtime outcomes through the request caller after ${name}`,
+    async fn() {
+      await withInlineRequestLifecycle(async (context) => {
+        const { messages, pending } = context;
+        const request = pending[0];
+        const record = request.message.records[0];
+        change?.(context);
+        request.resolve({ ok: true, results: result
+          ? [{ id: record.id, correlationToken: 'outcome-token', ...result(record) }]
+          : [] });
+        await flushMicrotasks(32);
+        assert.deepEqual(
+          messages.filter((message) => message.type === 'RECORD_INLINE_RUNTIME_DIAGNOSTIC'),
+          sent.map((expected) => ({
+            type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
+            operationId: request.message.operationId,
+            ...expected,
+          }))
+        );
+      });
     },
   })),
   {
@@ -743,7 +798,7 @@ exports.tests = [
       // The panel keeps its progress line muted and raises its error line. A translation
       // that failed reaching the reader as muted status was what the split was for.
       const failed = [
-        { state: 'failed', errorCode: 'runtime.request_failed' },
+        { state: 'failed', code: 'runtime.request_failed' },
       ];
 
       assert.match(
@@ -1825,6 +1880,7 @@ exports.tests = [
         records.map((record) => record.state),
         ['failed', 'queued', 'translated', 'translating', 'failed', 'stale']
       );
+      assert.equal(records[0].code, 'runtime.request_failed');
     },
   },
   {
@@ -1872,46 +1928,54 @@ exports.tests = [
       assert.match(
         helpers.getInlineTerminalReason([{
           state: 'translated_with_warning',
-          terminalCode: 'quality.english_residue',
+          code: 'quality.english_residue',
         }]),
         /Partial translation \(1 block\): Some source-language prose remained/
       );
       assert.match(
         helpers.getInlineTerminalReason([{
           state: 'failed',
-          terminalCode: 'structure.token_missing',
+          code: 'structure.token_missing',
         }]),
         /Protected page structure could not be preserved/
       );
       assert.match(
         helpers.getInlineTerminalReason([{
           state: 'failed',
-          terminalCode: 'protocol.invalid_json',
+          code: 'protocol.invalid_json',
         }]),
         /model response was malformed or incomplete/
       );
       assert.equal(
         helpers.getInlineTerminalReason([{
           state: 'failed',
-          terminalCode: 'quality.target_language_missing',
+          code: 'quality.target_language_missing',
         }]),
         'Translation failed (1 block): The model did not return the target language, so the original was kept.'
       );
       assert.match(
         helpers.getInlineTerminalReason([{
           state: 'stale',
-          errorCode: 'block_changed',
+          code: 'runtime.page_changed',
         }]),
         /Page changed before translation could be applied/
       );
       assert.equal(
         helpers.getInlineTerminalReason([{
           state: 'failed',
-          terminalCode: 'structure.token_missing',
+          code: 'structure.token_missing',
           supersededByRetryId: 'retry-1',
         }]),
         ''
       );
+      // One spelling per code: the unprefixed forms a block once carried are not read as
+      // their categories any more, so a stray one surfaces as the generic request failure.
+      for (const code of ['block_too_large', 'session_too_large', 'unsupported_block']) {
+        assert.equal(
+          helpers.getInlineTerminalReason([{ state: 'failed', code }]),
+          'Translation failed (1 block): The translation request could not be completed.'
+        );
+      }
     },
   },
   {
@@ -1920,35 +1984,35 @@ exports.tests = [
       const records = [
         {
           state: 'translated_with_warning',
-          terminalCode: 'quality.english_residue',
+          code: 'quality.english_residue',
         },
         {
           state: 'failed',
-          terminalCode: 'structure.token_missing',
+          code: 'structure.token_missing',
         },
         {
           state: 'stale',
-          errorCode: 'block_changed',
+          code: 'runtime.page_changed',
           supersededByRetryId: 'retry-1',
         },
         {
           state: 'failed',
-          terminalCode: 'quality.target_language_missing',
+          code: 'quality.target_language_missing',
         },
         {
           state: 'translated_with_warning',
-          terminalCode: 'quality.english_residue',
+          code: 'quality.english_residue',
         },
         {
           state: 'stale',
-          errorCode: 'block_changed',
+          code: 'runtime.page_changed',
         },
-        { state: 'failed', terminalCode: 'protocol.invalid_json' },
-        { state: 'failed', terminalCode: 'runtime.apply_failed' },
-        { state: 'failed', errorCode: 'unsupported_block' },
-        { state: 'failed', errorCode: 'block_too_large' },
-        { state: 'failed', errorCode: 'session_too_large' },
-        { state: 'failed', errorCode: 'request_failed' },
+        { state: 'failed', code: 'protocol.invalid_json' },
+        { state: 'failed', code: 'runtime.apply_failed' },
+        { state: 'failed', code: 'runtime.unsupported_block' },
+        { state: 'failed', code: 'runtime.block_too_large' },
+        { state: 'failed', code: 'runtime.session_too_large' },
+        { state: 'failed', code: 'runtime.request_failed' },
       ];
 
       assert.equal(
@@ -2645,7 +2709,7 @@ exports.tests = [
       const record = helpers.queueInlineViewportBlock(store, block);
 
       assert.equal(record.state, 'failed');
-      assert.equal(record.errorCode, 'unsupported_block');
+      assert.equal(record.code, 'runtime.unsupported_block');
       assert.match(helpers.getInlineTerminalReason([record]), /unsupported structure/);
       const previousChrome = global.chrome;
       const messages = [];
@@ -2816,7 +2880,7 @@ exports.tests = [
         []
       );
       assert.equal(record.state, 'failed');
-      assert.equal(record.errorCode, 'session_too_large');
+      assert.equal(record.code, 'runtime.session_too_large');
       assert.match(
         helpers.getInlineTerminalReason([record]),
         /reached this page visit's limit/
@@ -2847,7 +2911,7 @@ exports.tests = [
 
       assert.equal(taken.length, queued.length);
       assert.equal(
-        store.records.filter((record) => record.errorCode === 'session_too_large').length,
+        store.records.filter((record) => record.code === 'runtime.session_too_large').length,
         0
       );
       assert.equal(store.sessionBudget.recordCost, actualTotal);
@@ -2934,7 +2998,7 @@ exports.tests = [
     name: 'tells a reader who exhausted the session budget to reload, and names no figure',
     fn() {
       const message = helpers.getInlineTerminalReason([
-        { state: 'failed', errorCode: 'session_too_large' },
+        { state: 'failed', code: 'runtime.session_too_large' },
       ]);
 
       assert.match(message, /no request was sent/);
@@ -2955,7 +3019,7 @@ exports.tests = [
 
       assert.deepEqual(helpers.takeInlineViewportBlockBatch(store, 12000), []);
       assert.equal(oversized.state, 'failed');
-      assert.equal(oversized.errorCode, 'block_too_large');
+      assert.equal(oversized.code, 'runtime.block_too_large');
       assert.equal(store.sessionBudget.recordCost, 0);
 
       // The per-batch cap keeps its unit too: two blocks whose actual costs would fit one
@@ -2995,6 +3059,7 @@ exports.tests = [
         retried: 0,
         failed: 0,
         ignored: 0,
+        runtimeOutcomes: [],
       });
       assert.equal(record.state, 'translated');
       assert.equal(block.childNodes[0], link);
@@ -3309,7 +3374,7 @@ exports.tests = [
       assert.equal(helpers.queueInlineViewportBlock(secondStore, block), null);
       const cachedRecord = secondStore.records[0];
       assert.equal(cachedRecord.state, 'translated_with_warning');
-      assert.equal(cachedRecord.terminalCode, 'quality.english_residue');
+      assert.equal(cachedRecord.code, 'quality.english_residue');
       assert.equal(cachedRecord.attemptCount, 2);
       assert.match(helpers.getInlineTerminalReason([cachedRecord]), /Partial translation/);
       assert.equal(secondStore.queue.length, 0);
@@ -3359,7 +3424,7 @@ exports.tests = [
       const batch = helpers.takeInlineViewportBlockBatch(store);
       codec.applyPatchPlan = () => ({ ok: false, errorCode: 'apply_failed' });
       try {
-        helpers.applyInlineViewportBlockResults(
+        const summary = helpers.applyInlineViewportBlockResults(
           batch,
           [{
             id: record.id,
@@ -3371,9 +3436,10 @@ exports.tests = [
           store
         );
         assert.equal(record.state, 'failed');
-        assert.equal(record.errorCode, 'runtime.apply_failed');
-        assert.equal(record.terminalCode, undefined);
-        assert.equal(record.correlationToken, 'opaque-token');
+        assert.equal(record.code, 'runtime.apply_failed');
+        assert.deepEqual(summary.runtimeOutcomes, [
+          { code: 'runtime.apply_failed', correlationToken: 'opaque-token' },
+        ]);
       } finally {
         codec.applyPatchPlan = previousApply;
       }
@@ -3537,7 +3603,7 @@ exports.tests = [
       const rerendered = helpers.queueInlineViewportBlock(store, block);
 
       assert.equal(first.state, 'stale');
-      assert.equal(first.errorCode, 'block_changed');
+      assert.equal(first.code, 'runtime.page_changed');
       assert.equal(rerendered.state, 'queued');
       assert.equal(rerendered.blockElement, block);
       assert.equal(store.byBlock.get(block), rerendered);

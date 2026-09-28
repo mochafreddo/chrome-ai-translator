@@ -680,7 +680,7 @@ function cacheInlineViewportBlockTranslation(store, record) {
     codecVersion: inlineBlockCodec.CODEC_VERSION,
     translatedTemplate: record.translatedTemplate,
     state: record.state,
-    terminalCode: record.terminalCode || null,
+    code: record.code || null,
     attemptCount: Math.min(2, Math.max(1, Number(record.attemptCount) || 1)),
   });
   return true;
@@ -704,8 +704,8 @@ function applyCachedInlineViewportBlock(store, record) {
   record.state = cached.state === 'translated_with_warning'
     ? 'translated_with_warning'
     : 'translated';
-  record.terminalCode = record.state === 'translated_with_warning'
-    ? cached.terminalCode || 'quality.target_language_uncertain'
+  record.code = record.state === 'translated_with_warning'
+    ? cached.code || 'quality.target_language_uncertain'
     : null;
   record.attemptCount = Math.min(2, Math.max(1, Number(cached.attemptCount) || 1));
   record.translatedTemplate = cached.translatedTemplate;
@@ -724,7 +724,7 @@ function queueInlineViewportBlock(store, blockElement, options = {}) {
         return null;
       }
       existing.state = 'stale';
-      existing.errorCode = 'block_changed';
+      existing.code = 'runtime.page_changed';
       store.byBlock.delete(blockElement);
     } else if (
       ['queued', 'translating', 'failed', 'stale'].includes(existing.state)
@@ -737,12 +737,12 @@ function queueInlineViewportBlock(store, blockElement, options = {}) {
   if (!serialized.ok) {
     const failedRecord = createInlineViewportBlockRecord(store, blockElement, {
       state: 'failed',
-      errorCode: serialized.errorCode || 'unsupported_block',
+      code: 'runtime.unsupported_block',
     });
     queueInlineLocalDiagnostic(
       store,
       failedRecord,
-      'runtime.unsupported_block',
+      failedRecord.code,
       {},
       serialized.localRejection
     );
@@ -777,8 +777,8 @@ function takeInlineViewportBlockBatch(
     if (cost > limit) {
       store.queue.shift();
       record.state = 'failed';
-      record.errorCode = 'block_too_large';
-      queueInlineLocalDiagnostic(store, record, 'runtime.block_too_large', {
+      record.code = 'runtime.block_too_large';
+      queueInlineLocalDiagnostic(store, record, record.code, {
         recordCost: cost,
         limit,
       });
@@ -788,8 +788,8 @@ function takeInlineViewportBlockBatch(
     if (reservedCost > limit) {
       store.queue.shift();
       record.state = 'failed';
-      record.errorCode = 'block_too_large';
-      queueInlineLocalDiagnostic(store, record, 'runtime.block_too_large', {
+      record.code = 'runtime.block_too_large';
+      queueInlineLocalDiagnostic(store, record, record.code, {
         recordCost: reservedCost,
         limit,
       });
@@ -802,8 +802,8 @@ function takeInlineViewportBlockBatch(
     if (store.sessionBudget.recordCost + cost > INLINE_BLOCK_SESSION_MAX_RECORD_COST) {
       store.queue.shift();
       record.state = 'failed';
-      record.errorCode = 'session_too_large';
-      queueInlineLocalDiagnostic(store, record, 'runtime.session_too_large', {
+      record.code = 'runtime.session_too_large';
+      queueInlineLocalDiagnostic(store, record, record.code, {
         recordCost: cost,
         sessionCost: store.sessionBudget.recordCost,
         limit: INLINE_BLOCK_SESSION_MAX_RECORD_COST,
@@ -861,6 +861,9 @@ function queueInlineViewportBlockRetry(
   return retryRecord;
 }
 
+// `runtimeOutcomes` are the failures the page files itself, decided where each one happens:
+// an application failure, and a changed block no retry supersedes. A worker verdict and a
+// missing result are the worker's to record, so those records only release their tokens.
 function applyInlineViewportBlockResults(
   records,
   results,
@@ -874,17 +877,33 @@ function applyInlineViewportBlockResults(
     retried: 0,
     failed: 0,
     ignored: 0,
+    runtimeOutcomes: [],
   };
+
+  function fileRuntimeOutcome(record) {
+    summary.runtimeOutcomes.push({
+      code: record.code,
+      correlationToken: record.correlationToken,
+    });
+  }
 
   function queuePageRetry(record) {
     record.state = 'stale';
-    record.errorCode = 'block_changed';
+    record.code = 'runtime.page_changed';
     summary.stale += 1;
     if (queueInlineViewportBlockRetry(store, record, 'page-change')) {
       summary.retried += 1;
       return true;
     }
+    fileRuntimeOutcome(record);
     return false;
+  }
+
+  function failApplication(record, codecCode) {
+    record.state = 'failed';
+    record.code = `runtime.${codecCode || 'apply_failed'}`;
+    summary.failed += 1;
+    fileRuntimeOutcome(record);
   }
 
   for (const record of records || []) {
@@ -895,7 +914,7 @@ function applyInlineViewportBlockResults(
     }
     if (!result) {
       record.state = 'failed';
-      record.errorCode = 'request_failed';
+      record.code = 'runtime.request_failed';
       summary.failed += 1;
       continue;
     }
@@ -906,8 +925,7 @@ function applyInlineViewportBlockResults(
         continue;
       }
       record.state = 'failed';
-      record.errorCode = result.terminalCode || 'runtime.request_failed';
-      record.terminalCode = record.errorCode;
+      record.code = result.terminalCode || 'runtime.request_failed';
       record.attemptCount = result.attemptCount || 1;
       summary.failed += 1;
       continue;
@@ -919,28 +937,21 @@ function applyInlineViewportBlockResults(
     );
     if (!plan.ok) {
       if (plan.errorCode === 'block_changed') queuePageRetry(record);
-      else {
-        record.state = 'failed';
-        record.errorCode = `runtime.${plan.errorCode || 'apply_failed'}`;
-        summary.failed += 1;
-      }
+      else failApplication(record, plan.errorCode);
       continue;
     }
     const applied = inlineBlockCodec.applyPatchPlan(record.snapshot, plan);
     if (!applied.ok) {
       if (applied.errorCode === 'block_changed') queuePageRetry(record);
-      else {
-        record.state = 'failed';
-        record.errorCode = `runtime.${applied.errorCode || 'apply_failed'}`;
-        summary.failed += 1;
-      }
+      else failApplication(record, applied.errorCode);
       continue;
     }
 
     record.state = result.disposition === 'apply_with_warning'
       ? 'translated_with_warning'
       : 'translated';
-    record.terminalCode = result.terminalCode || null;
+    record.code = result.terminalCode ||
+      (record.state === 'translated_with_warning' ? 'quality.target_language_uncertain' : null);
     record.attemptCount = result.attemptCount || 1;
     record.translatedTemplate = result.template;
     record.translation = result.template;
@@ -1002,6 +1013,7 @@ function markInlineViewportBatchFailed(records, operationId) {
   for (const record of records || []) {
     if (record.operationId === operationId && record.state === 'translating') {
       record.state = 'failed';
+      record.code = 'runtime.request_failed';
     }
   }
 }
@@ -1047,15 +1059,12 @@ function getInlineTerminalReasonCategory(record) {
   ) {
     return '';
   }
-  const code = String(record.terminalCode || record.errorCode || '');
+  const code = String(record.code || '');
   if (code === 'quality.target_language_missing') {
     return 'target_language_missing';
   }
   if (record.state === 'translated_with_warning') {
     return 'residual_source_prose';
-  }
-  if (record.state === 'stale' || code === 'runtime.page_changed') {
-    return 'page_changed';
   }
   if (code.startsWith('structure.')) {
     return 'protected_structure';
@@ -1063,20 +1072,18 @@ function getInlineTerminalReasonCategory(record) {
   if (code.startsWith('protocol.')) {
     return 'malformed_response';
   }
-  if (code === 'runtime.apply_failed') {
-    return 'application_failed';
-  }
-  if (code === 'runtime.unsupported_block' || code === 'unsupported_block') {
-    return 'unsupported_block';
-  }
-  if (code === 'runtime.block_too_large' || code === 'block_too_large') {
-    return 'block_too_large';
-  }
-  if (code === 'runtime.session_too_large' || code === 'session_too_large') {
-    return 'session_too_large';
-  }
-  return 'request_failed';
+  return INLINE_RUNTIME_CODE_CATEGORIES[code] || 'request_failed';
 }
+
+// The exact `runtime.*` codes that have a category of their own. Any other runtime code,
+// an application failure's codec code among them, reads as a failed request.
+var INLINE_RUNTIME_CODE_CATEGORIES = Object.freeze({
+  'runtime.page_changed': 'page_changed',
+  'runtime.apply_failed': 'application_failed',
+  'runtime.unsupported_block': 'unsupported_block',
+  'runtime.block_too_large': 'block_too_large',
+  'runtime.session_too_large': 'session_too_large',
+});
 
 var INLINE_TERMINAL_REASON_CATEGORIES = Object.freeze([
   {
@@ -1207,6 +1214,7 @@ function restoreInlineViewportRecords(state = inlineState) {
       const restored = inlineBlockCodec.restoreBlock(record.snapshot);
       if (!restored.ok) {
         record.state = 'stale';
+        record.code = 'runtime.page_changed';
         continue;
       }
       restoredBlocks.add(blockElement);
@@ -1767,23 +1775,12 @@ async function drainInlineViewportQueue(state = inlineState) {
           markInlineViewportBatchFailed(batch, operationId);
           return;
         }
-        applyInlineViewportBlockResults(
+        const { runtimeOutcomes } = applyInlineViewportBlockResults(
           batch,
           resp.results,
           operationId,
           store
         );
-        const runtimeOutcomes = batch
-          .filter((record) =>
-            (record.state === 'failed' && !record.terminalCode && String(record.errorCode || '').startsWith('runtime.')) ||
-            (record.state === 'stale' && !record.supersededByRetryId)
-          )
-          .map((record) => ({
-            code: record.state === 'stale'
-              ? 'runtime.page_changed'
-              : record.terminalCode || record.errorCode || 'runtime.apply_failed',
-            correlationToken: record.correlationToken,
-          }));
         const runtimeTokens = new Set(runtimeOutcomes.map((outcome) => outcome.correlationToken));
         const releaseTokens = batch
           .map((record) => record.correlationToken)

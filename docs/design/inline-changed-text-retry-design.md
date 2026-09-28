@@ -190,7 +190,7 @@ When `applyInlineViewportBlockResults()` receives a valid translation for a
 record but cannot apply it because the block no longer owns the nodes it was
 serialized from:
 
-1. Mark the current record `stale` with `errorCode: 'block_changed'`.
+1. Mark the current record `stale` with `code: 'runtime.page_changed'`.
 2. Do not apply the returned translation.
 3. Consider a retry only if the block element is still connected and still maps
    to this record.
