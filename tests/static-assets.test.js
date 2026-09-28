@@ -407,7 +407,8 @@ exports.tests = [
       // which runs only in the worker. The Markdown entry module is read by the two halves of
       // Side Panel Translation's codec that render a span, which sit one on each side. The
       // page-only chain from the inline codec through the Inline Translation Session to the
-      // content script is guarded the same way.
+      // content script is guarded the same way, and so is the diagnostics protocol the session
+      // reads as it loads.
       const backgroundJs = fs.readFileSync(
         path.join(__dirname, '..', 'extension', 'background.js'),
         'utf8'
@@ -426,6 +427,7 @@ exports.tests = [
         ['markdown-entries.js', 'translation-chunks.js', ['worker']],
         ['markdown-entries.js', 'markdown-document.js', ['page']],
         ['inline-block.js', 'inline-translation-session.js', ['page']],
+        ['inline-diagnostics-protocol.js', 'inline-translation-session.js', ['page']],
         ['inline-translation-session.js', 'content.js', ['page']],
       ];
 
