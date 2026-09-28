@@ -7,6 +7,7 @@
 const assert = require('node:assert/strict');
 const background = require('../extension/background.js');
 const content = require('../extension/content.js');
+const inlineTranslationSession = require('../extension/inline-translation-session.js');
 const validation = require('../extension/translation-validation.js');
 const policy = require('../extension/translation-policy.js');
 const { createReasoningFixture } = require('./inline-block.test.js');
@@ -428,7 +429,12 @@ exports.tests = [
     fn() {
       const failedFixture = createReasoningFixture();
       const siblingFixture = createReasoningFixture();
-      const store = content.createInlineViewportStore(303);
+      const store = content.createInlineViewportStore(
+        303,
+        null,
+        null,
+        inlineTranslationSession.createInlineTranslationSession()
+      );
       const failedOriginal = failedFixture.block.textContent;
       const siblingOriginal = siblingFixture.block.textContent;
       content.queueInlineViewportBlock(store, failedFixture.block);

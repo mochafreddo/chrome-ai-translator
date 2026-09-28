@@ -311,6 +311,7 @@ function getInlineContentScriptFiles() {
     'default-model.js',
     'placeholder-tokens.js',
     'inline-block.js',
+    'inline-translation-session.js',
     'inline-diagnostics-protocol.js',
     'inline-translation-controls.js',
     'markdown-entries.js',

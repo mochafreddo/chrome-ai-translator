@@ -95,8 +95,8 @@ On the next **Page in Korean** click on the same page:
 1. The content script reads settings as it already does before starting inline
    translation.
 2. A settings signature is derived from those settings.
-3. `activateInlineTranslationCacheBucket()` selects the current settings bucket
-   and stores it as the active `inlineState.translationCache`.
+3. The Inline Translation Session's `begin()` selects the bucket for the current
+   settings signature.
 4. A new viewport store is created.
 5. The new store receives the shared page cache `Map` for the current settings
    signature.
@@ -113,10 +113,9 @@ On the next **Page in Korean** click on the same page:
    `original` state and the scan restarts from the top of the current viewport.
 
 The implementation shares the page cache `Map` with each new viewport store.
-That avoids copy drift and keeps the helper API small:
-`getInlineTranslationCacheBucket()` only returns a bucket, while
-`activateInlineTranslationCacheBucket()` makes that bucket the active cache for
-restore/retranslate flows.
+That avoids copy drift: the Inline Translation Session keeps one bucket per
+settings signature for the whole page visit, and `begin()` hands the current one
+to the store it begins.
 
 ## Settings Snapshot
 

@@ -1,6 +1,7 @@
 const suites = [
   require('./placeholder-tokens.test'),
   require('./inline-block.test'),
+  require('./inline-translation-session.test'),
   require('./markdown-codec.test'),
   require('./openai-response.test'),
   require('./translation-validation.test'),

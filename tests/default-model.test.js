@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DEFAULT_MODEL } = require('../extension/default-model.js');
 const background = require('../extension/background.js');
-const content = require('../extension/content.js');
+const inlineTranslationSession = require('../extension/inline-translation-session.js');
 
 const EXTENSION_DIR = path.join(__dirname, '..', 'extension');
 
@@ -31,10 +31,10 @@ exports.tests = [
     },
   },
   {
-    name: 'agrees with the settings the content script snapshots when none are supplied',
+    name: 'agrees with the settings the Inline Translation Session snapshots when none are supplied',
     fn() {
       assert.equal(
-        content.createInlineTranslationSettingsSnapshot({}).model,
+        inlineTranslationSession.createSettingsSnapshot({}).model,
         DEFAULT_MODEL
       );
     },

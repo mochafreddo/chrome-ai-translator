@@ -20,11 +20,11 @@ var inlineTranslationControls =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-translation-controls.js')
     : null);
-var { DEFAULT_MODEL } =
-  globalThis.ChromeAiTranslatorDefaultModel ||
+var inlineTranslationSession =
+  globalThis.ChromeAiTranslatorInlineTranslationSession ||
   (typeof module !== 'undefined' && module.exports
-    ? require('./default-model.js')
-    : {});
+    ? require('./inline-translation-session.js')
+    : null);
 
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_MAX_RECORDS = 500;
@@ -40,15 +40,10 @@ var INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;
 var INLINE_VIEWPORT_SCAN_DEBOUNCE_MS = 250;
 var INLINE_VIEWPORT_PREFETCH_RATIO = 0.5;
 var INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES = 1200;
-var INLINE_TRANSLATION_SETTINGS_DEFAULTS = {
-  targetLanguage: 'Korean',
-  tone: 'technical',
-  model: DEFAULT_MODEL,
-  reasoningEffort: 'none',
-};
-function isInlineTranslatedState(state) {
-  return state === 'translated' || state === 'translated_with_warning';
-}
+var INLINE_TRANSLATION_SETTINGS_DEFAULTS = inlineTranslationSession.SETTINGS_DEFAULTS;
+var isInlineTranslatedState = inlineTranslationSession.isTranslatedState;
+var createInlineTranslationSettingsSnapshot = inlineTranslationSession.createSettingsSnapshot;
+var getInlineTranslationCacheSignature = inlineTranslationSession.getSettingsSignature;
 var INLINE_EXCLUDED_TAGS = new Set([
   'SCRIPT',
   'STYLE',
@@ -82,11 +77,13 @@ var INLINE_EXCLUDED_ROLES = new Set([
   'tablist',
   'toolbar',
 ]);
+// `session` is the Inline Translation Session whose Session Budget the store's batches are
+// charged to. It is the page visit's, never the store's own.
 function createInlineViewportStore(
   operationId,
   translationByOriginal = null,
   translationSettings = null,
-  sessionBudget = { recordCost: 0 }
+  session
 ) {
   const translationSettingsSnapshot = translationSettings
     ? createInlineTranslationSettingsSnapshot(translationSettings)
@@ -104,8 +101,7 @@ function createInlineViewportStore(
     localDiagnostics: [],
     localDiagnosticsInFlight: null,
     localDiagnosticRetryTimer: null,
-    // One owner per page visit, shared by every operation, including pending requests.
-    sessionBudget,
+    session,
     translationByOriginal:
       translationByOriginal instanceof Map ? translationByOriginal : new Map(),
     scanTimer: null,
@@ -161,7 +157,7 @@ function sendInlineLocalDiagnosticBatch(store, batch, state = inlineState) {
         scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store, state), 250);
       }
     }
-    if (store.diagnosticsUnavailable && state.viewport === store && state.operationId === store.operationId) {
+    if (store.diagnosticsUnavailable && state.viewport === store && state.session.operationId === store.operationId) {
       updateInlineViewportMessage(state);
     }
   };
@@ -210,9 +206,9 @@ function isInlineViewportOperationCurrent(state, store, operationId) {
   return Boolean(
     state &&
       store &&
-      state.status === 'active' &&
+      state.session.status === 'active' &&
       state.viewport === store &&
-      state.operationId === operationId &&
+      state.session.operationId === operationId &&
       store.operationId === operationId &&
       !store.stopped
   );
@@ -220,10 +216,9 @@ function isInlineViewportOperationCurrent(state, store, operationId) {
 
 function stopInlineViewportTranslation(state = inlineState) {
   const store = state.viewport;
-  if (!store) return state.operationId;
+  if (!store) return state.session.operationId;
 
   const hasPendingDiagnosticTask = Boolean(store.localDiagnosticRetryTimer);
-  addInlineRestorableRecords(state, store.records);
   // `store.queue = []` below discards every queued retry, so a queued retry cancels here
   // just as an in-flight one does and has to release the record it superseded. This must
   // run before `resetQueuedInlineViewportRecords`, which retains a queued Semantic Block
@@ -241,11 +236,7 @@ function stopInlineViewportTranslation(state = inlineState) {
     store.localDiagnosticRetryTimer = null;
   }
   drainInlineLocalDiagnosticsOnStop(store, hasPendingDiagnosticTask, state);
-  if (state.operationId === store.operationId) {
-    state.operationId = (Number(state.operationId) || 0) + 1;
-  }
-  state.status = 'stopped';
-  return state.operationId;
+  return state.session.stop(store.records);
 }
 
 // A run is live from the moment Start hands it to the viewport scanner until something
@@ -255,7 +246,7 @@ function stopInlineViewportTranslation(state = inlineState) {
 // view rather than a second run. A stopped run no longer admits work; Start begins a new
 // operation while submitted requests can still settle against the same Session Budget.
 function isInlineTranslationRunLive(state = inlineState) {
-  return state?.status === 'active' && !state?.viewport?.stopped;
+  return state?.session?.status === 'active' && !state?.viewport?.stopped;
 }
 
 function hasInlineSettingsApiKey(settings) {
@@ -325,125 +316,28 @@ async function requestInlineStartupInstructions(chromeApi = globalThis.chrome) {
   return response.instructions;
 }
 
-function getInlineTranslationCacheSignature(settings = {}) {
-  return JSON.stringify(createInlineTranslationSettingsSnapshot(settings));
-}
-
-function createInlineTranslationSettingsSnapshot(settings = {}) {
-  const safe = settings || {};
-  return {
-    targetLanguage: String(
-      safe.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage
-    ),
-    tone: String(safe.tone || INLINE_TRANSLATION_SETTINGS_DEFAULTS.tone),
-    model: String(safe.model || INLINE_TRANSLATION_SETTINGS_DEFAULTS.model),
-    reasoningEffort: String(
-      safe.reasoningEffort ||
-        INLINE_TRANSLATION_SETTINGS_DEFAULTS.reasoningEffort
-    ),
-  };
-}
-
-function ensureInlineTranslationCacheBySettings(state = inlineState) {
-  if (!(state.translationCacheBySettings instanceof Map)) {
-    state.translationCacheBySettings = new Map();
-  }
-  return state.translationCacheBySettings;
-}
-
-function getInlineTranslationCacheBucket(state = inlineState, settings = {}) {
-  const caches = ensureInlineTranslationCacheBySettings(state);
-  const signature = getInlineTranslationCacheSignature(settings);
-  let cache = caches.get(signature);
-  if (!cache) {
-    cache = new Map();
-    caches.set(signature, cache);
-  }
-  return cache;
-}
-
-function activateInlineTranslationCacheBucket(state = inlineState, settings = {}) {
-  const cache = getInlineTranslationCacheBucket(state, settings);
-  state.translationCache = cache;
-  return cache;
-}
-
-function ensureInlineRestorableRecords(state = inlineState) {
-  if (!Array.isArray(state.restorableRecords)) {
-    state.restorableRecords = [];
-  }
-  return state.restorableRecords;
-}
-
-function addInlineRestorableRecords(state = inlineState, records = []) {
-  const restorableRecords = ensureInlineRestorableRecords(state);
-  const seen = new Set(restorableRecords);
-  for (const record of records || []) {
-    if (isInlineTranslatedState(record?.state) && !seen.has(record)) {
-      restorableRecords.push(record);
-      seen.add(record);
-    }
-  }
-  return restorableRecords;
-}
-
-function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
-  if (!store?.byBlock) return store;
-  const seenRecords = new Set(store.records);
-  for (const record of records || []) {
-    const blockElement = record?.snapshot?.blockElement;
-    if (!blockElement) continue;
-    if (!isInlineTranslatedState(record.state) || !blockElement.isConnected) continue;
-    if (hasInlineViewportSettingsSignatureMismatch(store, record)) {
-      if (inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) {
-        const restored = inlineBlockCodec.restoreBlock(record.snapshot);
-        if (restored.ok) record.state = 'original';
-      }
-      continue;
-    }
-    if (!inlineBlockCodec.matchesAppliedOwnership(record.snapshot)) continue;
-    if (!store.byBlock.get(blockElement)) {
-      store.byBlock.set(blockElement, record);
-    }
-    if (!seenRecords.has(record)) {
-      store.records.push(record);
-      seenRecords.add(record);
-    }
+// A fresh store takes the translated blocks the session carried into its operation, so a
+// rescan finds them already translated instead of queueing them again.
+function seedInlineViewportStoreWithCarriedRecords(store, records) {
+  for (const record of records) {
+    store.byBlock.set(record.snapshot.blockElement, record);
+    store.records.push(record);
     cacheInlineViewportBlockTranslation(store, record);
   }
-  return store;
-}
-
-function getInlineViewportRestoreRecords(state = inlineState) {
-  const records = [];
-  const seen = new Set();
-  for (const record of state.restorableRecords || []) {
-    if (record && !seen.has(record)) {
-      records.push(record);
-      seen.add(record);
-    }
-  }
-  for (const record of state.viewport?.records || []) {
-    if (record && !seen.has(record)) {
-      records.push(record);
-      seen.add(record);
-    }
-  }
-  return records;
 }
 
 // One shape for an Inline Translation state, so a check drives the fields the page has
 // rather than the ones it remembered to write down. A hand-rolled state that left out
-// `authorizedUntil` would find the run start refusing it and say nothing about why.
+// `authorizedUntil` would find the run start refusing it and say nothing about why. The
+// Inline Translation status and the operation id are not among the fields: they are the
+// session's, and read through it.
 function createInlineTranslationState(overrides = {}) {
   return {
-    status: 'original',
     menuOpen: false,
     message: '',
     error: '',
-    operationId: 0,
     authorizedUntil: 0,
-    restorableRecords: [],
+    session: inlineTranslationSession.createInlineTranslationSession(),
     ...overrides,
   };
 }
@@ -452,10 +346,13 @@ var inlineState =
   globalThis.__chromeAiTranslatorInlineState || createInlineTranslationState();
 globalThis.__chromeAiTranslatorInlineState = inlineState;
 if (!inlineState.viewport) {
-  inlineState.viewport = createInlineViewportStore(inlineState.operationId);
+  inlineState.viewport = createInlineViewportStore(
+    inlineState.session.operationId,
+    null,
+    null,
+    inlineState.session
+  );
 }
-ensureInlineRestorableRecords(inlineState);
-ensureInlineTranslationCacheBySettings(inlineState);
 var inlineUiRoot = globalThis.__chromeAiTranslatorInlineUiRoot || null;
 
 async function refreshInlineTranslatorSettings(
@@ -616,13 +513,13 @@ function settleInlineBlockRequest(store, records, response) {
   const byId = new Map(response.results.map((result) => [result.id, result]));
   for (const record of records) {
     if (Number(byId.get(record.id)?.attemptCount) === 2) {
-      store.sessionBudget.recordCost += getInlineBlockRecordCost(record);
+      store.session.charge(getInlineBlockRecordCost(record));
     }
   }
 }
 
 // The id carries the operation that minted it, so a record minted here cannot collide with
-// one `seedInlineViewportStoreWithRestorableRecords` carried over from a stopped session —
+// one `seedInlineViewportStoreWithCarriedRecords` carried over from a stopped operation —
 // those keep the ids of an earlier operation, and every store is built for an operation id
 // that was incremented first. `findInlineViewportRecordById` resolves `retryOf` by scanning
 // `store.records` for the first match, so a duplicate id there silently resolves a retry to
@@ -799,13 +696,13 @@ function takeInlineViewportBlockBatch(
     // cost. Two units for the same record in adjacent lines is deliberate: reserved cost
     // over-counts so one request can never exceed the cap it was checked against, and a
     // cumulative budget needs no such guarantee. See ADR-0007.
-    if (store.sessionBudget.recordCost + cost > INLINE_BLOCK_SESSION_MAX_RECORD_COST) {
+    if (store.session.spent + cost > INLINE_BLOCK_SESSION_MAX_RECORD_COST) {
       store.queue.shift();
       record.state = 'failed';
       record.code = 'runtime.session_too_large';
       queueInlineLocalDiagnostic(store, record, record.code, {
         recordCost: cost,
-        sessionCost: store.sessionBudget.recordCost,
+        sessionCost: store.session.spent,
         limit: INLINE_BLOCK_SESSION_MAX_RECORD_COST,
       });
       continue;
@@ -816,7 +713,7 @@ function takeInlineViewportBlockBatch(
     record.state = 'translating';
     batch.push(record);
     batchCost += reservedCost;
-    store.sessionBudget.recordCost += cost;
+    store.session.charge(cost);
     if (batchCost >= limit) break;
   }
   if (batch.length) store.inFlight += 1;
@@ -1151,7 +1048,7 @@ function getInlineTranslatorUiModel(
   state = inlineState,
   settings = state?.translationSettings || INLINE_TRANSLATION_SETTINGS_DEFAULTS
 ) {
-  const status = state?.status || 'original';
+  const status = state?.session?.status || 'original';
   const targetLanguage =
     settings?.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage;
   const menuOpen = Boolean(state?.menuOpen);
@@ -1199,38 +1096,8 @@ function restoreInlineViewportRecords(state = inlineState) {
     clearTimeout(viewport.scanTimer);
   }
 
-  const restoredBlocks = new Set();
-  for (const record of getInlineViewportRestoreRecords(state)) {
-    // A record with no snapshot never reached the page — a block that could not be
-    // serialized is one — so there is nothing to put back, but it still goes back to
-    // `original` along with the rest.
-    const blockElement = record.snapshot?.blockElement;
-    if (
-      blockElement &&
-      isInlineTranslatedState(record.state) &&
-      blockElement.isConnected &&
-      !restoredBlocks.has(blockElement)
-    ) {
-      const restored = inlineBlockCodec.restoreBlock(record.snapshot);
-      if (!restored.ok) {
-        record.state = 'stale';
-        record.code = 'runtime.page_changed';
-        continue;
-      }
-      restoredBlocks.add(blockElement);
-    }
-    record.state = 'original';
-  }
-
-  state.status = 'original';
-  state.restorableRecords = [];
-  state.operationId = (Number(state.operationId) || 0) + 1;
-  state.viewport = createInlineViewportStore(
-    state.operationId,
-    state.translationCache,
-    null,
-    viewport?.sessionBudget
-  );
+  const operationId = state.session.restore(viewport?.records);
+  state.viewport = createInlineViewportStore(operationId, null, null, state.session);
 }
 
 function authorizeInlineTranslation(state = inlineState, now = Date.now()) {
@@ -1443,7 +1310,7 @@ function clearInlineFeedback(state = inlineState) {
 // script keeps the state; the section's own view model decides how it reads.
 function getInlineTranslationStatusSnapshot(state = inlineState) {
   return {
-    status: state?.status || 'original',
+    status: state?.session?.status || 'original',
     progress: state?.message || '',
     error: state?.error || '',
   };
@@ -1465,7 +1332,7 @@ function formatInlineViewportErrorText(records, diagnosticsUnavailable = false) 
 function updateInlineViewportMessage(state = inlineState) {
   const records = state.viewport?.records || [];
   const counts = getInlineViewportStatusCounts(records);
-  state.message = formatInlineViewportStatusMessage(counts, state.status);
+  state.message = formatInlineViewportStatusMessage(counts, state.session.status);
   const errorText = formatInlineViewportErrorText(
     records,
     Boolean(state.viewport?.diagnosticsUnavailable)
@@ -1605,7 +1472,7 @@ function updateInlineTranslatorUi(state = inlineState) {
 
 function runInlineViewportScan(state = inlineState) {
   const store = state.viewport;
-  if (!store || store.stopped || state.status !== 'active') return;
+  if (!store || store.stopped || state.session.status !== 'active') return;
   const root = store.root || pickArticleRoot();
   if (!root) {
     setInlineErrorMessage('No article content found.', state);
@@ -1624,7 +1491,7 @@ function runInlineViewportScan(state = inlineState) {
 
 function scheduleInlineViewportScan(state = inlineState, options = {}) {
   const store = state.viewport;
-  if (!store || store.stopped || state.status !== 'active') return;
+  if (!store || store.stopped || state.session.status !== 'active') return;
   if (options?.resetScanStartIndex) {
     store.scanStartIndex = 0;
     resetQueuedInlineViewportRecords(store);
@@ -1732,7 +1599,7 @@ function releaseInlineRuntimeTokensFromStaleResponse(resp, operationId) {
 
 async function drainInlineViewportQueue(state = inlineState) {
   const store = state.viewport;
-  if (!store || store.stopped || state.status !== 'active') return;
+  if (!store || store.stopped || state.session.status !== 'active') return;
   const operationId = store.operationId;
   flushInlineLocalDiagnostics(store, state);
 
@@ -1808,7 +1675,6 @@ async function drainInlineViewportQueue(state = inlineState) {
         if (resp.results.some((result) => result.diagnosticsUnavailable)) {
           store.diagnosticsUnavailable = true;
         }
-        addInlineRestorableRecords(state, batch);
       })
       .catch(() => {
         if (isInlineViewportOperationCurrent(state, store, operationId)) {
@@ -1826,6 +1692,24 @@ async function drainInlineViewportQueue(state = inlineState) {
         );
       });
   }
+}
+
+// Begins an Inline Translation Operation in a fresh store, holding what the session carried
+// over from the operation it replaces.
+function beginInlineTranslationOperation(state, settingsSnapshot) {
+  const { operationId, translationCache, carriedRecords } = state.session.begin(
+    settingsSnapshot,
+    state.viewport?.records
+  );
+  state.translationSettings = settingsSnapshot;
+  state.viewport = createInlineViewportStore(
+    operationId,
+    translationCache,
+    settingsSnapshot,
+    state.session
+  );
+  seedInlineViewportStoreWithCarriedRecords(state.viewport, carriedRecords);
+  return state.viewport;
 }
 
 async function translateInlinePage(state = inlineState) {
@@ -1858,28 +1742,11 @@ async function translateInlinePage(state = inlineState) {
   if (!root) throw new Error('No article content found.');
 
   detachInlineViewportWatchers(state);
-  addInlineRestorableRecords(state, state.viewport?.records || []);
-  const settingsSnapshot = createInlineTranslationSettingsSnapshot(
-    settingsResponse.settings
-  );
-  state.translationSettings = settingsSnapshot;
-  const translationCache = activateInlineTranslationCacheBucket(
+  beginInlineTranslationOperation(
     state,
-    settingsSnapshot
-  );
-  state.operationId = (Number(state.operationId) || 0) + 1;
-  state.status = 'active';
-  state.viewport = createInlineViewportStore(
-    state.operationId,
-    translationCache,
-    settingsSnapshot,
-    state.viewport?.sessionBudget
+    createInlineTranslationSettingsSnapshot(settingsResponse.settings)
   );
   state.viewport.root = root;
-  seedInlineViewportStoreWithRestorableRecords(
-    state.viewport,
-    state.restorableRecords
-  );
 
   attachInlineViewportWatchers(root, state);
   runInlineViewportScan(state);
@@ -2018,9 +1885,7 @@ if (typeof module !== 'undefined' && module.exports) {
     runInlineInstructions,
     requestInlineStartupInstructions,
     refreshInlineTranslatorSettings,
-    createInlineTranslationSettingsSnapshot,
-    getInlineTranslationCacheBucket,
-    seedInlineViewportStoreWithRestorableRecords,
+    beginInlineTranslationOperation,
     createInlineViewportStore,
     findInlineSemanticBlock,
     getInlineBlockRecordCost,

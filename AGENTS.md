@@ -24,7 +24,7 @@ Five hand-maintained lists decide whether a new `extension/*.js` file is loaded 
 
 A module both runtimes reach is in two of those lists at once and has to be ordered correctly in each. `extension/placeholder-tokens.js` and `extension/markdown-entries.js` are both like that: the worker imports each ahead of the modules that read it there, and the page gets it from the injected list ahead of the ones that read it there.
 
-`tests/static-assets.test.js` guards parts of this, but it spot-checks `check:syntax` against nine named files rather than the whole directory, so an omission there passes.
+`tests/static-assets.test.js` guards parts of this, but it spot-checks `check:syntax` against a handful of named files rather than the whole directory, so an omission there passes.
 
 ## Adding a browser-driven check
 

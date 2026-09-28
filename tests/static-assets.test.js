@@ -41,12 +41,22 @@ exports.tests = [
         path.join(EXTENSION_DIR, 'background.js')
       );
       const pageScope = vm.createContext({ console });
-
-      for (let injection = 0; injection < 2; injection += 1) {
+      const inject = () => {
         for (const name of getInlineContentScriptFiles()) {
           loadClassicScript(pageScope, name);
         }
-      }
+      };
+
+      inject();
+      const session = pageScope.__chromeAiTranslatorInlineState.session;
+      session.begin({});
+      session.charge(1200);
+      inject();
+
+      // The second injection continues the page visit rather than starting a new budget.
+      assert.equal(pageScope.__chromeAiTranslatorInlineState.session, session);
+      assert.equal(session.spent, 1200);
+      assert.equal(session.status, 'active');
     },
   },
   {
@@ -354,6 +364,10 @@ exports.tests = [
         packageJson.scripts['check:syntax'],
         /node --check extension\/openai-response\.js/
       );
+      assert.match(
+        packageJson.scripts['check:syntax'],
+        /node --check extension\/inline-translation-session\.js/
+      );
       for (const file of [
         'markdown-entries',
         'markdown-document',
@@ -391,7 +405,9 @@ exports.tests = [
       // Two shared modules are guarded here. The Placeholder Token contract is read by the
       // inline codec, which runs in both, and by Side Panel Translation's rehydration half,
       // which runs only in the worker. The Markdown entry module is read by the two halves of
-      // Side Panel Translation's codec that render a span, which sit one on each side.
+      // Side Panel Translation's codec that render a span, which sit one on each side. The
+      // page-only chain from the inline codec through the Inline Translation Session to the
+      // content script is guarded the same way.
       const backgroundJs = fs.readFileSync(
         path.join(__dirname, '..', 'extension', 'background.js'),
         'utf8'
@@ -409,6 +425,8 @@ exports.tests = [
         ['markdown-entries.js', 'markdown-rehydration.js', ['worker']],
         ['markdown-entries.js', 'translation-chunks.js', ['worker']],
         ['markdown-entries.js', 'markdown-document.js', ['page']],
+        ['inline-block.js', 'inline-translation-session.js', ['page']],
+        ['inline-translation-session.js', 'content.js', ['page']],
       ];
 
       for (const [shared, reader, runtimes] of dependencies) {

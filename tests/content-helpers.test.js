@@ -5,7 +5,7 @@ const {
   createTestDocument,
 } = require('./inline-block.test');
 const inlineBlockCodec = require('../extension/inline-block.js');
-const { DEFAULT_MODEL } = require('../extension/default-model.js');
+const inlineTranslationSession = require('../extension/inline-translation-session.js');
 
 function getReasoningTranslatedTemplate(record) {
   const wrapper = record.contract.entries.find(
@@ -13,6 +13,27 @@ function getReasoningTranslatedTemplate(record) {
   );
   const atom = record.contract.entries.find((entry) => entry.kind === 'atom');
   return `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
+}
+
+// A state with an Inline Translation Operation begun under `settings`, the way Start begins
+// one once it has the settings.
+function createActiveInlineTranslationState(overrides = {}, settings = {}) {
+  const state = helpers.createInlineTranslationState(overrides);
+  helpers.beginInlineTranslationOperation(
+    state,
+    inlineTranslationSession.createSettingsSnapshot(settings)
+  );
+  return state;
+}
+
+// A store for a check that drives one store alone, charged to a page visit of its own.
+function createStore(operationId, cache = null, settings = null) {
+  return helpers.createInlineViewportStore(
+    operationId,
+    cache,
+    settings,
+    inlineTranslationSession.createInlineTranslationSession()
+  );
 }
 
 // The Session Budget's limit, restated rather than imported: a check that reads the constant
@@ -54,7 +75,7 @@ function drainSemanticBlockQueue(store) {
 // stale and the one page-change retry it is allowed was queued behind it.
 function queueSemanticBlockPageChangeRetry(
   operationId,
-  store = helpers.createInlineViewportStore(operationId),
+  store = createStore(operationId),
   fixture = createReasoningFixture()
 ) {
   const { block } = fixture;
@@ -263,7 +284,7 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
       }
       await instruct('grantInlineTranslationAuthorization');
       await instruct('startInlineTranslation');
-      assert.equal(state.status, 'active', state.error);
+      assert.equal(state.session.status, 'active', state.error);
       assert.equal(state.viewport.records.every((record) => record.code === 'protocol.invalid_json'), true);
       warming = false;
       document.body.replaceChildren(block);
@@ -333,7 +354,7 @@ exports.tests = [
           releaseTokens: ['lifecycle-token'],
         }]);
 
-        if (state.status !== 'active') await instruct('startInlineTranslation');
+        if (state.session.status !== 'active') await instruct('startInlineTranslation');
         const next = paragraph(recordCost);
         document.body.appendChild(next);
         helpers.runInlineViewportScan(state);
@@ -765,19 +786,21 @@ exports.tests = [
       // The panel is the only place either is shown, and it has a line for each: mixing
       // them into one string would leave the panel guessing which it had been handed.
       assert.deepEqual(
-        helpers.getInlineTranslationStatusSnapshot({
-          status: 'active',
-          message: 'Translated 3 blocks.',
-          error: '',
-        }),
+        helpers.getInlineTranslationStatusSnapshot(
+          createActiveInlineTranslationState({
+            message: 'Translated 3 blocks.',
+            error: '',
+          })
+        ),
         { status: 'active', progress: 'Translated 3 blocks.', error: '' }
       );
 
       assert.deepEqual(
-        helpers.getInlineTranslationStatusSnapshot({
-          status: 'original',
-          error: 'Open Options and paste your OpenAI API key.',
-        }),
+        helpers.getInlineTranslationStatusSnapshot(
+          helpers.createInlineTranslationState({
+            error: 'Open Options and paste your OpenAI API key.',
+          })
+        ),
         {
           status: 'original',
           progress: '',
@@ -825,12 +848,13 @@ exports.tests = [
     fn() {
       // Single-sourced in the panel: the Floating Translate Button carries the controls
       // and nothing else, so there is no two-way synchronisation to maintain.
-      const model = helpers.getInlineTranslatorUiModel({
-        status: 'active',
-        menuOpen: true,
-        message: 'Translated 3 blocks.',
-        error: 'Translation failed.',
-      });
+      const model = helpers.getInlineTranslatorUiModel(
+        createActiveInlineTranslationState({
+          menuOpen: true,
+          message: 'Translated 3 blocks.',
+          error: 'Translation failed.',
+        })
+      );
 
       assert.equal('message' in model, false);
       assert.doesNotMatch(JSON.stringify(model), /Translated 3 blocks|failed/);
@@ -850,17 +874,15 @@ exports.tests = [
     // whatever the check ran next then reads.
     name: 'does not act on the retired inline progress message',
     fn() {
-      const state = helpers.createInlineTranslationState({
-        status: 'active',
+      const state = createActiveInlineTranslationState({
         message: 'Visible translation on',
-        operationId: 11,
       });
       const responses = [];
 
       const handled = helpers.handleInlineContentMessage(
         {
           type: 'INLINE_TRANSLATION_PROGRESS',
-          operationId: state.operationId,
+          operationId: state.session.operationId,
           progress: { stage: 'queued', recordCount: 3, chunkCount: 1 },
         },
         (response) => responses.push(response),
@@ -878,7 +900,7 @@ exports.tests = [
       // The re-mount half of the cycle: mounting renders whatever the state says, so a
       // button closed with its menu open would come back mid-menu if closing left it that
       // way. This is the whole of what closing has to remember.
-      const state = { status: 'original', menuOpen: true, message: '' };
+      const state = helpers.createInlineTranslationState({ menuOpen: true });
       helpers.closeFloatingTranslateButton(state);
       const remounted = helpers.getInlineTranslatorUiModel(state);
       assert.equal(remounted.menuOpen, false);
@@ -890,15 +912,14 @@ exports.tests = [
     fn() {
       // Closing takes the UI, not the work: the run stays active on the same operation, so
       // the Semantic Blocks already under way keep being translated against it.
-      const scanning = {
-        status: 'active',
+      const scanning = createActiveInlineTranslationState({
         menuOpen: true,
         message: 'Visible translation on',
-        operationId: 3,
-      };
+      });
+      const { operationId } = scanning.session;
       helpers.closeFloatingTranslateButton(scanning);
-      assert.equal(scanning.status, 'active');
-      assert.equal(scanning.operationId, 3);
+      assert.equal(scanning.session.status, 'active');
+      assert.equal(scanning.session.operationId, operationId);
     },
   },
   {
@@ -907,7 +928,7 @@ exports.tests = [
       // A reload brings the button back subject to the reader's visibility choice, so
       // closing must leave nothing behind to restore from. It adds no state at all: the
       // button is closed exactly while its UI is detached.
-      const state = { status: 'active', menuOpen: true, operationId: 4 };
+      const state = createActiveInlineTranslationState({ menuOpen: true });
       const before = Object.keys(state).sort();
       helpers.closeFloatingTranslateButton(state);
       assert.deepEqual(Object.keys(state).sort(), before);
@@ -933,7 +954,7 @@ exports.tests = [
     name: 'loads inline menu target language through masked runtime settings',
     async fn() {
       const messages = [];
-      const state = { status: 'original', menuOpen: true, message: '' };
+      const state = helpers.createInlineTranslationState({ menuOpen: true });
       const fakeChrome = {
         runtime: {
           async sendMessage(value) {
@@ -1127,12 +1148,8 @@ exports.tests = [
           global.document.scrollingElement = null;
           global.document.body = null;
 
-          const store = helpers.createInlineViewportStore(51);
-          const state = helpers.createInlineTranslationState({
-            status: 'active',
-            operationId: 51,
-            viewport: store,
-          });
+          const state = createActiveInlineTranslationState();
+          const store = state.viewport;
 
           helpers.attachInlineViewportWatchers(root, state);
 
@@ -1184,13 +1201,9 @@ exports.tests = [
           text(`Visible article sentence ${index + 1}.`)
         );
         const root = new FakeElement(nodes);
-        const store = helpers.createInlineViewportStore(31);
+        const state = createActiveInlineTranslationState();
+        const store = state.viewport;
         store.root = root;
-        const state = helpers.createInlineTranslationState({
-          status: 'active',
-          operationId: 31,
-          viewport: store,
-        });
 
         helpers.runInlineViewportScan(state);
 
@@ -1254,7 +1267,7 @@ exports.tests = [
       };
 
       try {
-        const store = helpers.createInlineViewportStore(41);
+        const store = createStore(41);
 
         const first = helpers.collectVisibleInlineBlocks(root, store, 2);
         assert.deepEqual(
@@ -1326,7 +1339,7 @@ exports.tests = [
       };
 
       try {
-        const store = helpers.createInlineViewportStore(42);
+        const store = createStore(42);
 
         // A budget of one: it has to survive three offscreen paragraphs to be spent on the
         // visible one.
@@ -1347,10 +1360,7 @@ exports.tests = [
   {
     name: 'drains semantic block page-change retries through the runtime loop',
     async fn() {
-      const state = helpers.createInlineTranslationState({
-        status: 'active',
-        operationId: 32,
-      });
+      const state = createActiveInlineTranslationState();
       const previous = {
         chrome: global.chrome,
         document: global.document,
@@ -1408,9 +1418,8 @@ exports.tests = [
       };
 
       try {
-        const store = helpers.createInlineViewportStore(32);
+        const store = state.viewport;
         store.root = fixture.block;
-        state.viewport = store;
 
         helpers.runInlineViewportScan(state);
         await flushMicrotasks(16);
@@ -1449,170 +1458,27 @@ exports.tests = [
     },
   },
   {
-    name: 'separates page translation cache by inline settings',
-    fn() {
-      const state = { translationCacheBySettings: new Map() };
-      const baseSettings = {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-        apiKey: 'secret-one',
-      };
-      const sameTranslationSettings = {
-        ...baseSettings,
-        apiKey: 'secret-two',
-      };
-      const noApiKeySettings = {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-      };
-      const differentTargetLanguageSettings = {
-        ...baseSettings,
-        targetLanguage: 'Japanese',
-      };
-      const differentToneSettings = {
-        ...baseSettings,
-        tone: 'natural',
-      };
-      const differentModelSettings = {
-        ...baseSettings,
-        model: 'gpt-5.4',
-      };
-      const differentReasoningEffortSettings = {
-        ...baseSettings,
-        reasoningEffort: 'low',
-      };
-
-      const firstCache = helpers.getInlineTranslationCacheBucket(
-        state,
-        baseSettings
-      );
-      firstCache.set('Hello world.', {
-        original: 'Hello world.',
-        translation: '안녕하세요.',
-      });
-
-      assert.equal(
-        helpers.getInlineTranslationCacheBucket(state, sameTranslationSettings),
-        firstCache
-      );
-      assert.equal(
-        helpers.getInlineTranslationCacheBucket(state, noApiKeySettings),
-        firstCache
-      );
-      const japaneseCache = helpers.getInlineTranslationCacheBucket(
-        state,
-        differentTargetLanguageSettings
-      );
-      assert.notEqual(japaneseCache, firstCache);
-      assert.equal(
-        helpers.getInlineTranslationCacheBucket(
-          state,
-          differentTargetLanguageSettings
-        ),
-        japaneseCache
-      );
-
-      const naturalCache = helpers.getInlineTranslationCacheBucket(
-        state,
-        differentToneSettings
-      );
-      assert.notEqual(naturalCache, firstCache);
-      assert.equal(
-        helpers.getInlineTranslationCacheBucket(state, differentToneSettings),
-        naturalCache
-      );
-
-      const gpt54Cache = helpers.getInlineTranslationCacheBucket(
-        state,
-        differentModelSettings
-      );
-      assert.notEqual(gpt54Cache, firstCache);
-      assert.equal(
-        helpers.getInlineTranslationCacheBucket(state, differentModelSettings),
-        gpt54Cache
-      );
-
-      const lowReasoningCache = helpers.getInlineTranslationCacheBucket(
-        state,
-        differentReasoningEffortSettings
-      );
-      assert.notEqual(lowReasoningCache, firstCache);
-      assert.equal(
-        helpers.getInlineTranslationCacheBucket(
-          state,
-          differentReasoningEffortSettings
-        ),
-        lowReasoningCache
-      );
-      assert.equal(
-        new Set([
-          firstCache,
-          japaneseCache,
-          naturalCache,
-          gpt54Cache,
-          lowReasoningCache,
-        ]).size,
-        5
-      );
-    },
-  },
-  {
-    name: 'builds inline translation settings snapshot without api key',
-    fn() {
-      assert.deepEqual(
-        helpers.createInlineTranslationSettingsSnapshot({
-          targetLanguage: 'Japanese',
-          tone: 'natural',
-          model: 'gpt-5.4',
-          reasoningEffort: 'low',
-          apiKey: 'sk-secret',
-          viewMode: 'bilingual',
-          chunkMaxChars: 24000,
-        }),
-        {
-          targetLanguage: 'Japanese',
-          tone: 'natural',
-          model: 'gpt-5.4',
-          reasoningEffort: 'low',
-        }
-      );
-      assert.deepEqual(helpers.createInlineTranslationSettingsSnapshot({}), {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: DEFAULT_MODEL,
-        reasoningEffort: 'none',
-      });
-    },
-  },
-  {
     name: 'stopping viewport translation invalidates operation without restoring text',
     fn() {
-      const store = helpers.createInlineViewportStore(4);
+      const state = createActiveInlineTranslationState();
+      const store = state.viewport;
+      const { operationId } = store;
       const node = { isConnected: true, nodeValue: '안녕하세요.' };
-      store.queue.push({ id: 'v2', state: 'queued', operationId: 4 });
+      store.queue.push({ id: 'v2', state: 'queued', operationId });
       store.records.push({
         id: 'v1',
         node,
         original: 'Hello world.',
         translation: '안녕하세요.',
         state: 'translated',
-        operationId: 4,
+        operationId,
       });
-      const state = {
-        status: 'active',
-        operationId: 4,
-        viewport: store,
-      };
 
       const nextOperationId = helpers.stopInlineViewportTranslation(state);
 
-      assert.equal(nextOperationId, 5);
-      assert.equal(state.operationId, 5);
-      assert.equal(state.status, 'stopped');
+      assert.notEqual(nextOperationId, operationId);
+      assert.equal(state.session.operationId, nextOperationId);
+      assert.equal(state.session.status, 'stopped');
       assert.equal(store.stopped, true);
       assert.deepEqual(store.queue, []);
       assert.equal(node.nodeValue, '안녕하세요.');
@@ -1627,7 +1493,8 @@ exports.tests = [
         messages.push(message);
         return new Promise(() => {});
       } } };
-      const store = helpers.createInlineViewportStore(5);
+      const state = createActiveInlineTranslationState();
+      const store = state.viewport;
       store.localDiagnosticsInFlight = {
         id: globalThis.crypto.randomUUID(),
         diagnostics: [{ code: 'runtime.block_too_large', evidence: {} }],
@@ -1635,7 +1502,6 @@ exports.tests = [
       };
       store.localDiagnostics.push({ code: 'runtime.session_too_large', evidence: {} });
       store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
-      const state = { status: 'active', operationId: 5, viewport: store };
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 2);
@@ -1655,10 +1521,10 @@ exports.tests = [
         messages.push(message);
         return new Promise(() => {});
       } } };
-      const store = helpers.createInlineViewportStore(6);
+      const state = createActiveInlineTranslationState();
+      const store = state.viewport;
       store.localDiagnostics.push({ code: 'runtime.session_too_large', evidence: { limit: 60000 } });
       store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
-      const state = { status: 'active', operationId: 6, viewport: store };
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 1);
@@ -1677,14 +1543,14 @@ exports.tests = [
         messages.push(message);
         return new Promise(() => {});
       } } };
-      const store = helpers.createInlineViewportStore(7);
+      const state = createActiveInlineTranslationState();
+      const store = state.viewport;
       store.localDiagnosticsInFlight = {
         id: globalThis.crypto.randomUUID(),
         diagnostics: [{ code: 'runtime.block_too_large', evidence: {} }],
         attempt: 0,
       };
       store.localDiagnostics.push({ code: 'runtime.unsupported_block', evidence: {} });
-      const state = { status: 'active', operationId: 7, viewport: store };
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 1);
@@ -1697,29 +1563,28 @@ exports.tests = [
   {
     name: 'rejects stale viewport operation after stop or replacement',
     fn() {
-      const store = helpers.createInlineViewportStore(9);
-      const state = {
-        status: 'active',
-        operationId: 9,
-        viewport: store,
-      };
+      const state = createActiveInlineTranslationState();
+      const store = state.viewport;
+      const { operationId } = store;
 
       assert.equal(
-        helpers.isInlineViewportOperationCurrent(state, store, 9),
+        helpers.isInlineViewportOperationCurrent(state, store, operationId),
         true
       );
 
       store.stopped = true;
       assert.equal(
-        helpers.isInlineViewportOperationCurrent(state, store, 9),
+        helpers.isInlineViewportOperationCurrent(state, store, operationId),
         false
       );
 
       store.stopped = false;
-      state.viewport = helpers.createInlineViewportStore(10);
-      state.operationId = 10;
+      helpers.beginInlineTranslationOperation(
+        state,
+        inlineTranslationSession.createSettingsSnapshot({})
+      );
       assert.equal(
-        helpers.isInlineViewportOperationCurrent(state, store, 9),
+        helpers.isInlineViewportOperationCurrent(state, store, operationId),
         false
       );
     },
@@ -1731,32 +1596,17 @@ exports.tests = [
       // do that would pay for the same page twice, so `translateInlinePage` rescans instead
       // whenever this holds. A stopped run no longer admits work; Start begins a new
       // operation while already submitted requests can still settle.
-      assert.equal(
-        helpers.isInlineTranslationRunLive({
-          status: 'active',
-          viewport: helpers.createInlineViewportStore(2),
-        }),
-        true
-      );
+      const live = createActiveInlineTranslationState();
+      assert.equal(helpers.isInlineTranslationRunLive(live), true);
 
-      const stoppedStore = helpers.createInlineViewportStore(2);
-      stoppedStore.stopped = true;
+      live.viewport.stopped = true;
+      assert.equal(helpers.isInlineTranslationRunLive(live), false);
+
+      const stopped = createActiveInlineTranslationState();
+      helpers.stopInlineViewportTranslation(stopped);
+      assert.equal(helpers.isInlineTranslationRunLive(stopped), false);
       assert.equal(
-        helpers.isInlineTranslationRunLive({
-          status: 'active',
-          viewport: stoppedStore,
-        }),
-        false
-      );
-      assert.equal(
-        helpers.isInlineTranslationRunLive({
-          status: 'stopped',
-          viewport: stoppedStore,
-        }),
-        false
-      );
-      assert.equal(
-        helpers.isInlineTranslationRunLive({ status: 'original' }),
+        helpers.isInlineTranslationRunLive(helpers.createInlineTranslationState()),
         false
       );
     },
@@ -2038,7 +1888,7 @@ exports.tests = [
     fn() {
       assert.deepEqual(
         helpers.getInlineTranslatorUiModel(
-          { status: 'original', menuOpen: true, message: '' },
+          helpers.createInlineTranslationState({ menuOpen: true }),
           { targetLanguage: 'Japanese' }
         ),
         {
@@ -2053,7 +1903,7 @@ exports.tests = [
 
       assert.deepEqual(
         helpers.getInlineTranslatorUiModel(
-          { status: 'active', menuOpen: false, message: 'Visible translation on' },
+          createActiveInlineTranslationState({ message: 'Visible translation on' }),
           { targetLanguage: 'Korean' }
         ),
         {
@@ -2070,23 +1920,19 @@ exports.tests = [
   {
     name: 'keeps inline menu target language after restoring original text',
     fn() {
-      const state = helpers.createInlineTranslationState({
-        status: 'active',
-        message: 'Visible translation on',
-        operationId: 7,
-        translationSettings: {
+      const state = createActiveInlineTranslationState(
+        { message: 'Visible translation on' },
+        {
           targetLanguage: 'Japanese',
           tone: 'technical',
           model: 'gpt-5.4-mini',
           reasoningEffort: 'none',
-        },
-        translationCache: new Map(),
-        viewport: helpers.createInlineViewportStore(7),
-      });
+        }
+      );
 
       helpers.restoreInlineOriginal(state);
 
-      assert.equal(state.status, 'original');
+      assert.equal(state.session.status, 'original');
       assert.equal(
         helpers.getInlineTranslatorUiModel(state).translateText,
         'Page in Japanese'
@@ -2097,17 +1943,14 @@ exports.tests = [
     name: 'refreshes inline menu target language when opening menu',
     async fn() {
       const messages = [];
-      const state = {
-        status: 'original',
-        menuOpen: false,
-        message: '',
+      const state = helpers.createInlineTranslationState({
         translationSettings: {
           targetLanguage: 'Korean',
           tone: 'technical',
           model: 'gpt-5.4-mini',
           reasoningEffort: 'none',
         },
-      };
+      });
       const fakeChrome = {
         runtime: {
           async sendMessage(value) {
@@ -2139,17 +1982,14 @@ exports.tests = [
     name: 'opens inline menu before target language refresh completes',
     async fn() {
       let resolveSettings;
-      const state = {
-        status: 'original',
-        menuOpen: false,
-        message: '',
+      const state = helpers.createInlineTranslationState({
         translationSettings: {
           targetLanguage: 'Korean',
           tone: 'technical',
           model: 'gpt-5.4-mini',
           reasoningEffort: 'none',
         },
-      };
+      });
       const updates = [];
       const fakeChrome = {
         runtime: {
@@ -2222,7 +2062,7 @@ exports.tests = [
     name: 'queues one semantic record for all text in the same block',
     fn() {
       const { block } = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(12);
+      const store = createStore(12);
 
       const first = helpers.queueInlineViewportBlock(store, block);
       const duplicate = helpers.queueInlineViewportBlock(store, block);
@@ -2258,7 +2098,7 @@ exports.tests = [
       global.HTMLElement = block.constructor;
       global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
       try {
-        const store = helpers.createInlineViewportStore(12);
+        const store = createStore(12);
         const records = helpers.collectVisibleInlineBlocks(root, store);
         assert.equal(records.length, 1);
         const [record] = records;
@@ -2318,7 +2158,7 @@ exports.tests = [
       global.HTMLElement = root.constructor;
       global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
       try {
-        const store = helpers.createInlineViewportStore(13);
+        const store = createStore(13);
         helpers.collectVisibleInlineBlocks(root, store);
         helpers.collectVisibleInlineBlocks(root, store);
         assert.deepEqual(store.queue.map(record => record.blockElement), [ordinary, inner]);
@@ -2356,7 +2196,7 @@ exports.tests = [
           global.document = document;
           global.HTMLElement = outer.constructor;
           global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
-          const store = helpers.createInlineViewportStore(14);
+          const store = createStore(14);
           helpers.collectVisibleInlineBlocks(outer, store);
           helpers.collectVisibleInlineBlocks(outer, store);
           assert.equal(store.byBlock.get(outer)?.state, 'failed', tag);
@@ -2405,7 +2245,7 @@ exports.tests = [
       global.HTMLElement = block.constructor;
       global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
       try {
-        const store = helpers.createInlineViewportStore(12);
+        const store = createStore(12);
         const records = helpers.collectVisibleInlineBlocks(block, store);
         assert.equal(records.length, 1);
         const [record] = records;
@@ -2466,7 +2306,7 @@ exports.tests = [
       };
 
       try {
-        const store = helpers.createInlineViewportStore(12);
+        const store = createStore(12);
         const queued = helpers.collectVisibleInlineBlocks(block, store);
 
         assert.equal(queued.length, 1);
@@ -2515,7 +2355,7 @@ exports.tests = [
       };
 
       try {
-        const store = helpers.createInlineViewportStore(12);
+        const store = createStore(12);
         const queued = helpers.collectVisibleInlineBlocks(root, store);
 
         assert.equal(queued.length, 1);
@@ -2559,7 +2399,7 @@ exports.tests = [
       };
 
       try {
-        const store = helpers.createInlineViewportStore(12);
+        const store = createStore(12);
         const queued = helpers.collectVisibleInlineBlocks(editor, store);
 
         assert.deepEqual(queued, []);
@@ -2612,7 +2452,7 @@ exports.tests = [
       };
 
       try {
-        const store = helpers.createInlineViewportStore(12);
+        const store = createStore(12);
         const queued = helpers.collectVisibleInlineBlocks(root, store);
 
         assert.equal(queued.length, 4);
@@ -2675,7 +2515,7 @@ exports.tests = [
       };
 
       try {
-        const store = helpers.createInlineViewportStore(12);
+        const store = createStore(12);
         const queued = helpers.collectVisibleInlineBlocks(root, store);
 
         assert.equal(queued.length, 3);
@@ -2704,7 +2544,7 @@ exports.tests = [
       const nested = element('p', text('Nested paragraph text.'));
       const block = element('li', text('Outer item text.'), nested);
       document.body.appendChild(block);
-      const store = helpers.createInlineViewportStore(13);
+      const store = createStore(13);
 
       const record = helpers.queueInlineViewportBlock(store, block);
 
@@ -2742,7 +2582,7 @@ exports.tests = [
         messages.push(message);
         return Promise.resolve({ ok: true });
       } } };
-      const store = helpers.createInlineViewportStore(15);
+      const store = createStore(15);
       try {
         for (const reason of protocol.localRejectionReasons) {
           helpers.queueInlineLocalDiagnostic(
@@ -2777,7 +2617,7 @@ exports.tests = [
     fn() {
       const firstFixture = createReasoningFixture();
       const secondFixture = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(14);
+      const store = createStore(14);
       const first = helpers.queueInlineViewportBlock(
         store,
         firstFixture.block
@@ -2794,7 +2634,7 @@ exports.tests = [
       assert.equal(second.state, 'translating');
       assert.equal(store.inFlight, 1);
       assert.equal(
-        store.sessionBudget.recordCost,
+        store.session.spent,
         helpers.getInlineBlockRecordCost(first) +
           helpers.getInlineBlockRecordCost(second)
       );
@@ -2826,7 +2666,7 @@ exports.tests = [
   {
     name: 'caps semantic block batches at the reserved record cap and the session budget',
     fn() {
-      const store = helpers.createInlineViewportStore(14);
+      const store = createStore(14);
       store.queue = Array.from({ length: 501 }, (_, index) => ({
         id: `b${index + 1}`,
         state: 'queued',
@@ -2847,7 +2687,7 @@ exports.tests = [
         ) <= 12000,
         true
       );
-      assert.equal(store.sessionBudget.recordCost <= INLINE_SESSION_BUDGET, true);
+      assert.equal(store.session.spent <= INLINE_SESSION_BUDGET, true);
       assert.equal(
         store.records.filter((record) => record.state === 'failed').length,
         0
@@ -2859,20 +2699,12 @@ exports.tests = [
   {
     name: 'preserves the semantic block session budget across original restore',
     fn() {
-      const cache = new Map();
-      const firstStore = helpers.createInlineViewportStore(14, cache);
-      firstStore.sessionBudget.recordCost = INLINE_SESSION_BUDGET;
-      const state = {
-        status: 'active',
-        operationId: 14,
-        viewport: firstStore,
-        translationCache: cache,
-        restorableRecords: [],
-      };
+      const state = createActiveInlineTranslationState();
+      state.session.charge(INLINE_SESSION_BUDGET);
 
       helpers.restoreInlineViewportRecords(state);
 
-      assert.equal(state.viewport.sessionBudget.recordCost, INLINE_SESSION_BUDGET);
+      assert.equal(state.viewport.session.spent, INLINE_SESSION_BUDGET);
       const { block } = createReasoningFixture();
       const record = helpers.queueInlineViewportBlock(state.viewport, block);
       assert.deepEqual(
@@ -2890,7 +2722,7 @@ exports.tests = [
   {
     name: 'charges the session budget in actual record cost, not reserved cost',
     fn() {
-      const store = helpers.createInlineViewportStore(140);
+      const store = createStore(140);
       // Short blocks are where the two costs diverge most: reserved cost counts a whole
       // request wrapper for every record and then counts it again for a repair most of them
       // never need, so a page of table cells and list items pays several times its text.
@@ -2914,7 +2746,7 @@ exports.tests = [
         store.records.filter((record) => record.code === 'runtime.session_too_large').length,
         0
       );
-      assert.equal(store.sessionBudget.recordCost, actualTotal);
+      assert.equal(store.session.spent, actualTotal);
       assert.equal(helpers.getInlineTerminalReason(store.records), '');
     },
   },
@@ -2923,7 +2755,7 @@ exports.tests = [
     fn() {
       // The page issue #29 was measured on: 356 Semantic Blocks holding 37,392 characters,
       // most of them table cells, median block length 36 characters.
-      const store = helpers.createInlineViewportStore(141);
+      const store = createStore(141);
       const queued = queueSyntheticSemanticBlocks(store, [
         ...Array(213).fill(36),
         ...Array(29).fill(30),
@@ -2942,7 +2774,7 @@ exports.tests = [
       );
       // Headroom, not a near miss: the page fits even if every one of its blocks had needed
       // a repair request, which is twice what this page can possibly cost.
-      assert.equal(store.sessionBudget.recordCost * 2 <= INLINE_SESSION_BUDGET, true);
+      assert.equal(store.session.spent * 2 <= INLINE_SESSION_BUDGET, true);
     },
   },
   {
@@ -2950,7 +2782,7 @@ exports.tests = [
     fn() {
       const { block } = createReasoningFixture();
       const cache = new Map();
-      const firstStore = helpers.createInlineViewportStore(144, cache);
+      const firstStore = createStore(144, cache);
       const record = helpers.queueInlineViewportBlock(firstStore, block);
       helpers.applyInlineViewportBlockResults(
         helpers.takeInlineViewportBlockBatch(firstStore),
@@ -2965,31 +2797,31 @@ exports.tests = [
       );
       assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
 
-      const secondStore = helpers.createInlineViewportStore(145, cache);
+      const secondStore = createStore(145, cache);
       assert.equal(helpers.queueInlineViewportBlock(secondStore, block), null);
 
       // The cache replays `attemptCount: 2` with no request sent, so nothing is charged for
       // it — here or on the next batch the store takes.
       assert.equal(secondStore.records[0].attemptCount, 2);
-      assert.equal(secondStore.sessionBudget.recordCost, 0);
+      assert.equal(secondStore.session.spent, 0);
       assert.deepEqual(helpers.takeInlineViewportBlockBatch(secondStore), []);
-      assert.equal(secondStore.sessionBudget.recordCost, 0);
+      assert.equal(secondStore.session.spent, 0);
     },
   },
   {
     name: 'releases no session budget when a batch fails',
     fn() {
       const firstFixture = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(146);
+      const store = createStore(146);
       const first = helpers.queueInlineViewportBlock(store, firstFixture.block);
       const batch = helpers.takeInlineViewportBlockBatch(store);
-      const spent = store.sessionBudget.recordCost;
+      const spent = store.session.spent;
       assert.equal(spent > 0, true);
 
       helpers.markInlineViewportBatchFailed(batch, 146);
 
       assert.equal(first.state, 'failed');
-      assert.equal(store.sessionBudget.recordCost, spent);
+      assert.equal(store.session.spent, spent);
 
 
     },
@@ -3012,7 +2844,7 @@ exports.tests = [
   {
     name: 'still refuses the request-size caps on reserved cost',
     fn() {
-      const store = helpers.createInlineViewportStore(147);
+      const store = createStore(147);
       const [oversized] = queueSyntheticSemanticBlocks(store, [7000]);
       assert.equal(helpers.getInlineBlockRecordCost(oversized) < 12000, true);
       assert.equal(helpers.getInlineBlockReservedRecordCost(oversized) > 12000, true);
@@ -3020,11 +2852,11 @@ exports.tests = [
       assert.deepEqual(helpers.takeInlineViewportBlockBatch(store, 12000), []);
       assert.equal(oversized.state, 'failed');
       assert.equal(oversized.code, 'runtime.block_too_large');
-      assert.equal(store.sessionBudget.recordCost, 0);
+      assert.equal(store.session.spent, 0);
 
       // The per-batch cap keeps its unit too: two blocks whose actual costs would fit one
       // request are still split across two, because their reserved costs do not.
-      const batchStore = helpers.createInlineViewportStore(148);
+      const batchStore = createStore(148);
       const pair = queueSyntheticSemanticBlocks(batchStore, [4000, 4000]);
       assert.equal(
         pair.reduce((sum, record) => sum + helpers.getInlineBlockRecordCost(record), 0) <
@@ -3041,7 +2873,7 @@ exports.tests = [
     fn() {
       const { block, link } = createReasoningFixture();
       const cache = new Map();
-      const firstStore = helpers.createInlineViewportStore(15, cache);
+      const firstStore = createStore(15, cache);
       const record = helpers.queueInlineViewportBlock(firstStore, block);
       const batch = helpers.takeInlineViewportBlockBatch(firstStore);
       const translatedTemplate = getReasoningTranslatedTemplate(record);
@@ -3067,7 +2899,7 @@ exports.tests = [
       assert.equal(cache.get(record.cacheKey).translatedTemplate, translatedTemplate);
 
       assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
-      const secondStore = helpers.createInlineViewportStore(16, cache);
+      const secondStore = createStore(16, cache);
       const queued = helpers.queueInlineViewportBlock(secondStore, block);
 
       assert.equal(queued, null);
@@ -3082,7 +2914,7 @@ exports.tests = [
     name: 'queues at most one page-change retry for a semantic block',
     fn() {
       const { block } = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(17);
+      const store = createStore(17);
       const first = helpers.queueInlineViewportBlock(store, block);
       helpers.takeInlineViewportBlockBatch(store);
       const firstText = first.snapshot.originalTextValues.keys().next().value;
@@ -3126,13 +2958,9 @@ exports.tests = [
     name: 'resetting queued semantic block retries keeps them queued rather than cancelling them',
     fn() {
       withFakeViewportDom(() => {
+        const state = createActiveInlineTranslationState();
         const { block, store, original, retry } =
-          queueSemanticBlockPageChangeRetry(35);
-        const state = helpers.createInlineTranslationState({
-          status: 'active',
-          operationId: 35,
-          viewport: store,
-        });
+          queueSemanticBlockPageChangeRetry(state.viewport.operationId, state.viewport);
 
         // Everything this check asserts about the retry is that the reset left it alone,
         // which is also what a reset that never ran would look like. A plain queued block
@@ -3185,13 +3013,9 @@ exports.tests = [
   {
     name: 'stopping in-flight semantic block retries keeps unresolved changed status visible',
     fn() {
-      const { store, original, retry } = queueSemanticBlockPageChangeRetry(36);
-      const state = {
-        status: 'active',
-        operationId: 36,
-        restorableRecords: [],
-        viewport: store,
-      };
+      const state = createActiveInlineTranslationState();
+      const { store, original, retry } =
+        queueSemanticBlockPageChangeRetry(state.viewport.operationId, state.viewport);
       helpers.takeInlineViewportBlockBatch(store);
       assert.equal(retry.state, 'translating');
 
@@ -3222,13 +3046,9 @@ exports.tests = [
   {
     name: 'stopping queued semantic block retries keeps unresolved changed status visible',
     fn() {
-      const { store, original, retry } = queueSemanticBlockPageChangeRetry(37);
-      const state = {
-        status: 'active',
-        operationId: 37,
-        restorableRecords: [],
-        viewport: store,
-      };
+      const state = createActiveInlineTranslationState();
+      const { store, original, retry } =
+        queueSemanticBlockPageChangeRetry(state.viewport.operationId, state.viewport);
       assert.equal(retry.state, 'queued');
 
       helpers.stopInlineViewportTranslation(state);
@@ -3260,10 +3080,10 @@ exports.tests = [
     },
   },
   {
-    // The two checks above build their store with `createInlineViewportStore` and never seed
-    // it, so neither can see what a restart does to the record ids. A restarted session
-    // carries its translated blocks into a fresh store keeping their original ids, so the
-    // first block the new session mints has to be given an id none of them already holds —
+    // The two checks above never restart their operation, so neither can see what a restart
+    // does to the record ids. A restarted operation carries its translated blocks into a
+    // fresh store keeping their original ids, so the first block the new operation mints has
+    // to be given an id none of them already holds —
     // otherwise `findInlineViewportRecordById` resolves the retry's `retryOf` to the seeded
     // record, the supersession is never cleared, and the unresolved block goes back to
     // reading as finished.
@@ -3275,32 +3095,25 @@ exports.tests = [
         model: 'gpt-5.4-mini',
         reasoningEffort: 'none',
       };
-      const cache = new Map();
       const { block: firstBlock } = createReasoningFixture();
-      const firstStore = helpers.createInlineViewportStore(38, cache, settings);
+      const state = createActiveInlineTranslationState({}, settings);
+      const firstStore = state.viewport;
       const seeded = helpers.queueInlineViewportBlock(firstStore, firstBlock);
       helpers.applyInlineViewportBlockResults(
         helpers.takeInlineViewportBlockBatch(firstStore),
         [{ id: seeded.id, disposition: 'apply', template: getReasoningTranslatedTemplate(seeded) }],
-        38,
+        firstStore.operationId,
         firstStore
       );
       assert.equal(seeded.state, 'translated');
 
-      const state = {
-        status: 'active',
-        operationId: 38,
-        viewport: firstStore,
-        restorableRecords: [],
-      };
       helpers.stopInlineViewportTranslation(state);
 
       // Page in Korean again: a fresh store for the new operation, seeded with what the
       // stopped run had already translated.
-      const secondStore = helpers.createInlineViewportStore(39, cache, settings);
-      helpers.seedInlineViewportStoreWithRestorableRecords(
-        secondStore,
-        state.restorableRecords
+      const secondStore = helpers.beginInlineTranslationOperation(
+        state,
+        inlineTranslationSession.createSettingsSnapshot(settings)
       );
       assert.deepEqual(secondStore.records, [seeded]);
 
@@ -3309,13 +3122,10 @@ exports.tests = [
       const secondFixture = createReasoningFixture();
       secondFixture.strong.childNodes[0].nodeValue = 'Other reasoning models';
       const { original, retry } = queueSemanticBlockPageChangeRetry(
-        39,
+        secondStore.operationId,
         secondStore,
         secondFixture
       );
-      state.status = 'active';
-      state.operationId = 39;
-      state.viewport = secondStore;
 
       // Asserted separately from the status below, so a future change that fixes the counts
       // while leaving two records sharing an id does not read as a clean pass.
@@ -3354,7 +3164,7 @@ exports.tests = [
     fn() {
       const { block } = createReasoningFixture();
       const cache = new Map();
-      const firstStore = helpers.createInlineViewportStore(161, cache);
+      const firstStore = createStore(161, cache);
       const record = helpers.queueInlineViewportBlock(firstStore, block);
       helpers.applyInlineViewportBlockResults(
         helpers.takeInlineViewportBlockBatch(firstStore),
@@ -3370,7 +3180,7 @@ exports.tests = [
       );
       assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
 
-      const secondStore = helpers.createInlineViewportStore(162, cache);
+      const secondStore = createStore(162, cache);
       assert.equal(helpers.queueInlineViewportBlock(secondStore, block), null);
       const cachedRecord = secondStore.records[0];
       assert.equal(cachedRecord.state, 'translated_with_warning');
@@ -3386,7 +3196,7 @@ exports.tests = [
       const firstFixture = createReasoningFixture();
       const secondFixture = createReasoningFixture();
       secondFixture.strong.childNodes[0].nodeValue = 'Other reasoning models';
-      const store = helpers.createInlineViewportStore(19);
+      const store = createStore(19);
       const first = helpers.queueInlineViewportBlock(store, firstFixture.block);
       const second = helpers.queueInlineViewportBlock(store, secondFixture.block);
       const batch = helpers.takeInlineViewportBlockBatch(store);
@@ -3419,7 +3229,7 @@ exports.tests = [
       const codec = require('../extension/inline-block.js');
       const previousApply = codec.applyPatchPlan;
       const { block } = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(191);
+      const store = createStore(191);
       const record = helpers.queueInlineViewportBlock(store, block);
       const batch = helpers.takeInlineViewportBlockBatch(store);
       codec.applyPatchPlan = () => ({ ok: false, errorCode: 'apply_failed' });
@@ -3451,8 +3261,8 @@ exports.tests = [
       const { block, strong, link } = createReasoningFixture();
       const originalBlockChildren = [...block.childNodes];
       const originalStrongChildren = [...strong.childNodes];
-      const cache = new Map();
-      const store = helpers.createInlineViewportStore(20, cache);
+      const state = createActiveInlineTranslationState();
+      const store = state.viewport;
       const record = helpers.queueInlineViewportBlock(store, block);
       const batch = helpers.takeInlineViewportBlockBatch(store);
       helpers.applyInlineViewportBlockResults(
@@ -3464,16 +3274,9 @@ exports.tests = [
           terminalCode: 'quality.english_residue',
           attemptCount: 2,
         }],
-        20,
+        store.operationId,
         store
       );
-      const state = {
-        status: 'active',
-        operationId: 20,
-        viewport: store,
-        restorableRecords: [record],
-        translationCache: cache,
-      };
 
       helpers.restoreInlineViewportRecords(state);
 
@@ -3482,8 +3285,9 @@ exports.tests = [
       assert.equal(block.childNodes[2], link);
       assert.equal(block.textContent, 'Reasoning models like GPT-5.5 use internal reasoning tokens.');
       assert.equal(record.state, 'original');
-      assert.equal(state.status, 'original');
-      assert.equal(state.operationId, 21);
+      assert.equal(state.session.status, 'original');
+      assert.equal(state.viewport.operationId, state.session.operationId);
+      assert.notEqual(state.session.operationId, store.operationId);
     },
   },
   {
@@ -3496,27 +3300,20 @@ exports.tests = [
         model: 'gpt-5.4-mini',
         reasoningEffort: 'none',
       };
-      const cache = new Map();
-      const firstStore = helpers.createInlineViewportStore(21, cache, settings);
+      const state = createActiveInlineTranslationState({}, settings);
+      const firstStore = state.viewport;
       const record = helpers.queueInlineViewportBlock(firstStore, block);
       helpers.applyInlineViewportBlockResults(
         helpers.takeInlineViewportBlockBatch(firstStore),
         [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
-        21,
+        firstStore.operationId,
         firstStore
       );
-      const state = {
-        status: 'active',
-        operationId: 21,
-        viewport: firstStore,
-        restorableRecords: [],
-      };
       helpers.stopInlineViewportTranslation(state);
-      const secondStore = helpers.createInlineViewportStore(22, cache, settings);
 
-      helpers.seedInlineViewportStoreWithRestorableRecords(
-        secondStore,
-        state.restorableRecords
+      const secondStore = helpers.beginInlineTranslationOperation(
+        state,
+        inlineTranslationSession.createSettingsSnapshot(settings)
       );
 
       assert.equal(secondStore.byBlock.get(block), record);
@@ -3534,39 +3331,32 @@ exports.tests = [
     fn() {
       const { block, strong, link } = createReasoningFixture();
       const originalText = block.textContent;
-      const cache = new Map();
-      const firstStore = helpers.createInlineViewportStore(31, cache, {
+      const state = createActiveInlineTranslationState({}, {
         targetLanguage: 'Korean',
         tone: 'technical',
         model: 'gpt-5.4-mini',
         reasoningEffort: 'none',
       });
+      const firstStore = state.viewport;
       const record = helpers.queueInlineViewportBlock(firstStore, block);
       helpers.applyInlineViewportBlockResults(
         helpers.takeInlineViewportBlockBatch(firstStore),
         [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
-        31,
+        firstStore.operationId,
         firstStore
       );
-      const state = {
-        status: 'active',
-        operationId: 31,
-        viewport: firstStore,
-        restorableRecords: [],
-      };
       helpers.stopInlineViewportTranslation(state);
 
       // A different settings signature selects a different cache bucket, which is why the
       // carried-over translation cannot simply be reapplied.
-      const secondStore = helpers.createInlineViewportStore(32, new Map(), {
-        targetLanguage: 'Japanese',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-      });
-      helpers.seedInlineViewportStoreWithRestorableRecords(
-        secondStore,
-        state.restorableRecords
+      const secondStore = helpers.beginInlineTranslationOperation(
+        state,
+        inlineTranslationSession.createSettingsSnapshot({
+          targetLanguage: 'Japanese',
+          tone: 'technical',
+          model: 'gpt-5.4-mini',
+          reasoningEffort: 'none',
+        })
       );
 
       assert.equal(record.state, 'original');
@@ -3586,7 +3376,7 @@ exports.tests = [
     name: 'requeues a block rerendered with equivalent page-owned nodes',
     fn() {
       const { document, block } = createReasoningFixture();
-      const store = helpers.createInlineViewportStore(23);
+      const store = createStore(23);
       const first = helpers.queueInlineViewportBlock(store, block);
       helpers.applyInlineViewportBlockResults(
         helpers.takeInlineViewportBlockBatch(store),
