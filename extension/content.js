@@ -101,7 +101,6 @@ function createInlineViewportStore(
     queue: [],
     inFlight: 0,
     nextBlockId: 0,
-    nextTerminalSequence: 0,
     localDiagnostics: [],
     localDiagnosticsInFlight: null,
     localDiagnosticRetryTimer: null,
@@ -119,13 +118,6 @@ function createInlineViewportStore(
     translationSettings: translationSettingsSnapshot,
     translationSettingsSignature,
   };
-}
-
-function markInlineTerminalTransition(store, record) {
-  if (!record) return 0;
-  if (store) store.nextTerminalSequence = (Number(store.nextTerminalSequence) || 0) + 1;
-  record.terminalSequence = store?.nextTerminalSequence || (Number(record.terminalSequence) || 0) + 1;
-  return record.terminalSequence;
 }
 
 function queueInlineLocalDiagnostic(store, record, code, evidence = {}, localRejection = null) {
@@ -419,10 +411,6 @@ function seedInlineViewportStoreWithRestorableRecords(store, records = []) {
     }
     cacheInlineViewportBlockTranslation(store, record);
   }
-  store.nextTerminalSequence = Math.max(
-    Number(store.nextTerminalSequence) || 0,
-    ...store.records.map((record) => Number(record?.terminalSequence) || 0)
-  );
   return store;
 }
 
@@ -722,7 +710,6 @@ function applyCachedInlineViewportBlock(store, record) {
   record.attemptCount = Math.min(2, Math.max(1, Number(cached.attemptCount) || 1));
   record.translatedTemplate = cached.translatedTemplate;
   record.translation = cached.translatedTemplate;
-  if (record.state === 'translated_with_warning') markInlineTerminalTransition(store, record);
   return true;
 }
 
@@ -738,7 +725,6 @@ function queueInlineViewportBlock(store, blockElement, options = {}) {
       }
       existing.state = 'stale';
       existing.errorCode = 'block_changed';
-      markInlineTerminalTransition(store, existing);
       store.byBlock.delete(blockElement);
     } else if (
       ['queued', 'translating', 'failed', 'stale'].includes(existing.state)
@@ -753,7 +739,6 @@ function queueInlineViewportBlock(store, blockElement, options = {}) {
       state: 'failed',
       errorCode: serialized.errorCode || 'unsupported_block',
     });
-    markInlineTerminalTransition(store, failedRecord);
     queueInlineLocalDiagnostic(
       store,
       failedRecord,
@@ -793,7 +778,6 @@ function takeInlineViewportBlockBatch(
       store.queue.shift();
       record.state = 'failed';
       record.errorCode = 'block_too_large';
-      markInlineTerminalTransition(store, record);
       queueInlineLocalDiagnostic(store, record, 'runtime.block_too_large', {
         recordCost: cost,
         limit,
@@ -805,7 +789,6 @@ function takeInlineViewportBlockBatch(
       store.queue.shift();
       record.state = 'failed';
       record.errorCode = 'block_too_large';
-      markInlineTerminalTransition(store, record);
       queueInlineLocalDiagnostic(store, record, 'runtime.block_too_large', {
         recordCost: reservedCost,
         limit,
@@ -820,7 +803,6 @@ function takeInlineViewportBlockBatch(
       store.queue.shift();
       record.state = 'failed';
       record.errorCode = 'session_too_large';
-      markInlineTerminalTransition(store, record);
       queueInlineLocalDiagnostic(store, record, 'runtime.session_too_large', {
         recordCost: cost,
         sessionCost: store.sessionBudget.recordCost,
@@ -897,7 +879,6 @@ function applyInlineViewportBlockResults(
   function queuePageRetry(record) {
     record.state = 'stale';
     record.errorCode = 'block_changed';
-    markInlineTerminalTransition(store, record);
     summary.stale += 1;
     if (queueInlineViewportBlockRetry(store, record, 'page-change')) {
       summary.retried += 1;
@@ -915,7 +896,6 @@ function applyInlineViewportBlockResults(
     if (!result) {
       record.state = 'failed';
       record.errorCode = 'request_failed';
-      markInlineTerminalTransition(store, record);
       summary.failed += 1;
       continue;
     }
@@ -929,7 +909,6 @@ function applyInlineViewportBlockResults(
       record.errorCode = result.terminalCode || 'runtime.request_failed';
       record.terminalCode = record.errorCode;
       record.attemptCount = result.attemptCount || 1;
-      markInlineTerminalTransition(store, record);
       summary.failed += 1;
       continue;
     }
@@ -943,7 +922,6 @@ function applyInlineViewportBlockResults(
       else {
         record.state = 'failed';
         record.errorCode = `runtime.${plan.errorCode || 'apply_failed'}`;
-        markInlineTerminalTransition(store, record);
         summary.failed += 1;
       }
       continue;
@@ -954,7 +932,6 @@ function applyInlineViewportBlockResults(
       else {
         record.state = 'failed';
         record.errorCode = `runtime.${applied.errorCode || 'apply_failed'}`;
-        markInlineTerminalTransition(store, record);
         summary.failed += 1;
       }
       continue;
@@ -967,7 +944,6 @@ function applyInlineViewportBlockResults(
     record.attemptCount = result.attemptCount || 1;
     record.translatedTemplate = result.template;
     record.translation = result.template;
-    if (record.state === 'translated_with_warning') markInlineTerminalTransition(store, record);
     stampInlineViewportRecordSettings(store, record);
     cacheInlineViewportBlockTranslation(store, record);
     summary.applied += 1;
@@ -1022,11 +998,10 @@ function resetQueuedInlineViewportRecords(store) {
   store.queue = retained;
 }
 
-function markInlineViewportBatchFailed(records, operationId, store = null) {
+function markInlineViewportBatchFailed(records, operationId) {
   for (const record of records || []) {
     if (record.operationId === operationId && record.state === 'translating') {
       record.state = 'failed';
-      markInlineTerminalTransition(store, record);
     }
   }
 }
@@ -1789,7 +1764,7 @@ async function drainInlineViewportQueue(state = inlineState) {
           return;
         }
         if (!resp?.ok || !Array.isArray(resp.results)) {
-          markInlineViewportBatchFailed(batch, operationId, store);
+          markInlineViewportBatchFailed(batch, operationId);
           return;
         }
         applyInlineViewportBlockResults(
@@ -1840,7 +1815,7 @@ async function drainInlineViewportQueue(state = inlineState) {
       })
       .catch(() => {
         if (isInlineViewportOperationCurrent(state, store, operationId)) {
-          markInlineViewportBatchFailed(batch, operationId, store);
+          markInlineViewportBatchFailed(batch, operationId);
         }
       })
       .finally(() => {

@@ -1921,40 +1921,34 @@ exports.tests = [
         {
           state: 'translated_with_warning',
           terminalCode: 'quality.english_residue',
-          terminalSequence: 3,
         },
         {
           state: 'failed',
           terminalCode: 'structure.token_missing',
-          terminalSequence: 2,
         },
         {
           state: 'stale',
           errorCode: 'block_changed',
-          terminalSequence: 4,
           supersededByRetryId: 'retry-1',
         },
         {
           state: 'failed',
           terminalCode: 'quality.target_language_missing',
-          terminalSequence: 5,
         },
         {
           state: 'translated_with_warning',
           terminalCode: 'quality.english_residue',
-          terminalSequence: 1,
         },
         {
           state: 'stale',
           errorCode: 'block_changed',
-          terminalSequence: 6,
         },
-        { state: 'failed', terminalCode: 'protocol.invalid_json', terminalSequence: 12 },
-        { state: 'failed', terminalCode: 'runtime.apply_failed', terminalSequence: 11 },
-        { state: 'failed', errorCode: 'unsupported_block', terminalSequence: 10 },
-        { state: 'failed', errorCode: 'block_too_large', terminalSequence: 9 },
-        { state: 'failed', errorCode: 'session_too_large', terminalSequence: 8 },
-        { state: 'failed', errorCode: 'request_failed', terminalSequence: 7 },
+        { state: 'failed', terminalCode: 'protocol.invalid_json' },
+        { state: 'failed', terminalCode: 'runtime.apply_failed' },
+        { state: 'failed', errorCode: 'unsupported_block' },
+        { state: 'failed', errorCode: 'block_too_large' },
+        { state: 'failed', errorCode: 'session_too_large' },
+        { state: 'failed', errorCode: 'request_failed' },
       ];
 
       assert.equal(
@@ -2652,7 +2646,6 @@ exports.tests = [
 
       assert.equal(record.state, 'failed');
       assert.equal(record.errorCode, 'unsupported_block');
-      assert.equal(record.terminalSequence, 1);
       assert.match(helpers.getInlineTerminalReason([record]), /unsupported structure/);
       const previousChrome = global.chrome;
       const messages = [];
@@ -2824,7 +2817,6 @@ exports.tests = [
       );
       assert.equal(record.state, 'failed');
       assert.equal(record.errorCode, 'session_too_large');
-      assert.equal(record.terminalSequence, 1);
       assert.match(
         helpers.getInlineTerminalReason([record]),
         /reached this page visit's limit/
@@ -2930,7 +2922,7 @@ exports.tests = [
       const spent = store.sessionBudget.recordCost;
       assert.equal(spent > 0, true);
 
-      helpers.markInlineViewportBatchFailed(batch, 146, store);
+      helpers.markInlineViewportBatchFailed(batch, 146);
 
       assert.equal(first.state, 'failed');
       assert.equal(store.sessionBudget.recordCost, spent);
@@ -2942,7 +2934,7 @@ exports.tests = [
     name: 'tells a reader who exhausted the session budget to reload, and names no figure',
     fn() {
       const message = helpers.getInlineTerminalReason([
-        { state: 'failed', errorCode: 'session_too_large', terminalSequence: 1 },
+        { state: 'failed', errorCode: 'session_too_large' },
       ]);
 
       assert.match(message, /no request was sent/);
@@ -3454,7 +3446,6 @@ exports.tests = [
         restorableRecords: [],
       };
       helpers.stopInlineViewportTranslation(state);
-      record.terminalSequence = 9;
       const secondStore = helpers.createInlineViewportStore(22, cache, settings);
 
       helpers.seedInlineViewportStoreWithRestorableRecords(
@@ -3465,11 +3456,6 @@ exports.tests = [
       assert.equal(secondStore.byBlock.get(block), record);
       assert.deepEqual(secondStore.records, [record]);
       assert.equal(record.state, 'translated');
-      assert.equal(secondStore.nextTerminalSequence, 9);
-      const laterFailure = { state: 'translating', operationId: 22 };
-      secondStore.records.push(laterFailure);
-      helpers.markInlineViewportBatchFailed([laterFailure], 22, secondStore);
-      assert.equal(laterFailure.terminalSequence, 10);
       assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
     },
   },
