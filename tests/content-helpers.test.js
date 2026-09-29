@@ -26,81 +26,14 @@ function createActiveInlineTranslationState(overrides = {}, settings = {}) {
   return state;
 }
 
-// A store for a check that drives one store alone, charged to a page visit of its own.
-function createStore(operationId, cache = null, settings = null) {
-  return helpers.createInlineViewportStore(
-    operationId,
-    cache,
-    settings,
-    inlineTranslationSession.createInlineTranslationSession()
-  );
-}
-
-// The Session Budget's limit, restated rather than imported: a check that reads the constant
-// it is checking cannot notice the constant moving.
+// The Session Budget limit is an independent expectation, never imported from runtime.
 const INLINE_SESSION_BUDGET = 150000;
 
-// A page's worth of queued Semantic Blocks, built as bare records rather than from the DOM so
-// a check can hold hundreds of them. `lengths` is the shape of the page: what matters to the
-// accounting is how many blocks carry how much text, not what the text says.
-function queueSyntheticSemanticBlocks(store, lengths) {
-  const queued = lengths.map((length, index) => ({
-    id: `b${Number(store.operationId) || 0}-${index + 1}`,
-    state: 'queued',
-    operationId: store.operationId,
-    template: 'word '.repeat(Math.ceil(length / 5)).slice(0, length),
-    atoms: [],
-    repair: null,
-  }));
-  store.queue.push(...queued);
-  store.records.push(...queued);
-  return queued;
-}
-
-// Drains the queue the way a reader scrolling the whole page does: batch after batch, each
-// one taken once the previous request has come back, until nothing is left to take.
-function drainSemanticBlockQueue(store) {
-  const taken = [];
-  while (store.queue.length) {
-    const batch = helpers.takeInlineViewportBlockBatch(store);
-    if (!batch.length) break;
-    taken.push(...batch);
-    store.inFlight = 0;
-  }
-  return taken;
-}
-
-// The retry-cancellation checks for Semantic Blocks all start from the same place: a block
-// whose translation came back after the page had already changed it, so the block was marked
-// stale and the one page-change retry it is allowed was queued behind it.
-function queueSemanticBlockPageChangeRetry(
-  operationId,
-  store = createStore(operationId),
-  fixture = createReasoningFixture()
-) {
-  const { block } = fixture;
-  const original = helpers.queueInlineViewportBlock(store, block);
-  helpers.takeInlineViewportBlockBatch(store);
-  const originalText = original.snapshot.originalTextValues.keys().next().value;
-  originalText.nodeValue = 'Updated reasoning models';
-
-  helpers.applyInlineViewportBlockResults(
-    [original],
-    [
-      {
-        id: original.id,
-        disposition: 'apply',
-        template: getReasoningTranslatedTemplate(original),
-      },
-    ],
-    operationId,
-    store
-  );
-
-  const retry = store.queue[0];
-  assert.equal(original.state, 'stale');
-  assert.equal(original.supersededByRetryId, retry.id);
-  return { block, store, original, retry };
+function admitUnsupported(state) {
+  const { document, element, text } = createTestDocument();
+  const block = element('li', text('Outer prose.'), element('p', text('Nested prose.')));
+  document.body.appendChild(block);
+  state.session.admit(block);
 }
 
 exports.name = 'content helpers';
@@ -263,7 +196,7 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
 
     function paragraph(cost) {
       const node = document.createElement('p');
-      const overhead = helpers.getInlineBlockRecordCost({ template: '', atoms: [] });
+      const overhead = inlineTranslationSession.getRecordCost({ template: '', atoms: [] });
       const length = cost - overhead;
       node.textContent = 'An article sentence with ordinary prose. '.repeat(
         Math.ceil(length / 40)
@@ -274,7 +207,7 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
     try {
       // Spend through real admission first, leaving room for a chosen number of copies
       // of the fixture. Paired one-attempt cases prove that later admission really fits.
-      const recordCost = helpers.getInlineBlockRecordCost(fixture.serialized);
+      const recordCost = inlineTranslationSession.getRecordCost(fixture.serialized);
       document.body.replaceChildren();
       let remaining = headroom === null ? 0 : INLINE_SESSION_BUDGET - headroom * recordCost;
       while (remaining > 0) {
@@ -285,7 +218,8 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
       await instruct('grantInlineTranslationAuthorization');
       await instruct('startInlineTranslation');
       assert.equal(state.session.status, 'active', state.error);
-      assert.equal(state.viewport.records.every((record) => record.code === 'protocol.invalid_json'), true);
+      assert.equal(state.session.progress().counts.pending, 0);
+      if (headroom !== null) assert.match(state.session.progress().reason, /malformed or incomplete/);
       warming = false;
       document.body.replaceChildren(block);
       helpers.runInlineViewportScan(state);
@@ -323,7 +257,7 @@ exports.tests = [
         // Keep the old block offscreen so restarting cannot submit it a second time.
         block.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
         for (const control of controls) await instruct(control);
-        const before = state.viewport?.records.map(({ id, state }) => ({ id, state })) || [];
+        const before = state.session.progress();
         const statusBefore = helpers.getInlineTranslationStatusSnapshot(state);
         request.resolve({ ok: true, results: [{
           id: record.id,
@@ -337,12 +271,12 @@ exports.tests = [
         if (controls.length) {
           assert.equal(block.textContent, originalText);
           assert.deepEqual(block.childNodes, originalChildren);
-          assert.deepEqual(state.viewport.records.map(({ id, state }) => ({ id, state })), before);
+          assert.deepEqual(state.session.progress(), before);
           assert.deepEqual(helpers.getInlineTranslationStatusSnapshot(state), statusBefore);
           assert.equal(pending.length, 1, 'obsolete work cannot re-enter the queue');
         } else {
           assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
-          assert.equal(state.viewport.records.find((candidate) => candidate.id === record.id).state, 'translated');
+          assert.equal(state.session.progress().counts.translated, 1);
           assert.equal(strong.parentElement, block);
           assert.equal(link.parentElement, block);
           assert.equal(link.getAttribute('href'), '/api/docs/models/gpt-5.5');
@@ -404,8 +338,8 @@ exports.tests = [
           ? { ok: false, results: [{ id: pending[0].message.records[0].id, attemptCount: 2 }] }
           : { ok: true });
         await flushMicrotasks(32);
-        assert.equal(state.viewport.records.at(-1).state, 'failed');
-        assert.equal(state.viewport.records.at(-1).code, 'runtime.request_failed');
+        assert.match(state.session.progress().reason, /translation request could not be completed/);
+        assert.equal(state.session.progress().counts.pending, 0);
         block.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
         await instruct('restoreInlineOriginal');
         await instruct('startInlineTranslation');
@@ -820,27 +754,29 @@ exports.tests = [
     fn() {
       // The panel keeps its progress line muted and raises its error line. A translation
       // that failed reaching the reader as muted status was what the split was for.
-      const failed = [
-        { state: 'failed', code: 'runtime.request_failed' },
-      ];
+      const visit = inlineTranslationSession.createInlineTranslationSession();
+      visit.begin({});
+      visit.admit(createReasoningFixture().block);
+      visit.settle(visit.takeBatch(), null);
+      const failed = visit.progress().reason;
 
       assert.match(
-        helpers.formatInlineViewportErrorText(failed),
+        helpers.formatInlineViewportReasons(failed),
         /Translation failed/
       );
       assert.equal(
-        helpers.formatInlineViewportErrorText(failed, true),
-        `${helpers.getInlineTerminalReason(failed)}\nDiagnostics could not be saved.`
+        helpers.formatInlineViewportReasons(failed, true),
+        `${failed}\nDiagnostics could not be saved.`
       );
       assert.equal(
-        helpers.formatInlineViewportErrorText([{ state: 'translated' }], true),
+        helpers.formatInlineViewportReasons('', true),
         'Diagnostics could not be saved.'
       );
       assert.equal(
-        helpers.formatInlineViewportErrorText([{ state: 'translated' }]),
+        helpers.formatInlineViewportReasons(''),
         ''
       );
-      assert.equal(helpers.formatInlineViewportErrorText([]), '');
+      assert.equal(helpers.formatInlineViewportReasons(''), '');
     },
   },
   {
@@ -1267,16 +1203,17 @@ exports.tests = [
       };
 
       try {
-        const store = createStore(41);
+        const state = createActiveInlineTranslationState();
+        const store = state.viewport;
 
-        const first = helpers.collectVisibleInlineBlocks(root, store, 2);
+        const first = helpers.collectVisibleInlineBlocks(root, state, 2);
         assert.deepEqual(
           first.map((record) => record.template),
           [sentences[0], sentences[1]]
         );
         assert.equal(store.scanStartIndex, 2);
 
-        const second = helpers.collectVisibleInlineBlocks(root, store, 2);
+        const second = helpers.collectVisibleInlineBlocks(root, state, 2);
         assert.deepEqual(
           second.map((record) => record.template),
           [sentences[2]]
@@ -1339,11 +1276,12 @@ exports.tests = [
       };
 
       try {
-        const store = createStore(42);
+        const state = createActiveInlineTranslationState();
+        const store = state.viewport;
 
         // A budget of one: it has to survive three offscreen paragraphs to be spent on the
         // visible one.
-        const queued = helpers.collectVisibleInlineBlocks(root, store, 1);
+        const queued = helpers.collectVisibleInlineBlocks(root, state, 1);
 
         assert.deepEqual(
           queued.map((record) => record.template),
@@ -1396,12 +1334,9 @@ exports.tests = [
             if (message.type === 'RECORD_INLINE_RUNTIME_DIAGNOSTIC') {
               return { ok: true };
             }
-            const activeRecord = state.viewport.records.find(
-              (record) => record.id === message.records[0].id
-            );
+            const activeRecord = message.records[0];
             if (calls.length === 1) {
-              activeRecord.snapshot.originalTextValues.keys().next().value.nodeValue =
-                'Updated reasoning models';
+              fixture.strong.childNodes[0].nodeValue = 'Updated reasoning models';
             }
             return {
               ok: true,
@@ -1440,9 +1375,7 @@ exports.tests = [
           fixture.block.textContent,
           'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.'
         );
-        assert.equal(store.inFlight, 0);
-        assert.equal(store.queue.length, 0);
-        assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
+        assert.deepEqual(state.session.progress().counts, {
           translated: 1,
           partial: 0,
           pending: 0,
@@ -1455,33 +1388,6 @@ exports.tests = [
         global.HTMLElement = previous.HTMLElement;
         global.window = previous.window;
       }
-    },
-  },
-  {
-    name: 'stopping viewport translation invalidates operation without restoring text',
-    fn() {
-      const state = createActiveInlineTranslationState();
-      const store = state.viewport;
-      const { operationId } = store;
-      const node = { isConnected: true, nodeValue: '안녕하세요.' };
-      store.queue.push({ id: 'v2', state: 'queued', operationId });
-      store.records.push({
-        id: 'v1',
-        node,
-        original: 'Hello world.',
-        translation: '안녕하세요.',
-        state: 'translated',
-        operationId,
-      });
-
-      const nextOperationId = helpers.stopInlineViewportTranslation(state);
-
-      assert.notEqual(nextOperationId, operationId);
-      assert.equal(state.session.operationId, nextOperationId);
-      assert.equal(state.session.status, 'stopped');
-      assert.equal(store.stopped, true);
-      assert.deepEqual(store.queue, []);
-      assert.equal(node.nodeValue, '안녕하세요.');
     },
   },
   {
@@ -1500,13 +1406,13 @@ exports.tests = [
         diagnostics: [{ code: 'runtime.block_too_large', evidence: {} }],
         attempt: 1,
       };
-      store.localDiagnostics.push({ code: 'runtime.session_too_large', evidence: {} });
+      admitUnsupported(state);
       store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 2);
         assert.equal(messages[0].type, 'RECORD_INLINE_LOCAL_DIAGNOSTIC');
-        assert.equal(messages[1].diagnostics[0].code, 'runtime.session_too_large');
+        assert.equal(messages[1].diagnostics[0].code, 'runtime.unsupported_block');
       } finally {
         global.chrome = previousChrome;
       }
@@ -1523,12 +1429,12 @@ exports.tests = [
       } } };
       const state = createActiveInlineTranslationState();
       const store = state.viewport;
-      store.localDiagnostics.push({ code: 'runtime.session_too_large', evidence: { limit: 60000 } });
+      admitUnsupported(state);
       store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 1);
-        assert.equal(messages[0].diagnostics[0].code, 'runtime.session_too_large');
+        assert.equal(messages[0].diagnostics[0].code, 'runtime.unsupported_block');
       } finally {
         global.chrome = previousChrome;
       }
@@ -1550,7 +1456,7 @@ exports.tests = [
         diagnostics: [{ code: 'runtime.block_too_large', evidence: {} }],
         attempt: 0,
       };
-      store.localDiagnostics.push({ code: 'runtime.unsupported_block', evidence: {} });
+      admitUnsupported(state);
       try {
         helpers.stopInlineViewportTranslation(state);
         assert.equal(messages.length, 1);
@@ -1572,13 +1478,12 @@ exports.tests = [
         true
       );
 
-      store.stopped = true;
+      helpers.stopInlineViewportTranslation(state);
       assert.equal(
         helpers.isInlineViewportOperationCurrent(state, store, operationId),
         false
       );
 
-      store.stopped = false;
       helpers.beginInlineTranslationOperation(
         state,
         inlineTranslationSession.createSettingsSnapshot({})
@@ -1599,7 +1504,7 @@ exports.tests = [
       const live = createActiveInlineTranslationState();
       assert.equal(helpers.isInlineTranslationRunLive(live), true);
 
-      live.viewport.stopped = true;
+      helpers.stopInlineViewportTranslation(live);
       assert.equal(helpers.isInlineTranslationRunLive(live), false);
 
       const stopped = createActiveInlineTranslationState();
@@ -1609,33 +1514,6 @@ exports.tests = [
         helpers.isInlineTranslationRunLive(helpers.createInlineTranslationState()),
         false
       );
-    },
-  },
-  {
-    name: 'releases runtime tokens from stale operation responses',
-    fn() {
-      const previousChrome = global.chrome;
-      const messages = [];
-      global.chrome = { runtime: { sendMessage(message) {
-        messages.push(message);
-        return Promise.resolve({ ok: true });
-      } } };
-      try {
-        assert.equal(helpers.releaseInlineRuntimeTokensFromStaleResponse({
-          results: [
-            { correlationToken: 'token-1', template: 'ignored translation' },
-            { correlationToken: 'token-2' },
-          ],
-        }, 41), true);
-        assert.deepEqual(messages, [{
-          type: 'RECORD_INLINE_RUNTIME_DIAGNOSTIC',
-          operationId: 41,
-          outcomes: [],
-          releaseTokens: ['token-1', 'token-2'],
-        }]);
-      } finally {
-        global.chrome = previousChrome;
-      }
     },
   },
   {
@@ -1650,28 +1528,28 @@ exports.tests = [
         calls += 1;
         return calls === 4 ? Promise.resolve({ ok: true }) : Promise.reject(new Error('transient'));
       } } };
-      const store = {
-        operationId: 77,
-        localDiagnostics: [{ code: 'runtime.unsupported_block', evidence: {} }],
-        localDiagnosticsInFlight: null,
-        translationSettings: null,
-      };
+      const state = createActiveInlineTranslationState();
+      const store = state.viewport;
+      admitUnsupported(state);
       try {
-        helpers.flushInlineLocalDiagnostics(store);
+        helpers.flushInlineLocalDiagnostics(store, state);
         await new Promise((resolve) => setImmediate(resolve));
-        store.localDiagnostics.push({ code: 'runtime.block_too_large', evidence: {} });
+        admitUnsupported(state);
+        assert.equal(typeof timers[0], 'function', 'diagnostic transport schedules its next attempt');
         timers.shift()();
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(calls, 2);
-        assert.equal(store.localDiagnostics.length, 1);
+        assert.equal(state.session.outbox.length, 1);
 
+        assert.equal(typeof timers[0], 'function', 'diagnostic transport schedules its next attempt');
         timers.shift()();
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(calls, 3);
+        assert.equal(typeof timers[0], 'function', 'diagnostic transport schedules its next attempt');
         timers.shift()();
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(calls, 4);
-        assert.equal(store.localDiagnostics.length, 0);
+        assert.equal(state.session.outbox.length, 0);
         assert.equal(store.localDiagnosticsInFlight, null);
       } finally {
         global.chrome = previousChrome;
@@ -1691,16 +1569,14 @@ exports.tests = [
         calls += 1;
         return calls === 1 ? Promise.reject(new Error('transient')) : Promise.resolve({ ok: true });
       } } };
-      const store = {
-        operationId: 78,
-        localDiagnostics: [{ code: 'runtime.unsupported_block', evidence: {} }],
-        localDiagnosticsInFlight: null,
-        translationSettings: null,
-      };
+      const state = createActiveInlineTranslationState();
+      const store = state.viewport;
+      admitUnsupported(state);
       try {
-        helpers.flushInlineLocalDiagnostics(store);
+        helpers.flushInlineLocalDiagnostics(store, state);
         await new Promise((resolve) => setImmediate(resolve));
         assert.notEqual(store.diagnosticsUnavailable, true);
+        assert.equal(typeof timers[0], 'function', 'diagnostic transport schedules its next attempt');
         timers.shift()();
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(calls, 2);
@@ -1710,49 +1586,6 @@ exports.tests = [
         global.chrome = previousChrome;
         global.setTimeout = previousSetTimeout;
       }
-    },
-  },
-  {
-    name: 'marks only current translating viewport records as failed',
-    fn() {
-      const records = [
-        { id: 'v1', state: 'translating', operationId: 12 },
-        { id: 'v2', state: 'queued', operationId: 12 },
-        { id: 'v3', state: 'translated', operationId: 12 },
-        { id: 'v4', state: 'translating', operationId: 11 },
-        { id: 'v5', state: 'failed', operationId: 12 },
-        { id: 'v6', state: 'stale', operationId: 12 },
-      ];
-
-      helpers.markInlineViewportBatchFailed(records, 12);
-
-      assert.deepEqual(
-        records.map((record) => record.state),
-        ['failed', 'queued', 'translated', 'translating', 'failed', 'stale']
-      );
-      assert.equal(records[0].code, 'runtime.request_failed');
-    },
-  },
-  {
-    name: 'counts translated pending changed and failed viewport records',
-    fn() {
-      const counts = helpers.getInlineViewportStatusCounts([
-        { state: 'translated' },
-        { state: 'queued' },
-        { state: 'translating' },
-        { state: 'failed' },
-        { state: 'stale' },
-        { state: 'stale', supersededByRetryId: 'v7' },
-        { state: 'original' },
-      ]);
-
-      assert.deepEqual(counts, {
-        translated: 1,
-        partial: 0,
-        pending: 2,
-        changed: 1,
-        failed: 1,
-      });
     },
   },
   {
@@ -1769,117 +1602,6 @@ exports.tests = [
       assert.equal(
         message,
         'Visible translation on\nTranslated 18 · Partial 0 · Pending 4 · Changed 3 · Failed 1'
-      );
-    },
-  },
-  {
-    name: 'formats human-readable terminal reasons without exposing internal codes',
-    fn() {
-      assert.match(
-        helpers.getInlineTerminalReason([{
-          state: 'translated_with_warning',
-          code: 'quality.english_residue',
-        }]),
-        /Partial translation \(1 block\): Some source-language prose remained/
-      );
-      assert.match(
-        helpers.getInlineTerminalReason([{
-          state: 'failed',
-          code: 'structure.token_missing',
-        }]),
-        /Protected page structure could not be preserved/
-      );
-      assert.match(
-        helpers.getInlineTerminalReason([{
-          state: 'failed',
-          code: 'protocol.invalid_json',
-        }]),
-        /model response was malformed or incomplete/
-      );
-      assert.equal(
-        helpers.getInlineTerminalReason([{
-          state: 'failed',
-          code: 'quality.target_language_missing',
-        }]),
-        'Translation failed (1 block): The model did not return the target language, so the original was kept.'
-      );
-      assert.match(
-        helpers.getInlineTerminalReason([{
-          state: 'stale',
-          code: 'runtime.page_changed',
-        }]),
-        /Page changed before translation could be applied/
-      );
-      assert.equal(
-        helpers.getInlineTerminalReason([{
-          state: 'failed',
-          code: 'structure.token_missing',
-          supersededByRetryId: 'retry-1',
-        }]),
-        ''
-      );
-      // One spelling per code: the unprefixed forms a block once carried are not read as
-      // their categories any more, so a stray one surfaces as the generic request failure.
-      for (const code of ['block_too_large', 'session_too_large', 'unsupported_block']) {
-        assert.equal(
-          helpers.getInlineTerminalReason([{ state: 'failed', code }]),
-          'Translation failed (1 block): The translation request could not be completed.'
-        );
-      }
-    },
-  },
-  {
-    name: 'aggregates terminal reasons in a stable reader-facing order',
-    fn() {
-      const records = [
-        {
-          state: 'translated_with_warning',
-          code: 'quality.english_residue',
-        },
-        {
-          state: 'failed',
-          code: 'structure.token_missing',
-        },
-        {
-          state: 'stale',
-          code: 'runtime.page_changed',
-          supersededByRetryId: 'retry-1',
-        },
-        {
-          state: 'failed',
-          code: 'quality.target_language_missing',
-        },
-        {
-          state: 'translated_with_warning',
-          code: 'quality.english_residue',
-        },
-        {
-          state: 'stale',
-          code: 'runtime.page_changed',
-        },
-        { state: 'failed', code: 'protocol.invalid_json' },
-        { state: 'failed', code: 'runtime.apply_failed' },
-        { state: 'failed', code: 'runtime.unsupported_block' },
-        { state: 'failed', code: 'runtime.block_too_large' },
-        { state: 'failed', code: 'runtime.session_too_large' },
-        { state: 'failed', code: 'runtime.request_failed' },
-      ];
-
-      assert.equal(
-        helpers.formatInlineViewportErrorText(records, true),
-        [
-          'Translation failed (1 block): The model did not return the target language, so the original was kept.',
-          'Partial translation (2 blocks): Some source-language prose remained after one repair attempt.',
-          'Translation failed (1 block): Protected page structure could not be preserved, so the original was kept.',
-          'Translation failed (1 block): The model response was malformed or incomplete.',
-          'Translation failed (1 block): The page rejected the translated update, so the original was kept.',
-          'Translation failed (1 block): This page block has unsupported structure, so no request was sent.',
-          'Translation failed (1 block): This page block exceeds the 12,000-character request limit, so no request was sent.',
-          'Translation failed (1 block): The visible translation reached this page visit\'s limit, so no request was sent. Reload the page to continue.',
-          'Changed (1 block): Page changed before translation could be applied.',
-          'Translation failed (1 block): The translation request could not be completed.',
-          'Diagnostics could not be saved.',
-        ].join('\n')
       );
     },
   },
@@ -2059,25 +1781,6 @@ exports.tests = [
     },
   },
   {
-    name: 'queues one semantic record for all text in the same block',
-    fn() {
-      const { block } = createReasoningFixture();
-      const store = createStore(12);
-
-      const first = helpers.queueInlineViewportBlock(store, block);
-      const duplicate = helpers.queueInlineViewportBlock(store, block);
-
-      assert.equal(first.state, 'queued');
-      assert.equal(first.blockElement, block);
-      assert.equal(first.template.includes('GPT-5.5'), false);
-      assert.equal(first.atoms[0].label, 'GPT-5.5');
-      assert.equal(duplicate, null);
-      assert.equal(store.records.length, 1);
-      assert.equal(store.queue.length, 1);
-      assert.equal(store.byBlock.get(block), first);
-    },
-  },
-  {
     name: 'collects data-as paragraphs once and preserves inline elements through apply and restore',
     fn() {
       const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
@@ -2098,26 +1801,23 @@ exports.tests = [
       global.HTMLElement = block.constructor;
       global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
       try {
-        const store = createStore(12);
-        const records = helpers.collectVisibleInlineBlocks(root, store);
+        const state = createActiveInlineTranslationState();
+        const records = helpers.collectVisibleInlineBlocks(root, state);
         assert.equal(records.length, 1);
         const [record] = records;
-        assert.equal(record.state, 'queued');
-        assert.equal(record.blockElement, block);
-        helpers.collectVisibleInlineBlocks(root, store);
-        assert.equal(store.records.length, 1);
-        assert.equal(store.queue.length, 1);
+        assert.deepEqual(helpers.collectVisibleInlineBlocks(root, state), []);
+        assert.equal(state.session.progress().counts.pending, 1);
         const [anchor, em, atom] = record.contract.entries;
         const translated = `${atom.token} 사용 전에 ${em.openToken}주의 깊게${em.closeToken} ${anchor.openToken}안내서${anchor.closeToken}를 읽으세요.`;
-        helpers.applyInlineViewportBlockResults([record], [{ id: record.id, disposition: 'apply', template: translated }], 12, store);
-        assert.equal(record.state, 'translated');
+        state.session.settle(state.session.takeBatch(), { ok: true, results: [{ id: record.id, disposition: 'apply', template: translated }] });
+        assert.equal(state.session.progress().counts.translated, 1);
         assert.equal(block.textContent, '/advisor 사용 전에 주의 깊게 안내서를 읽으세요.');
         assert.equal(block.childNodes[0], code);
         assert.equal(link.parentNode, block);
         assert.equal(emphasis.parentNode, block);
         assert.equal(link.getAttribute('href'), '/guide');
         assert.equal(block.getAttribute('data-as'), 'p');
-        assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+        state.session.restore();
         assert.deepEqual(block.childNodes, original);
         assert.equal(block.textContent, originalText);
       } finally {
@@ -2158,14 +1858,12 @@ exports.tests = [
       global.HTMLElement = root.constructor;
       global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
       try {
-        const store = createStore(13);
-        helpers.collectVisibleInlineBlocks(root, store);
-        helpers.collectVisibleInlineBlocks(root, store);
-        assert.deepEqual(store.queue.map(record => record.blockElement), [ordinary, inner]);
-        assert.equal(store.records.length, 6);
-        for (const node of unsupported) assert.equal(store.byBlock.has(node), false);
-        for (const node of [...rejected, outer]) assert.equal(store.byBlock.get(node).state, 'failed');
-        assert.deepEqual(store.localDiagnostics.map(item => item.localRejection), [
+        const state = createActiveInlineTranslationState();
+        helpers.collectVisibleInlineBlocks(root, state);
+        helpers.collectVisibleInlineBlocks(root, state);
+        assert.deepEqual(state.session.takeBatch().map(record => record.template), ['An ordinary paragraph stays supported.', 'Inner paragraph has its own owner.']);
+        assert.deepEqual(state.session.progress().counts, { translated: 0, partial: 0, pending: 2, changed: 0, failed: 4 });
+        assert.deepEqual(state.session.outbox.map(item => item.localRejection), [
           { reason: 'hidden_content', tag: 'SPAN' },
           { reason: 'interactive_content', tag: 'BUTTON' },
           { reason: 'editable_content', tag: 'SPAN' },
@@ -2196,20 +1894,21 @@ exports.tests = [
           global.document = document;
           global.HTMLElement = outer.constructor;
           global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
-          const store = createStore(14);
-          helpers.collectVisibleInlineBlocks(outer, store);
-          helpers.collectVisibleInlineBlocks(outer, store);
-          assert.equal(store.byBlock.get(outer)?.state, 'failed', tag);
-          assert.deepEqual(store.localDiagnostics.map(item => item.localRejection), [
+          const state = createActiveInlineTranslationState();
+          helpers.collectVisibleInlineBlocks(outer, state);
+          helpers.collectVisibleInlineBlocks(outer, state);
+          assert.equal(state.session.progress().counts.failed, 1, tag);
+          assert.deepEqual(state.session.outbox.map(item => item.localRejection), [
             { reason: 'nested_semantic_block', tag: 'SPAN' },
           ], tag);
-          assert.deepEqual(store.queue.map(record => record.blockElement), tag === 'a' ? [inner] : [], tag);
+          const batch = state.session.takeBatch();
+          assert.deepEqual(batch.map(record => record.template), tag === 'a' ? ['Responses API'] : [], tag);
           if (tag === 'a') {
-            const record = store.byBlock.get(inner);
-            helpers.applyInlineViewportBlockResults([record], [{ id: record.id, disposition: 'apply', template: '응답 API' }], 14, store);
-            assert.equal(record.state, 'translated');
+            const [record] = batch;
+            state.session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: '응답 API' }] });
+            assert.equal(state.session.progress().counts.translated, 1);
             assert.equal(outer.textContent, 'Read this documentation: 응답 API');
-            assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+            state.session.restore();
             assert.equal(atom.getAttribute('href'), '/docs');
           }
           assert.deepEqual(outer.childNodes, original);
@@ -2245,12 +1944,10 @@ exports.tests = [
       global.HTMLElement = block.constructor;
       global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
       try {
-        const store = createStore(12);
-        const records = helpers.collectVisibleInlineBlocks(block, store);
+        const state = createActiveInlineTranslationState();
+        const records = helpers.collectVisibleInlineBlocks(block, state);
         assert.equal(records.length, 1);
         const [record] = records;
-        assert.equal(record.state, 'queued');
-        assert.equal(record.blockElement, block);
         const request = JSON.stringify({ template: record.template, atoms: record.atoms, contract: record.contract });
         for (const local of ['Link to this heading', '#heading', '\u200b', 'DIV', 'SVG']) {
           assert.equal(request.includes(local), false, local);
@@ -2259,14 +1956,13 @@ exports.tests = [
         assert.equal(em.tagName, 'EM');
         assert.equal(anchor.tagName, 'A');
         const translated = `${anchor.openToken}안내${anchor.closeToken}: ${em.openToken}조언자${em.closeToken} 사용`;
-        assert.equal(inlineBlockCodec.applyPatchPlan(record.snapshot,
-          inlineBlockCodec.createPatchPlan(record.snapshot, translated)).ok, true);
+        state.session.settle(state.session.takeBatch(), { ok: true, results: [{ id: record.id, disposition: 'apply', template: translated }] });
         assert.equal(block.childNodes[0], control);
         assert.equal(control.childNodes[0], link);
         assert.equal(link.getAttribute('href'), '#heading');
         assert.equal(link.getAttribute('aria-label'), 'Link to this heading');
         assert.equal(block.childNodes[1], proseLink);
-        assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
+        state.session.restore();
         assert.deepEqual(block.childNodes, original);
         assert.equal(block.textContent, originalText);
         assert.equal(control.childNodes[0], link);
@@ -2306,12 +2002,12 @@ exports.tests = [
       };
 
       try {
-        const store = createStore(12);
-        const queued = helpers.collectVisibleInlineBlocks(block, store);
+        const state = createActiveInlineTranslationState();
+        const queued = helpers.collectVisibleInlineBlocks(block, state);
 
         assert.equal(queued.length, 1);
-        assert.equal(store.queue.length, 1);
-        assert.equal(store.queue[0].atoms[0].label, 'x');
+        assert.equal(state.session.progress().counts.pending, 1);
+        assert.equal(state.session.takeBatch()[0].atoms[0].label, 'x');
       } finally {
         global.document = previous.document;
         global.HTMLElement = previous.HTMLElement;
@@ -2355,8 +2051,8 @@ exports.tests = [
       };
 
       try {
-        const store = createStore(12);
-        const queued = helpers.collectVisibleInlineBlocks(root, store);
+        const state = createActiveInlineTranslationState();
+        const queued = helpers.collectVisibleInlineBlocks(root, state);
 
         assert.equal(queued.length, 1);
         assert.equal(queued[0].template, 'Then reload the extension.');
@@ -2399,11 +2095,11 @@ exports.tests = [
       };
 
       try {
-        const store = createStore(12);
-        const queued = helpers.collectVisibleInlineBlocks(editor, store);
+        const state = createActiveInlineTranslationState();
+        const queued = helpers.collectVisibleInlineBlocks(editor, state);
 
         assert.deepEqual(queued, []);
-        assert.equal(store.records.length, 0);
+        assert.equal(state.session.progress().counts.pending, 0);
       } finally {
         global.document = previous.document;
         global.HTMLElement = previous.HTMLElement;
@@ -2452,15 +2148,14 @@ exports.tests = [
       };
 
       try {
-        const store = createStore(12);
-        const queued = helpers.collectVisibleInlineBlocks(root, store);
+        const state = createActiveInlineTranslationState();
+        const queued = helpers.collectVisibleInlineBlocks(root, state);
 
         assert.equal(queued.length, 4);
         assert.deepEqual(
-          queued.map((record) => record.blockElement),
-          [heading, summary, body, extra]
+          queued.map((record) => record.template),
+          ['Ordinary heading stays a heading.', 'Disclosure title is its own block.', 'Body paragraph remains a separate block.', 'Second body paragraph stays distinct.']
         );
-        assert.equal(store.byBlock.has(disclosure), false);
         assert.equal(queued[1].template, 'Disclosure title is its own block.');
         assert.equal(
           queued[2].template,
@@ -2515,16 +2210,12 @@ exports.tests = [
       };
 
       try {
-        const store = createStore(12);
-        const queued = helpers.collectVisibleInlineBlocks(root, store);
+        const state = createActiveInlineTranslationState();
+        const queued = helpers.collectVisibleInlineBlocks(root, state);
 
         assert.equal(queued.length, 3);
-        assert.deepEqual(
-          queued.map((record) => record.blockElement),
-          [heading, block, extra]
-        );
-        assert.equal(store.byBlock.has(summary), false);
-        assert.equal(store.byBlock.has(disclosure), false);
+        assert.equal(queued[0].template, 'Ordinary heading stays a heading.');
+        assert.equal(queued[2].template, 'Sibling paragraph stays distinct.');
         assert.equal(queued[1].template.includes('Wrapped disclosure title.'), true);
         assert.equal(
           queued[1].template.includes('Body prose stays in the enclosing block.'),
@@ -2535,869 +2226,6 @@ exports.tests = [
         global.HTMLElement = previous.HTMLElement;
         global.window = previous.window;
       }
-    },
-  },
-  {
-    name: 'fails closed when a block contains a nested semantic block',
-    fn() {
-      const { document, element, text } = createTestDocument();
-      const nested = element('p', text('Nested paragraph text.'));
-      const block = element('li', text('Outer item text.'), nested);
-      document.body.appendChild(block);
-      const store = createStore(13);
-
-      const record = helpers.queueInlineViewportBlock(store, block);
-
-      assert.equal(record.state, 'failed');
-      assert.equal(record.code, 'runtime.unsupported_block');
-      assert.match(helpers.getInlineTerminalReason([record]), /unsupported structure/);
-      const previousChrome = global.chrome;
-      const messages = [];
-      global.chrome = { runtime: { sendMessage(message) {
-        messages.push(message);
-        return Promise.resolve({ ok: true });
-      } } };
-      try {
-        helpers.flushInlineLocalDiagnostics(store);
-        assert.equal(messages[0].type, 'RECORD_INLINE_LOCAL_DIAGNOSTIC');
-        assert.equal(messages[0].diagnostics[0].code, 'runtime.unsupported_block');
-        assert.deepEqual(messages[0].diagnostics[0].localRejection, {
-          reason: 'nested_semantic_block',
-          tag: 'P',
-        });
-        assert.equal(messages[0].diagnostics[0].template, undefined);
-      } finally {
-        global.chrome = previousChrome;
-      }
-      assert.equal(store.queue.length, 0);
-    },
-  },
-  {
-    name: 'queues only allowlisted local rejection metadata',
-    fn() {
-      const protocol = require('../extension/inline-diagnostics-protocol.js');
-      const previousChrome = global.chrome;
-      const messages = [];
-      global.chrome = { runtime: { sendMessage(message) {
-        messages.push(message);
-        return Promise.resolve({ ok: true });
-      } } };
-      const store = createStore(15);
-      try {
-        for (const reason of protocol.localRejectionReasons) {
-          helpers.queueInlineLocalDiagnostic(
-            store,
-            { state: 'failed' },
-            'runtime.unsupported_block',
-            {},
-            {
-              reason,
-              tag: reason === 'custom_element' ? 'MY-WIDGET' : 'P',
-              source: 'page prose',
-              selector: 'div > p',
-            }
-          );
-        }
-        helpers.flushInlineLocalDiagnostics(store);
-        assert.equal(messages[0].diagnostics.length, protocol.localRejectionReasons.length);
-        assert.deepEqual(
-          messages[0].diagnostics.map((entry) => entry.localRejection),
-          protocol.localRejectionReasons.map((reason) => (
-            reason === 'custom_element' ? { reason } : { reason, tag: 'P' }
-          ))
-        );
-        assert.equal(JSON.stringify(messages[0]).includes('page prose'), false);
-      } finally {
-        global.chrome = previousChrome;
-      }
-    },
-  },
-  {
-    name: 'takes semantic block batches within the record-cost limit',
-    fn() {
-      const firstFixture = createReasoningFixture();
-      const secondFixture = createReasoningFixture();
-      const store = createStore(14);
-      const first = helpers.queueInlineViewportBlock(
-        store,
-        firstFixture.block
-      );
-      const second = helpers.queueInlineViewportBlock(
-        store,
-        secondFixture.block
-      );
-
-      const batch = helpers.takeInlineViewportBlockBatch(store, 12000);
-
-      assert.deepEqual(batch, [first, second]);
-      assert.equal(first.state, 'translating');
-      assert.equal(second.state, 'translating');
-      assert.equal(store.inFlight, 1);
-      assert.equal(
-        store.session.spent,
-        helpers.getInlineBlockRecordCost(first) +
-          helpers.getInlineBlockRecordCost(second)
-      );
-      for (const record of [first, second]) {
-        const modelRecord = (candidate) => ({
-          id: candidate.id,
-          template: candidate.template,
-          atoms: candidate.atoms,
-          repair: candidate.repair ?? null,
-        });
-        const repaired = {
-          ...record,
-          repair: {
-            attempt: 1,
-            previousErrorCode: 'quality.target_language_uncertain',
-          },
-        };
-        const actualInitialAndRepairCost =
-          JSON.stringify({ records: [modelRecord(record)] }).length +
-          JSON.stringify({ records: [modelRecord(repaired)] }).length;
-        assert.equal(
-          actualInitialAndRepairCost <=
-            helpers.getInlineBlockReservedRecordCost(record),
-          true
-        );
-      }
-    },
-  },
-  {
-    name: 'caps semantic block batches at the reserved record cap and the session budget',
-    fn() {
-      const store = createStore(14);
-      store.queue = Array.from({ length: 501 }, (_, index) => ({
-        id: `b${index + 1}`,
-        state: 'queued',
-        operationId: 14,
-        template: 'text',
-        atoms: [],
-        repair: null,
-      }));
-      store.records = [...store.queue];
-
-      const batch = helpers.takeInlineViewportBlockBatch(store, 12000);
-
-      assert.equal(batch.length <= 500, true);
-      assert.equal(
-        batch.reduce(
-          (sum, record) => sum + helpers.getInlineBlockReservedRecordCost(record),
-          0
-        ) <= 12000,
-        true
-      );
-      assert.equal(store.session.spent <= INLINE_SESSION_BUDGET, true);
-      assert.equal(
-        store.records.filter((record) => record.state === 'failed').length,
-        0
-      );
-      assert.equal(store.queue.length, 501 - batch.length);
-      assert.equal(store.queue.every((record) => record.state === 'queued'), true);
-    },
-  },
-  {
-    name: 'preserves the semantic block session budget across original restore',
-    fn() {
-      const state = createActiveInlineTranslationState();
-      state.session.charge(INLINE_SESSION_BUDGET);
-
-      helpers.restoreInlineViewportRecords(state);
-
-      assert.equal(state.viewport.session.spent, INLINE_SESSION_BUDGET);
-      const { block } = createReasoningFixture();
-      const record = helpers.queueInlineViewportBlock(state.viewport, block);
-      assert.deepEqual(
-        helpers.takeInlineViewportBlockBatch(state.viewport, 12000),
-        []
-      );
-      assert.equal(record.state, 'failed');
-      assert.equal(record.code, 'runtime.session_too_large');
-      assert.match(
-        helpers.getInlineTerminalReason([record]),
-        /reached this page visit's limit/
-      );
-    },
-  },
-  {
-    name: 'charges the session budget in actual record cost, not reserved cost',
-    fn() {
-      const store = createStore(140);
-      // Short blocks are where the two costs diverge most: reserved cost counts a whole
-      // request wrapper for every record and then counts it again for a repair most of them
-      // never need, so a page of table cells and list items pays several times its text.
-      const queued = queueSyntheticSemanticBlocks(store, Array(500).fill(40));
-      const reservedTotal = queued.reduce(
-        (sum, record) => sum + helpers.getInlineBlockReservedRecordCost(record),
-        0
-      );
-      const actualTotal = queued.reduce(
-        (sum, record) => sum + helpers.getInlineBlockRecordCost(record),
-        0
-      );
-      // The premise: charged in reserved cost this page would be refused partway.
-      assert.equal(reservedTotal > INLINE_SESSION_BUDGET, true);
-      assert.equal(actualTotal < INLINE_SESSION_BUDGET, true);
-
-      const taken = drainSemanticBlockQueue(store);
-
-      assert.equal(taken.length, queued.length);
-      assert.equal(
-        store.records.filter((record) => record.code === 'runtime.session_too_large').length,
-        0
-      );
-      assert.equal(store.session.spent, actualTotal);
-      assert.equal(helpers.getInlineTerminalReason(store.records), '');
-    },
-  },
-  {
-    name: 'translates a page shaped like the measured one to the end',
-    fn() {
-      // The page issue #29 was measured on: 356 Semantic Blocks holding 37,392 characters,
-      // most of them table cells, median block length 36 characters.
-      const store = createStore(141);
-      const queued = queueSyntheticSemanticBlocks(store, [
-        ...Array(213).fill(36),
-        ...Array(29).fill(30),
-        ...Array(23).fill(55),
-        ...Array(91).fill(303),
-      ]);
-
-      const taken = drainSemanticBlockQueue(store);
-
-      assert.equal(queued.length, 356);
-      assert.equal(taken.length, queued.length);
-      assert.equal(store.queue.length, 0);
-      assert.equal(
-        store.records.filter((record) => record.state !== 'translating').length,
-        0
-      );
-      // Headroom, not a near miss: the page fits even if every one of its blocks had needed
-      // a repair request, which is twice what this page can possibly cost.
-      assert.equal(store.session.spent * 2 <= INLINE_SESSION_BUDGET, true);
-    },
-  },
-  {
-    name: 'charges nothing for a repaired semantic block that comes back from the cache',
-    fn() {
-      const { block } = createReasoningFixture();
-      const cache = new Map();
-      const firstStore = createStore(144, cache);
-      const record = helpers.queueInlineViewportBlock(firstStore, block);
-      helpers.applyInlineViewportBlockResults(
-        helpers.takeInlineViewportBlockBatch(firstStore),
-        [{
-          id: record.id,
-          disposition: 'apply',
-          template: getReasoningTranslatedTemplate(record),
-          attemptCount: 2,
-        }],
-        144,
-        firstStore
-      );
-      assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
-
-      const secondStore = createStore(145, cache);
-      assert.equal(helpers.queueInlineViewportBlock(secondStore, block), null);
-
-      // The cache replays `attemptCount: 2` with no request sent, so nothing is charged for
-      // it — here or on the next batch the store takes.
-      assert.equal(secondStore.records[0].attemptCount, 2);
-      assert.equal(secondStore.session.spent, 0);
-      assert.deepEqual(helpers.takeInlineViewportBlockBatch(secondStore), []);
-      assert.equal(secondStore.session.spent, 0);
-    },
-  },
-  {
-    name: 'releases no session budget when a batch fails',
-    fn() {
-      const firstFixture = createReasoningFixture();
-      const store = createStore(146);
-      const first = helpers.queueInlineViewportBlock(store, firstFixture.block);
-      const batch = helpers.takeInlineViewportBlockBatch(store);
-      const spent = store.session.spent;
-      assert.equal(spent > 0, true);
-
-      helpers.markInlineViewportBatchFailed(batch, 146);
-
-      assert.equal(first.state, 'failed');
-      assert.equal(store.session.spent, spent);
-
-
-    },
-  },
-  {
-    name: 'tells a reader who exhausted the session budget to reload, and names no figure',
-    fn() {
-      const message = helpers.getInlineTerminalReason([
-        { state: 'failed', code: 'runtime.session_too_large' },
-      ]);
-
-      assert.match(message, /no request was sent/);
-      assert.match(message, /Reload the page/);
-      assert.match(message, /\(1 block\)/);
-      // The retired message named 60,000 characters, which is not a number the reader can
-      // count. The only figure now is the issue summary's affected-block count.
-      assert.equal(/\d/.test(message.replace('(1 block)', '')), false);
-    },
-  },
-  {
-    name: 'still refuses the request-size caps on reserved cost',
-    fn() {
-      const store = createStore(147);
-      const [oversized] = queueSyntheticSemanticBlocks(store, [7000]);
-      assert.equal(helpers.getInlineBlockRecordCost(oversized) < 12000, true);
-      assert.equal(helpers.getInlineBlockReservedRecordCost(oversized) > 12000, true);
-
-      assert.deepEqual(helpers.takeInlineViewportBlockBatch(store, 12000), []);
-      assert.equal(oversized.state, 'failed');
-      assert.equal(oversized.code, 'runtime.block_too_large');
-      assert.equal(store.session.spent, 0);
-
-      // The per-batch cap keeps its unit too: two blocks whose actual costs would fit one
-      // request are still split across two, because their reserved costs do not.
-      const batchStore = createStore(148);
-      const pair = queueSyntheticSemanticBlocks(batchStore, [4000, 4000]);
-      assert.equal(
-        pair.reduce((sum, record) => sum + helpers.getInlineBlockRecordCost(record), 0) <
-          12000,
-        true
-      );
-
-      assert.deepEqual(helpers.takeInlineViewportBlockBatch(batchStore, 12000), [pair[0]]);
-      assert.deepEqual(batchStore.queue, [pair[1]]);
-    },
-  },
-  {
-    name: 'applies a semantic block result and rehydrates it from cache',
-    fn() {
-      const { block, link } = createReasoningFixture();
-      const cache = new Map();
-      const firstStore = createStore(15, cache);
-      const record = helpers.queueInlineViewportBlock(firstStore, block);
-      const batch = helpers.takeInlineViewportBlockBatch(firstStore);
-      const translatedTemplate = getReasoningTranslatedTemplate(record);
-
-      const applied = helpers.applyInlineViewportBlockResults(
-        batch,
-        [{ id: record.id, disposition: 'apply', template: translatedTemplate }],
-        15,
-        firstStore
-      );
-
-      assert.deepEqual(applied, {
-        applied: 1,
-        stale: 0,
-        retried: 0,
-        failed: 0,
-        ignored: 0,
-        runtimeOutcomes: [],
-      });
-      assert.equal(record.state, 'translated');
-      assert.equal(block.childNodes[0], link);
-      assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
-      assert.equal(cache.get(record.cacheKey).translatedTemplate, translatedTemplate);
-
-      assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
-      const secondStore = createStore(16, cache);
-      const queued = helpers.queueInlineViewportBlock(secondStore, block);
-
-      assert.equal(queued, null);
-      assert.equal(secondStore.queue.length, 0);
-      assert.equal(secondStore.records.length, 1);
-      assert.equal(secondStore.records[0].state, 'translated');
-      assert.equal(block.childNodes[0], link);
-      assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
-    },
-  },
-  {
-    name: 'queues at most one page-change retry for a semantic block',
-    fn() {
-      const { block } = createReasoningFixture();
-      const store = createStore(17);
-      const first = helpers.queueInlineViewportBlock(store, block);
-      helpers.takeInlineViewportBlockBatch(store);
-      const firstText = first.snapshot.originalTextValues.keys().next().value;
-      firstText.nodeValue = 'Updated reasoning models';
-
-      const firstResult = helpers.applyInlineViewportBlockResults(
-        [first],
-        [{ id: first.id, disposition: 'apply', template: getReasoningTranslatedTemplate(first) }],
-        17,
-        store
-      );
-      const retry = store.queue[0];
-
-      assert.equal(first.state, 'stale');
-      assert.equal(firstResult.retried, 1);
-      assert.equal(retry.pageChangeRetryCount, 1);
-      assert.equal(first.supersededByRetryId, retry.id);
-
-      helpers.takeInlineViewportBlockBatch(store);
-      const retryText = retry.snapshot.originalTextValues.keys().next().value;
-      retryText.nodeValue = 'Updated again';
-      const secondResult = helpers.applyInlineViewportBlockResults(
-        [retry],
-        [{ id: retry.id, disposition: 'apply', template: getReasoningTranslatedTemplate(retry) }],
-        17,
-        store
-      );
-
-      assert.equal(secondResult.retried, 0);
-      assert.equal(store.queue.length, 0);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 0,
-        changed: 1,
-        failed: 0,
-      });
-    },
-  },
-  {
-    name: 'resetting queued semantic block retries keeps them queued rather than cancelling them',
-    fn() {
-      withFakeViewportDom(() => {
-        const state = createActiveInlineTranslationState();
-        const { block, store, original, retry } =
-          queueSemanticBlockPageChangeRetry(state.viewport.operationId, state.viewport);
-
-        // Everything this check asserts about the retry is that the reset left it alone,
-        // which is also what a reset that never ran would look like. A plain queued block
-        // behind it is the control: the same call has to reset that one to `original`, so
-        // a green result cannot mean the reset was skipped.
-        const control = helpers.queueInlineViewportBlock(
-          store,
-          createReasoningFixture().block
-        );
-        assert.equal(control.state, 'queued');
-        assert.deepEqual(store.queue, [retry, control]);
-
-        helpers.scheduleInlineViewportScanFromViewportChange(state);
-
-        assert.equal(control.state, 'original');
-
-        // The retry survives the reset, so the block it superseded stays pending rather
-        // than falling back to an unresolved `changed` — either way it does not read as
-        // finished.
-        assert.equal(retry.state, 'queued');
-        assert.deepEqual(store.queue, [retry]);
-        assert.equal(original.supersededByRetryId, retry.id);
-        assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-          translated: 0,
-          partial: 0,
-          pending: 1,
-          changed: 0,
-          failed: 0,
-        });
-
-        // The rescan the reset schedules re-reaches the same block, and must not queue a
-        // second retry beside the one it left alone.
-        assert.equal(helpers.queueInlineViewportBlock(store, block), null);
-        assert.deepEqual(store.queue, [retry]);
-        assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-          translated: 0,
-          partial: 0,
-          pending: 1,
-          changed: 0,
-          failed: 0,
-        });
-      }, {
-        clearTimeout() {},
-        setTimeout() {
-          return 123;
-        },
-      });
-    },
-  },
-  {
-    name: 'stopping in-flight semantic block retries keeps unresolved changed status visible',
-    fn() {
-      const state = createActiveInlineTranslationState();
-      const { store, original, retry } =
-        queueSemanticBlockPageChangeRetry(state.viewport.operationId, state.viewport);
-      helpers.takeInlineViewportBlockBatch(store);
-      assert.equal(retry.state, 'translating');
-
-      helpers.stopInlineViewportTranslation(state);
-
-      assert.equal(store.stopped, true);
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 1,
-        changed: 1,
-        failed: 0,
-      });
-      assert.equal(
-        helpers.formatInlineViewportStatusMessage(
-          helpers.getInlineViewportStatusCounts(store.records),
-          'stopped'
-        ),
-        'Visible translation stopped\nTranslated 0 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
-      );
-      assert.equal(
-        helpers.getInlineTerminalReason(store.records),
-        'Changed (1 block): Page changed before translation could be applied.'
-      );
-    },
-  },
-  {
-    name: 'stopping queued semantic block retries keeps unresolved changed status visible',
-    fn() {
-      const state = createActiveInlineTranslationState();
-      const { store, original, retry } =
-        queueSemanticBlockPageChangeRetry(state.viewport.operationId, state.viewport);
-      assert.equal(retry.state, 'queued');
-
-      helpers.stopInlineViewportTranslation(state);
-
-      // Stopping discards the queue, so this retry will never run. The block it superseded
-      // has to stop pointing at it, or nothing counts the block as `changed` and a stopped
-      // run with an unresolved block reads as finished.
-      assert.equal(store.stopped, true);
-      assert.deepEqual(store.queue, []);
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(store.records), {
-        translated: 0,
-        partial: 0,
-        pending: 1,
-        changed: 1,
-        failed: 0,
-      });
-      assert.equal(
-        helpers.formatInlineViewportStatusMessage(
-          helpers.getInlineViewportStatusCounts(store.records),
-          'stopped'
-        ),
-        'Visible translation stopped\nTranslated 0 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
-      );
-      assert.equal(
-        helpers.getInlineTerminalReason(store.records),
-        'Changed (1 block): Page changed before translation could be applied.'
-      );
-    },
-  },
-  {
-    // The two checks above never restart their operation, so neither can see what a restart
-    // does to the record ids. A restarted operation carries its translated blocks into a
-    // fresh store keeping their original ids, so the first block the new operation mints has
-    // to be given an id none of them already holds —
-    // otherwise `findInlineViewportRecordById` resolves the retry's `retryOf` to the seeded
-    // record, the supersession is never cleared, and the unresolved block goes back to
-    // reading as finished.
-    name: 'stopping a restarted session keeps unresolved changed status visible',
-    fn() {
-      const settings = {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-      };
-      const { block: firstBlock } = createReasoningFixture();
-      const state = createActiveInlineTranslationState({}, settings);
-      const firstStore = state.viewport;
-      const seeded = helpers.queueInlineViewportBlock(firstStore, firstBlock);
-      helpers.applyInlineViewportBlockResults(
-        helpers.takeInlineViewportBlockBatch(firstStore),
-        [{ id: seeded.id, disposition: 'apply', template: getReasoningTranslatedTemplate(seeded) }],
-        firstStore.operationId,
-        firstStore
-      );
-      assert.equal(seeded.state, 'translated');
-
-      helpers.stopInlineViewportTranslation(state);
-
-      // Page in Korean again: a fresh store for the new operation, seeded with what the
-      // stopped run had already translated.
-      const secondStore = helpers.beginInlineTranslationOperation(
-        state,
-        inlineTranslationSession.createSettingsSnapshot(settings)
-      );
-      assert.deepEqual(secondStore.records, [seeded]);
-
-      // A second block, whose text differs from the seeded one so the shared cache bucket
-      // does not answer for it and it really is queued.
-      const secondFixture = createReasoningFixture();
-      secondFixture.strong.childNodes[0].nodeValue = 'Other reasoning models';
-      const { original, retry } = queueSemanticBlockPageChangeRetry(
-        secondStore.operationId,
-        secondStore,
-        secondFixture
-      );
-
-      // Asserted separately from the status below, so a future change that fixes the counts
-      // while leaving two records sharing an id does not read as a clean pass.
-      const mintedIds = secondStore.records.map((record) => record.id);
-      assert.equal(new Set(mintedIds).size, mintedIds.length);
-      assert.notEqual(original.id, seeded.id);
-      assert.notEqual(retry.id, seeded.id);
-
-      helpers.stopInlineViewportTranslation(state);
-
-      assert.equal(secondStore.stopped, true);
-      assert.deepEqual(secondStore.queue, []);
-      assert.equal(original.supersededByRetryId, undefined);
-      assert.deepEqual(helpers.getInlineViewportStatusCounts(secondStore.records), {
-        translated: 1,
-        partial: 0,
-        pending: 1,
-        changed: 1,
-        failed: 0,
-      });
-      assert.equal(
-        helpers.formatInlineViewportStatusMessage(
-          helpers.getInlineViewportStatusCounts(secondStore.records),
-          'stopped'
-        ),
-        'Visible translation stopped\nTranslated 1 · Partial 0 · Pending 0 · Changed 1 · Failed 0'
-      );
-      assert.equal(
-        helpers.getInlineTerminalReason(secondStore.records),
-        'Changed (1 block): Page changed before translation could be applied.'
-      );
-    },
-  },
-  {
-    name: 'rehydrates cached partial translations without false success',
-    fn() {
-      const { block } = createReasoningFixture();
-      const cache = new Map();
-      const firstStore = createStore(161, cache);
-      const record = helpers.queueInlineViewportBlock(firstStore, block);
-      helpers.applyInlineViewportBlockResults(
-        helpers.takeInlineViewportBlockBatch(firstStore),
-        [{
-          id: record.id,
-          disposition: 'apply_with_warning',
-          template: getReasoningTranslatedTemplate(record),
-          terminalCode: 'quality.english_residue',
-          attemptCount: 2,
-        }],
-        161,
-        firstStore
-      );
-      assert.equal(inlineBlockCodec.restoreBlock(record.snapshot).ok, true);
-
-      const secondStore = createStore(162, cache);
-      assert.equal(helpers.queueInlineViewportBlock(secondStore, block), null);
-      const cachedRecord = secondStore.records[0];
-      assert.equal(cachedRecord.state, 'translated_with_warning');
-      assert.equal(cachedRecord.code, 'quality.english_residue');
-      assert.equal(cachedRecord.attemptCount, 2);
-      assert.match(helpers.getInlineTerminalReason([cachedRecord]), /Partial translation/);
-      assert.equal(secondStore.queue.length, 0);
-    },
-  },
-  {
-    name: 'isolates an invalid block result from valid siblings',
-    fn() {
-      const firstFixture = createReasoningFixture();
-      const secondFixture = createReasoningFixture();
-      secondFixture.strong.childNodes[0].nodeValue = 'Other reasoning models';
-      const store = createStore(19);
-      const first = helpers.queueInlineViewportBlock(store, firstFixture.block);
-      const second = helpers.queueInlineViewportBlock(store, secondFixture.block);
-      const batch = helpers.takeInlineViewportBlockBatch(store);
-
-      const result = helpers.applyInlineViewportBlockResults(
-        batch,
-        [
-          { id: first.id, disposition: 'apply', template: getReasoningTranslatedTemplate(first) },
-          {
-            id: second.id,
-            disposition: 'reject',
-            terminalCode: 'structure.token_unknown',
-            attemptCount: 2,
-          },
-        ],
-        19,
-        store
-      );
-
-      assert.equal(result.applied, 1);
-      assert.equal(result.retried, 0);
-      assert.equal(first.state, 'translated');
-      assert.equal(second.state, 'failed');
-      assert.equal(store.queue.length, 0);
-    },
-  },
-  {
-    name: 'normalizes local DOM apply failures for runtime diagnostics',
-    fn() {
-      const codec = require('../extension/inline-block.js');
-      const previousApply = codec.applyPatchPlan;
-      const { block } = createReasoningFixture();
-      const store = createStore(191);
-      const record = helpers.queueInlineViewportBlock(store, block);
-      const batch = helpers.takeInlineViewportBlockBatch(store);
-      codec.applyPatchPlan = () => ({ ok: false, errorCode: 'apply_failed' });
-      try {
-        const summary = helpers.applyInlineViewportBlockResults(
-          batch,
-          [{
-            id: record.id,
-            disposition: 'apply',
-            template: getReasoningTranslatedTemplate(record),
-            correlationToken: 'opaque-token',
-          }],
-          191,
-          store
-        );
-        assert.equal(record.state, 'failed');
-        assert.equal(record.code, 'runtime.apply_failed');
-        assert.deepEqual(summary.runtimeOutcomes, [
-          { code: 'runtime.apply_failed', correlationToken: 'opaque-token' },
-        ]);
-      } finally {
-        codec.applyPatchPlan = previousApply;
-      }
-    },
-  },
-  {
-    name: 'restores partial semantic block records through Original text',
-    fn() {
-      const { block, strong, link } = createReasoningFixture();
-      const originalBlockChildren = [...block.childNodes];
-      const originalStrongChildren = [...strong.childNodes];
-      const state = createActiveInlineTranslationState();
-      const store = state.viewport;
-      const record = helpers.queueInlineViewportBlock(store, block);
-      const batch = helpers.takeInlineViewportBlockBatch(store);
-      helpers.applyInlineViewportBlockResults(
-        batch,
-        [{
-          id: record.id,
-          disposition: 'apply_with_warning',
-          template: getReasoningTranslatedTemplate(record),
-          terminalCode: 'quality.english_residue',
-          attemptCount: 2,
-        }],
-        store.operationId,
-        store
-      );
-
-      helpers.restoreInlineViewportRecords(state);
-
-      assert.deepEqual(block.childNodes, originalBlockChildren);
-      assert.deepEqual(strong.childNodes, originalStrongChildren);
-      assert.equal(block.childNodes[2], link);
-      assert.equal(block.textContent, 'Reasoning models like GPT-5.5 use internal reasoning tokens.');
-      assert.equal(record.state, 'original');
-      assert.equal(state.session.status, 'original');
-      assert.equal(state.viewport.operationId, state.session.operationId);
-      assert.notEqual(state.session.operationId, store.operationId);
-    },
-  },
-  {
-    name: 'seeds same-settings translated blocks after a stopped restart',
-    fn() {
-      const { block } = createReasoningFixture();
-      const settings = {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-      };
-      const state = createActiveInlineTranslationState({}, settings);
-      const firstStore = state.viewport;
-      const record = helpers.queueInlineViewportBlock(firstStore, block);
-      helpers.applyInlineViewportBlockResults(
-        helpers.takeInlineViewportBlockBatch(firstStore),
-        [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
-        firstStore.operationId,
-        firstStore
-      );
-      helpers.stopInlineViewportTranslation(state);
-
-      const secondStore = helpers.beginInlineTranslationOperation(
-        state,
-        inlineTranslationSession.createSettingsSnapshot(settings)
-      );
-
-      assert.equal(secondStore.byBlock.get(block), record);
-      assert.deepEqual(secondStore.records, [record]);
-      assert.equal(record.state, 'translated');
-      assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
-    },
-  },
-  {
-    // A translation carried over from a stopped run was produced under the settings of that
-    // run. Reusing it after the reader changed the target language would show the old answer
-    // as if it were the new one, so the block goes back to its original content and is
-    // queued again under the settings now in force.
-    name: 'restores stopped-session translated blocks when settings change',
-    fn() {
-      const { block, strong, link } = createReasoningFixture();
-      const originalText = block.textContent;
-      const state = createActiveInlineTranslationState({}, {
-        targetLanguage: 'Korean',
-        tone: 'technical',
-        model: 'gpt-5.4-mini',
-        reasoningEffort: 'none',
-      });
-      const firstStore = state.viewport;
-      const record = helpers.queueInlineViewportBlock(firstStore, block);
-      helpers.applyInlineViewportBlockResults(
-        helpers.takeInlineViewportBlockBatch(firstStore),
-        [{ id: record.id, disposition: 'apply', template: getReasoningTranslatedTemplate(record) }],
-        firstStore.operationId,
-        firstStore
-      );
-      helpers.stopInlineViewportTranslation(state);
-
-      // A different settings signature selects a different cache bucket, which is why the
-      // carried-over translation cannot simply be reapplied.
-      const secondStore = helpers.beginInlineTranslationOperation(
-        state,
-        inlineTranslationSession.createSettingsSnapshot({
-          targetLanguage: 'Japanese',
-          tone: 'technical',
-          model: 'gpt-5.4-mini',
-          reasoningEffort: 'none',
-        })
-      );
-
-      assert.equal(record.state, 'original');
-      assert.equal(secondStore.byBlock.get(block), undefined);
-      assert.deepEqual(secondStore.records, []);
-      assert.equal(block.textContent, originalText);
-      // The block's own inline elements came back, in their original order.
-      assert.equal(block.childNodes[0], strong);
-      assert.equal(block.childNodes[2], link);
-
-      // The block is available to translate again under the settings now in force.
-      const requeued = helpers.queueInlineViewportBlock(secondStore, block);
-      assert.equal(requeued.state, 'queued');
-    },
-  },
-  {
-    name: 'requeues a block rerendered with equivalent page-owned nodes',
-    fn() {
-      const { document, block } = createReasoningFixture();
-      const store = createStore(23);
-      const first = helpers.queueInlineViewportBlock(store, block);
-      helpers.applyInlineViewportBlockResults(
-        helpers.takeInlineViewportBlockBatch(store),
-        [{ id: first.id, disposition: 'apply', template: getReasoningTranslatedTemplate(first) }],
-        23,
-        store
-      );
-      const extensionText = block.childNodes[1];
-      const pageOwnedText = document.createTextNode(extensionText.nodeValue);
-      block.childNodes.splice(1, 1, pageOwnedText);
-      extensionText.parentNode = null;
-      pageOwnedText.parentNode = block;
-
-      const rerendered = helpers.queueInlineViewportBlock(store, block);
-
-      assert.equal(first.state, 'stale');
-      assert.equal(first.code, 'runtime.page_changed');
-      assert.equal(rerendered.state, 'queued');
-      assert.equal(rerendered.blockElement, block);
-      assert.equal(store.byBlock.get(block), rerendered);
-      assert.deepEqual(store.queue, [rerendered]);
     },
   },
 ];

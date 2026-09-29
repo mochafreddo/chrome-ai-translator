@@ -94,10 +94,6 @@
   // One Inline Translation Operation's Semantic Blocks: its queue, its records, and the outbox
   // of local diagnostics the content script's send-and-retry loop reads. `session` is the page
   // visit whose Session Budget its batches are charged to, never the operation's own.
-  //
-  // TODO: #70 - the content script still keeps its viewport scanner and local-diagnostic loop
-  // fields on this object, because its store-level checks reach both through one store; they
-  // move to the content script's own state once those checks drive the session instead.
   function createOperation(
     operationId,
     translationCache = null,
@@ -648,6 +644,10 @@
     let spent = 0;
     const cacheBySettings = new Map();
     let translatedRecords = [];
+    const budget = {
+      get spent() { return spent; },
+      charge(cost) { spent += cost; },
+    };
     let session = null;
     let operation = null;
 
@@ -690,7 +690,7 @@
       const signature = getSettingsSignature(settings);
       operationId += 1;
       status = 'active';
-      operation = createOperation(operationId, getCacheBucket(signature), settings, session);
+      operation = createOperation(operationId, getCacheBucket(signature), settings, budget);
       for (const record of translatedRecords) {
         const blockElement = record.snapshot?.blockElement;
         if (!blockElement?.isConnected || !isTranslatedState(record.state)) continue;
@@ -706,7 +706,7 @@
         operation.records.push(record);
         cacheTranslation(operation, record);
       }
-      return operation;
+      return operationId;
     }
 
     // A second Stop, with the operation already ended, has nothing to end.
@@ -746,7 +746,7 @@
       translatedRecords = [];
       status = 'original';
       operationId += 1;
-      operation = createOperation(operationId, null, null, session);
+      operation = createOperation(operationId, null, null, budget);
       return operationId;
     }
 
@@ -758,7 +758,7 @@
     function settle(batch, response) {
       const records = batch || [];
       const batchOperationId = records[0]?.operationId;
-      chargeRepairs(session, records, response);
+      chargeRepairs(budget, records, response);
       if (!isCurrent(batchOperationId)) {
         return {
           runtimeOutcomes: [],
@@ -799,21 +799,10 @@
       get operationId() {
         return operationId;
       },
-      get spent() {
-        return spent;
-      },
-      // TODO: #70 - the operation the content script keeps its scanner fields on; see
-      // `createOperation`.
-      get operation() {
-        return operation;
-      },
       // The current operation's local diagnostics, oldest first. The content script's
       // send-and-retry loop takes them from the front.
       get outbox() {
         return operation.localDiagnostics;
-      },
-      charge(recordCost) {
-        spent += recordCost;
       },
       isCurrent,
       begin,
@@ -828,7 +817,7 @@
         reason: getTerminalReason(operation.records),
       }),
     });
-    operation = createOperation(operationId, null, null, session);
+    operation = createOperation(operationId, null, null, budget);
     return session;
   }
 
@@ -836,22 +825,9 @@
     SETTINGS_DEFAULTS,
     createSettingsSnapshot,
     getSettingsSignature,
-    isTranslatedState,
     getRecordCost,
     getReservedRecordCost,
-    getStatusCounts,
-    getTerminalReason,
     createInlineTranslationSession,
-    // TODO: #70 - the content script's store-level exports delegate here, so the checks that
-    // hand them a store of their own still run; this goes when those exports do.
-    operations: Object.freeze({
-      create: createOperation,
-      admit: admitBlock,
-      takeBatch,
-      applyResults,
-      failBatch,
-      queueLocalDiagnostic,
-    }),
   };
   globalScope.ChromeAiTranslatorInlineTranslationSession = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

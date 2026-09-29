@@ -6,7 +6,6 @@
 
 const assert = require('node:assert/strict');
 const background = require('../extension/background.js');
-const content = require('../extension/content.js');
 const inlineTranslationSession = require('../extension/inline-translation-session.js');
 const validation = require('../extension/translation-validation.js');
 const policy = require('../extension/translation-policy.js');
@@ -429,18 +428,14 @@ exports.tests = [
     fn() {
       const failedFixture = createReasoningFixture();
       const siblingFixture = createReasoningFixture();
-      const store = content.createInlineViewportStore(
-        303,
-        null,
-        null,
-        inlineTranslationSession.createInlineTranslationSession()
-      );
+      const visit = inlineTranslationSession.createInlineTranslationSession();
+      visit.begin({});
       const failedOriginal = failedFixture.block.textContent;
       const siblingOriginal = siblingFixture.block.textContent;
-      content.queueInlineViewportBlock(store, failedFixture.block);
-      content.queueInlineViewportBlock(store, siblingFixture.block);
+      visit.admit(failedFixture.block);
+      visit.admit(siblingFixture.block);
 
-      const firstBatch = content.takeInlineViewportBlockBatch(store);
+      const firstBatch = visit.takeBatch();
       // The rejection handed to the content script is the one the live path really
       // produces for this block, rather than a hand-written stand-in: the English
       // template comes back unchanged twice, so validation calls it partial and the
@@ -464,9 +459,7 @@ exports.tests = [
       );
       const siblingTranslation = getReasoningTranslatedTemplate(firstBatch[1]);
 
-      const firstSummary = content.applyInlineViewportBlockResults(
-        firstBatch,
-        [
+      visit.settle(firstBatch, { ok: true, results: [
           {
             id: firstBatch[0].id,
             disposition: repairedDecision.disposition,
@@ -480,24 +473,15 @@ exports.tests = [
             attemptCount: 1,
           },
         ],
-        303,
-        store
-      );
-      assert.equal(firstSummary.retried, 0);
-      assert.equal(firstSummary.failed, 1);
-      assert.equal(firstSummary.applied, 1);
-      assert.equal(store.queue.length, 0);
-      assert.equal(firstBatch[0].state, 'failed');
-      assert.equal(
-        firstBatch[0].code,
-        'quality.target_language_missing'
-      );
-      assert.equal(firstBatch[0].attemptCount, 2);
-      assert.equal(firstBatch[1].state, 'translated');
+      });
+      assert.deepEqual(visit.takeBatch(), []);
+      assert.deepEqual(visit.progress().counts, {
+        translated: 1, partial: 0, pending: 0, changed: 0, failed: 1,
+      });
       assert.equal(failedFixture.block.textContent, failedOriginal);
       assert.notEqual(siblingFixture.block.textContent, siblingOriginal);
 
-      const readerMessage = content.formatInlineViewportErrorText(store.records);
+      const readerMessage = visit.progress().reason;
       assert.equal(
         readerMessage,
         'Translation failed (1 block): The model did not return the target language, so the original was kept.'

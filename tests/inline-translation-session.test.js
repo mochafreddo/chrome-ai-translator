@@ -60,25 +60,336 @@ function translateBlock(visit, fixture = createReasoningFixture(), result = {}) 
   return fixture;
 }
 
+// Restated deliberately: importing the cap would hide an accidental limit change.
+const SESSION_BUDGET = 150000;
+
+function paragraph(length) {
+  const { document, element, text } = createTestDocument();
+  const block = element('p', text('word '.repeat(Math.ceil(length / 5)).slice(0, length - 1) + '.'));
+  document.body.appendChild(block);
+  return block;
+}
+
+// Spend through the same serialized paragraphs as the page, settling each request so the
+// next can run. A failed request still costs its initial submission and populates no cache.
+function spend(visit, cost) {
+  while (cost > 0) {
+    const next = Math.min(4000, cost);
+    visit.admit(paragraph(next - 6)); // empty atoms and null repair contribute six bytes
+    const batch = visit.takeBatch();
+    assert.equal(batch.length, 1, 'a paragraph within the remaining budget is admitted');
+    visit.settle(batch, null);
+    cost -= next;
+  }
+}
+
+function assertRemainingBudget(visit, cost) {
+  // End the operation to isolate the probe from pending records and cached results.
+  visit.stop();
+  visit.begin(JAPANESE);
+  if (cost > 0) spend(visit, cost);
+  visit.admit(paragraph(20));
+  assert.deepEqual(visit.takeBatch(), [], 'no budget is refunded or silently reset');
+  const refusal = visit.outbox.at(-1);
+  assert.equal(refusal.code, 'runtime.session_too_large');
+  assert.equal(refusal.evidence.sessionCost, SESSION_BUDGET);
+}
+
+function drain(visit, attemptCount = 1) {
+  const taken = [];
+  for (let batch; (batch = visit.takeBatch()).length;) {
+    taken.push(...batch);
+    visit.settle(batch, { ok: true, results: batch.map(({ id }) => ({
+      id, disposition: 'apply', template: '번역한 문장입니다.', attemptCount,
+    })) });
+  }
+  return taken;
+}
+
 exports.name = 'inline translation session';
 exports.tests = [
+  {
+    name: 'exposes only allowlisted rejection metadata from unsupported page content',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { document, element, text } = createTestDocument();
+      for (const [tag, attributes] of [
+        ['private-widget', {}],
+        ['button', { 'aria-label': 'private label' }],
+        ['span', { hidden: '' }],
+        ['span', { contenteditable: 'true' }],
+        ['p', {}],
+      ]) {
+        const child = element(tag, text('private page prose'));
+        for (const [key, value] of Object.entries(attributes)) child.setAttribute(key, value);
+        if (tag === 'span' && 'hidden' in attributes) child.hidden = true;
+        const block = element('p', text('Visible article prose. '), child);
+        block.setAttribute('id', 'private-selector');
+        document.body.appendChild(block);
+        visit.admit(block);
+      }
+      assert.deepEqual(visit.takeBatch(), []);
+      assert.deepEqual(visit.progress().counts, { ...NOTHING, failed: 5 });
+      assert.deepEqual(visit.outbox, [
+        { reason: 'custom_element' },
+        { reason: 'interactive_content', tag: 'BUTTON' },
+        { reason: 'hidden_content', tag: 'SPAN' },
+        { reason: 'editable_content', tag: 'SPAN' },
+        { reason: 'nested_semantic_block', tag: 'P' },
+      ].map(localRejection => ({ code: 'runtime.unsupported_block', evidence: {}, localRejection })));
+      assert.equal(JSON.stringify(visit.outbox).includes('private'), false);
+    },
+  },
+  {
+    name: 'admits a Semantic Block once across repeated scans',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { block } = createReasoningFixture();
+      visit.admit(block);
+      assert.equal(visit.admit(block), null);
+      const batch = visit.takeBatch();
+      assert.equal(batch.length, 1);
+      assert.equal(batch[0].template.includes('GPT-5.5'), false);
+      assert.equal(batch[0].atoms[0].label, 'GPT-5.5');
+      assert.deepEqual(visit.progress().counts, { ...NOTHING, pending: 1 });
+      assert.deepEqual(visit.takeBatch(), []);
+    },
+  },
+  {
+    name: 'charges actual record cost while reserving space for each request and repair',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      for (let index = 0; index < 500; index++) visit.admit(paragraph(40));
+      const taken = drain(visit);
+      assert.equal(taken.length, 500);
+      assert.equal(taken.reduce((sum, record) => sum + session.getReservedRecordCost(record), 0) > SESSION_BUDGET, true);
+      assert.deepEqual(visit.progress(), { counts: { ...NOTHING, translated: 500 }, reason: '' });
+      assertRemainingBudget(visit, SESSION_BUDGET - 23000);
+    },
+  },
+  {
+    name: 'translates the ADR-0007 page reconstruction whole even when every block is repaired',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      // Synthetic reconstruction of the measured page's approximate shape, using real paragraphs.
+      const lengths = [...Array(213).fill(36), ...Array(29).fill(30), ...Array(23).fill(55), ...Array(91).fill(303)];
+      const blocks = lengths.map(paragraph);
+      for (const block of blocks) visit.admit(block);
+      const taken = drain(visit, 2);
+      assert.equal(taken.length, 356);
+      assert.equal(taken.reduce((sum, record) => sum + record.template.length, 0), 37376);
+      assert.equal(taken.reduce((sum, record) => sum + session.getRecordCost(record), 0), 39512);
+      assert.equal(taken.reduce((sum, record) => sum + session.getReservedRecordCost(record), 0), 162824);
+      assert.deepEqual(visit.progress(), { counts: { ...NOTHING, translated: 356 }, reason: '' });
+      assert.equal(blocks.every(block => block.textContent === '번역한 문장입니다.'), true);
+      assertRemainingBudget(visit, SESSION_BUDGET - 79024);
+    },
+  },
+  {
+    name: 'refuses a full Session Budget and tells the reader to reload without naming a figure',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      spend(visit, SESSION_BUDGET);
+      visit.restore();
+      visit.begin(KOREAN);
+      const block = paragraph(20);
+      visit.admit(block);
+      assert.deepEqual(visit.takeBatch(), []);
+      assert.deepEqual(visit.progress().counts, { ...NOTHING, failed: 1 });
+      assert.equal(block.textContent, 'word word word word.');
+      const reason = visit.progress().reason;
+      assert.match(reason, /reached this page visit's limit, so no request was sent. Reload the page to continue/);
+      assert.doesNotMatch(reason.split(': ')[1], /\d/);
+      assert.deepEqual(visit.outbox.map(({ code, evidence }) => ({ code, limit: evidence.limit })), [
+        { code: 'runtime.session_too_large', limit: SESSION_BUDGET },
+      ]);
+    },
+  },
+  {
+    name: 'splits requests on reserved cost while retaining every admitted paragraph',
+    fn() {
+      for (const [length, sizes] of [[4000, [1, 1, 1]], [2500, [2, 1]]]) {
+        const visit = session.createInlineTranslationSession();
+        visit.begin(KOREAN);
+        for (let index = 0; index < 3; index++) visit.admit(paragraph(length));
+        for (const size of sizes) {
+          const batch = visit.takeBatch();
+          assert.equal(batch.length, size);
+          const records = batch.map(({ id, template, atoms }) => ({ id, template, atoms, repair: null }));
+          const repairs = records.map(record => ({ ...record, repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) } }));
+          assert.equal(JSON.stringify({ records }).length + JSON.stringify({ records: repairs }).length <= 12000, true);
+          visit.settle(batch, null);
+        }
+        assert.deepEqual(visit.takeBatch(), []);
+        assert.deepEqual(visit.progress().counts, { ...NOTHING, failed: 3 });
+      }
+    },
+  },
+  {
+    name: 'retains a queued page-change retry when a viewport rescan resets ordinary queued work',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { strong, batch, block } = sendBlock(visit);
+      strong.childNodes[0].nodeValue = 'Updated reasoning models';
+      visit.settle(batch, answer(batch));
+      const control = paragraph(40);
+      visit.admit(control);
+      visit.resetQueue();
+      assert.equal(visit.admit(block), null);
+      assert.deepEqual(visit.progress(), { counts: { ...NOTHING, pending: 1 }, reason: '' });
+      const retry = visit.takeBatch();
+      assert.equal(retry.length, 1);
+      assert.match(retry[0].template, /Updated reasoning models/);
+      visit.settle(retry, answer(retry));
+      assert.equal(block.textContent, TRANSLATED_TEXT);
+      assert.deepEqual(visit.takeBatch(), []);
+      visit.admit(control);
+      assert.equal(visit.takeBatch().length, 1);
+    },
+  },
+  {
+    name: 'keeps a restarted operation retry distinct from its carried translation when stopped',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      translateBlock(visit);
+      visit.stop();
+      visit.begin(KOREAN);
+      const { strong, batch } = sendBlock(visit, otherReasoningFixture('New reasoning models'));
+      strong.childNodes[0].nodeValue = 'Updated reasoning models';
+      visit.settle(batch, answer(batch));
+      visit.stop();
+      assert.deepEqual(visit.progress(), {
+        counts: { ...NOTHING, translated: 1, pending: 1, changed: 1 },
+        reason: 'Changed (1 block): Page changed before translation could be applied.',
+      });
+      assert.deepEqual(visit.takeBatch(), []);
+    },
+  },
+  {
+    name: 'restores and replays a cached partial translation as partial without a request',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { block } = translateBlock(visit, undefined, {
+        disposition: 'apply_with_warning', terminalCode: 'quality.english_residue', attemptCount: 2,
+      });
+      const progress = visit.progress();
+      assert.deepEqual(progress.counts, { ...NOTHING, partial: 1 });
+      assert.match(progress.reason, /Partial translation \(1 block\)/);
+      visit.restore();
+      assert.equal(block.textContent, ORIGINAL_TEXT);
+      assert.deepEqual(visit.progress().counts, NOTHING);
+      visit.begin(KOREAN);
+      assert.equal(visit.admit(block), null);
+      assert.deepEqual(visit.takeBatch(), []);
+      assert.equal(block.textContent, TRANSLATED_TEXT);
+      assert.deepEqual(visit.progress(), progress);
+    },
+  },
+  {
+    name: 'isolates an application failure from its valid sibling and files its runtime code',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const failed = createReasoningFixture();
+      const sibling = otherReasoningFixture('Other reasoning models');
+      visit.admit(failed.block);
+      visit.admit(sibling.block);
+      const batch = visit.takeBatch();
+      // Fault at the DOM boundary: the page refuses the codec's replacement.
+      failed.block.replaceChildren = () => { throw new Error('page refused update'); };
+      const settled = visit.settle(batch, answer(batch, { correlationToken: 'apply-token' }));
+      assert.deepEqual(settled.runtimeOutcomes, [{ code: 'runtime.apply_failed', correlationToken: 'apply-token' }]);
+      assert.equal(failed.block.textContent, ORIGINAL_TEXT);
+      assert.equal(sibling.block.textContent, TRANSLATED_TEXT);
+      assert.deepEqual(visit.progress().counts, { ...NOTHING, translated: 1, failed: 1 });
+      assert.match(visit.progress().reason, /page rejected the translated update/);
+    },
+  },
+  {
+    name: 'readmits a translated block whose page-owned nodes were replaced',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { block, document } = translateBlock(visit);
+      const previous = block.childNodes[1];
+      const replacement = document.createTextNode(previous.nodeValue);
+      block.childNodes.splice(1, 1, replacement);
+      previous.parentNode = null;
+      replacement.parentNode = block;
+      visit.admit(block);
+      assert.equal(visit.takeBatch().length, 1);
+      assert.deepEqual(visit.progress().counts, { ...NOTHING, pending: 1, changed: 1 });
+      assert.match(visit.progress().reason, /Page changed/);
+    },
+  },
+  {
+    name: 'aggregates terminal reasons from real transitions in stable reader-facing order',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      spend(visit, SESSION_BUDGET - 6000);
+      visit.restore();
+      visit.begin(KOREAN);
+      // Produce the categories out of display order, including two partial translations.
+      for (const terminalCode of ['protocol.invalid_json', 'structure.token_missing', 'quality.target_language_missing', 'quality.english_residue', 'quality.english_residue']) {
+        const fixture = sendBlock(visit, otherReasoningFixture(`${terminalCode} ${visit.progress().counts.partial}`));
+        visit.settle(fixture.batch, answer(fixture.batch, {
+          disposition: terminalCode === 'quality.english_residue' ? 'apply_with_warning' : 'reject', terminalCode,
+        }));
+      }
+      const application = sendBlock(visit, otherReasoningFixture('DOM failure'));
+      application.block.replaceChildren = () => { throw new Error('page refused update'); };
+      visit.settle(application.batch, answer(application.batch));
+      const changed = sendBlock(visit, otherReasoningFixture('Detached block'));
+      changed.document.body.replaceChildren();
+      visit.settle(changed.batch, answer(changed.batch));
+      const { document, element, text } = createTestDocument();
+      const unsupported = element('li', text('Outer prose'), element('p', text('Nested prose')));
+      document.body.appendChild(unsupported);
+      visit.admit(unsupported);
+      visit.admit(paragraph(7000));
+      visit.admit(paragraph(5000)); // exceeds the remaining Session Budget
+      visit.takeBatch();
+      visit.settle(sendBlock(visit, otherReasoningFixture('Failed request')).batch, null);
+      assert.equal(visit.progress().reason, [
+        'Translation failed (1 block): The model did not return the target language, so the original was kept.',
+        'Partial translation (2 blocks): Some source-language prose remained after one repair attempt.',
+        'Translation failed (1 block): Protected page structure could not be preserved, so the original was kept.',
+        'Translation failed (1 block): The model response was malformed or incomplete.',
+        'Translation failed (1 block): The page rejected the translated update, so the original was kept.',
+        'Translation failed (1 block): This page block has unsupported structure, so no request was sent.',
+        'Translation failed (1 block): This page block exceeds the 12,000-character request limit, so no request was sent.',
+        "Translation failed (1 block): The visible translation reached this page visit's limit, so no request was sent. Reload the page to continue.",
+        'Changed (1 block): Page changed before translation could be applied.',
+        'Translation failed (1 block): The translation request could not be completed.',
+      ].join('\n'));
+    },
+  },
+
   {
     name: 'keeps the Session Budget across stop, Start and Original text',
     fn() {
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);
-      visit.charge(1200);
+      spend(visit, 1200);
       visit.stop();
-      assert.equal(visit.spent, 1200);
       visit.begin(KOREAN);
-      visit.charge(300);
+      spend(visit, 300);
       visit.restore();
-      assert.equal(visit.spent, 1500);
       visit.begin(JAPANESE);
-      assert.equal(visit.spent, 1500);
+      assertRemainingBudget(visit, SESSION_BUDGET - 1500);
 
-      // Only a new page visit starts counting again.
-      assert.equal(session.createInlineTranslationSession().spent, 0);
+      const fresh = session.createInlineTranslationSession();
+      fresh.begin(KOREAN);
+      assertRemainingBudget(fresh, SESSION_BUDGET);
     },
   },
   {
@@ -88,7 +399,7 @@ exports.tests = [
       assert.equal(visit.status, 'original');
       const initial = visit.operationId;
 
-      const { operationId: first } = visit.begin(KOREAN);
+      const first = visit.begin(KOREAN);
       assert.equal(first > initial, true);
       assert.equal(visit.operationId, first);
       assert.equal(visit.status, 'active');
@@ -100,7 +411,7 @@ exports.tests = [
       // A second Stop has no operation left to end.
       assert.equal(visit.stop(), stopped);
 
-      const { operationId: second } = visit.begin(KOREAN);
+      const second = visit.begin(KOREAN);
       assert.equal(second > stopped, true);
 
       const restored = visit.restore();
@@ -186,7 +497,8 @@ exports.tests = [
         { ...KOREAN, reasoningEffort: 'low' },
       ]) {
         visit.begin(settings);
-        assert.equal(visit.admit(block).state, 'queued', JSON.stringify(settings));
+        visit.admit(block);
+        assert.equal(visit.takeBatch().length, 1, JSON.stringify(settings));
         assert.equal(block.textContent, ORIGINAL_TEXT);
         visit.restore();
       }
@@ -204,15 +516,15 @@ exports.tests = [
       const { block } = translateBlock(visit, undefined, { attemptCount: 2 });
       visit.restore();
       assert.equal(block.textContent, ORIGINAL_TEXT);
-      const spent = visit.spent;
+      const spent = session.getRecordCost(require('../extension/inline-block.js').serializeBlock(createReasoningFixture().block)) * 2;
 
       visit.begin(KOREAN);
 
       assert.equal(visit.admit(block), null);
       assert.deepEqual(visit.takeBatch(), []);
       assert.equal(block.textContent, TRANSLATED_TEXT);
-      assert.equal(visit.spent, spent);
       assert.deepEqual(visit.progress(), { counts: { ...NOTHING, translated: 1 }, reason: '' });
+      assertRemainingBudget(visit, SESSION_BUDGET - spent);
     },
   },
   {
@@ -228,7 +540,6 @@ exports.tests = [
       visit.admit(block);
 
       assert.deepEqual(visit.takeBatch(), []);
-      assert.equal(visit.spent, 0);
       const { counts, reason } = visit.progress();
       assert.deepEqual(counts, { ...NOTHING, failed: 1 });
       assert.match(reason, /exceeds the 12,000-character request limit, so no request was sent/);
@@ -237,6 +548,7 @@ exports.tests = [
         [{ code: 'runtime.block_too_large', limit: 12000 }]
       );
       assert.equal(visit.outbox[0].evidence.recordCost > 12000, true);
+      assertRemainingBudget(visit, SESSION_BUDGET);
     },
   },
   {
@@ -248,7 +560,7 @@ exports.tests = [
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);
 
-      assert.equal(visit.admit(block).state, 'failed');
+      visit.admit(block);
 
       assert.deepEqual(visit.takeBatch(), []);
       assert.deepEqual(visit.progress().counts, { ...NOTHING, failed: 1 });
@@ -271,12 +583,12 @@ exports.tests = [
         visit.begin(KOREAN);
         const { batch } = sendBlock(visit);
         // A fresh visit has been charged for exactly this one record so far.
-        const recordCost = visit.spent;
+        const recordCost = session.getRecordCost(batch[0]);
         assert.equal(recordCost > 0, true);
 
         visit.settle(batch, answer(batch, { attemptCount }));
 
-        assert.equal(visit.spent, recordCost * attemptCount, `attemptCount ${attemptCount}`);
+        assertRemainingBudget(visit, SESSION_BUDGET - recordCost * attemptCount);
       }
     },
   },
@@ -291,7 +603,7 @@ exports.tests = [
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);
       const { block, batch } = sendBlock(visit);
-      const recordCost = visit.spent;
+      const recordCost = session.getRecordCost(batch[0]);
       end(visit);
       const progress = visit.progress();
 
@@ -301,7 +613,6 @@ exports.tests = [
       );
 
       // The repair was sent whatever the reader did since, so the page visit pays for it.
-      assert.equal(visit.spent, recordCost * 2);
       assert.deepEqual(settled, {
         runtimeOutcomes: [],
         releaseTokens: ['late-token'],
@@ -310,6 +621,7 @@ exports.tests = [
       assert.equal(block.textContent, ORIGINAL_TEXT);
       assert.deepEqual(visit.progress(), progress);
       assert.deepEqual(visit.takeBatch(), []);
+      assertRemainingBudget(visit, SESSION_BUDGET - recordCost * 2);
     },
   })),
   {
@@ -319,7 +631,7 @@ exports.tests = [
         const visit = session.createInlineTranslationSession();
         visit.begin(KOREAN);
         const { block, batch } = sendBlock(visit);
-        const spent = visit.spent;
+        const spent = session.getRecordCost(batch[0]);
 
         const settled = visit.settle(batch, response);
 
@@ -328,12 +640,12 @@ exports.tests = [
           releaseTokens: [],
           diagnosticsUnavailable: false,
         });
-        assert.equal(visit.spent, spent);
         assert.equal(block.textContent, ORIGINAL_TEXT);
         assert.deepEqual(visit.progress(), {
           counts: { ...NOTHING, failed: 1 },
           reason: 'Translation failed (1 block): The translation request could not be completed.',
         });
+        assertRemainingBudget(visit, SESSION_BUDGET - spent);
       }
     },
   },

@@ -66,20 +66,6 @@ var INLINE_EXCLUDED_ROLES = new Set([
   'tablist',
   'toolbar',
 ]);
-// The Semantic Block lifecycle is the Inline Translation Session's. These names are what the
-// content script's store-level checks call, and each is the session's own function.
-// TODO: #70 - these go once the checks drive the session's interface instead.
-var createInlineViewportStore = inlineTranslationSession.operations.create;
-var queueInlineViewportBlock = inlineTranslationSession.operations.admit;
-var takeInlineViewportBlockBatch = inlineTranslationSession.operations.takeBatch;
-var applyInlineViewportBlockResults = inlineTranslationSession.operations.applyResults;
-var markInlineViewportBatchFailed = inlineTranslationSession.operations.failBatch;
-var queueInlineLocalDiagnostic = inlineTranslationSession.operations.queueLocalDiagnostic;
-var getInlineBlockRecordCost = inlineTranslationSession.getRecordCost;
-var getInlineBlockReservedRecordCost = inlineTranslationSession.getReservedRecordCost;
-var getInlineViewportStatusCounts = inlineTranslationSession.getStatusCounts;
-var getInlineTerminalReason = inlineTranslationSession.getTerminalReason;
-
 function flushInlineLocalDiagnostics(store, state = inlineState) {
   if (!store?.localDiagnostics?.length || store.localDiagnosticsInFlight) return;
   const batch = {
@@ -164,6 +150,7 @@ function stopInlineViewportTranslation(state = inlineState) {
   const store = state.viewport;
   const hasPendingDiagnosticTask = Boolean(store.localDiagnosticRetryTimer);
   const operationId = state.session.stop();
+  store.stopped = true;
   if (store.scanTimer) {
     clearTimeout(store.scanTimer);
     store.scanTimer = null;
@@ -253,21 +240,26 @@ async function requestInlineStartupInstructions(chromeApi = globalThis.chrome) {
   return response.instructions;
 }
 
-// One shape for an Inline Translation state, so a check drives the fields the page has
-// rather than the ones it remembered to write down. A hand-rolled state that left out
-// `authorizedUntil` would find the run start refusing it and say nothing about why. The
-// Inline Translation status, the operation id and the operation's store are not among the
-// fields: they are the session's, and read through it.
+// The viewport scanner and diagnostic transport belong to the page, separate from the
+// session's Semantic Block state. The outbox is the session's transport interface.
+function createInlineViewportState(session, settings = null) {
+  return {
+    operationId: session.operationId,
+    translationSettings: settings,
+    localDiagnostics: session.outbox,
+    stopped: false,
+  };
+}
+
 function createInlineTranslationState(overrides = {}) {
+  const session = inlineTranslationSession.createInlineTranslationSession();
   return {
     menuOpen: false,
     message: '',
     error: '',
     authorizedUntil: 0,
-    session: inlineTranslationSession.createInlineTranslationSession(),
-    get viewport() {
-      return this.session.operation;
-    },
+    session,
+    viewport: createInlineViewportState(session),
     ...overrides,
   };
 }
@@ -446,6 +438,7 @@ function restoreInlineViewportRecords(state = inlineState) {
     clearTimeout(viewport.scanTimer);
   }
   state.session.restore();
+  state.viewport = createInlineViewportState(state.session);
 }
 
 function authorizeInlineTranslation(state = inlineState, now = Date.now()) {
@@ -587,16 +580,15 @@ function getInlineChildNodes(node) {
   return Array.from(node?.childNodes || []);
 }
 
-// Admits into the store it is handed, which in the page is always the session's current
-// operation. TODO: #70 - admit through the session once the scan checks stop handing it a
-// store of their own.
+// Collects visible blocks through the session, retaining only scan position on the page.
 function collectVisibleInlineBlocks(
   root,
-  store,
+  state,
   maxTextNodes = INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES
 ) {
   const limit = normalizeInlineViewportScanLimit(maxTextNodes);
-  const startIndex = Math.max(0, Number(store?.scanStartIndex) || 0);
+  const store = state.viewport;
+  const startIndex = Math.max(0, Number(store.scanStartIndex) || 0);
   const viewport = getInlineViewportInfo();
   const queued = [];
   const queuedBlocks = new Set();
@@ -625,7 +617,7 @@ function collectVisibleInlineBlocks(
         const block = findInlineSemanticBlock(node, root);
         if (block && !queuedBlocks.has(block)) {
           queuedBlocks.add(block);
-          const record = queueInlineViewportBlock(store, block);
+          const record = state.session.admit(block);
           if (record) queued.push(record);
         }
       }
@@ -675,11 +667,6 @@ function formatInlineViewportReasons(terminalReason, diagnosticsUnavailable = fa
   if (terminalReason) reasons.push(terminalReason);
   if (diagnosticsUnavailable) reasons.push('Diagnostics could not be saved.');
   return reasons.join('\n');
-}
-
-// TODO: #70 - reached only by the checks that hand it records of their own.
-function formatInlineViewportErrorText(records, diagnosticsUnavailable = false) {
-  return formatInlineViewportReasons(getInlineTerminalReason(records), diagnosticsUnavailable);
 }
 
 // The counts are progress. A reason that has been reached is not withdrawn by a later
@@ -833,7 +820,7 @@ function runInlineViewportScan(state = inlineState) {
     return;
   }
   store.root = root;
-  collectVisibleInlineBlocks(root, store);
+  collectVisibleInlineBlocks(root, state);
   if (store.scanStartIndex > 0) {
     scheduleInlineViewportScan(state);
   }
@@ -937,21 +924,6 @@ function detachInlineViewportWatchers(state = inlineState) {
   }
 }
 
-// TODO: #70 - reached only by its own check; the drain loop sends what `settle` returns.
-function releaseInlineRuntimeTokensFromStaleResponse(resp, operationId) {
-  const releaseTokens = Array.isArray(resp?.results)
-    ? resp.results.map((result) => result?.correlationToken).filter(Boolean)
-    : [];
-  if (!releaseTokens.length) return false;
-  chrome.runtime.sendMessage({
-    type: inlineDiagnosticsProtocol.messages.recordRuntime,
-    operationId,
-    outcomes: [],
-    releaseTokens,
-  }).catch(() => {});
-  return true;
-}
-
 // Sends the worker what settling a batch said the page must file. The worker failing to take
 // it is reported only while the operation it belongs to is still the one on the page.
 function fileInlineRuntimeOutcomes(state, store, operationId, { runtimeOutcomes, releaseTokens }) {
@@ -1024,7 +996,9 @@ async function drainInlineViewportQueue(state = inlineState) {
 // operation it replaces.
 function beginInlineTranslationOperation(state, settingsSnapshot) {
   state.translationSettings = settingsSnapshot;
-  return state.session.begin(settingsSnapshot);
+  state.session.begin(settingsSnapshot);
+  state.viewport = createInlineViewportState(state.session, settingsSnapshot);
+  return state.viewport;
 }
 
 async function translateInlinePage(state = inlineState) {
@@ -1201,21 +1175,10 @@ if (typeof module !== 'undefined' && module.exports) {
     requestInlineStartupInstructions,
     refreshInlineTranslatorSettings,
     beginInlineTranslationOperation,
-    createInlineViewportStore,
     findInlineSemanticBlock,
-    getInlineBlockRecordCost,
-    getInlineBlockReservedRecordCost,
-    queueInlineViewportBlock,
-    queueInlineLocalDiagnostic,
-    takeInlineViewportBlockBatch,
-    applyInlineViewportBlockResults,
-    releaseInlineRuntimeTokensFromStaleResponse,
     flushInlineLocalDiagnostics,
-    markInlineViewportBatchFailed,
-    getInlineViewportStatusCounts,
     formatInlineViewportStatusMessage,
-    formatInlineViewportErrorText,
-    getInlineTerminalReason,
+    formatInlineViewportReasons,
     getInlineTranslationStatusSnapshot,
     handleInlineContentMessage,
     createInlineTranslationState,

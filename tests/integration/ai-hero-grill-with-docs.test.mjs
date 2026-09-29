@@ -38,9 +38,11 @@ async function attachReportedPage(context) {
 
 async function injectInlineTranslation(evaluate) {
   for (const file of [
+    'default-model.js',
     'inline-diagnostics-protocol.js',
     'placeholder-tokens.js',
     'inline-block.js',
+    'inline-translation-session.js',
     'translation-validation.js',
     'content.js',
   ]) {
@@ -82,7 +84,9 @@ async function main() {
       };
       try {
         const root = pickArticleRoot();
-        const store = createInlineViewportStore(1);
+        const state = createInlineTranslationState();
+        beginInlineTranslationOperation(state, {});
+        const records = [];
         const step = Math.max(1, Math.floor(window.innerHeight * 0.75));
         for (
           let top = 0;
@@ -91,14 +95,13 @@ async function main() {
         ) {
           window.scrollTo(0, top);
           await new Promise((resolve) => setTimeout(resolve, 75));
-          store.scanStartIndex = 0;
-          collectVisibleInlineBlocks(root, store, 5000);
+          state.viewport.scanStartIndex = 0;
+          records.push(...collectVisibleInlineBlocks(root, state, 5000));
         }
         window.scrollTo(0, 0);
 
-        const repository = store.records.find((record) =>
-          record.state === 'queued' &&
-          record.template.includes('mattpocock/skills')
+        const repository = records.find((record) =>
+          record.template?.includes('mattpocock/skills')
         );
         const quality = repository
           ? ChromeAiTranslatorValidation.assessTranslationQuality(
@@ -118,10 +121,8 @@ async function main() {
             )
           : null;
         return {
-          attempted: store.records.length,
-          failed: store.records.filter(
-            (record) => record.state === 'failed'
-          ).length,
+          attempted: records.length,
+          failed: state.session.progress().counts.failed,
           repositoryFound: Boolean(repository),
           repositoryQuality: quality?.status || '',
           changedSourceSyntaxCode: changed?.errorCode || '',

@@ -12,8 +12,6 @@ const PAGE_URL = 'https://code.claude.com/docs/en/advisor';
 const { check, failures, finish } = createChecks('data-as paragraph');
 
 async function exerciseParagraphs() {
-  const codec = ChromeAiTranslatorInlineBlock;
-  const root = pickArticleRoot();
   const paragraphs = [...document.querySelectorAll('span[data-as="p"]')];
   const results = [];
   for (const block of paragraphs) {
@@ -31,36 +29,39 @@ async function exerciseParagraphs() {
     const attributes = elements.map(node => JSON.stringify([...node.attributes].map(a => [a.name, a.value])));
     const codeNodes = [...block.querySelectorAll('code')];
     const codeHtml = codeNodes.map(node => node.outerHTML);
-    const store = createInlineViewportStore(73);
-    collectVisibleInlineBlocks(root, store);
-    collectVisibleInlineBlocks(root, store);
-    const record = store.byBlock.get(block);
-    if (record?.state !== 'queued') {
-      results.push({ collected: false, state: record?.state || 'missing' });
+    const state = createInlineTranslationState();
+    beginInlineTranslationOperation(state, {});
+    const collected = collectVisibleInlineBlocks(block, state);
+    const duplicate = collectVisibleInlineBlocks(block, state);
+    const batch = state.session.takeBatch();
+    const [record] = batch;
+    if (collected.length !== 1 || batch.length !== 1) {
+      results.push({ collected: false });
       continue;
     }
     const output = record.template.split(/(⟦[^⟧]+⟧)/g)
       .map(part => part.startsWith('⟦') || !part.trim() ? part : '번역된 문단 ')
       .join('');
-    applyInlineViewportBlockResults([record], [{ id: record.id, disposition: 'apply', template: output }], 73, store);
-    collectVisibleInlineBlocks(root, store);
-    const translated = record.state === 'translated' && block.textContent.includes('번역된 문단');
+    state.session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: output }] });
+    const rescanned = collectVisibleInlineBlocks(block, state);
+    const translated = state.session.progress().counts.translated === 1 && block.textContent.includes('번역된 문단');
     const preserved = elements.every((node, i) => node.isConnected &&
       JSON.stringify([...node.attributes].map(a => [a.name, a.value])) === attributes[i]) &&
       codeNodes.every((node, i) => node.outerHTML === codeHtml[i]);
-    const unique = store.records.filter(item => item.blockElement === block).length === 1;
-    const restored = codec.restoreBlock(record.snapshot);
+    const unique = duplicate.length === 0 && rescanned.length === 0 && state.session.takeBatch().length === 0;
+    state.session.restore();
+    const restored = state.session.status === 'original';
     const exactGraph = graph.every(({ node, children, value }) =>
       node.nodeValue === value && node.childNodes.length === children.length &&
       children.every((child, index) => node.childNodes[index] === child));
-    results.push({ collected: true, translated, preserved, unique, restored: restored.ok,
+    results.push({ collected: true, translated, preserved, unique, restored,
       exactGraph, exactHtml: block.outerHTML === originalHtml });
   }
   return results;
 }
 
 async function verifyPage(page, label, expectedCount) {
-  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'content.js']) {
+  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'content.js']) {
     await page.evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
   const results = await page.evaluate(`(${exerciseParagraphs.toString()})().catch(error => ({ error: error.message }))`, 20000);
@@ -91,26 +92,30 @@ async function exerciseProtectedAtoms() {
     const originalText = inner.firstChild;
     try {
       outer.scrollIntoView({ block: 'center', behavior: 'instant' });
-      const store = createInlineViewportStore(74);
-      collectVisibleInlineBlocks(outer, store);
-      collectVisibleInlineBlocks(outer, store);
-      const expected = tag === 'a' ? [inner] : [];
-      const unique = store.queue.length === expected.length &&
-        store.queue.every((record, i) => record.blockElement === expected[i]);
+      const state = createInlineTranslationState();
+      beginInlineTranslationOperation(state, {});
+      collectVisibleInlineBlocks(outer, state);
+      collectVisibleInlineBlocks(outer, state);
+      const expected = tag === 'a' ? ['Responses API'] : [];
+      const batch = state.session.takeBatch();
+      const unique = batch.length === expected.length &&
+        batch.every((record, i) => record.template === expected[i]);
+      const rejected = state.session.progress().counts.failed === 1;
+      const diagnostics = state.session.outbox.slice();
       let appliedAndRestored = true;
       if (tag === 'a') {
-        const record = store.byBlock.get(inner);
+        const [record] = batch;
         if (!record) appliedAndRestored = false;
         else {
-          applyInlineViewportBlockResults([record], [{ id: record.id, disposition: 'apply', template: '응답 API' }], 74, store);
-          appliedAndRestored = record.state === 'translated' && inner.textContent === '응답 API';
-          appliedAndRestored = ChromeAiTranslatorInlineBlock.restoreBlock(record.snapshot).ok && appliedAndRestored;
+          state.session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: '응답 API' }] });
+          appliedAndRestored = state.session.progress().counts.translated === 1 && inner.textContent === '응답 API';
+          state.session.restore();
         }
       }
-      results.push({ tag, rejected: store.byBlock.get(outer)?.state === 'failed', unique, appliedAndRestored,
-        diagnostic: store.localDiagnostics.length === 1 &&
-          store.localDiagnostics[0].localRejection?.reason === 'nested_semantic_block' &&
-          store.localDiagnostics[0].localRejection?.tag === 'SPAN',
+      results.push({ tag, rejected, unique, appliedAndRestored,
+        diagnostic: diagnostics.length === 1 &&
+          diagnostics[0].localRejection?.reason === 'nested_semantic_block' &&
+          diagnostics[0].localRejection?.tag === 'SPAN',
         restored: outer.outerHTML === html && outer.childNodes.length === children.length &&
           children.every((node, i) => outer.childNodes[i] === node) && atom.firstChild === inner &&
           inner.childNodes.length === 1 && inner.firstChild === originalText });

@@ -21,9 +21,11 @@ const { check, failures, finish } = createChecks('ai hero responsive labels');
 
 async function injectInlineTranslation(evaluate) {
   for (const file of [
+    'default-model.js',
     'inline-diagnostics-protocol.js',
     'placeholder-tokens.js',
     'inline-block.js',
+    'inline-translation-session.js',
     'translation-validation.js',
     'content.js',
   ]) {
@@ -84,24 +86,10 @@ async function exerciseLabels(page, context, width) {
           'position:fixed;left:20px;top:20px;width:400px;z-index:-1';
         document.body.appendChild(host);
         host.appendChild(block);
-        const store = createInlineViewportStore(${width});
-        const records = collectVisibleInlineBlocks(block, store);
-        const collectedRecord = records.find(
-          (item) => item.blockElement === block
-        );
-        const serialized = collectedRecord
-          ? null
-          : ChromeAiTranslatorInlineBlock.serializeBlock(block);
-        const record = collectedRecord || (
-          serialized?.ok
-            ? {
-                template: serialized.template,
-                atoms: serialized.atoms,
-                contract: serialized.contract,
-                snapshot: serialized.snapshot,
-              }
-            : null
-        );
+        const state = createInlineTranslationState();
+        beginInlineTranslationOperation(state, {});
+        const records = collectVisibleInlineBlocks(block, state);
+        const [record] = records;
         const responsiveAtom = record?.atoms.find(
           (atom) => atom.kind === 'responsive-label'
         );
@@ -111,24 +99,21 @@ async function exerciseLabels(page, context, width) {
         const visibleContribution = hidden && visible
           ? Number(visible.textContent.includes(hidden.textContent))
           : -1;
-        const output = record?.template.replace(
-          visible?.textContent || '',
-          \`\${visible?.textContent || ''} 번역\`
-        );
-        const plan = record
-          ? ChromeAiTranslatorInlineBlock.createPatchPlan(record.snapshot, output)
-          : null;
-        const applied = plan?.ok
-          ? ChromeAiTranslatorInlineBlock.applyPatchPlan(record.snapshot, plan)
-          : null;
+        // Mobile labels may be protected Source Syntax. Add visible prose around the
+        // preserved template so both viewports exercise a real DOM change.
+        const output = record ? record.template + ' 번역' : '';
+        if (record) state.session.settle(state.session.takeBatch(), {
+          ok: true, results: [{ id: record.id, disposition: 'apply', template: output }],
+        });
+        const applied = state.session.progress().counts.translated === 1 && block.textContent.includes('번역');
         const preservedAfterApply = Boolean(
           hidden &&
           hidden.isConnected &&
           hidden.outerHTML === hiddenHtml
         );
-        const restored = applied?.ok
-          ? ChromeAiTranslatorInlineBlock.restoreBlock(record.snapshot)
-          : null;
+        const localDiagnostics = state.session.outbox.slice();
+        state.session.restore();
+        const restored = state.session.status === 'original';
         originalParent.insertBefore(block, originalNextSibling);
         host.remove();
         const exactGraph = graph.every(({ node, children, value }) =>
@@ -140,9 +125,9 @@ async function exerciseLabels(page, context, width) {
           labelsFound: Boolean(hidden && visible),
           collectorOutcomeSafe:
             records.length === 1 &&
-            collectedRecord?.state === 'queued' &&
-            store.localDiagnostics.length === 0,
-          noHiddenRejection: !store.localDiagnostics.some((item) =>
+            Boolean(record) &&
+            localDiagnostics.length === 0,
+          noHiddenRejection: !localDiagnostics.some((item) =>
             item.localRejection?.reason === 'hidden_content' &&
             item.localRejection?.tag === 'SPAN'
           ),
@@ -150,9 +135,9 @@ async function exerciseLabels(page, context, width) {
             hiddenCount === visibleContribution &&
             responsiveAtom?.preserveText === false &&
             !Object.hasOwn(responsiveAtom, 'label'),
-          applied: applied?.ok === true,
+          applied,
           preservedAfterApply,
-          restored: restored?.ok === true,
+          restored,
           exactGraph,
           exactHtml: block.outerHTML === originalHtml,
         });

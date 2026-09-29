@@ -14,14 +14,13 @@ const PAGE_URL = 'https://code.claude.com/docs/en/advisor';
 const { check, failures, finish } = createChecks('heading permalink');
 
 async function inject(evaluate) {
-  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'content.js']) {
+  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'content.js']) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
 }
 
 // Runs in the page, so references never leave the DOM being checked.
 async function exerciseHeadings() {
-  const codec = ChromeAiTranslatorInlineBlock;
   const headings = Array.from(document.querySelectorAll('h1[id],h2[id],h3[id],h4[id],h5[id],h6[id]'))
     .filter((heading) => Array.from(heading.querySelectorAll('a')).some((link) =>
       link.getAttribute('href') === `#${heading.id}` && !/[\p{L}\p{N}]/u.test(link.textContent)));
@@ -47,11 +46,12 @@ async function exerciseHeadings() {
     let clicks = 0;
     const onClick = () => { clicks += 1; };
     link.addEventListener('click', onClick);
-    const store = createInlineViewportStore(59);
-    const records = collectVisibleInlineBlocks(heading, store);
-    const record = records.find((item) => item.blockElement === heading);
-    if (records.length !== 1 || record?.state !== 'queued') {
-      results.push({ collected: false, rejection: store.localDiagnostics.map((item) => item.localRejection) });
+    const state = createInlineTranslationState();
+    beginInlineTranslationOperation(state, {});
+    const records = collectVisibleInlineBlocks(heading, state);
+    const [record] = records;
+    if (records.length !== 1 || state.session.progress().counts.pending !== 1) {
+      results.push({ collected: false, rejection: state.session.outbox.map((item) => item.localRejection) });
       link.removeEventListener('click', onClick);
       continue;
     }
@@ -62,8 +62,8 @@ async function exerciseHeadings() {
       .join('');
     link.focus();
     const focusedBefore = document.activeElement === link;
-    const plan = codec.createPatchPlan(record.snapshot, output);
-    const applied = codec.applyPatchPlan(record.snapshot, plan);
+    state.session.settle(state.session.takeBatch(), { ok: true, results: [{ id: record.id, disposition: 'apply', template: output }] });
+    const applied = state.session.progress().counts.translated === 1 && heading.textContent.includes('번역된 제목');
     const request = JSON.stringify({ template: record.template, atoms: record.atoms, contract: record.contract });
     const localOnly = !request.includes(href) && !request.includes(label) && !request.includes('\u200b');
     const preserved = control.outerHTML === controlHtml && link.isConnected &&
@@ -75,14 +75,15 @@ async function exerciseHeadings() {
     // again so restoration is tested independently from that native behavior.
     link.focus();
     const focusedBeforeRestore = document.activeElement === link;
-    const restored = codec.restoreBlock(record.snapshot);
+    state.session.restore();
+    const restored = state.session.status === 'original';
     const exactGraph = graph.every(({ node, children, value }) =>
       node.nodeValue === value && node.childNodes.length === children.length &&
       children.every((child, index) => node.childNodes[index] === child));
     const focusedAfterRestore = document.activeElement === link;
     link.click();
-    results.push({ collected: true, applied: applied.ok, translated: output !== record.template,
-      localOnly, preserved, focusedBefore, clickedAfterApply, restored: restored.ok,
+    results.push({ collected: true, applied, translated: output !== record.template,
+      localOnly, preserved, focusedBefore, clickedAfterApply, restored,
       exactGraph, exactHtml: heading.outerHTML === originalHtml, focusedBeforeRestore, focusedAfterRestore,
       clickedAfterRestore: clicks === 2 && location.hash === href });
     link.removeEventListener('click', onClick);

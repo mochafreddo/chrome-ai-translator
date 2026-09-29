@@ -50,12 +50,14 @@ exports.tests = [
       inject();
       const session = pageScope.__chromeAiTranslatorInlineState.session;
       session.begin({});
-      session.charge(1200);
+      const { block } = require('./inline-block.test').createReasoningFixture();
+      session.admit(block);
       inject();
 
       // The second injection continues the page visit rather than starting a new budget.
       assert.equal(pageScope.__chromeAiTranslatorInlineState.session, session);
-      assert.equal(session.spent, 1200);
+      assert.equal(session.takeBatch().length, 1);
+      assert.equal(session.takeBatch().length, 0);
       assert.equal(session.status, 'active');
     },
   },
