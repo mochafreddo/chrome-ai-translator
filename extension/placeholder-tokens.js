@@ -6,6 +6,8 @@
 // byte-for-byte, exactly once, with nothing else from the token namespace alongside it, and
 // with the pairs still nested the way they were sent. Four failures fall out of that — a
 // token lost, repeated, invented, or crossed — and this module is where all four are decided.
+// Inline Translation's adapter may leave a wholly dropped emphasis pair out of what it asks
+// this module to expect (ADR-0010); nothing here knows about that exception.
 //
 // Side Panel Translation and Inline Translation used to decide them twice, in code that
 // differed only in what the entry kinds were called and which field carried the token, so a

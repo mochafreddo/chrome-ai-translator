@@ -51,6 +51,11 @@
     'Q',
     'SPAN',
   ]);
+  // Emphasis a faithful translation may leave with nothing to wrap: "doesn't restrict
+  // <em>what</em> commands" has no Korean word for "what". An answer that drops one of these
+  // pairs whole is applied without it rather than refused, which is the one exception to
+  // the Placeholder Token contract (ADR-0010).
+  const DROPPABLE_WRAPPER_TAGS = new Set(['EM', 'I', 'STRONG', 'B']);
   const ATOM_TAGS = new Set(['CODE', 'KBD', 'SAMP', 'BR', 'WBR']);
   const INERT_PAGE_NODE_TAGS = new Set(['IMG', 'SVG']);
   const OPAQUE_DESCENDANT_TAGS = new Set([
@@ -1053,9 +1058,20 @@
       rememberContainer(node);
       const linkedSourceSyntax = getLinkedSourceSyntax(node);
       if (linkedSourceSyntax) contextualSourceSyntax.add(linkedSourceSyntax);
+      const entryCount = contractEntries.length;
       const inner = getChildNodes(node)
         .map((child) => visit(child, id))
         .join('');
+      // Droppable only when it wraps visible text and nothing else: an empty <i> is an icon,
+      // and a wrapper holding tokens would take them with it.
+      if (
+        DROPPABLE_WRAPPER_TAGS.has(tagName) &&
+        !anchoredWrapper &&
+        contractEntries.length === entryCount &&
+        /[\p{L}\p{N}]/u.test(inner)
+      ) {
+        entry.droppable = true;
+      }
       return `${openToken}${inner}${closeToken}`;
     }
 
@@ -1184,8 +1200,17 @@
       }
     }
 
+    // A droppable pair counts as dropped only when both its tokens are gone.
+    const droppedWrappers = contract.entries
+      .filter(
+        (entry) =>
+          entry.droppable === true &&
+          !template.includes(entry.openToken) &&
+          !template.includes(entry.closeToken)
+      )
+      .map((entry) => entry.id);
     const expectedTokens = placeholderTokens.enumerateExpectedTokens(
-      contract.entries,
+      contract.entries.filter((entry) => !droppedWrappers.includes(entry.id)),
       classifyContractEntry
     );
     const expected = new Set(expectedTokens.map((token) => token.value));
@@ -1251,7 +1276,7 @@
     );
     if (!walked.ok) return validationError(walked.reason);
 
-    return { ok: true, tree: walked.tree, template };
+    return { ok: true, tree: walked.tree, template, droppedWrappers };
   }
 
   function sameNodeList(actual, expected) {
@@ -1302,17 +1327,22 @@
         return false;
       }
     }
+    // A node outside the block is a dropped emphasis an applied answer left out (ADR-0010).
+    // Detached, it has no layout box and would read as hidden; before apply,
+    // matchesOriginalOwnership already refuses any entry that left the block.
     for (const container of snapshot?.originalContainers || []) {
       if (
         snapshot.localControlNodes?.has(container.node) ||
-        snapshot.opaqueAtomNodes?.has(container.node)
+        snapshot.opaqueAtomNodes?.has(container.node) ||
+        !isNodeWithinBlock(container.node, snapshot.blockElement)
       ) continue;
       if (isUnsupportedElement(container.node)) return false;
     }
     for (const entry of snapshot?.entries?.values?.() || []) {
       if (
         entry.node?.nodeType === 8 ||
-        snapshot.opaqueAtomNodes?.has(entry.node)
+        snapshot.opaqueAtomNodes?.has(entry.node) ||
+        !isNodeWithinBlock(entry.node, snapshot.blockElement)
       ) continue;
       if (isUnsupportedElement(entry.node)) return false;
     }

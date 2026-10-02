@@ -94,6 +94,7 @@
                   ['openToken', 200], ['closeToken', 200], ['token', 200], ['atomKind', 80],
                 ]) copyString(copied, item || {}, key, max);
                 if (Object.hasOwn(item || {}, 'preserveText')) copied.preserveText = item.preserveText === true;
+                if (Object.hasOwn(item || {}, 'droppable')) copied.droppable = item.droppable === true;
                 return copied;
               });
           }
@@ -273,7 +274,10 @@
           }));
           for (const [id, correlation] of correlationEntries) correlationsById.set(id, correlation);
           const problemResults = results.filter(
-            (result) => result.attemptCount === 2 || result.disposition !== 'apply'
+            (result) =>
+              result.attemptCount === 2 ||
+              result.disposition !== 'apply' ||
+              result.diagnostic?.structure?.codes?.length > 0
           );
           const diagnosticBlocks = problemResults.map((result) => {
             const correlation = correlationsById.get(result.id) || {};

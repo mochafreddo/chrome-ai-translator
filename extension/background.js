@@ -779,7 +779,8 @@ function normalizeVisibleBlockBatchRecords(records) {
       normalizedRecord.template,
       normalizedRecord.contract
     );
-    if (!validation?.ok) {
+    // A source template carries every token it lists; ADR-0010's allowance is for answers.
+    if (!validation?.ok || validation.droppedWrappers.length) {
       throw new Error(
         `Invalid source token contract for block ${id}: ${validation?.errorCode || 'output_parse_failed'}`
       );

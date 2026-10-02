@@ -195,7 +195,12 @@
           record.contract
         );
         const structure = structureValidation.ok
-          ? { status: 'safe', codes: [] }
+          ? {
+              status: 'safe',
+              codes: structureValidation.droppedWrappers?.length
+                ? ['structure.emphasis_dropped']
+                : [],
+            }
           : {
               status: 'unsafe',
               codes: [mapStructureCode(structureValidation.errorCode)],

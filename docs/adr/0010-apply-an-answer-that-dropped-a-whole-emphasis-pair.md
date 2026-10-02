@@ -1,0 +1,21 @@
+# Apply an answer that dropped a whole emphasis pair
+
+Status: accepted
+
+Inline Translation applies an answer that left out both tokens of an emphasis wrapper (`EM`, `I`, `STRONG`, or `B`) that wrapped visible text and no other Placeholder Token, and puts the block back without that emphasis. Every other Placeholder Token is still required back exactly once, and a link, code span, Inert Page Node, or any wrapper with tokens inside it still fails the block when it goes missing. The applied block is recorded in diagnostics as a safe structure with `structure.emphasis_dropped`, and the reader is told nothing.
+
+## Why
+
+Emphasis can sit on a word the target language has no word for. On aihero.dev, "Docker Sandbox doesn't restrict <em>what</em> commands Claude can run, it just isolates <em>where</em> they run." becomes "Claude가 실행할 수 있는 명령을 제한하지 않고, 명령이 실행되는 위치만 격리합니다": "what" is gone, and nothing is left for its pair to wrap. On 2026-10-02 `gpt-6-luna` at reasoning effort `none` dropped a pair in 9 of 10 answers to that paragraph, and in 8 of 10 to the one-clause reduction. The same sentences with the emphasis removed, or moved onto a content word ("which <em>commands</em>"), failed 0 of 10. The repair request did no better: 7 of 10 failed, and 6 of 10 when it named the missing tokens. An added instruction to keep the pair fixed the one-clause sentence (0 of 10) and not the paragraph (9 of 10). Those are the measurements; the claim that the dropped word is the cause rests on that contrast and was not tested in any other language.
+
+The contract made all of that a Failed Semantic Block, so the reader saw the whole sentence in English to protect a typographic emphasis that a correct translation had no place for. Replaying the 48 refused answers collected that day through this rule applies 42 of them. The other six crossed or half-dropped a pair, and are still refused.
+
+## Consequences
+
+- `serializeBlock` in `extension/inline-block.js` marks such a wrapper's contract entry `droppable`, and `validateTranslatedTemplate` takes a droppable pair whose tokens are both absent out of the expected tokens before the shared checks in `extension/placeholder-tokens.js` run. Side Panel Translation sends no tokens for emphasis and is unchanged.
+- The allowance is for answers only. The worker still refuses a source template that is missing a pair its own contract lists.
+- A pair counts as dropped only when both tokens are absent. One token kept and one lost is still `token_missing`, because that answer did not leave the emphasis out. It broke it.
+- A wrapper with tokens inside is not droppable, because dropping it would also drop or reparent what it holds. A wrapper with no letter or digit inside, such as an empty `<i class="fa fa-check">` icon drawn by CSS, is not droppable, because losing it removes something visible. A wrapper with a `placement` is not droppable either, because it is pinned back into the block with its source text. Attributes are not inspected: an `EM` with a `title` loses that title with the emphasis.
+- After apply, the dropped node is detached from the page but stays in the snapshot's original containers, and **Original text** puts it back with its text. A detached element has no layout box, so `matchesSupportedClassification` skips nodes outside the block rather than reading the dropped one as hidden content; without that skip the applied block looked changed and the restore was refused. `matchesOriginalOwnership` still refuses any entry that left the block before apply. Checked in Chrome on the aihero.dev paragraph on 2026-10-02: apply and restore both succeeded and the block's HTML came back identical.
+- Diagnostics keep a block that was applied on the first attempt when its structure carries a code, so a dropped emphasis is visible in an export without a repair having happened. Only the answer that was applied is recorded: a drop in an initial answer that went on to a quality repair leaves no code.
+- `U`, `MARK`, `SMALL`, `SUB`, `SUP`, `ABBR`, `CITE`, `Q`, and `SPAN` stay required. Each either changes meaning when lost (a superscript, a quotation, an abbreviation's title) or carries page styling or attributes that are not only emphasis. Add one to the set when a page shows it dissolving the same way.

@@ -80,6 +80,20 @@ module.exports = {
       },
     },
     {
+      name: 'keeps a first-attempt block that dropped its emphasis',
+      async fn() {
+        const platform = createPlatform();
+        const diagnostics = controller.createInlineDiagnostics(platform);
+        const run = await beginModel(diagnostics);
+        const dropped = { ...result, diagnostic: { ...result.diagnostic,
+          structure: { status: 'safe', codes: ['structure.emphasis_dropped'] } } };
+        await run.complete([dropped]);
+        const [block] = (await storageDiagnostics.loadDiagnostics(platform.chrome)).runs[0].blocks;
+        assert.deepEqual(block.structure, { status: 'safe', codes: ['structure.emphasis_dropped'] });
+        assert.equal(block.terminalDisposition, 'apply');
+      },
+    },
+    {
       name: 'records local rejections and refuses replay with changed evidence',
       async fn() {
         const platform = createPlatform();

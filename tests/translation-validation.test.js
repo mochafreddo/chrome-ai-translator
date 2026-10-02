@@ -140,6 +140,29 @@ exports.tests = [
     },
   },
   {
+    name: 'reports a dropped emphasis pair on a safe structure',
+    fn() {
+      const record = reasoningRecord();
+      const strong = record.contract.entries.find((entry) => entry.tagName === 'STRONG');
+      const template = record.template
+        .split(strong.openToken).join('')
+        .split(strong.closeToken).join('')
+        .replace('Reasoning models like', '추론 모델 예:')
+        .replace(' use internal reasoning tokens.', '는 내부 추론을 사용합니다.');
+      const [verdict] = validation.validateBlockResponse(
+        JSON.stringify({ translations: [{ id: record.id, template }] }),
+        [record],
+        { targetLanguage: 'Korean' }
+      ).records;
+
+      assert.deepEqual(verdict.structure, {
+        status: 'safe',
+        codes: ['structure.emphasis_dropped'],
+      });
+      assert.equal(verdict.quality.status, 'complete');
+    },
+  },
+  {
     name: 'reports changed Source Syntax as an unsafe structure',
     fn() {
       const { document, element, text } = createTestDocument();

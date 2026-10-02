@@ -122,7 +122,11 @@ function createTestDocument() {
       return null;
     }
 
+    // CSSOM gives an element with no layout box, such as a detached one, an all-zero rect.
     getBoundingClientRect() {
+      if (!this.isConnected) {
+        return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+      }
       return this.rect || {
         top: 20,
         bottom: 44,
@@ -798,6 +802,68 @@ exports.tests = [
         ).errorCode,
         'token_nesting_invalid'
       );
+    },
+  },
+  {
+    // aihero.dev's "doesn't restrict <em>what</em> commands Claude can run" has no Korean
+    // word for "what" to emphasise, and gpt-6-luna dropped the pair in 8 of 10 answers, so
+    // the block was refused and left in English. The answer below is one of those.
+    name: 'applies an answer that dropped a whole emphasis pair and restores it',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const em = element('em', text('what'));
+      const block = element(
+        'p',
+        text("Docker Sandbox doesn't restrict "),
+        em,
+        text(' commands Claude can run.')
+      );
+      document.body.appendChild(block);
+      const originalChildren = [...block.childNodes];
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const translated = 'Docker Sandbox는 Claude가 실행할 수 있는 명령을 제한하지 않습니다.';
+
+      const validated = codec.validateTranslatedTemplate(translated, serialized.contract);
+      assert.equal(validated.ok, true);
+      assert.deepEqual(validated.droppedWrappers, ['W1']);
+      const plan = codec.createPatchPlan(serialized.snapshot, translated);
+      assert.equal(plan.ok, true);
+      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      assert.equal(block.textContent, translated);
+      assert.equal(em.parentNode, null);
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, originalChildren);
+      assert.equal(em.textContent, 'what');
+    },
+  },
+  {
+    name: 'still requires links, icons, half-dropped pairs, and emphasis around other tokens',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const link = element('a', text('Sandbox'));
+      link.setAttribute('href', '/ai-coding-dictionary/sandbox');
+      const em = element('em', text('what'));
+      const strong = element('strong', text('run '), element('code', text('git push')));
+      const icon = element('i');
+      icon.setAttribute('class', 'fa fa-check');
+      const block = element('p', icon, text('Docker '), link, text(' limits '), em, text(' you '), strong, text('.'));
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const byTag = (tag) => serialized.contract.entries.find((entry) => entry.tagName === tag);
+      const without = (...tokens) =>
+        tokens.reduce((value, token) => value.split(token).join(''), serialized.template);
+      const validate = (value) => codec.validateTranslatedTemplate(value, serialized.contract);
+
+      assert.equal(validate(without(byTag('A').openToken, byTag('A').closeToken)).errorCode, 'token_missing');
+      assert.equal(validate(without(byTag('EM').closeToken)).errorCode, 'token_missing');
+      assert.equal(
+        validate(without(byTag('STRONG').openToken, byTag('STRONG').closeToken, byTag('CODE').token)).errorCode,
+        'token_missing'
+      );
+      assert.equal(validate(without(byTag('I').openToken, byTag('I').closeToken)).errorCode, 'token_missing');
+      assert.deepEqual(validate(without(byTag('EM').openToken, byTag('EM').closeToken)).droppedWrappers, [byTag('EM').id]);
     },
   },
   {
