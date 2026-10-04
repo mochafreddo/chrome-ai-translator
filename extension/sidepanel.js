@@ -225,6 +225,8 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   let tabId = null;
   let selection = {};
   let queryVersion = 0;
+  let stateRequest = null;
+  let inlineRequest = null;
   let windowId = null;
   let state = { status: 'idle' };
   let panelError = '';
@@ -272,19 +274,21 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     const requestedSelection = selection;
     await Promise.all([
       (async () => {
+        const request = stateRequest = {};
         const response = await sendMessage({
           type: 'GET_STATE', tabId: requestedTab,
         });
-        if (selection !== requestedSelection || !response?.ok) return;
+        if (selection !== requestedSelection || stateRequest !== request || !response?.ok) return;
         state = response.state || { status: 'idle' };
         invocationError = readInlineTranslationError(state);
         paint();
       })().catch(() => {}),
       (async () => {
+        const request = inlineRequest = {};
         const response = await sendMessage({
           type: 'GET_INLINE_TRANSLATION_STATE', tabId: requestedTab,
         });
-        if (selection !== requestedSelection) return;
+        if (selection !== requestedSelection || inlineRequest !== request) return;
         const wasOutOfReach = hasPageAccess === false;
         hasPageAccess = response?.ok === true;
         if (wasOutOfReach && hasPageAccess) forgetControlError();
@@ -359,6 +363,8 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     },
     receive(msg) {
       if (msg?.type !== 'STATE_UPDATED' || msg.tabId !== tabId) return;
+      // An accepted notification supersedes state queries already in flight.
+      stateRequest = null;
       state = msg.state || { status: 'idle' };
       invocationError = readInlineTranslationError(state);
       if (controlErrorTabId !== tabId) forgetControlError();

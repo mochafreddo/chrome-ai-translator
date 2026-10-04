@@ -257,6 +257,150 @@ exports.tests.push(
   }
 );
 
+exports.tests.push(...[false, true].map((actual) => ({
+  name: `state notifications supersede earlier queries in the ${actual ? 'actual polling' : 'module'} display`,
+  async fn() {
+    const panel = actual ? domPanel() : modulePanel();
+    if (actual) await settle();
+    else await panel.controller.start(10);
+    const old = deferred();
+    const inline = deferred();
+    panel.setSend((msg) => msg.type === 'GET_STATE' ? old.promise : inline.promise);
+    const first = actual ? panel.poll() : panel.controller.refresh();
+    await settle();
+    const notify = (msg) => actual ? panel.notify(msg) : panel.controller.receive(msg);
+    notify({ type: 'STATE_UPDATED', tabId: 1, state: state('notified') });
+    old.resolve(response('GET_STATE', 'old'));
+    inline.resolve(response('GET_INLINE_TRANSLATION_STATE', 'valid inline'));
+    if (actual) await settle();
+    else await first;
+    if (actual) {
+      assert.equal(panel.element('original').textContent, 'original notified');
+      assert.equal(panel.element('translated').textContent, 'translated notified');
+      assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
+      assert.equal(panel.element('errorBox').textContent, 'panel notified');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut notified');
+      assert.equal(panel.element('inlineStatus').textContent, 'inline valid inline');
+    } else {
+      assert.deepEqual(panel.display().state, state('notified'));
+      assert.equal(panel.display().inline.invocationError, 'shortcut notified');
+      assert.equal(panel.display().inline.snapshot.progress, 'inline valid inline');
+    }
+    panel.setSend((msg) => response(msg.type, 'after notification'));
+    if (actual) { panel.poll(); await settle(); }
+    else await panel.controller.refresh();
+    assert.equal(actual ? panel.element('translated').textContent : panel.display().state.translated,
+      'translated after notification');
+  },
+})));
+
+exports.tests.push(...[false, true].flatMap((actual) => [false, true].map((oldHasAccess) => ({
+  name: `same-tab inline queries with old access ${oldHasAccess} cannot roll back the ${actual ? 'actual polling' : 'module'} display`,
+  async fn() {
+    const panel = actual ? domPanel() : modulePanel();
+    if (actual) await settle();
+    else await panel.controller.start(10);
+    const old = deferred();
+    panel.setSend((msg) => msg.type === 'GET_INLINE_TRANSLATION_STATE' ? old.promise : response(msg.type, 'current'));
+    const first = actual ? panel.poll() : panel.controller.refresh();
+    await settle();
+    panel.setSend((msg) => response(msg.type, 'current'));
+    if (actual) { panel.poll(); await settle(); }
+    else await panel.controller.refresh();
+    old.resolve(oldHasAccess
+      ? { ok: true, snapshot: { status: 'idle', progress: 'old inline' } } : { ok: false });
+    if (actual) await settle();
+    else await first;
+    if (actual) {
+      assert.equal(panel.element('inlineStatus').textContent, 'inline current');
+      assert.equal(panel.element('btnInlineStop').disabled, false);
+    } else {
+      assert.equal(panel.display().inline.hasPageAccess, true);
+      assert.deepEqual(panel.display().inline.snapshot, response('GET_INLINE_TRANSLATION_STATE', 'current').snapshot);
+      assert.equal(helpers.getInlineTranslationPanelViewModel(panel.display().inline).stopDisabled, false);
+    }
+  },
+}))));
+
+exports.tests.push(...[false, true].map((actual) => ({
+  name: `same-tab state queries cannot roll back the ${actual ? 'actual polling' : 'module'} display`,
+  async fn() {
+    const panel = actual ? domPanel() : modulePanel();
+    if (actual) await settle();
+    else await panel.controller.start(10);
+    const old = deferred();
+    panel.setSend((msg) => msg.type === 'GET_STATE' ? old.promise : response(msg.type, 'current'));
+    const first = actual ? panel.poll() : panel.controller.refresh();
+    await settle();
+    panel.setSend((msg) => msg.type === 'GET_STATE'
+      ? { ok: true, state: { ...state('current'), updatedAt: 100 } } : response(msg.type, 'current'));
+    if (actual) { panel.poll(); await settle(); }
+    else await panel.controller.refresh();
+    old.resolve({ ok: true, state: { ...state('old'), updatedAt: 900, progress: { current: 1, total: 3 } } });
+    if (actual) await settle();
+    else await first;
+    if (actual) {
+      assert.equal(panel.element('original').textContent, 'original current');
+      assert.equal(panel.element('translated').textContent, 'translated current');
+      assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
+      assert.equal(panel.element('errorBox').textContent, 'panel current');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut current');
+    } else {
+      assert.deepEqual(panel.display().state, { ...state('current'), updatedAt: 100 });
+      assert.equal(panel.display().inline.invocationError, 'shortcut current');
+    }
+  },
+})));
+
+exports.tests.push({
+  name: 'state and inline response paths update independently while the other query waits',
+  async fn() {
+    for (const waitingType of ['GET_STATE', 'GET_INLINE_TRANSLATION_STATE']) {
+      const panel = modulePanel();
+      await panel.controller.start(10);
+      const pending = deferred();
+      panel.setSend((msg) => msg.type === waitingType ? pending.promise : response(msg.type, 'first'));
+      const first = panel.controller.refresh();
+      await settle();
+      const next = deferred();
+      panel.setSend((msg) => msg.type === waitingType ? next.promise : response(msg.type, 'second'));
+      const second = panel.controller.refresh();
+      await settle();
+      if (waitingType === 'GET_STATE') {
+        assert.equal(panel.display().inline.snapshot.progress, 'inline second');
+        assert.equal(panel.display().state.translated, 'translated 1');
+      } else {
+        assert.equal(panel.display().state.translated, 'translated second');
+        assert.equal(panel.display().inline.snapshot.progress, 'inline 1');
+      }
+      next.resolve(response(waitingType, 'second'));
+      await second;
+      pending.resolve(response(waitingType, 'first'));
+      await first;
+      assert.equal(panel.display().state.translated, 'translated second');
+      assert.equal(panel.display().inline.snapshot.progress, 'inline second');
+    }
+  },
+}, {
+  name: 'same-tab polling does not invalidate a delayed user action failure',
+  async fn() {
+    for (const action of ['translate', 'control']) {
+      const panel = modulePanel();
+      await panel.controller.start(10);
+      const pending = deferred();
+      panel.setSend((msg) => ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)
+        ? pending.promise : response(msg.type, 'polled'));
+      const button = action === 'translate' ? panel.controller.translate({}) : panel.controller.runInlineControl('STOP');
+      await settle();
+      await panel.controller.refresh();
+      pending.resolve({ ok: false, error: { message: 'action failed' } });
+      await button;
+      assert.equal(action === 'translate' ? panel.display().panelError : panel.display().inline.controlError,
+        'action failed');
+    }
+  },
+});
+
 exports.tests.push({
   name: 'polling during a button tab query does not discard an action on the same tab',
   async fn() {
