@@ -1,6 +1,8 @@
 ## Tests
 
-`npm test` is the browser-free unit suite and is what "run the tests" means. `npm run test:integration` additionally drives a real Chrome and needs `agent-browser` plus network access. `npm run verify:live` drives a real Chrome *and* bills a real model, and needs an OpenAI key in `.env.local` — it is the only command that spends money, which is why it is never folded into the other two. See `tests/README.md`.
+Use `npm test` for "run the tests": it is the browser-free unit suite. `npm run test:integration` runs only the toolbar-action browser check, not all integration checks. Other unbilled browser checks have separate `test:integration:*` scripts in `package.json`. Before choosing or adding a browser check, read `tests/README.md` for its scope and prerequisites.
+
+`npm run verify:live` runs both billed browser checks; `verify:live:inline` and `verify:live:sidepanel` can also run separately and each bills a real model. These commands need `agent-browser`, network access, and an OpenAI key in `.env.local`. Keep all `verify:live*` checks separate from unit and unbilled integration checks.
 
 `npm run check:syntax` parses every extension script outside a browser. There is no linter, formatter, or type checker — those commands are the whole verification story.
 
@@ -10,7 +12,7 @@ The runner prints one `PASS`/`FAIL` line per check and no summary at all, so the
 
 No bundler and no build step: `extension/` is loaded unpacked as-is and every file there is a classic script. Four runtimes share it. `background.js` is the MV3 service worker and pulls its dependencies in with `importScripts`. `content.js` runs in the page and is injected programmatically by the worker — the manifest declares no `content_scripts` — from the list in `getInlineContentScriptFiles()`. `sidepanel.js` and `options.js` run in extension pages and get their dependencies from `<script>` tags in `sidepanel.html` and `options.html`.
 
-Every module in `extension/` publishes itself twice: onto `globalThis` under a `ChromeAiTranslator*` name for the browser, and as `module.exports` when a CommonJS loader is present. That second half is what lets the unit suite `require()` extension code directly and hand it a fake `chrome`. Keep both when adding a module — converting one to an ES module puts it out of reach of the service worker and the tests at the same time.
+For shared modules in `extension/`, keep both the `ChromeAiTranslator*` browser API on `globalThis` and the guarded `module.exports` export used by the unit suite. Entry scripts need not expose a named browser API: `background.js`, `content.js`, and `options.js` export helpers only for CommonJS tests; `sidepanel.js` also exposes a browser API. Keep scripts compatible with their classic-script loaders and the CommonJS test harness.
 
 ## Adding an extension file
 
@@ -32,22 +34,24 @@ A module both runtimes reach is in two of those lists at once and has to be orde
 
 ## Version
 
-`VERSION`, `version` in `package.json`, and `version` in `extension/manifest.json` all carry it, and nothing keeps them in sync.
+When changing the version, update `VERSION`, `version` in `package.json`, and `version` in `extension/manifest.json` together, then verify that all three values match.
 
 ## Git
 
-Work that resolves a GitHub issue goes on an `issue-<n>-<slug>` branch and comes back into `main` as a merge commit. Anything simpler is committed straight to `main`. There is no review gate here — one maintainer, no CI — so the branch is not protecting `main` from anything: it earns its place by keeping one ticket's commits together in the log and giving the merge somewhere to name the ticket, neither of which a standalone change needs. Subjects are `type(scope): imperative`; bodies are prose saying why the change was needed rather than what it touched, and are long by most projects' standards. Wrap the body by hand at about 78 columns: `git log` indents a body four spaces and never reflows it, so a soft-wrapped paragraph breaks mid-word and loses the indent in any terminal. This is the one place the soft-wrap default for prose does not apply. A commit that finishes or advances a ticket carries `Closes #<n>` or `Refs #<n>` — see `docs/agents/issue-tracker.md`.
+Use an `issue-<n>-<slug>` branch for work that resolves a GitHub issue, and merge it into `main` with a merge commit. Commit standalone changes directly to `main`.
+
+Use `type(scope): imperative` subjects. Explain why the change was needed in the body, and wrap it manually at about 78 columns; commit bodies are the exception to the soft-wrap default. Include `Closes #<n>` for a ticket the commit finishes or `Refs #<n>` for one it advances, following `docs/agents/issue-tracker.md`.
 
 ## Agent skills
 
 ### Issue tracker
 
-Issues live in this repo's GitHub Issues (`mochafreddo/chrome-ai-translator`), managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Before implementing a ticket or operating on GitHub issues, read `docs/agents/issue-tracker.md`, including its check for work already satisfied by `main`. Manage this repo's GitHub Issues with the `gh` CLI.
 
 ### Triage labels
 
-The five canonical triage roles, each label string equal to its name. See `docs/agents/triage-labels.md`.
+Before assigning triage labels, read `docs/agents/triage-labels.md` for the canonical roles and their label strings.
 
 ### Domain docs
 
-Single-context — one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Before exploring code or proposing domain or architecture changes, read `docs/agents/domain.md` and follow its guidance for loading `CONTEXT.md` and relevant ADRs.
