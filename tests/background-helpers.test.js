@@ -3568,7 +3568,7 @@ exports.tests = [
   {
     name: 'keeps the two translations’ failures in separate fields',
     fn() {
-      // CONTEXT.md spends half its vocabulary keeping the two translations apart. An error
+      // GLOSSARY.md spends half its vocabulary keeping the two translations apart. An error
       // box that merged them would undo that for the one moment the reader most needs to
       // know which feature is talking.
       const state = helpers.sanitizePublicTabState({

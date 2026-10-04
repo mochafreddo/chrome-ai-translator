@@ -54,4 +54,4 @@ Before assigning triage labels, read `docs/agents/triage-labels.md` for the cano
 
 ### Domain docs
 
-Before exploring code or proposing domain or architecture changes, read `docs/agents/domain.md` and follow its guidance for loading `CONTEXT.md` and relevant ADRs.
+Before exploring code or proposing domain or architecture changes, read `docs/agents/domain.md` and follow its guidance for loading `GLOSSARY.md` and relevant ADRs.
