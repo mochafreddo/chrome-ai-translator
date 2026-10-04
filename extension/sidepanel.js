@@ -19,23 +19,6 @@ const { describeSidePanelFailure } =
     ? require('./sidepanel-failure.js')
     : {});
 
-let activeTabId = null;
-let panelErrorMessage = '';
-let inlineTranslationSnapshot = null;
-// Two accounts of a failed start reach this section, and they are kept apart because they
-// are cleared by different things. The first is the panel's own, from a control the reader
-// pressed here; the panel holds it and drops it when the tab it was about goes out of
-// view. The second is the worker's, from the Inline Translation Shortcut — pressed on the
-// page, not here — and it lives in the tab state, so the tab it belongs to keeps it.
-let inlineControlError = '';
-let inlineControlErrorTabId = null;
-let inlineInvocationError = '';
-// The panel opens on a tab the reader just invoked the extension on, and asks that tab
-// about itself straight away. Until it answers, offering the controls is the better guess
-// of the two — and the wrong one costs a single click, where dimming them on a tab that is
-// in reach would tell the reader to do something they have already done.
-let inlineTranslationPageAccess = true;
-
 const hasDocument = typeof document !== 'undefined';
 
 const elStatus = hasDocument ? document.getElementById('status') : null;
@@ -98,11 +81,6 @@ function setSaveError(message) {
 
 function setProgress(p) {
   elProgress.textContent = p || '';
-}
-
-function setPanelError(message) {
-  panelErrorMessage = message || '';
-  setError(panelErrorMessage);
 }
 
 function trimPanelText(value) {
@@ -188,6 +166,17 @@ function getInlineTranslationPanelViewModel({
   // is a separate axis, and holding it on one tab grants nothing on another. So the
   // section dims all three and asks for the one thing that does help, rather than taking a
   // click and reporting the failure afterwards.
+  if (hasPageAccess === null) {
+    return {
+      startText,
+      startDisabled: true,
+      stopDisabled: true,
+      restoreDisabled: true,
+      statusText: 'Checking access to this tab...',
+      errorText: '',
+    };
+  }
+
   if (!hasPageAccess) {
     return {
       startText,
@@ -230,107 +219,165 @@ function readInlineTranslationError(state) {
   return state?.inlineTranslationError?.message || '';
 }
 
-function renderInlineTranslation() {
-  const model = getInlineTranslationPanelViewModel({
-    snapshot: inlineTranslationSnapshot,
-    controlError: inlineControlError,
-    invocationError: inlineInvocationError,
-    hasPageAccess: inlineTranslationPageAccess,
-  });
+// One owner for the panel's tab selection and both Translation displays. Adapters
+// supply Chrome queries and messages; rendering observes only the public display state.
+function createTabStateController({ queryActiveTab, sendMessage, render }) {
+  let tabId = null;
+  let selection = {};
+  let queryVersion = 0;
+  let windowId = null;
+  let state = { status: 'idle' };
+  let panelError = '';
+  let snapshot = null;
+  let controlError = '';
+  let controlErrorTabId = null;
+  let invocationError = '';
+  let hasPageAccess = null;
 
+  function paint() {
+    render({
+      tabId, state, panelError,
+      inline: { snapshot, controlError, invocationError, hasPageAccess },
+    });
+  }
+  function forgetControlError() {
+    controlError = '';
+    controlErrorTabId = null;
+  }
+  function select(nextTabId) {
+    if (tabId === nextTabId) return;
+    tabId = nextTabId;
+    selection = {};
+    state = { status: 'idle' };
+    panelError = '';
+    snapshot = null;
+    forgetControlError();
+    invocationError = '';
+    hasPageAccess = null;
+    paint();
+  }
+  async function resolveTab() {
+    const version = ++queryVersion;
+    const tab = await queryActiveTab();
+    // A newer selection wins, but a poll confirming the same tab must not swallow
+    // a button action that was waiting for its own query.
+    if (version !== queryVersion) return tabId !== null && tab?.id === tabId;
+    select(tab?.id ?? null);
+    return tabId !== null;
+  }
+  async function refreshSelected() {
+    if (tabId === null) return;
+    if (controlErrorTabId !== tabId) forgetControlError();
+    const requestedTab = tabId;
+    const requestedSelection = selection;
+    await Promise.all([
+      (async () => {
+        const response = await sendMessage({
+          type: 'GET_STATE', tabId: requestedTab,
+        });
+        if (selection !== requestedSelection || !response?.ok) return;
+        state = response.state || { status: 'idle' };
+        invocationError = readInlineTranslationError(state);
+        paint();
+      })().catch(() => {}),
+      (async () => {
+        const response = await sendMessage({
+          type: 'GET_INLINE_TRANSLATION_STATE', tabId: requestedTab,
+        });
+        if (selection !== requestedSelection) return;
+        const wasOutOfReach = hasPageAccess === false;
+        hasPageAccess = response?.ok === true;
+        if (wasOutOfReach && hasPageAccess) forgetControlError();
+        snapshot = response?.ok ? response.snapshot || null : null;
+        paint();
+      })().catch(() => {}),
+    ]);
+  }
+  async function refresh() {
+    if (await resolveTab()) await refreshSelected();
+  }
+  async function runInlineControl(control) {
+    try {
+      if (!(await resolveTab())) return;
+      const requestedTab = tabId;
+      forgetControlError();
+      paint();
+      const response = await sendMessage({
+        type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: requestedTab, control,
+      });
+      if (!response?.ok) {
+        controlError = response?.error?.message ||
+          'Inline translation did not answer on this tab.';
+        controlErrorTabId = requestedTab;
+        paint();
+        return;
+      }
+      await refresh();
+    } catch (error) {
+      controlError = error?.message || String(error);
+      controlErrorTabId = tabId;
+      paint();
+    }
+  }
+  async function translate(settingsOverride) {
+    try {
+      if (!(await resolveTab())) return;
+      panelError = '';
+      state = { status: 'translating' };
+      paint();
+      const response = await sendMessage({
+        type: 'TRANSLATE_TAB', tabId, settingsOverride,
+      });
+      if (!response?.ok) {
+        const failure = new Error(
+          response?.error?.message || 'Failed to start translation'
+        );
+        if (typeof response?.error?.code === 'string') failure.code = response.error.code;
+        throw failure;
+      }
+      if (response.skipped) await refresh();
+    } catch (error) {
+      panelError = describeSidePanelFailure({
+        message: error?.message || String(error), code: error?.code,
+      });
+      state = { status: 'idle', error: { message: panelError } };
+      paint();
+    }
+  }
+  paint();
+  return {
+    start(ownWindowId) {
+      windowId = ownWindowId;
+      return refresh();
+    },
+    refresh,
+    activate(info) {
+      if (info.windowId !== windowId) return Promise.resolve();
+      ++queryVersion;
+      select(info.tabId);
+      return refreshSelected();
+    },
+    receive(msg) {
+      if (msg?.type !== 'STATE_UPDATED' || msg.tabId !== tabId) return;
+      state = msg.state || { status: 'idle' };
+      invocationError = readInlineTranslationError(state);
+      if (controlErrorTabId !== tabId) forgetControlError();
+      paint();
+    },
+    runInlineControl,
+    translate,
+  };
+}
+
+function renderInlineTranslation(input) {
+  const model = getInlineTranslationPanelViewModel(input);
   btnInlineTranslate.textContent = model.startText;
   btnInlineTranslate.disabled = model.startDisabled;
   btnInlineStop.disabled = model.stopDisabled;
   btnInlineRestore.disabled = model.restoreDisabled;
   elInlineStatus.textContent = model.statusText;
-
-  if (model.errorText) {
-    elInlineError.hidden = false;
-    elInlineError.textContent = model.errorText;
-    return;
-  }
-  elInlineError.hidden = true;
-  elInlineError.textContent = '';
-}
-
-// What a control did is only ever true of the tab it was aimed at, and the panel stays
-// open across tab switches.
-function setInlineControlError(message, tabId) {
-  inlineControlError = message || '';
-  inlineControlErrorTabId = message ? tabId : null;
-  renderInlineTranslation();
-}
-
-// Dropped rather than rendered away: the two callers are mid-refresh and paint once at the
-// end, so neither wants a render of its own.
-function forgetInlineControlError() {
-  inlineControlError = '';
-  inlineControlErrorTabId = null;
-}
-
-// The worker's per-tab state is the only way the Inline Translation Shortcut's outcome
-// reaches this section: it is pressed on the page, not here. Only the two paths that carry
-// that state read it — a render the panel synthesises for itself says nothing about a run
-// the worker started, and must not be able to clear what it did.
-function syncInlineTranslationFromTabState(state) {
-  inlineInvocationError = readInlineTranslationError(state);
-  renderInlineTranslation();
-}
-
-async function refreshInlineTranslationState() {
-  activeTabId = await getActiveTabId();
-  if (!activeTabId) return;
-  if (inlineControlErrorTabId !== activeTabId) forgetInlineControlError();
-  const resp = await chrome.runtime.sendMessage({
-    type: 'GET_INLINE_TRANSLATION_STATE',
-    tabId: activeTabId,
-  });
-  // Whether the tab answered at all is what tells the panel it is in reach: the content
-  // script answers this one whatever Inline Translation is doing, and only a tab the
-  // extension has not been invoked on has nothing there to answer with.
-  const wasOutOfReach = !inlineTranslationPageAccess;
-  inlineTranslationPageAccess = resp?.ok === true;
-  // An error recorded while the tab was out of reach was about exactly that, and the reader
-  // has since done what the guidance asked. Letting it back out now would tell them the tab
-  // is unreachable in the same breath as re-enabling the controls.
-  // The worker's own account is withdrawn on the same news, from the tab state it lives
-  // in, when the click that grant took reaches the injection step.
-  if (wasOutOfReach && inlineTranslationPageAccess) forgetInlineControlError();
-  inlineTranslationSnapshot = resp?.ok ? resp.snapshot || null : null;
-  renderInlineTranslation();
-}
-
-async function sendInlineTranslationControl(control) {
-  const tabId = await getActiveTabId();
-  if (!tabId) return;
-  activeTabId = tabId;
-
-  setInlineControlError('', tabId);
-
-  const resp = await chrome.runtime.sendMessage({
-    type: 'RUN_INLINE_TRANSLATION_CONTROL',
-    tabId,
-    control,
-  });
-  if (!resp?.ok) {
-    setInlineControlError(
-      resp?.error?.message || 'Inline translation did not answer on this tab.',
-      tabId
-    );
-    return;
-  }
-  await refreshInlineTranslationState();
-}
-
-function handleInlineTranslationControlClick(control) {
-  sendInlineTranslationControl(control).catch((error) => {
-    setInlineControlError(error?.message || String(error), activeTabId);
-  });
-}
-
-async function getActiveTabId() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tabs?.[0]?.id ?? null;
+  elInlineError.hidden = !model.errorText;
+  elInlineError.textContent = model.errorText;
 }
 
 async function loadSettings() {
@@ -408,20 +455,7 @@ const settingsSaveController = hasDocument
     })
   : null;
 
-// A failure the panel caught itself rather than heard about from the tab. It is read the
-// same way, so that a coded one is not the one failure that still reaches the reader as a
-// code — and the sentence is settled here, because what renderState is handed below has no
-// code left to settle it from.
-function renderTranslateFailure(error) {
-  const message = describeSidePanelFailure({
-    message: error?.message || String(error),
-    code: error?.code,
-  });
-  setPanelError(message);
-  renderState({ status: 'idle', error: { message } });
-}
-
-function renderState(state) {
+function renderState(state, panelErrorMessage) {
   const displayState = getSidepanelDisplayState(
     state || { status: 'idle' },
     elViewMode.value || state?.settingsUsed?.viewMode || 'translation'
@@ -438,54 +472,6 @@ function renderState(state) {
 
   elOriginal.textContent = displayState.originalText;
   elTranslated.textContent = displayState.translatedText;
-}
-
-async function refreshState() {
-  // Side panel can stay open across tab switches.
-  // Always re-check the active tab before fetching state.
-  activeTabId = await getActiveTabId();
-  if (!activeTabId) return;
-  const resp = await chrome.runtime.sendMessage({
-    type: 'GET_STATE',
-    tabId: activeTabId,
-  });
-  if (!resp?.ok) return;
-  renderState(resp.state);
-  syncInlineTranslationFromTabState(resp.state);
-}
-
-async function translateNow() {
-  activeTabId = await getActiveTabId();
-  if (!activeTabId) return;
-  setPanelError('');
-  renderState({ status: 'translating' });
-  const settingsOverride = {
-    targetLanguage: elTargetLanguage.value.trim() || 'Korean',
-    tone: elTone.value,
-    model: elModel.value.trim() || DEFAULT_MODEL,
-    viewMode: elViewMode.value,
-  };
-  const resp = await chrome.runtime.sendMessage({
-    type: 'TRANSLATE_TAB',
-    tabId: activeTabId,
-    settingsOverride,
-  });
-  if (!resp?.ok) {
-    const failure = new Error(
-      resp?.error?.message || 'Failed to start translation'
-    );
-    // Re-raising loses everything but the message unless the code is carried across, and a
-    // coded failure's message is the code.
-    if (typeof resp?.error?.code === 'string') failure.code = resp.error.code;
-    throw failure;
-  }
-  if (resp.skipped) {
-    await refreshState();
-  }
-}
-
-function handleTranslateClick() {
-  translateNow().catch(renderTranslateFailure);
 }
 
 function setupTabs() {
@@ -510,64 +496,61 @@ function setupTabs() {
 }
 
 if (hasDocument) {
-  document
-    .getElementById('btnTranslate')
-    .addEventListener('click', handleTranslateClick);
-  btnSave.addEventListener('click', () => {
-    settingsSaveController.save();
+  let ownWindowId;
+  const tabState = createTabStateController({
+    queryActiveTab: async () => {
+      const tabs = await chrome.tabs.query({ active: true, windowId: ownWindowId });
+      return tabs?.[0] || null;
+    },
+    sendMessage: (message) => chrome.runtime.sendMessage(message),
+    render(display) {
+      renderState(display.state, display.panelError);
+      renderInlineTranslation(display.inline);
+    },
   });
-  document
-    .getElementById('btnOpenOptions')
-    .addEventListener('click', () => chrome.runtime.openOptionsPage());
-  elViewMode.addEventListener('change', () => refreshState().catch(() => {}));
+  btnTranslate.addEventListener('click', () => tabState.translate(readSettings()));
+  btnSave.addEventListener('click', () => settingsSaveController.save());
+  document.getElementById('btnOpenOptions').addEventListener('click', () =>
+    chrome.runtime.openOptionsPage()
+  );
+  elViewMode.addEventListener('change', () => tabState.refresh().catch(() => {}));
   btnInlineTranslate.addEventListener('click', () =>
-    handleInlineTranslationControlClick(INLINE_TRANSLATION_CONTROLS.START)
+    tabState.runInlineControl(INLINE_TRANSLATION_CONTROLS.START)
   );
   btnInlineStop.addEventListener('click', () =>
-    handleInlineTranslationControlClick(INLINE_TRANSLATION_CONTROLS.STOP)
+    tabState.runInlineControl(INLINE_TRANSLATION_CONTROLS.STOP)
   );
   btnInlineRestore.addEventListener('click', () =>
-    handleInlineTranslationControlClick(INLINE_TRANSLATION_CONTROLS.RESTORE)
+    tabState.runInlineControl(INLINE_TRANSLATION_CONTROLS.RESTORE)
   );
-
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg?.type !== 'STATE_UPDATED') return;
-    if (msg.tabId !== activeTabId) return;
-    renderState(msg.state);
-    syncInlineTranslationFromTabState(msg.state);
-  });
+  chrome.runtime.onMessage.addListener((msg) => tabState.receive(msg));
 
   (async function init() {
-    // The markup names no model of its own: a placeholder still naming the model the
-    // extension defaulted to yesterday is the same quiet lie as a stale fallback.
     elModel.placeholder = DEFAULT_MODEL;
     setupTabs();
-    renderInlineTranslation();
     await loadSettings();
-    // Whether the tab is in reach is asked first, because the panel opens holding the
-    // optimistic guess and the worker may already have a refused start waiting for it. Ask
-    // the other way round and that failure is painted in the error area for the one beat
-    // before the answer moves it into the guidance.
-    await refreshInlineTranslationState().catch(() => {});
-    await refreshState();
-
-    // Keep UI in sync when user switches tabs while the panel is open. Inline Translation
-    // is polled on the same beat: the tab owns that state, and it moves on without the
-    // panel — a translation may already be under way by the time the panel opens.
-    setInterval(() => {
-      refreshState().catch(() => {});
-      refreshInlineTranslationState().catch(() => {});
-    }, 1000);
-  })();
+    const ownWindow = await chrome.windows.getCurrent();
+    ownWindowId = ownWindow.id;
+    // Subscribe before querying: activation invalidates a query already in flight.
+    chrome.tabs.onActivated.addListener((info) =>
+      tabState.activate(info).catch(() => {})
+    );
+    const initialRefresh = tabState.start(ownWindow.id);
+    setInterval(() => tabState.refresh().catch(() => {}), 1000);
+    await initialRefresh;
+  })().catch(() => {});
 }
 
+const sidepanelApi = {
+  createSettingsSaveController,
+  createTabStateController,
+  formatOriginalPanelText,
+  formatTranslatedPanelText,
+  getInlineTranslationPanelViewModel,
+  getSidepanelDisplayState,
+  readInlineTranslationError,
+};
+globalThis.ChromeAiTranslatorSidepanel = sidepanelApi;
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    createSettingsSaveController,
-    formatOriginalPanelText,
-    formatTranslatedPanelText,
-    getInlineTranslationPanelViewModel,
-    getSidepanelDisplayState,
-    readInlineTranslationError,
-  };
+  module.exports = sidepanelApi;
 }

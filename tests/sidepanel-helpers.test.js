@@ -572,7 +572,9 @@ exports.tests = [
         },
       };
       global.chrome = {
+        windows: { getCurrent: async () => ({ id: 10 }) },
         tabs: {
+          onActivated: { addListener() {} },
           async query() {
             return [{ id: 77 }];
           },
@@ -787,7 +789,9 @@ exports.tests = [
         querySelectorAll: () => [],
       };
       global.chrome = {
+        windows: { getCurrent: async () => ({ id: 10 }) },
         tabs: {
+          onActivated: { addListener() {} },
           async query() {
             return [{ id: activeTabId }];
           },

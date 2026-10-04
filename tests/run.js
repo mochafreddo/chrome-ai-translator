@@ -16,6 +16,7 @@ const suites = [
   require('./options-helpers.test'),
   require('./sidepanel-failure.test'),
   require('./sidepanel-helpers.test'),
+  require('./sidepanel-tab-state.test'),
   require('./static-assets.test'),
   require('./live-key.test'),
   require('./protected-spans.test'),
