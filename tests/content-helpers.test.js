@@ -6,6 +6,8 @@ const {
 } = require('./inline-block.test');
 const inlineBlockCodec = require('../extension/inline-block.js');
 const inlineTranslationSession = require('../extension/inline-translation-session.js');
+const sidepanel = require('../extension/sidepanel.js');
+const background = require('../extension/background.js');
 
 function getReasoningTranslatedTemplate(record) {
   const wrapper = record.contract.entries.find(
@@ -145,6 +147,15 @@ async function flushMicrotasks(count = 8) {
   }
 }
 
+function holdInlineSettings() {
+  const requests = [];
+  const send = global.chrome.runtime.sendMessage;
+  global.chrome.runtime.sendMessage = (message) => message.type === 'GET_SETTINGS'
+    ? new Promise((resolve, reject) => requests.push({ resolve, reject }))
+    : send(message);
+  return requests;
+}
+
 // Drive the production controls, scan, and Chrome request caller with the codec's DOM
 // fixture. Only browser services are substituted; responses stay pending across controls.
 async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
@@ -235,6 +246,175 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
 }
 
 exports.tests = [
+  ...['stop', 'restore'].map((control) => ({
+    name: `panel to worker to content control wiring discards pending Start after ${control}`,
+    async fn() {
+      await withInlineRequestLifecycle(async ({ state, pending }) => {
+        const instructions = [];
+        const worker = background.createBackgroundWorker({ chrome: { tabs: {
+          sendMessage(tabId, message) {
+            assert.equal(tabId, 9);
+            if (message.type === 'RUN_INLINE_INSTRUCTION') instructions.push(message);
+            return new Promise((resolve) => {
+              assert.equal(helpers.handleInlineContentMessage(message, resolve, state), true);
+            });
+          },
+        } } });
+        let displayed;
+        const controller = sidepanel.createTabStateController({
+          queryActiveTab: async () => ({ id: 9 }),
+          sendMessage: (message) => new Promise((resolve) => worker.handlers.onMessage(message, {}, resolve)),
+          render(display) { displayed = display; },
+        });
+        await controller.start(10);
+        await controller.runInlineControl('restore');
+        instructions.length = 0;
+        const settings = holdInlineSettings();
+        await controller.runInlineControl('start');
+        assert.equal(settings.length, 1);
+        await controller.runInlineControl(control);
+        const before = displayed;
+        settings[0].resolve({ ok: true, settings: { apiKey: 'synthetic-test-key' } });
+        await flushMicrotasks(256);
+        await controller.refresh();
+        assert.deepEqual(displayed, before);
+        assert.equal(displayed.inline.snapshot.status, control === 'stop' ? 'stopped' : 'original');
+        assert.equal(pending.length, 1, 'superseded preparation cannot send a model request');
+        assert.deepEqual(instructions, [
+          { type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' },
+          { type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation' },
+          { type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' },
+          { type: 'RUN_INLINE_INSTRUCTION', instruction: control === 'stop'
+            ? 'stopInlineTranslation' : 'restoreInlineOriginal' },
+        ]);
+      });
+    },
+  })),
+  ...['stopInlineTranslation', 'restoreInlineOriginal', 'startInlineTranslation'].flatMap((control) =>
+    ['failure', 'rejection'].map((outcome) => ({
+      name: `discards superseded Start settings ${outcome} after ${control}`,
+      async fn() {
+        await withInlineRequestLifecycle(async ({ state, pending, instruct }) => {
+          await instruct('restoreInlineOriginal');
+          const settings = holdInlineSettings();
+          await instruct('startInlineTranslation');
+          await instruct(control);
+          if (control === 'startInlineTranslation') {
+            settings[1].resolve({ ok: false, error: { message: 'latest preparation failed' } });
+            await flushMicrotasks(256);
+            assert.equal(helpers.getInlineTranslationStatusSnapshot(state).error, 'latest preparation failed');
+          }
+          const before = helpers.getInlineTranslationStatusSnapshot(state);
+          if (outcome === 'rejection') settings[0].reject(new Error('old preparation failed'));
+          else settings[0].resolve({ ok: false, error: { message: 'old preparation failed' } });
+          await flushMicrotasks(256);
+          assert.deepEqual(helpers.getInlineTranslationStatusSnapshot(state), before);
+          assert.equal(pending.length, 1);
+        });
+      },
+    }))),
+  ...['stopInlineTranslation', 'restoreInlineOriginal'].map((control) => ({
+    name: `discards pending Start settings after ${control}`,
+    async fn() {
+      await withInlineRequestLifecycle(async ({ state, pending, instruct }) => {
+        await instruct('restoreInlineOriginal');
+        const settings = holdInlineSettings();
+        const listeners = [];
+        global.window.addEventListener = (type) => listeners.push(type);
+        await instruct('startInlineTranslation');
+        assert.equal(settings.length, 1);
+        await instruct(control);
+        const before = helpers.getInlineTranslationStatusSnapshot(state);
+        settings[0].resolve({ ok: true, settings: { apiKey: 'synthetic-test-key' } });
+        await flushMicrotasks(256);
+        assert.deepEqual(helpers.getInlineTranslationStatusSnapshot(state), before);
+        assert.deepEqual(listeners, [], 'superseded preparation cannot attach viewport watchers');
+        assert.equal(pending.length, 1, 'superseded preparation cannot send another model request');
+      });
+    },
+  })),
+  {
+    name: 'only the latest pending Start settings may begin an Inline Translation Operation',
+    async fn() {
+      await withInlineRequestLifecycle(async ({ state, pending, instruct }) => {
+        await instruct('restoreInlineOriginal');
+        const settings = holdInlineSettings();
+        await instruct('startInlineTranslation');
+        await instruct('startInlineTranslation');
+        assert.equal(settings.length, 2);
+        const before = helpers.getInlineTranslationStatusSnapshot(state);
+        settings[0].resolve({ ok: true, settings: { apiKey: 'synthetic-test-key' } });
+        await flushMicrotasks(256);
+        assert.deepEqual(helpers.getInlineTranslationStatusSnapshot(state), before);
+        assert.equal(pending.length, 1);
+        settings[1].resolve({ ok: true, settings: {
+          apiKey: 'synthetic-test-key', targetLanguage: 'Japanese',
+        } });
+        await flushMicrotasks(256);
+        assert.equal(helpers.getInlineTranslationStatusSnapshot(state).status, 'active');
+        assert.equal(pending.length, 2);
+        assert.equal(pending[1].message.settingsSnapshot.targetLanguage, 'Japanese');
+      });
+    },
+  },
+  ...['success', 'missing key'].map((outcome) => ({
+    name: `superseded Start settings ${outcome} preserves the latest preparation error`,
+    async fn() {
+      await withInlineRequestLifecycle(async ({ state, pending, instruct }) => {
+        await instruct('restoreInlineOriginal');
+        const settings = holdInlineSettings();
+        await instruct('startInlineTranslation');
+        await instruct('startInlineTranslation');
+        settings[1].resolve({ ok: false, error: { message: 'latest preparation failed' } });
+        await flushMicrotasks(256);
+        const before = helpers.getInlineTranslationStatusSnapshot(state);
+        assert.equal(before.error, 'latest preparation failed');
+        settings[0].resolve({ ok: true, settings: outcome === 'success'
+          ? { apiKey: 'synthetic-test-key' } : {} });
+        await flushMicrotasks(256);
+        assert.deepEqual(helpers.getInlineTranslationStatusSnapshot(state), before);
+        assert.equal(pending.length, 1);
+      });
+    },
+  })),
+  ...['failure', 'rejection', 'missing key'].map((outcome) => ({
+    name: `latest Start settings ${outcome} remains visible`,
+    async fn() {
+      await withInlineRequestLifecycle(async ({ state, pending, instruct }) => {
+        await instruct('restoreInlineOriginal');
+        const settings = holdInlineSettings();
+        await instruct('startInlineTranslation');
+        if (outcome === 'rejection') settings[0].reject(new Error('latest preparation failed'));
+        else settings[0].resolve(outcome === 'missing key' ? { ok: true, settings: {} }
+          : { ok: false, error: { message: 'latest preparation failed' } });
+        await flushMicrotasks(256);
+        const snapshot = helpers.getInlineTranslationStatusSnapshot(state);
+        assert.equal(snapshot.status, 'original');
+        assert.equal(snapshot.error, outcome === 'missing key'
+          ? 'Open Options and paste your OpenAI API key.' : 'latest preparation failed');
+        assert.equal(pending.length, 1);
+      });
+    },
+  })),
+  {
+    name: 'an active Start rescans and keeps its submitted Semantic Block response eligible',
+    async fn() {
+      await withInlineRequestLifecycle(async ({ state, block, pending, instruct }) => {
+        const settings = holdInlineSettings();
+        await instruct('startInlineTranslation');
+        assert.equal(settings.length, 0);
+        const request = pending[0];
+        request.resolve({ ok: true, results: [{
+          id: request.message.records[0].id, disposition: 'apply', attemptCount: 1,
+          template: getReasoningTranslatedTemplate(request.message.records[0]),
+        }] });
+        await flushMicrotasks(256);
+        assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
+        assert.equal(state.session.progress().counts.translated, 1);
+        assert.equal(pending.length, 1);
+      });
+    },
+  },
   ...[
     { name: 'current one-attempt response', attemptCount: 1, controls: [] },
     { name: 'current repaired response', attemptCount: 2, controls: [] },
