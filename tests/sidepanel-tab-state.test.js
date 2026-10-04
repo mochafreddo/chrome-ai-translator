@@ -590,6 +590,58 @@ exports.tests.push({
   },
 });
 
+exports.tests.push(...['stop', 'restore', 'start'].map((control) => ({
+  name: `discards a superseded Start before its tab query returns after ${control}`,
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const waiting = deferred();
+    panel.setQuery(() => waiting.promise);
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? { ok: true } : response(msg.type, 'current'));
+    const old = panel.controller.runInlineControl('start');
+    panel.setQuery(async () => ({ id: 1 }));
+    await panel.controller.runInlineControl(control);
+    await panel.controller.refresh();
+    waiting.resolve({ id: 1 });
+    await old;
+    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), [
+      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, control },
+    ]);
+  },
+})));
+
+exports.tests.push(...[false, true].map((returnToA) => ({
+  name: `discards a waiting control from the first visit after ${returnToA ? 'A to B to A' : 'A to B'}`,
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const waiting = deferred();
+    panel.setQuery(() => waiting.promise);
+    const old = panel.controller.runInlineControl('start');
+    await panel.activate(2);
+    if (returnToA) await panel.activate(1);
+    const display = panel.display();
+    waiting.resolve({ id: 1 });
+    await old;
+    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), []);
+    assert.deepEqual(panel.display(), display);
+  },
+})));
+
+exports.tests.push({
+  name: 'an initial control selects its queried tab before sending',
+  async fn() {
+    const panel = modulePanel();
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? { ok: true } : response(msg.type, 'current'));
+    await panel.controller.runInlineControl('start');
+    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), [
+      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, control: 'start' },
+    ]);
+  },
+});
+
 exports.tests.push(...['control', 'translate'].flatMap((action) =>
   ['failure', 'rejection'].flatMap((outcome) => [false, true].flatMap((actual) =>
     [false, true].map((returnToA) => ({

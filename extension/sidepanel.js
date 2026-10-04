@@ -249,6 +249,8 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   }
   function select(nextTabId) {
     if (tabId === nextTabId) return;
+    // A new visit ends pending controls; the initial query may still select its tab.
+    if (tabId !== null) inlineControl = null;
     tabId = nextTabId;
     selection = {};
     state = { status: 'idle' };
@@ -310,6 +312,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     let requestedSelection = selection;
     try {
       if (!(await resolveTab())) return;
+      if (inlineControl !== requestedControl) return;
       const requestedTab = tabId;
       requestedSelection = selection;
       const response = await sendMessage({
