@@ -5,8 +5,9 @@ const helpers = require('../extension/sidepanel.js');
 
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 async function settle() {
   for (let i = 0; i < 64; i += 1) await Promise.resolve();
@@ -424,3 +425,123 @@ exports.tests.push({
     }
   },
 });
+
+exports.tests.push(...['control', 'translate'].flatMap((action) =>
+  ['failure', 'rejection'].flatMap((outcome) => [false, true].flatMap((actual) =>
+    [false, true].map((returnToA) => ({
+      name: `${actual ? 'actual button' : 'module'} ${action} ignores late ${outcome} after ${returnToA ? 'A to B to A' : 'A to B'}`,
+      async fn() {
+        const panel = actual ? domPanel() : modulePanel();
+        if (actual) await settle();
+        else await panel.controller.start(10);
+        const pending = deferred();
+        const actionType = action === 'control' ? 'RUN_INLINE_TRANSLATION_CONTROL' : 'TRANSLATE_TAB';
+        panel.setSend((msg) => msg.type === actionType ? pending.promise
+          : response(msg.type, 'current'));
+        const running = actual
+          ? panel.element(action === 'control' ? 'btnInlineStop' : 'btnTranslate').listeners.click()
+          : action === 'control' ? panel.controller.runInlineControl('STOP')
+            : panel.controller.translate({ targetLanguage: 'French' });
+        await settle();
+        assert.equal(panel.sent.filter((msg) => msg.type === actionType).length, 1);
+        assert.equal(panel.sent.find((msg) => msg.type === actionType).tabId, 1);
+        await panel.activate(2);
+        await settle();
+        if (returnToA) { await panel.activate(1); await settle(); }
+        const readDisplay = () => actual
+          ? ['original', 'translated', 'progress', 'errorBox', 'inlineStatus', 'inlineError',
+            'btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore', 'btnTranslate']
+            .map((id) => {
+              const { textContent, hidden, disabled } = panel.element(id);
+              return { textContent, hidden, disabled };
+            })
+          : panel.display();
+        const before = readDisplay();
+        if (outcome === 'rejection') pending.reject(new Error('old action failed'));
+        else pending.resolve({ ok: false, error: { message: 'old action failed' } });
+        await running;
+        await settle();
+        assert.deepEqual(readDisplay(), before);
+        assert.equal(panel.sent.filter((msg) =>
+          ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
+      },
+    }))))));
+
+exports.tests.push(...['control', 'translate'].map((action) => ({
+  name: `${action} completion and its follow-up queries stay with the requesting visit`,
+  async fn() {
+    for (const switchDuringFollowUp of [false, true]) {
+      const panel = modulePanel();
+      await panel.controller.start(10);
+      const pending = deferred();
+      const followUp = deferred();
+      const actionType = action === 'control' ? 'RUN_INLINE_TRANSLATION_CONTROL' : 'TRANSLATE_TAB';
+      panel.setSend((msg) => msg.type === actionType ? pending.promise
+        : followUp.promise);
+      const running = action === 'control' ? panel.controller.runInlineControl('START')
+        : panel.controller.translate({});
+      await settle();
+      const before = panel.sent.length;
+      if (switchDuringFollowUp) {
+        pending.resolve({ ok: true, skipped: true });
+        await settle();
+        assert.deepEqual(panel.sent.slice(before), [
+          { type: 'GET_STATE', tabId: 1 },
+          { type: 'GET_INLINE_TRANSLATION_STATE', tabId: 1 },
+        ]);
+      }
+      panel.setSend((msg) => response(msg.type, 'new visit'));
+      await panel.activate(2);
+      await panel.activate(1);
+      const display = panel.display();
+      const afterSwitch = panel.sent.length;
+      if (!switchDuringFollowUp) pending.resolve({ ok: true, skipped: true });
+      else followUp.resolve({ ok: true, state: state('old'),
+        snapshot: { status: 'active', progress: 'old' } });
+      await running;
+      assert.deepEqual(panel.display(), display);
+      assert.equal(panel.sent.length, afterSwitch);
+      assert.equal(panel.sent.filter((msg) =>
+        ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
+    }
+  },
+})));
+
+exports.tests.push(...['control', 'translate'].flatMap((action) =>
+  ['failure', 'rejection', 'success', ...(action === 'translate' ? ['skipped'] : [])].map((outcome) => ({
+    name: `current ${action} ${outcome} remains valid across repeated polling`,
+    async fn() {
+      const panel = modulePanel();
+      await panel.controller.start(10);
+      const pending = deferred();
+      const actionType = action === 'control' ? 'RUN_INLINE_TRANSLATION_CONTROL' : 'TRANSLATE_TAB';
+      panel.setSend((msg) => msg.type === actionType ? pending.promise : response(msg.type, 'polled'));
+      const running = action === 'control' ? panel.controller.runInlineControl('STOP')
+        : panel.controller.translate({});
+      await settle();
+      for (let i = 0; i < 3; i += 1) await panel.controller.refresh();
+      if (outcome === 'success' || outcome === 'skipped') {
+        panel.setSend((msg) => response(msg.type, 'completed'));
+        if (action === 'translate' && outcome === 'success') panel.controller.receive({ type: 'STATE_UPDATED',
+          tabId: 1, state: { status: 'done', translated: 'completed translation' } });
+        pending.resolve({ ok: true, skipped: outcome === 'skipped' });
+      } else if (outcome === 'rejection') pending.reject(new Error('current action failed'));
+      else pending.resolve({ ok: false, error: { message: 'current action failed' } });
+      await running;
+      if (outcome === 'success' || outcome === 'skipped') {
+        assert.equal(panel.display().panelError, '');
+        assert.equal(panel.display().inline.controlError, '');
+        if (action === 'control' || outcome === 'skipped') {
+          assert.equal(panel.display().inline.snapshot.progress, 'inline completed');
+          assert.equal(panel.display().state.translated, 'translated completed');
+        } else {
+          assert.equal(panel.display().state.status, 'done');
+          assert.equal(panel.display().state.translated, 'completed translation');
+        }
+      } else {
+        assert.equal(action === 'control' ? panel.display().inline.controlError : panel.display().panelError,
+          'current action failed');
+        if (action === 'translate') assert.equal(panel.display().state.status, 'idle');
+      }
+    },
+  }))));

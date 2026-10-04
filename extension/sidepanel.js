@@ -301,14 +301,17 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     if (await resolveTab()) await refreshSelected();
   }
   async function runInlineControl(control) {
+    let requestedSelection = selection;
     try {
       if (!(await resolveTab())) return;
       const requestedTab = tabId;
+      requestedSelection = selection;
       forgetControlError();
       paint();
       const response = await sendMessage({
         type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: requestedTab, control,
       });
+      if (selection !== requestedSelection) return;
       if (!response?.ok) {
         controlError = response?.error?.message ||
           'Inline translation did not answer on this tab.';
@@ -316,22 +319,29 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         paint();
         return;
       }
-      await refresh();
+      await refreshSelected();
     } catch (error) {
+      if (selection !== requestedSelection) return;
       controlError = error?.message || String(error);
       controlErrorTabId = tabId;
       paint();
     }
   }
   async function translate(settingsOverride) {
+    let requestedSelection = selection;
     try {
       if (!(await resolveTab())) return;
+      const requestedTab = tabId;
+      requestedSelection = selection;
       panelError = '';
       state = { status: 'translating' };
       paint();
       const response = await sendMessage({
-        type: 'TRANSLATE_TAB', tabId, settingsOverride,
+        type: 'TRANSLATE_TAB', tabId: requestedTab, settingsOverride,
       });
+      // The worker can answer after translation finishes. Only this visit to the
+      // requested tab may display its result; polling does not end that visit.
+      if (selection !== requestedSelection) return;
       if (!response?.ok) {
         const failure = new Error(
           response?.error?.message || 'Failed to start translation'
@@ -339,8 +349,9 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         if (typeof response?.error?.code === 'string') failure.code = response.error.code;
         throw failure;
       }
-      if (response.skipped) await refresh();
+      if (response.skipped) await refreshSelected();
     } catch (error) {
+      if (selection !== requestedSelection) return;
       panelError = describeSidePanelFailure({
         message: error?.message || String(error), code: error?.code,
       });
