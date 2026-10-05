@@ -1001,7 +1001,7 @@ function beginInlineTranslationOperation(state, settingsSnapshot) {
   return state.viewport;
 }
 
-async function translateInlinePage(state = inlineState) {
+async function translateInlinePage(state, requestedStart) {
   if (isInlineTranslationRunLive(state)) {
     scheduleInlineViewportScan(state);
     updateInlineViewportMessage(state);
@@ -1017,6 +1017,7 @@ async function translateInlinePage(state = inlineState) {
   const settingsResponse = await chrome.runtime.sendMessage({
     type: 'GET_SETTINGS',
   });
+  if (state.startPreparation !== requestedStart) return;
   if (!settingsResponse?.ok) {
     throw new Error(
       settingsResponse?.error?.message || 'Unable to load extension settings.'
@@ -1042,6 +1043,7 @@ async function translateInlinePage(state = inlineState) {
 }
 
 function restoreInlineOriginal(state = inlineState) {
+  state.startPreparation = null;
   detachInlineViewportWatchers(state);
   restoreInlineViewportRecords(state);
   clearInlineFeedback(state);
@@ -1052,13 +1054,17 @@ function restoreInlineOriginal(state = inlineState) {
 // pressed it. Starting clears what the last attempt reported: the reader is asking again,
 // so the previous answer is no longer the current one.
 function startInlineTranslationRun(state = inlineState) {
+  const requestedStart = state.startPreparation = {};
   setInlineErrorMessage('', state);
-  translateInlinePage(state).catch((error) =>
-    setInlineErrorMessage(error?.message || String(error), state)
-  );
+  translateInlinePage(state, requestedStart).catch((error) => {
+    if (state.startPreparation === requestedStart) {
+      setInlineErrorMessage(error?.message || String(error), state);
+    }
+  });
 }
 
 function stopInlineTranslationRun(state = inlineState) {
+  state.startPreparation = null;
   stopInlineViewportTranslation(state);
   detachInlineViewportWatchers(state);
   updateInlineViewportMessage(state);

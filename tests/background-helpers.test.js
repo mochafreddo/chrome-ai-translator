@@ -3719,3 +3719,64 @@ exports.tests = [
     },
   },
 ];
+
+exports.tests.push(...['stop', 'restore', 'start'].map((control) => ({
+  name: `discards a superseded control after Authorization waits for ${control}`,
+  async fn() {
+    const sent = [];
+    let release;
+    const waiting = new Promise((resolve) => { release = resolve; });
+    const worker = helpers.createBackgroundWorker({ chrome: { tabs: {
+      sendMessage(tabId, message) {
+        sent.push({ tabId, ...message });
+        return sent.length === 1 ? waiting : Promise.resolve({ ok: true });
+      },
+    } } });
+    function command(next) {
+      return new Promise((resolve) => worker.handlers.onMessage({
+        type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 9, control: next,
+      }, {}, resolve));
+    }
+    const old = command('start');
+    assert.deepEqual(await command(control), { ok: true });
+    release({ ok: true });
+    assert.deepEqual(await old, { ok: true });
+    assert.deepEqual(sent, [
+      { tabId: 9, type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' },
+      { tabId: 9, type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' },
+      { tabId: 9, type: 'RUN_INLINE_INSTRUCTION', instruction: {
+        start: 'startInlineTranslation', stop: 'stopInlineTranslation', restore: 'restoreInlineOriginal',
+      }[control] },
+    ]);
+  },
+})));
+
+exports.tests.push({
+  name: 'controls on separate tabs retain their Authorization and execution order',
+  async fn() {
+    const sent = [];
+    let release;
+    const waiting = new Promise((resolve) => { release = resolve; });
+    const worker = helpers.createBackgroundWorker({ chrome: { tabs: {
+      sendMessage(tabId, message) {
+        sent.push({ tabId, instruction: message.instruction });
+        return sent.length === 1 ? waiting : Promise.resolve({ ok: true });
+      },
+    } } });
+    function command(tabId, control) {
+      return new Promise((resolve) => worker.handlers.onMessage({
+        type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId, control,
+      }, {}, resolve));
+    }
+    const old = command(9, 'start');
+    assert.deepEqual(await command(8, 'stop'), { ok: true });
+    release({ ok: true });
+    assert.deepEqual(await old, { ok: true });
+    assert.deepEqual(sent, [
+      { tabId: 9, instruction: 'grantInlineTranslationAuthorization' },
+      { tabId: 8, instruction: 'grantInlineTranslationAuthorization' },
+      { tabId: 8, instruction: 'stopInlineTranslation' },
+      { tabId: 9, instruction: 'startInlineTranslation' },
+    ]);
+  },
+});

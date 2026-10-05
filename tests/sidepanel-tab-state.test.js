@@ -98,6 +98,170 @@ function modulePanel() {
     activate(id, windowId = 10) { if (windowId === 10) active = id; return controller.activate({ tabId: id, windowId }); } };
 }
 
+exports.tests.push({
+  name: 'new control clears its predecessor error before its tab query answers',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    panel.setSend(() => ({ ok: false, error: { message: 'previous control failed' } }));
+    await panel.controller.runInlineControl('START');
+    assert.equal(panel.display().inline.controlError, 'previous control failed');
+    const query = deferred();
+    panel.setQuery(() => query.promise);
+    const next = panel.controller.runInlineControl('STOP');
+    assert.equal(panel.display().inline.controlError, '');
+    query.resolve({ id: 1 });
+    await next;
+  },
+});
+
+exports.tests.push(...['failure', 'rejection'].flatMap((outcome) =>
+  ['tab query', 'response', 'success'].map((waiting) => ({
+    name: `old control ${outcome} cannot alter the latest control during ${waiting}`,
+    async fn() {
+      const panel = modulePanel();
+      await panel.controller.start(10);
+      const old = deferred();
+      panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+        ? old.promise : response(msg.type, 'current'));
+      const first = panel.controller.runInlineControl('START');
+      await settle();
+      const next = deferred();
+      if (waiting === 'tab query') panel.setQuery(() => next.promise);
+      panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+        ? waiting === 'success' ? { ok: true } : next.promise
+        : response(msg.type, 'latest'));
+      // Repeated Start must have distinct ownership just like Start then Stop.
+      const latest = panel.controller.runInlineControl(waiting === 'success' ? 'START' : 'STOP');
+      await settle();
+      if (waiting === 'success') await latest;
+      const before = panel.display();
+      if (outcome === 'rejection') old.reject(new Error('old control failed'));
+      else old.resolve({ ok: false, error: { message: 'old control failed' } });
+      await first;
+      assert.deepEqual(panel.display(), before);
+      next.resolve(waiting === 'tab query' ? { id: 1 } : { ok: true });
+      await latest;
+    },
+  }))));
+
+exports.tests.push({
+  name: 'old control success cannot erase the latest failure through access recovery',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    panel.setSend((msg) => msg.type === 'GET_INLINE_TRANSLATION_STATE'
+      ? { ok: false } : response(msg.type, 'unreachable'));
+    await panel.controller.refresh();
+    const old = deferred();
+    panel.setSend(() => old.promise);
+    const first = panel.controller.runInlineControl('START');
+    await settle();
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? { ok: false, error: { message: 'latest control failed' } }
+      : response(msg.type, 'old success'));
+    await panel.controller.runInlineControl('STOP');
+    const before = panel.display();
+    const messages = panel.sent.length;
+    old.resolve({ ok: true });
+    await first;
+    assert.deepEqual(panel.display(), before);
+    assert.equal(panel.sent.length, messages);
+  },
+});
+
+exports.tests.push(...['GET_STATE', 'GET_INLINE_TRANSLATION_STATE'].flatMap((type) =>
+  ['tab query', 'failure', 'success'].map((latestStage) => ({
+    name: `old control follow-up ${type} cannot alter the latest control during ${latestStage}`,
+    async fn() {
+      const panel = modulePanel();
+      await panel.controller.start(10);
+      panel.setSend((msg) => msg.type === 'GET_INLINE_TRANSLATION_STATE'
+        ? { ok: false } : response(msg.type, 'unreachable'));
+      await panel.controller.refresh();
+      const followUp = deferred();
+      panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+        ? { ok: true } : msg.type === type ? followUp.promise : response(msg.type, 'first'));
+      const first = panel.controller.runInlineControl('START');
+      await settle();
+      const query = deferred();
+      if (latestStage === 'tab query') panel.setQuery(() => query.promise);
+      panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+        ? latestStage === 'success' ? { ok: true }
+          : { ok: false, error: { message: 'latest control failed' } }
+        : response(msg.type, 'latest'));
+      const latest = panel.controller.runInlineControl('STOP');
+      await settle();
+      if (latestStage !== 'tab query') await latest;
+      const before = panel.display();
+      followUp.resolve(response(type, 'old success'));
+      await first;
+      assert.deepEqual(panel.display(), before);
+      query.resolve({ id: 1 });
+      await latest;
+    },
+  }))));
+
+exports.tests.push(...['failure', 'rejection'].map((outcome) => ({
+  name: `actual Inline Translation buttons ignore superseded same-tab ${outcome}`,
+  async fn() {
+    const panel = domPanel();
+    await settle();
+    const old = deferred();
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? old.promise : response(msg.type, 'current'));
+    panel.element('btnInlineTranslate').listeners.click();
+    await settle();
+    const latest = deferred();
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? latest.promise : response(msg.type, 'latest'));
+    panel.element('btnInlineRestore').listeners.click();
+    await settle();
+    latest.resolve({ ok: false, error: { message: 'latest control failed' } });
+    await settle();
+    const before = ['inlineStatus', 'inlineError', 'btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore']
+      .map((id) => ({ ...panel.element(id) }));
+    if (outcome === 'rejection') old.reject(new Error('old control failed'));
+    else old.resolve({ ok: false, error: { message: 'old control failed' } });
+    await settle();
+    assert.deepEqual(['inlineStatus', 'inlineError', 'btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore']
+      .map((id) => ({ ...panel.element(id) })), before);
+    assert.equal(panel.element('inlineError').textContent, 'latest control failed');
+    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL')
+      .map((msg) => msg.control), ['start', 'restore']);
+  },
+})));
+
+exports.tests.push({
+  name: 'latest control error survives ordinary polling until invocation or access recovery or tab change',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? { ok: false, error: { message: 'latest control failed' } } : response(msg.type, 'current'));
+    await panel.controller.runInlineControl('STOP');
+    for (let i = 0; i < 3; i += 1) await panel.controller.refresh();
+    assert.equal(panel.display().inline.controlError, 'latest control failed');
+    assert.equal(helpers.getInlineTranslationPanelViewModel(panel.display().inline).errorText, 'latest control failed');
+    panel.setSend((msg) => msg.type === 'GET_INLINE_TRANSLATION_STATE'
+      ? { ok: false } : response(msg.type, 'unreachable'));
+    await panel.controller.refresh();
+    assert.equal(panel.display().inline.controlError, 'latest control failed');
+    panel.setSend((msg) => response(msg.type, 'recovered'));
+    await panel.controller.refresh();
+    assert.equal(panel.display().inline.controlError, '');
+    assert.equal(helpers.getInlineTranslationPanelViewModel(panel.display().inline).errorText, 'shortcut recovered');
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? { ok: false, error: { message: 'next control failed' } } : response(msg.type, 'current'));
+    await panel.controller.runInlineControl('START');
+    await panel.activate(2);
+    assert.equal(panel.display().inline.controlError, '');
+    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL')
+      .map((msg) => msg.control), ['STOP', 'START']);
+    assert.equal(panel.sent.some((msg) => msg.type === 'TRANSLATE_TAB'), false);
+  },
+});
+
 exports.tests.push(
   {
     name: 'actual activation immediately clears both displays while access is unconfirmed',
@@ -423,6 +587,58 @@ exports.tests.push({
       assert.ok(message, `${action} button action was lost during polling`);
       assert.equal(message.tabId, 1);
     }
+  },
+});
+
+exports.tests.push(...['stop', 'restore', 'start'].map((control) => ({
+  name: `discards a superseded Start before its tab query returns after ${control}`,
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const waiting = deferred();
+    panel.setQuery(() => waiting.promise);
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? { ok: true } : response(msg.type, 'current'));
+    const old = panel.controller.runInlineControl('start');
+    panel.setQuery(async () => ({ id: 1 }));
+    await panel.controller.runInlineControl(control);
+    await panel.controller.refresh();
+    waiting.resolve({ id: 1 });
+    await old;
+    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), [
+      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, control },
+    ]);
+  },
+})));
+
+exports.tests.push(...[false, true].map((returnToA) => ({
+  name: `discards a waiting control from the first visit after ${returnToA ? 'A to B to A' : 'A to B'}`,
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const waiting = deferred();
+    panel.setQuery(() => waiting.promise);
+    const old = panel.controller.runInlineControl('start');
+    await panel.activate(2);
+    if (returnToA) await panel.activate(1);
+    const display = panel.display();
+    waiting.resolve({ id: 1 });
+    await old;
+    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), []);
+    assert.deepEqual(panel.display(), display);
+  },
+})));
+
+exports.tests.push({
+  name: 'an initial control selects its queried tab before sending',
+  async fn() {
+    const panel = modulePanel();
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? { ok: true } : response(msg.type, 'current'));
+    await panel.controller.runInlineControl('start');
+    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), [
+      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, control: 'start' },
+    ]);
   },
 });
 

@@ -879,6 +879,7 @@ function createBackgroundWorker(platform = {}) {
   // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
   const stateByTab = new Map();
   const activeTranslationsByTab = new Map();
+  const inlineControlsByTab = new Map();
   let buttonVisibilityRegistrationSync = Promise.resolve();
 
   async function getSettings() {
@@ -988,13 +989,20 @@ function createBackgroundWorker(platform = {}) {
     if (!steps.length) {
       throw new Error(`Unknown inline translation control: ${control}`);
     }
-    for (const step of steps) {
-      await send(tabId, step);
+    const requestedControl = {};
+    inlineControlsByTab.set(tabId, requestedControl);
+    try {
+      for (const step of steps) {
+        await send(tabId, step);
+        if (inlineControlsByTab.get(tabId) !== requestedControl) return;
+      }
+      // A control the tab has just carried out disproves a recorded failure to reach it, and
+      // the Inline Translation Shortcut is only one of three ways into this feature. The
+      // panel reports the control's own outcome itself, from the click it is still holding.
+      clearInlineTranslationError(tabId);
+    } finally {
+      if (inlineControlsByTab.get(tabId) === requestedControl) inlineControlsByTab.delete(tabId);
     }
-    // A control the tab has just carried out disproves a recorded failure to reach it, and
-    // the Inline Translation Shortcut is only one of three ways into this feature. The
-    // panel reports the control's own outcome itself, from the click it is still holding.
-    clearInlineTranslationError(tabId);
   }
 
   function getDefaultInvocationHandlers() {

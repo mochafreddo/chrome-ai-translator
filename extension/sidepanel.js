@@ -227,6 +227,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   let queryVersion = 0;
   let stateRequest = null;
   let inlineRequest = null;
+  let inlineControl = null;
   let windowId = null;
   let state = { status: 'idle' };
   let panelError = '';
@@ -248,6 +249,8 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   }
   function select(nextTabId) {
     if (tabId === nextTabId) return;
+    // A new visit ends pending controls; the initial query may still select its tab.
+    if (tabId !== null) inlineControl = null;
     tabId = nextTabId;
     selection = {};
     state = { status: 'idle' };
@@ -267,7 +270,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     select(tab?.id ?? null);
     return tabId !== null;
   }
-  async function refreshSelected() {
+  async function refreshSelected(requestedControl = null) {
     if (tabId === null) return;
     if (controlErrorTabId !== tabId) forgetControlError();
     const requestedTab = tabId;
@@ -278,7 +281,8 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         const response = await sendMessage({
           type: 'GET_STATE', tabId: requestedTab,
         });
-        if (selection !== requestedSelection || stateRequest !== request || !response?.ok) return;
+        if (selection !== requestedSelection || stateRequest !== request ||
+            (requestedControl && inlineControl !== requestedControl) || !response?.ok) return;
         state = response.state || { status: 'idle' };
         invocationError = readInlineTranslationError(state);
         paint();
@@ -288,7 +292,8 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         const response = await sendMessage({
           type: 'GET_INLINE_TRANSLATION_STATE', tabId: requestedTab,
         });
-        if (selection !== requestedSelection || inlineRequest !== request) return;
+        if (selection !== requestedSelection || inlineRequest !== request ||
+            (requestedControl && inlineControl !== requestedControl)) return;
         const wasOutOfReach = hasPageAccess === false;
         hasPageAccess = response?.ok === true;
         if (wasOutOfReach && hasPageAccess) forgetControlError();
@@ -301,17 +306,19 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     if (await resolveTab()) await refreshSelected();
   }
   async function runInlineControl(control) {
+    const requestedControl = inlineControl = {};
+    forgetControlError();
+    paint();
     let requestedSelection = selection;
     try {
       if (!(await resolveTab())) return;
+      if (inlineControl !== requestedControl) return;
       const requestedTab = tabId;
       requestedSelection = selection;
-      forgetControlError();
-      paint();
       const response = await sendMessage({
         type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: requestedTab, control,
       });
-      if (selection !== requestedSelection) return;
+      if (selection !== requestedSelection || inlineControl !== requestedControl) return;
       if (!response?.ok) {
         controlError = response?.error?.message ||
           'Inline translation did not answer on this tab.';
@@ -319,9 +326,9 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         paint();
         return;
       }
-      await refreshSelected();
+      await refreshSelected(requestedControl);
     } catch (error) {
-      if (selection !== requestedSelection) return;
+      if (selection !== requestedSelection || inlineControl !== requestedControl) return;
       controlError = error?.message || String(error);
       controlErrorTabId = tabId;
       paint();
