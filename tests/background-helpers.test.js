@@ -464,12 +464,9 @@ exports.tests = [
       assert.deepEqual(Object.keys(helpers).sort(), [
         'INLINE_TRANSLATION_SHORTCUT_COMMAND',
         'assertFullPageTranslationBudget',
-        'buildBlockInstructions',
-        'buildBlockResponseFormat',
         'classifyContentScriptFailure',
         'createBackgroundWorker',
         'describeInlineTranslationControlFailure',
-        'getBlockBatchMaxOutputTokens',
         'getBlockRecordCost',
         'getInlineContentScriptFiles',
         'getInlineInstructions',
@@ -1334,35 +1331,11 @@ exports.tests = [
     },
   },
   {
-    name: 'builds the strict semantic block response format and instructions',
-    fn() {
-      const format = helpers.buildBlockResponseFormat(8);
-      const instructions = helpers.buildBlockInstructions({
-        targetLanguage: 'Korean',
-        tone: 'technical',
-      });
-
-      assert.equal(format.type, 'json_schema');
-      assert.equal(format.name, 'inline_block_translations');
-      assert.equal(format.strict, true);
-      assert.equal(format.schema.properties.translations.minItems, 8);
-      assert.equal(format.schema.properties.translations.maxItems, 8);
-      assert.deepEqual(
-        format.schema.properties.translations.items.required,
-        ['id', 'template']
-      );
-      assert.match(instructions, /complete semantic block/i);
-      assert.match(instructions, /token.*byte-for-byte/i);
-      assert.match(instructions, /Do not output HTML/i);
-      assert.match(instructions, /repair.*previousErrorCode/i);
-    },
-  },
-  {
     // Ranked hypotheses, each changed one boundary at a time:
     // 1. Request assembly dropped an id — falsified: the body still lists all eight.
     // 2. Response text collection truncated JSON — falsified at parseCompletedResponse.
     // 3. The validator mis-codes another protocol failure as missing_id — falsified
-    //    by the protocol-shape table in translation-validation.test.js.
+    //    by the protocol-shape table in inline-model-execution.test.js.
     // 4. Duplicate request ids shrink the expected set — never reaches validation;
     //    normalizeVisibleBlockBatchRecords refuses them first.
     // 5. The structured-output schema does not name the batch length, so a
@@ -1371,7 +1344,7 @@ exports.tests = [
     //    constraint, which is why this check can still go red on the original
     //    missing-id symptom.
     // Smallest load-bearing shape is one requested record whose translations
-    // array lacks that id (see translation-validation.test.js); eight is the
+    // array lacks that id (see inline-model-execution.test.js); eight is the
     // reported size.
     name: 'fails an eight-block batch when one completed translation id is omitted',
     async fn() {
@@ -1523,9 +1496,6 @@ exports.tests = [
         () => helpers.normalizeVisibleBlockBatchRecords([oversized]),
         /block record is too large/i
       );
-      assert.equal(helpers.getBlockBatchMaxOutputTokens(100), 4096);
-      assert.equal(helpers.getBlockBatchMaxOutputTokens(12000), 15000);
-      assert.equal(helpers.getBlockBatchMaxOutputTokens(20000), 16000);
       const plainFixture = createTestPlainBlockRecord();
       assert.throws(
         () =>
@@ -1662,12 +1632,7 @@ exports.tests = [
       assert.equal(input.records[0].contract, undefined);
       assert.equal(input.records[0].atoms[0].href, undefined);
       assert.equal(requestBodies[1].text.format.name, 'inline_block_translations');
-      assert.equal(
-        requestBodies[1].max_output_tokens,
-        helpers.getBlockBatchMaxOutputTokens(
-          helpers.getBlockRecordCost(record)
-        )
-      );
+      assert.equal(requestBodies[1].max_output_tokens, 4096);
     },
   },
   {
@@ -2629,6 +2594,56 @@ exports.tests = [
       assert.equal(run.summary.translatedBlocks, 2);
       assert.equal(run.summary.repairAttemptedBlocks, 2);
       assert.equal(run.summary.modelRequestAttempts, 2);
+    },
+  },
+  {
+    name: 'counts a failed multi-block repair request while preserving the successful sibling',
+    async fn() {
+      const stored = {};
+      const records = ['success', 'repair-a', 'repair-b'].map((id) => ({
+        ...createTestPlainBlockRecord(id), template: 'Hello world.',
+      }));
+      const requests = [];
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome({ stored }),
+        crypto: globalThis.crypto,
+        fetch: async (_url, options) => {
+          const request = JSON.parse(options.body);
+          requests.push(request);
+          if (requests.length === 2) {
+            assert.deepEqual(JSON.parse(request.input).records.map(({ id }) => id), ['repair-a', 'repair-b']);
+            throw new Error('repair network failed');
+          }
+          return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+            translations: records.map((record) => ({
+              id: record.id,
+              template: record.id === 'success' ? '성공한 번역입니다.' : record.template,
+            })),
+          })); } };
+        },
+      });
+      const results = await worker.translateVisibleBlockBatch(records);
+      assert.equal(requests.length, 2);
+      assert.deepEqual(results.map(({ disposition, attemptCount }) => [disposition, attemptCount]), [
+        ['apply', 1], ['reject', 2], ['reject', 2],
+      ]);
+      assert.equal(results[0].template, '성공한 번역입니다.');
+      for (const result of results.slice(1)) {
+        assert.equal(result.terminalCode, 'runtime.repair_request_failed');
+        assert.equal(result.messageKey, 'repair_request_failed');
+        assert.equal('template' in result, false);
+      }
+      assert.ok(results.every((result) => !Object.hasOwn(result, 'diagnostic')));
+      const run = Object.values(stored).find((value) => value?.outcome === 'failed');
+      assert.equal(run.summary.attemptedBlocks, 3);
+      assert.equal(run.summary.translatedBlocks, 1);
+      assert.equal(run.summary.failedBlocks, 2);
+      assert.equal(run.summary.repairAttemptedBlocks, 2);
+      assert.equal(run.summary.modelRequestAttempts, 2);
+      for (const block of run.blocks.filter((block) => block.attemptCount === 2)) {
+        assert.equal(block.timeline[1].stage, 'repair_validation');
+        assert.equal(block.timeline[1].disposition, 'reject');
+      }
     },
   },
   {

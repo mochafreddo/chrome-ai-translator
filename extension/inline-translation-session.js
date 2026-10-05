@@ -60,13 +60,7 @@
     return state === 'translated' || state === 'translated_with_warning';
   }
 
-  function getRecordCost(record) {
-    return (
-      String(record?.template || '').length +
-      JSON.stringify(record?.atoms || []).length +
-      JSON.stringify(record?.repair ?? null).length
-    );
-  }
+  const { getRecordCost } = inlineBlockCodec;
 
   function getReservedRecordCost(record) {
     function requestPayloadCost(candidate) {
