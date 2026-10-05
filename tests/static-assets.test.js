@@ -375,6 +375,8 @@ exports.tests = [
         'markdown-document',
         'markdown-rehydration',
         'translation-chunks',
+        'translation-settings',
+        'inline-model-execution',
       ]) {
         assert.match(
           packageJson.scripts['check:syntax'],
