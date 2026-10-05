@@ -19,11 +19,12 @@ function getReasoningTranslatedTemplate(record) {
 
 // A state with an Inline Translation Operation begun under `settings`, the way Start begins
 // one once it has the settings.
-function createActiveInlineTranslationState(overrides = {}, settings = {}) {
+function createActiveInlineTranslationState(overrides = {}, settings = {}, diagnosticAdapters) {
   const state = helpers.createInlineTranslationState(overrides);
   helpers.beginInlineTranslationOperation(
     state,
-    inlineTranslationSession.createSettingsSnapshot(settings)
+    inlineTranslationSession.createSettingsSnapshot(settings),
+    diagnosticAdapters
   );
   return state;
 }
@@ -147,6 +148,43 @@ async function flushMicrotasks(count = 8) {
   }
 }
 
+function createLocalDiagnosticAdapters() {
+  const requests = [];
+  const timers = new Map();
+  let nextTimer = 0;
+  return {
+    requests,
+    timers,
+    sendMessage(message) {
+      return new Promise((resolve, reject) => requests.push({ message, resolve, reject }));
+    },
+    setTimeout(callback, delay) {
+      const id = ++nextTimer;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    advance() {
+      assert.equal(timers.size, 1, 'one diagnostic task is scheduled');
+      const [id, task] = timers.entries().next().value;
+      timers.delete(id);
+      task.callback();
+    },
+  };
+}
+
+function createLocalDiagnosticLifecycle() {
+  const adapters = createLocalDiagnosticAdapters();
+  const state = createActiveInlineTranslationState({}, {}, adapters);
+  return {
+    ...adapters,
+    state,
+    admit: () => admitUnsupported(state),
+    flush: () => state.viewport.localDiagnosticTransport.flush(),
+    stop: () => helpers.stopInlineViewportTranslation(state),
+  };
+}
+
 function holdInlineSettings() {
   const requests = [];
   const send = global.chrome.runtime.sendMessage;
@@ -246,6 +284,38 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
 }
 
 exports.tests = [
+  {
+    name: 'sends the Session outbox through the local diagnostic transport interface',
+    async fn() {
+      const adapters = createLocalDiagnosticAdapters();
+      const state = createActiveInlineTranslationState();
+      const settingsSnapshot = state.viewport.translationSettings;
+      const transport = helpers.createInlineLocalDiagnosticTransport({
+        outbox: state.session.outbox,
+        operationId: state.session.operationId,
+        settingsSnapshot,
+        ...adapters,
+      });
+      admitUnsupported(state);
+      transport.flush();
+      assert.equal(adapters.requests.length, 1);
+      assert.deepEqual(adapters.requests[0].message, {
+        type: 'RECORD_INLINE_LOCAL_DIAGNOSTIC',
+        diagnosticBatchId: adapters.requests[0].message.diagnosticBatchId,
+        operationId: state.session.operationId,
+        settingsSnapshot,
+        diagnostics: [{ code: 'runtime.unsupported_block', evidence: {},
+          localRejection: { reason: 'nested_semantic_block', tag: 'P' } }],
+      });
+      assert.match(adapters.requests[0].message.diagnosticBatchId,
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+      adapters.requests[0].resolve({ ok: true });
+      await flushMicrotasks();
+      transport.flush();
+      assert.equal(adapters.requests.length, 1);
+      assert.equal(adapters.timers.size, 0);
+    },
+  },
   ...['stop', 'restore'].map((control) => ({
     name: `panel to worker to content control wiring discards pending Start after ${control}`,
     async fn() {
@@ -1571,79 +1641,171 @@ exports.tests = [
     },
   },
   {
-    name: 'makes a final RCA persistence attempt when stopping during retry backoff',
-    fn() {
-      const previousChrome = global.chrome;
-      const messages = [];
-      global.chrome = { runtime: { sendMessage(message) {
-        messages.push(message);
-        return new Promise(() => {});
-      } } };
-      const state = createActiveInlineTranslationState();
-      const store = state.viewport;
-      store.localDiagnosticsInFlight = {
-        id: globalThis.crypto.randomUUID(),
-        diagnostics: [{ code: 'runtime.block_too_large', evidence: {} }],
-        attempt: 1,
-      };
-      admitUnsupported(state);
-      store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
-      try {
-        helpers.stopInlineViewportTranslation(state);
-        assert.equal(messages.length, 2);
-        assert.equal(messages[0].type, 'RECORD_INLINE_LOCAL_DIAGNOSTIC');
-        assert.equal(messages[1].diagnostics[0].code, 'runtime.unsupported_block');
-      } finally {
-        global.chrome = previousChrome;
-      }
+    name: 'makes a final local diagnostic persistence attempt when stopping during retry backoff',
+    async fn() {
+      const run = createLocalDiagnosticLifecycle();
+      run.admit();
+      await run.flush();
+      run.requests[0].reject(new Error('transient'));
+      await flushMicrotasks();
+      assert.equal(run.timers.size, 1);
+      run.admit();
+      run.stop();
+      assert.equal(run.state.session.status, 'stopped');
+      assert.equal(run.requests.length, 3);
+      assert.deepEqual(run.requests[1].message, run.requests[0].message);
+      assert.notEqual(run.requests[2].message.diagnosticBatchId, run.requests[0].message.diagnosticBatchId);
+      assert.equal(run.timers.size, 0);
+      run.stop();
+      assert.equal(run.requests.length, 3, 'repeated Stop does not resend final batches');
+      run.requests[1].resolve({ ok: false });
+      run.requests[2].reject(new Error('final failure'));
+      await flushMicrotasks();
+      assert.equal(run.timers.size, 0, 'Stop prevents subsequent retries');
+      assert.doesNotMatch(helpers.getInlineTranslationStatusSnapshot(run.state).error, /Diagnostics could not be saved/);
     },
   },
   {
-    name: 'flushes queued RCA diagnostics when stopping before a deferred flush',
-    fn() {
-      const previousChrome = global.chrome;
-      const messages = [];
-      global.chrome = { runtime: { sendMessage(message) {
-        messages.push(message);
-        return new Promise(() => {});
-      } } };
-      const state = createActiveInlineTranslationState();
-      const store = state.viewport;
-      admitUnsupported(state);
-      store.localDiagnosticRetryTimer = setTimeout(() => {}, 10000);
-      try {
-        helpers.stopInlineViewportTranslation(state);
-        assert.equal(messages.length, 1);
-        assert.equal(messages[0].diagnostics[0].code, 'runtime.unsupported_block');
-      } finally {
-        global.chrome = previousChrome;
-      }
+    name: 'flushes queued local diagnostics when stopping before a deferred flush',
+    async fn() {
+      const run = createLocalDiagnosticLifecycle();
+      run.admit();
+      await run.flush();
+      run.admit();
+      run.requests[0].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.equal(run.timers.size, 1);
+      run.stop();
+      assert.equal(run.requests.length, 2);
+      assert.equal(run.requests[1].message.diagnostics[0].code, 'runtime.unsupported_block');
+      assert.equal(run.timers.size, 0);
+      run.requests[1].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.equal(run.timers.size, 0);
     },
   },
   {
-    name: 'drains queued RCA diagnostics while another request is active',
-    fn() {
-      const previousChrome = global.chrome;
-      const messages = [];
-      global.chrome = { runtime: { sendMessage(message) {
-        messages.push(message);
-        return new Promise(() => {});
-      } } };
-      const state = createActiveInlineTranslationState();
-      const store = state.viewport;
-      store.localDiagnosticsInFlight = {
-        id: globalThis.crypto.randomUUID(),
-        diagnostics: [{ code: 'runtime.block_too_large', evidence: {} }],
-        attempt: 0,
-      };
-      admitUnsupported(state);
-      try {
-        helpers.stopInlineViewportTranslation(state);
-        assert.equal(messages.length, 1);
-        assert.equal(messages[0].diagnostics[0].code, 'runtime.unsupported_block');
-      } finally {
-        global.chrome = previousChrome;
-      }
+    name: 'drains queued local diagnostics without waiting for an active request on Stop',
+    async fn() {
+      const run = createLocalDiagnosticLifecycle();
+      run.admit();
+      await run.flush();
+      run.admit();
+      run.stop();
+      assert.equal(run.state.session.status, 'stopped', 'Stop completes with both responses pending');
+      assert.equal(run.requests.length, 2, 'the active request is not resent');
+      assert.notEqual(run.requests[0].message.diagnosticBatchId, run.requests[1].message.diagnosticBatchId);
+      run.stop();
+      assert.equal(run.requests.length, 2);
+      run.requests[0].resolve({ ok: true });
+      run.requests[1].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.equal(run.timers.size, 0);
+    },
+  },
+  {
+    name: 'does not resend an active diagnostic batch after a scan consumes a deferred flush',
+    async fn() {
+      const run = createLocalDiagnosticLifecycle();
+      run.admit();
+      await run.flush();
+      run.admit();
+      run.requests[0].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.equal(run.timers.size, 1);
+      await run.flush();
+      assert.equal(run.requests.length, 2);
+      run.stop();
+      assert.equal(run.requests.length, 2, 'Stop leaves the already sent request alone');
+      assert.equal(run.timers.size, 0);
+      run.requests[1].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.equal(run.timers.size, 0);
+    },
+  },
+  {
+    name: 'sends diagnostics added during a request after that request succeeds',
+    async fn() {
+      const run = createLocalDiagnosticLifecycle();
+      run.admit();
+      await run.flush();
+      run.admit();
+      await run.flush();
+      assert.equal(run.requests.length, 1);
+      run.requests[0].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.equal([...run.timers.values()][0].delay, 0);
+      run.advance();
+      assert.equal(run.requests.length, 2);
+      assert.notEqual(run.requests[0].message.diagnosticBatchId, run.requests[1].message.diagnosticBatchId);
+      run.requests[1].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.equal(run.timers.size, 0);
+      assert.doesNotMatch(helpers.getInlineTranslationStatusSnapshot(run.state).error, /Diagnostics could not be saved/);
+    },
+  },
+  ...['success', 'failure', 'rejection'].map((outcome) => ({
+    name: `late local diagnostic ${outcome} preserves the new Operation display`,
+    async fn() {
+      const run = createLocalDiagnosticLifecycle();
+      run.admit();
+      await run.flush();
+      const original = run.requests[0].message;
+      run.stop();
+      helpers.beginInlineTranslationOperation(run.state,
+        inlineTranslationSession.createSettingsSnapshot({ targetLanguage: 'Japanese' }), run);
+      run.state.message = 'Current operation progress';
+      run.state.error = 'Current operation feedback';
+      run.admit();
+      await run.flush();
+      const current = run.requests[1].message;
+      assert.notEqual(original.operationId, current.operationId);
+      assert.equal(original.settingsSnapshot.targetLanguage, 'Korean');
+      assert.equal(current.settingsSnapshot.targetLanguage, 'Japanese');
+      const before = helpers.getInlineTranslationStatusSnapshot(run.state);
+      if (outcome === 'rejection') run.requests[0].reject(new Error('old send failed'));
+      else run.requests[0].resolve({ ok: outcome === 'success' });
+      await flushMicrotasks();
+      assert.deepEqual(helpers.getInlineTranslationStatusSnapshot(run.state), before);
+      assert.equal(run.timers.size, 0);
+      run.requests[1].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.deepEqual(helpers.getInlineTranslationStatusSnapshot(run.state), before);
+    },
+  })),
+  {
+    name: 'scanner and content Stop instruction use the local diagnostic transport',
+    async fn() {
+      await withFakeViewportDom(async () => {
+        const run = createLocalDiagnosticLifecycle();
+        const { document, element, text } = createTestDocument();
+        const block = element('p', text('Visible prose before an interactive element.'),
+          element('button', text('Action')));
+        document.body.appendChild(block);
+        document.documentElement = { clientWidth: 0, clientHeight: 0 };
+        document.createRange = () => { throw new Error('range unavailable'); };
+        global.document = document;
+        global.HTMLElement = block.constructor;
+        run.state.viewport.root = block;
+        helpers.runInlineViewportScan(run.state);
+        await flushMicrotasks();
+        assert.equal(run.requests.length, 1, 'the scanner sends its local preflight rejection');
+        assert.equal(run.requests[0].message.diagnostics[0].code, 'runtime.unsupported_block');
+        run.requests[0].resolve({ ok: false });
+        await flushMicrotasks();
+        assert.equal([...run.timers.values()][0].delay, 250);
+        const replies = [];
+        helpers.handleInlineContentMessage(
+          { type: 'RUN_INLINE_INSTRUCTION', instruction: 'stopInlineTranslation' },
+          (reply) => replies.push(reply), run.state);
+        assert.deepEqual(replies, [{ ok: true }]);
+        assert.equal(run.state.session.status, 'stopped');
+        assert.deepEqual(run.requests[1].message, run.requests[0].message);
+        assert.equal(run.timers.size, 0);
+        run.requests[1].resolve({ ok: true });
+        await flushMicrotasks();
+        assert.equal(block.textContent, 'Visible prose before an interactive element.Action');
+      });
     },
   },
   {
@@ -1699,73 +1861,49 @@ exports.tests = [
   {
     name: 'grants each local diagnostic batch an independent retry',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousSetTimeout = global.setTimeout;
-      const timers = [];
-      let calls = 0;
-      global.setTimeout = (callback) => { timers.push(callback); return timers.length; };
-      global.chrome = { runtime: { sendMessage() {
-        calls += 1;
-        return calls === 4 ? Promise.resolve({ ok: true }) : Promise.reject(new Error('transient'));
-      } } };
-      const state = createActiveInlineTranslationState();
-      const store = state.viewport;
-      admitUnsupported(state);
-      try {
-        helpers.flushInlineLocalDiagnostics(store, state);
-        await new Promise((resolve) => setImmediate(resolve));
-        admitUnsupported(state);
-        assert.equal(typeof timers[0], 'function', 'diagnostic transport schedules its next attempt');
-        timers.shift()();
-        await new Promise((resolve) => setImmediate(resolve));
-        assert.equal(calls, 2);
-        assert.equal(state.session.outbox.length, 1);
-
-        assert.equal(typeof timers[0], 'function', 'diagnostic transport schedules its next attempt');
-        timers.shift()();
-        await new Promise((resolve) => setImmediate(resolve));
-        assert.equal(calls, 3);
-        assert.equal(typeof timers[0], 'function', 'diagnostic transport schedules its next attempt');
-        timers.shift()();
-        await new Promise((resolve) => setImmediate(resolve));
-        assert.equal(calls, 4);
-        assert.equal(state.session.outbox.length, 0);
-        assert.equal(store.localDiagnosticsInFlight, null);
-      } finally {
-        global.chrome = previousChrome;
-        global.setTimeout = previousSetTimeout;
-      }
+      const run = createLocalDiagnosticLifecycle();
+      run.admit();
+      await run.flush();
+      run.requests[0].reject(new Error('transient'));
+      await flushMicrotasks();
+      run.admit();
+      await run.flush();
+      assert.equal(run.requests.length, 1, 'queued work waits during retry backoff');
+      run.advance();
+      assert.deepEqual(run.requests[1].message, run.requests[0].message);
+      run.requests[1].resolve({ ok: false });
+      await flushMicrotasks();
+      assert.match(helpers.getInlineTranslationStatusSnapshot(run.state).error, /Diagnostics could not be saved/);
+      run.advance();
+      assert.equal(run.requests.length, 3, 'the next batch follows a final failure');
+      assert.notEqual(run.requests[2].message.diagnosticBatchId, run.requests[0].message.diagnosticBatchId);
+      run.requests[2].resolve({ ok: false });
+      await flushMicrotasks();
+      run.advance();
+      assert.equal(run.requests.length, 4, 'the next batch has its own retry');
+      assert.deepEqual(run.requests[3].message, run.requests[2].message);
+      run.requests[3].resolve({ ok: true });
+      await flushMicrotasks();
+      await run.flush();
+      assert.equal(run.requests.length, 4);
+      assert.equal(run.timers.size, 0);
     },
   },
   {
     name: 'does not warn when a local diagnostic retry succeeds',
     async fn() {
-      const previousChrome = global.chrome;
-      const previousSetTimeout = global.setTimeout;
-      const timers = [];
-      let calls = 0;
-      global.setTimeout = (callback) => { timers.push(callback); return timers.length; };
-      global.chrome = { runtime: { sendMessage() {
-        calls += 1;
-        return calls === 1 ? Promise.reject(new Error('transient')) : Promise.resolve({ ok: true });
-      } } };
-      const state = createActiveInlineTranslationState();
-      const store = state.viewport;
-      admitUnsupported(state);
-      try {
-        helpers.flushInlineLocalDiagnostics(store, state);
-        await new Promise((resolve) => setImmediate(resolve));
-        assert.notEqual(store.diagnosticsUnavailable, true);
-        assert.equal(typeof timers[0], 'function', 'diagnostic transport schedules its next attempt');
-        timers.shift()();
-        await new Promise((resolve) => setImmediate(resolve));
-        assert.equal(calls, 2);
-        assert.notEqual(store.diagnosticsUnavailable, true);
-        assert.equal(store.localDiagnosticsInFlight, null);
-      } finally {
-        global.chrome = previousChrome;
-        global.setTimeout = previousSetTimeout;
-      }
+      const run = createLocalDiagnosticLifecycle();
+      run.admit();
+      await run.flush();
+      run.requests[0].resolve({ ok: false });
+      await flushMicrotasks();
+      assert.doesNotMatch(helpers.getInlineTranslationStatusSnapshot(run.state).error, /Diagnostics could not be saved/);
+      run.advance();
+      assert.deepEqual(run.requests[1].message, run.requests[0].message);
+      run.requests[1].resolve({ ok: true });
+      await flushMicrotasks();
+      assert.doesNotMatch(helpers.getInlineTranslationStatusSnapshot(run.state).error, /Diagnostics could not be saved/);
+      assert.equal(run.timers.size, 0);
     },
   },
   {
