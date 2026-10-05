@@ -66,78 +66,97 @@ var INLINE_EXCLUDED_ROLES = new Set([
   'tablist',
   'toolbar',
 ]);
-function flushInlineLocalDiagnostics(store, state = inlineState) {
-  if (!store?.localDiagnostics?.length || store.localDiagnosticsInFlight) return;
-  const batch = {
-    id: createInlineLocalDiagnosticBatchId(),
-    diagnostics: store.localDiagnostics.splice(0, inlineDiagnosticsProtocol.limits.maxRecords),
-    attempt: 0,
-  };
-  store.localDiagnosticsInFlight = batch;
-  sendInlineLocalDiagnosticBatch(store, batch, state);
-}
-
 // The page's own crypto, named here rather than inside the protocol object: the token is
 // minted with whatever crypto its caller mints it with, and in the page that is the page's.
 function createInlineLocalDiagnosticBatchId() {
   return inlineDiagnosticsProtocol.createUuidV4(globalThis.crypto);
 }
 
-function sendInlineLocalDiagnosticBatch(store, batch, state = inlineState) {
-  const fail = () => {
-    if (batch.attempt < 1 && store.localDiagnosticsInFlight === batch) {
-      batch.attempt += 1;
-      scheduleInlineLocalDiagnosticTask(store, () => sendInlineLocalDiagnosticBatch(store, batch, state), 250);
-    } else {
-      store.diagnosticsUnavailable = true;
-      if (store.localDiagnosticsInFlight === batch) store.localDiagnosticsInFlight = null;
-      if (store.localDiagnostics.length) {
-        scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store, state), 250);
-      }
-    }
-    if (store.diagnosticsUnavailable && state.viewport === store && state.session.operationId === store.operationId) {
-      updateInlineViewportMessage(state);
-    }
-  };
-  chrome.runtime.sendMessage({
-    type: inlineDiagnosticsProtocol.messages.recordLocal,
-    diagnosticBatchId: batch.id,
-    operationId: store.operationId,
-    settingsSnapshot: store.translationSettings,
-    diagnostics: batch.diagnostics,
-  }).then((response) => {
-    if (response?.ok !== true) {
-      fail();
-      return;
-    }
-    if (store.localDiagnosticsInFlight === batch) store.localDiagnosticsInFlight = null;
-    if (store.localDiagnostics.length) {
-      scheduleInlineLocalDiagnosticTask(store, () => flushInlineLocalDiagnostics(store, state), 0);
-    }
-  }).catch(fail);
-}
+// Consume the Session's outbox without exposing batching, retries, or timers to its callers.
+function createInlineLocalDiagnosticTransport({
+  outbox,
+  operationId,
+  settingsSnapshot,
+  sendMessage = (message) => chrome.runtime.sendMessage(message),
+  setTimeout: schedule = (task, delay) => setTimeout(task, delay),
+  clearTimeout: cancel = (timer) => clearTimeout(timer),
+  onUnavailable = () => {},
+}) {
+  let inFlight = null;
+  let timer = null;
+  let stopped = false;
 
-function scheduleInlineLocalDiagnosticTask(store, task, delay) {
-  if (store.localDiagnosticRetryTimer) clearTimeout(store.localDiagnosticRetryTimer);
-  store.localDiagnosticRetryTimer = setTimeout(() => {
-    store.localDiagnosticRetryTimer = null;
-    if (!store.stopped) task();
-  }, delay);
-}
-
-function drainInlineLocalDiagnosticsOnStop(store, resendInFlight, state = inlineState) {
-  if (resendInFlight && store.localDiagnosticsInFlight) {
-    const inFlight = store.localDiagnosticsInFlight;
-    store.localDiagnosticsInFlight = null;
-    sendInlineLocalDiagnosticBatch(store, inFlight, state);
-  }
-  while (store.localDiagnostics.length) {
-    sendInlineLocalDiagnosticBatch(store, {
+  function takeBatch() {
+    return {
       id: createInlineLocalDiagnosticBatchId(),
-      diagnostics: store.localDiagnostics.splice(0, inlineDiagnosticsProtocol.limits.maxRecords),
-      attempt: 1,
-    }, state);
+      diagnostics: outbox.splice(0, inlineDiagnosticsProtocol.limits.maxRecords),
+      attempt: 0,
+    };
   }
+
+  function defer(task, delay) {
+    if (stopped) return;
+    if (timer !== null) cancel(timer);
+    timer = schedule(() => {
+      timer = null;
+      if (!stopped) task();
+    }, delay);
+  }
+
+  function send(batch) {
+    const fail = () => {
+      if (!stopped && batch.attempt < 1 && inFlight === batch) {
+        batch.attempt += 1;
+        defer(() => send(batch), 250);
+      } else {
+        if (inFlight === batch) inFlight = null;
+        if (outbox.length) defer(flush, 250);
+        onUnavailable();
+      }
+    };
+    sendMessage({
+      type: inlineDiagnosticsProtocol.messages.recordLocal,
+      diagnosticBatchId: batch.id,
+      operationId,
+      settingsSnapshot,
+      diagnostics: batch.diagnostics,
+    }).then((response) => {
+      if (response?.ok !== true) {
+        fail();
+        return;
+      }
+      if (inFlight === batch) inFlight = null;
+      if (outbox.length) defer(flush, 0);
+    }).catch(fail);
+  }
+
+  function flush() {
+    if (stopped || !outbox.length || inFlight) return;
+    if (timer !== null) {
+      cancel(timer);
+      timer = null;
+    }
+    inFlight = takeBatch();
+    send(inFlight);
+  }
+
+  function stop() {
+    if (stopped) return;
+    stopped = true;
+    const retryWaiting = timer !== null && inFlight;
+    if (timer !== null) {
+      cancel(timer);
+      timer = null;
+    }
+    if (retryWaiting) {
+      const batch = inFlight;
+      inFlight = null;
+      send(batch);
+    }
+    while (outbox.length) send(takeBatch());
+  }
+
+  return { flush, stop };
 }
 
 function isInlineViewportOperationCurrent(state, store, operationId) {
@@ -148,18 +167,13 @@ function isInlineViewportOperationCurrent(state, store, operationId) {
 // timer and the last chance to send the local diagnostics the operation queued.
 function stopInlineViewportTranslation(state = inlineState) {
   const store = state.viewport;
-  const hasPendingDiagnosticTask = Boolean(store.localDiagnosticRetryTimer);
   const operationId = state.session.stop();
   store.stopped = true;
   if (store.scanTimer) {
     clearTimeout(store.scanTimer);
     store.scanTimer = null;
   }
-  if (store.localDiagnosticRetryTimer) {
-    clearTimeout(store.localDiagnosticRetryTimer);
-    store.localDiagnosticRetryTimer = null;
-  }
-  drainInlineLocalDiagnosticsOnStop(store, hasPendingDiagnosticTask, state);
+  store.localDiagnosticTransport.stop();
   return operationId;
 }
 
@@ -242,26 +256,40 @@ async function requestInlineStartupInstructions(chromeApi = globalThis.chrome) {
 
 // The viewport scanner and diagnostic transport belong to the page, separate from the
 // session's Semantic Block state. The outbox is the session's transport interface.
-function createInlineViewportState(session, settings = null) {
-  return {
+function createInlineViewportState(state, settings = null, diagnosticAdapters = {}) {
+  const session = state.session;
+  const store = {
     operationId: session.operationId,
     translationSettings: settings,
-    localDiagnostics: session.outbox,
     stopped: false,
   };
+  store.localDiagnosticTransport = createInlineLocalDiagnosticTransport({
+    outbox: session.outbox,
+    operationId: store.operationId,
+    settingsSnapshot: settings,
+    ...diagnosticAdapters,
+    onUnavailable() {
+      store.diagnosticsUnavailable = true;
+      if (state.viewport === store && state.session.operationId === store.operationId) {
+        updateInlineViewportMessage(state);
+      }
+    },
+  });
+  return store;
 }
 
 function createInlineTranslationState(overrides = {}) {
   const session = inlineTranslationSession.createInlineTranslationSession();
-  return {
+  const state = {
     menuOpen: false,
     message: '',
     error: '',
     authorizedUntil: 0,
     session,
-    viewport: createInlineViewportState(session),
     ...overrides,
   };
+  state.viewport = createInlineViewportState(state);
+  return state;
 }
 
 var inlineState =
@@ -438,7 +466,7 @@ function restoreInlineViewportRecords(state = inlineState) {
     clearTimeout(viewport.scanTimer);
   }
   state.session.restore();
-  state.viewport = createInlineViewportState(state.session);
+  state.viewport = createInlineViewportState(state);
 }
 
 function authorizeInlineTranslation(state = inlineState, now = Date.now()) {
@@ -949,11 +977,11 @@ async function drainInlineViewportQueue(state = inlineState) {
   const store = state.viewport;
   if (store.stopped || state.session.status !== 'active') return;
   const operationId = store.operationId;
-  flushInlineLocalDiagnostics(store, state);
+  store.localDiagnosticTransport.flush();
 
   while (isInlineViewportOperationCurrent(state, store, operationId)) {
     const batch = state.session.takeBatch();
-    flushInlineLocalDiagnostics(store, state);
+    store.localDiagnosticTransport.flush();
     updateInlineViewportMessage(state);
     if (!batch.length) return;
 
@@ -994,10 +1022,10 @@ async function drainInlineViewportQueue(state = inlineState) {
 
 // Begins an Inline Translation Operation, holding what the session carried over from the
 // operation it replaces.
-function beginInlineTranslationOperation(state, settingsSnapshot) {
+function beginInlineTranslationOperation(state, settingsSnapshot, diagnosticAdapters) {
   state.translationSettings = settingsSnapshot;
   state.session.begin(settingsSnapshot);
-  state.viewport = createInlineViewportState(state.session, settingsSnapshot);
+  state.viewport = createInlineViewportState(state, settingsSnapshot, diagnosticAdapters);
   return state.viewport;
 }
 
@@ -1182,7 +1210,7 @@ if (typeof module !== 'undefined' && module.exports) {
     refreshInlineTranslatorSettings,
     beginInlineTranslationOperation,
     findInlineSemanticBlock,
-    flushInlineLocalDiagnostics,
+    createInlineLocalDiagnosticTransport,
     formatInlineViewportStatusMessage,
     formatInlineViewportReasons,
     getInlineTranslationStatusSnapshot,
