@@ -26,46 +26,16 @@ var inlineTranslationSession =
     ? require('./inline-translation-session.js')
     : null);
 
+var inlineViewport =
+  globalThis.ChromeAiTranslatorInlineViewport ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./inline-viewport.js')
+    : null);
+
 var INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
 var INLINE_TRANSLATION_AUTH_MS = 5 * 60 * 1000;
-var INLINE_VIEWPORT_SCAN_DEBOUNCE_MS = 250;
-var INLINE_VIEWPORT_PREFETCH_RATIO = 0.5;
-var INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES = 1200;
 var INLINE_TRANSLATION_SETTINGS_DEFAULTS = inlineTranslationSession.SETTINGS_DEFAULTS;
 var createInlineTranslationSettingsSnapshot = inlineTranslationSession.createSettingsSnapshot;
-var INLINE_EXCLUDED_TAGS = new Set([
-  'SCRIPT',
-  'STYLE',
-  'NOSCRIPT',
-  'SVG',
-  'CANVAS',
-  'IFRAME',
-  'NAV',
-  'FOOTER',
-  'FORM',
-  'BUTTON',
-  'INPUT',
-  'TEXTAREA',
-  'SELECT',
-  'OPTION',
-  'PRE',
-  'CODE',
-  'KBD',
-  'SAMP',
-]);
-var INLINE_EXCLUDED_ROLES = new Set([
-  'navigation',
-  'banner',
-  'contentinfo',
-  'complementary',
-  'search',
-  'form',
-  'button',
-  'menu',
-  'menubar',
-  'tablist',
-  'toolbar',
-]);
 // The page's own crypto, named here rather than inside the protocol object: the token is
 // minted with whatever crypto its caller mints it with, and in the page that is the page's.
 function createInlineLocalDiagnosticBatchId() {
@@ -168,11 +138,7 @@ function isInlineViewportOperationCurrent(state, store, operationId) {
 function stopInlineViewportTranslation(state = inlineState) {
   const store = state.viewport;
   const operationId = state.session.stop();
-  store.stopped = true;
-  if (store.scanTimer) {
-    clearTimeout(store.scanTimer);
-    store.scanTimer = null;
-  }
+  store.scanner.stop();
   store.localDiagnosticTransport.stop();
   return operationId;
 }
@@ -184,7 +150,7 @@ function stopInlineViewportTranslation(state = inlineState) {
 // view rather than a second run. A stopped run no longer admits work; Start begins a new
 // operation while submitted requests can still settle against the same Session Budget.
 function isInlineTranslationRunLive(state = inlineState) {
-  return state?.session?.status === 'active' && !state?.viewport?.stopped;
+  return state?.session?.status === 'active';
 }
 
 function hasInlineSettingsApiKey(settings) {
@@ -261,7 +227,6 @@ function createInlineViewportState(state, settings = null, diagnosticAdapters = 
   const store = {
     operationId: session.operationId,
     translationSettings: settings,
-    stopped: false,
   };
   store.localDiagnosticTransport = createInlineLocalDiagnosticTransport({
     outbox: session.outbox,
@@ -273,6 +238,15 @@ function createInlineViewportState(state, settings = null, diagnosticAdapters = 
       if (state.viewport === store && state.session.operationId === store.operationId) {
         updateInlineViewportMessage(state);
       }
+    },
+  });
+  store.scanner = inlineViewport.createInlineViewport({
+    session,
+    onScan() {
+      updateInlineViewportMessage(state);
+      drainInlineViewportQueue(state).catch((error) =>
+        setInlineErrorMessage(error?.message || String(error), state)
+      );
     },
   });
   return store;
@@ -309,29 +283,6 @@ async function refreshInlineTranslatorSettings(
   return snapshot;
 }
 
-function isInlineTranslationExcludedTag(tagName) {
-  return INLINE_EXCLUDED_TAGS.has(String(tagName || '').toUpperCase());
-}
-
-function isInlineTranslationExcludedElement(el) {
-  if (!el) return false;
-  if (isInlineTranslationExcludedTag(el.tagName)) return true;
-  const role = String(el.getAttribute?.('role') || '').toLowerCase();
-  return INLINE_EXCLUDED_ROLES.has(role);
-}
-
-function isInlineEffectivelyEditable(element) {
-  if (element?.isContentEditable === true) return true;
-  for (let current = element; current; current = current.parentElement) {
-    if (!current.hasAttribute?.('contenteditable')) continue;
-    return (
-      String(current.getAttribute?.('contenteditable') || '').toLowerCase() !==
-      'false'
-    );
-  }
-  return false;
-}
-
 function isTrustedInlineUiEvent(event) {
   return event?.isTrusted === true;
 }
@@ -356,44 +307,6 @@ function getInlineHostStyleText() {
     'background: transparent !important',
     'pointer-events: auto !important',
   ].join('; ');
-}
-
-function isInlineRectInViewport(
-  rect,
-  viewport,
-  prefetchRatio = INLINE_VIEWPORT_PREFETCH_RATIO
-) {
-  if (!rect || !viewport) return false;
-  const width = Number(viewport.width) || 0;
-  const height = Number(viewport.height) || 0;
-  if (width <= 0 || height <= 0) return false;
-
-  const margin = height * prefetchRatio;
-  const top = Number(rect.top);
-  const bottom = Number(rect.bottom);
-  const left = Number(rect.left);
-  const right = Number(rect.right);
-
-  if (![top, bottom, left, right].every(Number.isFinite)) return false;
-  if (bottom < -margin) return false;
-  if (top > height + margin) return false;
-  if (right < 0) return false;
-  if (left > width) return false;
-  return true;
-}
-
-function findInlineSemanticBlock(textNode, root) {
-  for (
-    let element = textNode?.parentElement;
-    element;
-    element = element.parentElement
-  ) {
-    if (inlineBlockCodec?.isSemanticBlockElement(element)) {
-      return element;
-    }
-    if (element === root) break;
-  }
-  return null;
 }
 
 function formatInlineViewportStatusMessage(counts, status = 'active') {
@@ -458,13 +371,7 @@ async function toggleInlineTranslatorMenu(
 }
 
 function restoreInlineViewportRecords(state = inlineState) {
-  const viewport = state.viewport;
-  if (viewport.observer) {
-    viewport.observer.disconnect();
-  }
-  if (viewport.scanTimer) {
-    clearTimeout(viewport.scanTimer);
-  }
+  state.viewport.scanner.stop();
   state.session.restore();
   state.viewport = createInlineViewportState(state);
 }
@@ -525,142 +432,6 @@ function buildArticleExtraction(root, metadata) {
     ),
     translationDocument,
   };
-}
-
-function isElementHidden(el) {
-  if (!el || !(el instanceof HTMLElement)) return false;
-  const style = window.getComputedStyle(el);
-  return (
-    style.display === 'none' ||
-    style.visibility === 'hidden' ||
-    style.opacity === '0' ||
-    el.hidden ||
-    el.getAttribute('aria-hidden') === 'true'
-  );
-}
-
-function getInlineViewportInfo() {
-  return {
-    width: window.innerWidth || document.documentElement.clientWidth || 0,
-    height: window.innerHeight || document.documentElement.clientHeight || 0,
-  };
-}
-
-function getInlineTextNodeRect(textNode) {
-  try {
-    const range = document.createRange();
-    range.selectNodeContents(textNode);
-    const rect = range.getBoundingClientRect();
-    range.detach?.();
-    if (rect && (rect.width || rect.height)) return rect;
-  } catch {}
-  return textNode.parentElement?.getBoundingClientRect?.() || null;
-}
-
-function isInlineTextNodeInViewport(textNode, viewport = getInlineViewportInfo()) {
-  return isInlineRectInViewport(
-    getInlineTextNodeRect(textNode),
-    viewport
-  );
-}
-
-function shouldSkipInlineBlockCandidateTextNode(textNode) {
-  const parent = textNode?.parentElement;
-  if (!parent) return true;
-  if (parent.closest(`#${INLINE_TRANSLATOR_ID}`)) return true;
-  if (isInlineEffectivelyEditable(parent)) return true;
-  for (let element = parent; element; element = element.parentElement) {
-    if (isInlineTranslationExcludedElement(element)) return true;
-    if (isElementHidden(element)) return true;
-  }
-  const value = String(textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
-  if (!/[A-Za-z]/.test(value)) return true;
-  return inlineBlockCodec.isCodeLikeInlineText(value);
-}
-
-function normalizeInlineViewportScanLimit(maxTextNodes) {
-  const parsed = Number(maxTextNodes);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES;
-  }
-  return Math.floor(parsed);
-}
-
-function isInlineTextNode(node) {
-  return Boolean(node && node.nodeType === 3);
-}
-
-function shouldSkipInlineElementSubtree(node, viewport = getInlineViewportInfo()) {
-  if (!node || !(node instanceof HTMLElement)) return false;
-  if (node.closest?.(`#${INLINE_TRANSLATOR_ID}`)) return true;
-  if (
-    isInlineTranslationExcludedElement(node) ||
-    isInlineEffectivelyEditable(node) ||
-    isElementHidden(node)
-  ) {
-    return true;
-  }
-  const rect = node.getBoundingClientRect?.();
-  return rect ? !isInlineRectInViewport(rect, viewport) : false;
-}
-
-function getInlineChildNodes(node) {
-  return Array.from(node?.childNodes || []);
-}
-
-// Collects visible blocks through the session, retaining only scan position on the page.
-function collectVisibleInlineBlocks(
-  root,
-  state,
-  maxTextNodes = INLINE_VIEWPORT_SCAN_MAX_TEXT_NODES
-) {
-  const limit = normalizeInlineViewportScanLimit(maxTextNodes);
-  const store = state.viewport;
-  const startIndex = Math.max(0, Number(store.scanStartIndex) || 0);
-  const viewport = getInlineViewportInfo();
-  const queued = [];
-  const queuedBlocks = new Set();
-  const stack = [root];
-  let textIndex = 0;
-  let inspected = 0;
-  let truncated = false;
-
-  while (stack.length) {
-    const node = stack.pop();
-    if (isInlineTextNode(node)) {
-      if (textIndex < startIndex) {
-        textIndex += 1;
-        continue;
-      }
-      if (inspected >= limit) {
-        truncated = true;
-        break;
-      }
-      textIndex += 1;
-      inspected += 1;
-      if (
-        !shouldSkipInlineBlockCandidateTextNode(node) &&
-        isInlineTextNodeInViewport(node, viewport)
-      ) {
-        const block = findInlineSemanticBlock(node, root);
-        if (block && !queuedBlocks.has(block)) {
-          queuedBlocks.add(block);
-          const record = state.session.admit(block);
-          if (record) queued.push(record);
-        }
-      }
-      continue;
-    }
-
-    if (shouldSkipInlineElementSubtree(node, viewport)) continue;
-    const children = getInlineChildNodes(node);
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      stack.push(children[index]);
-    }
-  }
-
-  if (store) store.scanStartIndex = truncated ? textIndex : 0;
-  return queued;
 }
 
 // Progress and errors are kept apart because the side panel, which is now the only place
@@ -839,119 +610,6 @@ function updateInlineTranslatorUi(state = inlineState) {
   restore.disabled = model.restoreDisabled;
 }
 
-function runInlineViewportScan(state = inlineState) {
-  const store = state.viewport;
-  if (!store || store.stopped || state.session.status !== 'active') return;
-  const root = store.root || pickArticleRoot();
-  if (!root) {
-    setInlineErrorMessage('No article content found.', state);
-    return;
-  }
-  store.root = root;
-  collectVisibleInlineBlocks(root, state);
-  if (store.scanStartIndex > 0) {
-    scheduleInlineViewportScan(state);
-  }
-  updateInlineViewportMessage(state);
-  drainInlineViewportQueue(state).catch((error) =>
-    setInlineErrorMessage(error?.message || String(error), state)
-  );
-}
-
-function scheduleInlineViewportScan(state = inlineState, options = {}) {
-  const store = state.viewport;
-  if (!store || store.stopped || state.session.status !== 'active') return;
-  if (options?.resetScanStartIndex) {
-    store.scanStartIndex = 0;
-    state.session.resetQueue();
-  }
-  if (store.scanTimer) clearTimeout(store.scanTimer);
-  store.scanTimer = setTimeout(() => {
-    store.scanTimer = null;
-    runInlineViewportScan(state);
-  }, INLINE_VIEWPORT_SCAN_DEBOUNCE_MS);
-}
-
-function scheduleInlineViewportScanFromViewportChange(state = inlineState) {
-  scheduleInlineViewportScan(state, { resetScanStartIndex: true });
-}
-
-function isInlineScrollableElement(el) {
-  if (!el || !(el instanceof HTMLElement)) return false;
-  const style = window.getComputedStyle(el);
-  const overflowY = style.overflowY || style.overflow || '';
-  if (!/(auto|scroll|overlay)/.test(overflowY)) return false;
-  return Number(el.scrollHeight) > Number(el.clientHeight) + 1;
-}
-
-function getInlineViewportScrollTargets(root) {
-  const targets = [];
-  const seen = new Set();
-  const addTarget = (target) => {
-    if (!target || seen.has(target) || !target.addEventListener) return;
-    targets.push(target);
-    seen.add(target);
-  };
-
-  addTarget(window);
-  addTarget(document);
-  addTarget(document.scrollingElement);
-  addTarget(document.documentElement);
-  addTarget(document.body);
-
-  for (let el = root; el; el = el.parentElement) {
-    if (isInlineScrollableElement(el)) {
-      addTarget(el);
-    }
-  }
-
-  return targets;
-}
-
-// The listener is made here rather than being one module-level function, because it has
-// to carry the state whose store the scan it schedules belongs to. It is kept on that
-// store so detaching removes the same reference attaching added: a fresh closure per call
-// would leave every scroll target holding a listener nothing can take off again.
-function attachInlineViewportWatchers(root, state = inlineState) {
-  const store = state.viewport;
-  const onViewportChange = () =>
-    scheduleInlineViewportScanFromViewportChange(state);
-  const scrollTargets = getInlineViewportScrollTargets(root);
-  for (const target of scrollTargets) {
-    target.addEventListener('scroll', onViewportChange, { passive: true });
-  }
-  window.addEventListener('resize', onViewportChange);
-
-  const observer = new MutationObserver(onViewportChange);
-  observer.observe(root, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-  });
-  store.observer = observer;
-  store.scrollTargets = scrollTargets;
-  store.viewportChangeListener = onViewportChange;
-}
-
-function detachInlineViewportWatchers(state = inlineState) {
-  const store = state.viewport;
-  const onViewportChange = store?.viewportChangeListener;
-  if (onViewportChange) {
-    for (const target of store.scrollTargets || []) {
-      target?.removeEventListener?.('scroll', onViewportChange);
-    }
-    window.removeEventListener('resize', onViewportChange);
-  }
-  if (store) {
-    store.scrollTargets = [];
-    store.viewportChangeListener = null;
-    if (store.observer) {
-      store.observer.disconnect();
-      store.observer = null;
-    }
-  }
-}
-
 // Sends the worker what settling a batch said the page must file. The worker failing to take
 // it is reported only while the operation it belongs to is still the one on the page.
 function fileInlineRuntimeOutcomes(state, store, operationId, { runtimeOutcomes, releaseTokens }) {
@@ -975,7 +633,7 @@ function fileInlineRuntimeOutcomes(state, store, operationId, { runtimeOutcomes,
 // or nothing when the request failed, goes straight back to it to settle.
 async function drainInlineViewportQueue(state = inlineState) {
   const store = state.viewport;
-  if (store.stopped || state.session.status !== 'active') return;
+  if (state.session.status !== 'active') return;
   const operationId = store.operationId;
   store.localDiagnosticTransport.flush();
 
@@ -1023,6 +681,7 @@ async function drainInlineViewportQueue(state = inlineState) {
 // Begins an Inline Translation Operation, holding what the session carried over from the
 // operation it replaces.
 function beginInlineTranslationOperation(state, settingsSnapshot, diagnosticAdapters) {
+  state.viewport.scanner.stop();
   state.translationSettings = settingsSnapshot;
   state.session.begin(settingsSnapshot);
   state.viewport = createInlineViewportState(state, settingsSnapshot, diagnosticAdapters);
@@ -1031,7 +690,7 @@ function beginInlineTranslationOperation(state, settingsSnapshot, diagnosticAdap
 
 async function translateInlinePage(state, requestedStart) {
   if (isInlineTranslationRunLive(state)) {
-    scheduleInlineViewportScan(state);
+    state.viewport.scanner.rescan();
     updateInlineViewportMessage(state);
     return;
   }
@@ -1059,20 +718,15 @@ async function translateInlinePage(state, requestedStart) {
   const root = pickArticleRoot();
   if (!root) throw new Error('No article content found.');
 
-  detachInlineViewportWatchers(state);
   beginInlineTranslationOperation(
     state,
     createInlineTranslationSettingsSnapshot(settingsResponse.settings)
   );
-  state.viewport.root = root;
-
-  attachInlineViewportWatchers(root, state);
-  runInlineViewportScan(state);
+  state.viewport.scanner.start(root);
 }
 
 function restoreInlineOriginal(state = inlineState) {
   state.startPreparation = null;
-  detachInlineViewportWatchers(state);
   restoreInlineViewportRecords(state);
   clearInlineFeedback(state);
   updateInlineTranslatorUi(state);
@@ -1094,7 +748,6 @@ function startInlineTranslationRun(state = inlineState) {
 function stopInlineTranslationRun(state = inlineState) {
   state.startPreparation = null;
   stopInlineViewportTranslation(state);
-  detachInlineViewportWatchers(state);
   updateInlineViewportMessage(state);
 }
 
@@ -1186,8 +839,6 @@ if (
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    isInlineTranslationExcludedTag,
-    isInlineTranslationExcludedElement,
     isCodeLikeInlineText: inlineBlockCodec.isCodeLikeInlineText,
     buildArticleExtraction,
     isTrustedInlineUiEvent,
@@ -1196,8 +847,6 @@ if (typeof module !== 'undefined' && module.exports) {
     hasInlineTranslationAuthorization,
     getInlineShadowMode,
     getInlineHostStyleText,
-    isInlineRectInViewport,
-    collectVisibleInlineBlocks,
     isInlineViewportOperationCurrent,
     stopInlineViewportTranslation,
     isInlineTranslationRunLive,
@@ -1209,20 +858,14 @@ if (typeof module !== 'undefined' && module.exports) {
     requestInlineStartupInstructions,
     refreshInlineTranslatorSettings,
     beginInlineTranslationOperation,
-    findInlineSemanticBlock,
     createInlineLocalDiagnosticTransport,
     formatInlineViewportStatusMessage,
     formatInlineViewportReasons,
     getInlineTranslationStatusSnapshot,
     handleInlineContentMessage,
     createInlineTranslationState,
-    attachInlineViewportWatchers,
-    detachInlineViewportWatchers,
     getInlineTranslatorUiModel,
     toggleInlineTranslatorMenu,
-    runInlineViewportScan,
-    scheduleInlineViewportScanFromViewportChange,
-    getInlineViewportScrollTargets,
     restoreInlineViewportRecords,
     restoreInlineOriginal,
   };

@@ -1,6 +1,7 @@
 // Unbilled collection, deterministic apply, and exact restore on a local fixture
 // and the reported page. No key is read and no model request is sent.
 import { readFileSync } from 'node:fs';
+import viewportHarness from '../viewport-harness.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until } from './harness.mjs';
@@ -31,39 +32,44 @@ async function exerciseParagraphs() {
     const codeHtml = codeNodes.map(node => node.outerHTML);
     const state = createInlineTranslationState();
     beginInlineTranslationOperation(state, {});
-    const collected = collectVisibleInlineBlocks(block, state);
-    const duplicate = collectVisibleInlineBlocks(block, state);
-    const batch = state.session.takeBatch();
-    const [record] = batch;
-    if (collected.length !== 1 || batch.length !== 1) {
-      results.push({ collected: false });
-      continue;
-    }
-    const output = record.template.split(/(⟦[^⟧]+⟧)/g)
-      .map(part => part.startsWith('⟦') || !part.trim() ? part : '번역된 문단 ')
-      .join('');
-    state.session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: output }] });
-    const rescanned = collectVisibleInlineBlocks(block, state);
-    const translated = state.session.progress().counts.translated === 1 && block.textContent.includes('번역된 문단');
-    const preserved = elements.every((node, i) => node.isConnected &&
-      JSON.stringify([...node.attributes].map(a => [a.name, a.value])) === attributes[i]) &&
-      codeNodes.every((node, i) => node.outerHTML === codeHtml[i]);
-    const unique = duplicate.length === 0 && rescanned.length === 0 && state.session.takeBatch().length === 0;
-    state.session.restore();
-    const restored = state.session.status === 'original';
-    const exactGraph = graph.every(({ node, children, value }) =>
-      node.nodeValue === value && node.childNodes.length === children.length &&
-      children.every((child, index) => node.childNodes[index] === child));
-    results.push({ collected: true, translated, preserved, unique, restored,
-      exactGraph, exactHtml: block.outerHTML === originalHtml });
+    const viewport = createViewportProbe(state.session);
+    try {
+      viewport.start(block);
+      const collected = viewport.records;
+      const duplicate = viewport.rescan();
+      const batch = state.session.takeBatch();
+      const [record] = batch;
+      if (collected.length !== 1 || batch.length !== 1) {
+        results.push({ collected: false });
+        continue;
+      }
+      const output = record.template.split(/(⟦[^⟧]+⟧)/g)
+        .map(part => part.startsWith('⟦') || !part.trim() ? part : '번역된 문단 ')
+        .join('');
+      state.session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: output }] });
+      const rescanned = viewport.rescan();
+      const translated = state.session.progress().counts.translated === 1 && block.textContent.includes('번역된 문단');
+      const preserved = elements.every((node, i) => node.isConnected &&
+        JSON.stringify([...node.attributes].map(a => [a.name, a.value])) === attributes[i]) &&
+        codeNodes.every((node, i) => node.outerHTML === codeHtml[i]);
+      const unique = duplicate.length === 0 && rescanned.length === 0 && state.session.takeBatch().length === 0;
+      state.session.restore();
+      const restored = state.session.status === 'original';
+      const exactGraph = graph.every(({ node, children, value }) =>
+        node.nodeValue === value && node.childNodes.length === children.length &&
+        children.every((child, index) => node.childNodes[index] === child));
+      results.push({ collected: true, translated, preserved, unique, restored,
+        exactGraph, exactHtml: block.outerHTML === originalHtml });
+    } finally { viewport.stop(); }
   }
   return results;
 }
 
 async function verifyPage(page, label, expectedCount) {
-  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'content.js']) {
+  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'inline-viewport.js', 'content.js']) {
     await page.evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
+  await page.evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
   const results = await page.evaluate(`(${exerciseParagraphs.toString()})().catch(error => ({ error: error.message }))`, 20000);
   check(`${label}: visible marked paragraphs are present`, Array.isArray(results) &&
     (expectedCount === undefined ? results.length > 0 : results.length === expectedCount), JSON.stringify(results));
@@ -90,12 +96,14 @@ async function exerciseProtectedAtoms() {
     const html = outer.outerHTML;
     const children = [...outer.childNodes];
     const originalText = inner.firstChild;
+    let viewport;
     try {
       outer.scrollIntoView({ block: 'center', behavior: 'instant' });
       const state = createInlineTranslationState();
       beginInlineTranslationOperation(state, {});
-      collectVisibleInlineBlocks(outer, state);
-      collectVisibleInlineBlocks(outer, state);
+      viewport = createViewportProbe(state.session);
+      viewport.start(outer);
+      viewport.rescan();
       const expected = tag === 'a' ? ['Responses API'] : [];
       const batch = state.session.takeBatch();
       const unique = batch.length === expected.length &&
@@ -120,6 +128,7 @@ async function exerciseProtectedAtoms() {
           children.every((node, i) => outer.childNodes[i] === node) && atom.firstChild === inner &&
           inner.childNodes.length === 1 && inner.firstChild === originalText });
     } finally {
+      viewport?.stop();
       outer.remove();
     }
   }

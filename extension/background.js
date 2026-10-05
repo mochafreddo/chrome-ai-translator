@@ -305,6 +305,7 @@ function getInlineContentScriptFiles() {
     'inline-block.js',
     'inline-diagnostics-protocol.js',
     'inline-translation-session.js',
+    'inline-viewport.js',
     'inline-translation-controls.js',
     'markdown-entries.js',
     'markdown-document.js',

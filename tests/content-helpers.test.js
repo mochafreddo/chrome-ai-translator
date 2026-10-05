@@ -43,6 +43,7 @@ exports.name = 'content helpers';
 
 function withFakeViewportDom(fn, options = {}) {
   const previous = {
+    MutationObserver: global.MutationObserver,
     chrome: global.chrome,
     clearTimeout: global.clearTimeout,
     document: global.document,
@@ -95,8 +96,10 @@ function withFakeViewportDom(fn, options = {}) {
     };
   }
 
+  global.MutationObserver = class { observe() {} disconnect() {} };
   global.HTMLElement = FakeElement;
   global.window = {
+    addEventListener() {}, removeEventListener() {},
     innerWidth: 500,
     innerHeight: 300,
     getComputedStyle() {
@@ -121,6 +124,7 @@ function withFakeViewportDom(fn, options = {}) {
   if ('setTimeout' in options) global.setTimeout = options.setTimeout;
 
   const restore = () => {
+    global.MutationObserver = previous.MutationObserver;
     global.chrome = previous.chrome;
     global.clearTimeout = previous.clearTimeout;
     global.document = previous.document;
@@ -197,6 +201,17 @@ function holdInlineSettings() {
 // Drive the production controls, scan, and Chrome request caller with the codec's DOM
 // fixture. Only browser services are substituted; responses stay pending across controls.
 async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
+  const timers = new Map();
+  let nextTimer = 0;
+  function advanceScans() {
+    const tasks = [...timers.values()];
+    timers.clear();
+    for (const task of tasks) task();
+  }
+  function rescan(state) {
+    state.viewport.scanner.rescan();
+    advanceScans();
+  }
   return withFakeViewportDom(async () => {
     const fixture = createReasoningFixture();
     const { document, block } = fixture;
@@ -205,17 +220,22 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
     const pending = [];
     let warming = true;
     const previousObserver = global.MutationObserver;
+    const observers = new Set();
+    const viewportListeners = new Map();
     global.MutationObserver = class {
-      observe() {}
-      disconnect() {}
+      observe() { observers.add(this); }
+      disconnect() { observers.delete(this); }
     };
     global.document = document;
     global.HTMLElement = block.constructor;
     document.querySelector = () => document.body;
     document.documentElement = { clientWidth: 0, clientHeight: 0 };
     document.createRange = () => { throw new Error('range unavailable'); };
-    global.window.addEventListener = () => {};
-    global.window.removeEventListener = () => {};
+    global.window.addEventListener = (type, listener) => {
+      if (!viewportListeners.has(type)) viewportListeners.set(type, new Set());
+      viewportListeners.get(type).add(listener);
+    };
+    global.window.removeEventListener = (type, listener) => viewportListeners.get(type)?.delete(listener);
     global.chrome = { runtime: { sendMessage(message) {
       messages.push(message);
       if (message.type === 'GET_SETTINGS') {
@@ -271,16 +291,19 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
       if (headroom !== null) assert.match(state.session.progress().reason, /malformed or incomplete/);
       warming = false;
       document.body.replaceChildren(block);
-      helpers.runInlineViewportScan(state);
+      rescan(state);
       await flushMicrotasks();
       assert.equal(pending.length, 1, 'the original Semantic Block request is admitted');
-      await fn({ ...fixture, state, messages, pending, instruct, paragraph, recordCost });
+      await fn({ ...fixture, state, messages, pending, instruct, paragraph, recordCost, rescan, advanceScans, timers, observers, viewportListeners });
     } finally {
-      helpers.detachInlineViewportWatchers(state);
+      state.viewport.scanner.stop();
       if (previousObserver === undefined) delete global.MutationObserver;
       else global.MutationObserver = previousObserver;
     }
-  }, { setTimeout: () => 1, clearTimeout: () => {} });
+  }, {
+    setTimeout(task) { const id = ++nextTimer; timers.set(id, task); return id; },
+    clearTimeout(id) { timers.delete(id); },
+  });
 }
 
 exports.tests = [
@@ -469,10 +492,16 @@ exports.tests = [
   {
     name: 'an active Start rescans and keeps its submitted Semantic Block response eligible',
     async fn() {
-      await withInlineRequestLifecycle(async ({ state, block, pending, instruct }) => {
+      await withInlineRequestLifecycle(async ({ state, block, pending, instruct, document, paragraph, recordCost, advanceScans, timers }) => {
         const settings = holdInlineSettings();
+        document.body.appendChild(paragraph(recordCost));
         await instruct('startInlineTranslation');
         assert.equal(settings.length, 0);
+        assert.equal(timers.size, 1);
+        assert.equal(pending.length, 1);
+        advanceScans();
+        await flushMicrotasks();
+        assert.equal(pending.length, 2);
         const request = pending[0];
         request.resolve({ ok: true, results: [{
           id: request.message.records[0].id, disposition: 'apply', attemptCount: 1,
@@ -481,10 +510,38 @@ exports.tests = [
         await flushMicrotasks(256);
         assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
         assert.equal(state.session.progress().counts.translated, 1);
-        assert.equal(pending.length, 1);
+        assert.equal(pending.length, 2);
       });
     },
   },
+  ...['stopInlineTranslation', 'restoreInlineOriginal', 'replace'].map((control) => ({
+    name: `content ${control} closes the scanner before the next operation`,
+    async fn() {
+      await withInlineRequestLifecycle(async ({ state, instruct, timers, observers, viewportListeners, pending }) => {
+        assert.equal(observers.size, 1);
+        for (const listeners of viewportListeners.values()) assert.equal(listeners.size, 1);
+        await instruct('startInlineTranslation');
+        assert.equal(timers.size, 1);
+        const lateScan = [...timers.values()][0];
+        const lateChange = [...viewportListeners.get('scroll')][0];
+        if (control === 'replace') helpers.beginInlineTranslationOperation(state, {});
+        else await instruct(control);
+        assert.equal(timers.size, 0);
+        assert.equal(observers.size, 0);
+        for (const listeners of viewportListeners.values()) assert.equal(listeners.size, 0);
+        const progress = state.session.progress();
+        lateScan(); lateChange();
+        await flushMicrotasks();
+        assert.equal(pending.length, 1);
+        assert.deepEqual(state.session.progress(), progress);
+        if (control !== 'replace') {
+          await instruct('startInlineTranslation');
+          assert.equal(observers.size, 1);
+          for (const listeners of viewportListeners.values()) assert.equal(listeners.size, 1);
+        }
+      });
+    },
+  })),
   ...[
     { name: 'current one-attempt response', attemptCount: 1, controls: [] },
     { name: 'current repaired response', attemptCount: 2, controls: [] },
@@ -499,7 +556,7 @@ exports.tests = [
   ].map(({ name, attemptCount, controls, headroom = 2 }) => ({
     name: `settles Session Budget through controls: ${name}`,
     async fn() {
-      await withInlineRequestLifecycle(async ({ block, strong, link, document, state, messages, pending, instruct, paragraph, recordCost }) => {
+      await withInlineRequestLifecycle(async ({ block, strong, link, document, state, messages, pending, instruct, paragraph, recordCost, rescan }) => {
         const originalText = block.textContent;
         const originalChildren = [...block.childNodes];
         const request = pending[0];
@@ -541,7 +598,7 @@ exports.tests = [
         if (state.session.status !== 'active') await instruct('startInlineTranslation');
         const next = paragraph(recordCost);
         document.body.appendChild(next);
-        helpers.runInlineViewportScan(state);
+        rescan(state);
         await flushMicrotasks(32);
         if (headroom <= attemptCount) {
           assert.equal(pending.length, 1, 'reported repair must refuse the next request');
@@ -550,7 +607,7 @@ exports.tests = [
           assert.equal(pending.length, 2, 'only reported attempts consume the remaining room');
           // Its initial charge must consume the remaining room, even before a response.
           document.body.appendChild(paragraph(recordCost));
-          helpers.runInlineViewportScan(state);
+          rescan(state);
           await flushMicrotasks();
           assert.equal(pending.length, 2, 'initial requests are charged at assembly');
         }
@@ -560,7 +617,7 @@ exports.tests = [
   {
     name: 'settles only originating records once despite duplicate and unrelated repair results',
     async fn() {
-      await withInlineRequestLifecycle(async ({ document, state, pending, paragraph, recordCost }) => {
+      await withInlineRequestLifecycle(async ({ document, state, pending, paragraph, recordCost, rescan }) => {
         const request = pending[0];
         const { id } = request.message.records[0];
         const repaired = { id, disposition: 'reject', terminalCode: 'protocol.invalid_json', attemptCount: 2 };
@@ -569,11 +626,11 @@ exports.tests = [
         ] });
         await flushMicrotasks(32);
         document.body.appendChild(paragraph(recordCost));
-        helpers.runInlineViewportScan(state);
+        rescan(state);
         await flushMicrotasks();
         assert.equal(pending.length, 2, 'one reported repair leaves room for one more record');
         document.body.appendChild(paragraph(recordCost));
-        helpers.runInlineViewportScan(state);
+        rescan(state);
         await flushMicrotasks();
         assert.equal(pending.length, 2, 'the matching rejected repair still costs one attempt');
       }, { headroom: 3 });
@@ -582,7 +639,7 @@ exports.tests = [
   ...['request error', 'unsuccessful batch', 'missing results'].map((failure) => ({
     name: `retains initial Session Budget through the request caller after ${failure}`,
     async fn() {
-      await withInlineRequestLifecycle(async ({ block, document, state, pending, instruct, paragraph, recordCost }) => {
+      await withInlineRequestLifecycle(async ({ block, document, state, pending, instruct, paragraph, recordCost, rescan }) => {
         if (failure === 'request error') pending[0].reject(new Error('synthetic transport failure'));
         else pending[0].resolve(failure === 'unsuccessful batch'
           ? { ok: false, results: [{ id: pending[0].message.records[0].id, attemptCount: 2 }] }
@@ -594,11 +651,11 @@ exports.tests = [
         await instruct('restoreInlineOriginal');
         await instruct('startInlineTranslation');
         document.body.appendChild(paragraph(recordCost));
-        helpers.runInlineViewportScan(state);
+        rescan(state);
         await flushMicrotasks();
         assert.equal(pending.length, 2, 'failure retains the initial cost without guessing a repair');
         document.body.appendChild(paragraph(recordCost));
-        helpers.runInlineViewportScan(state);
+        rescan(state);
         await flushMicrotasks();
         assert.equal(pending.length, 2, 'the failed request is not refunded');
       }, { headroom: 2 });
@@ -681,49 +738,9 @@ exports.tests = [
           await instruct('startInlineTranslation', fresh);
           assert.equal(pending.length, 2, 'a fresh content-side lifetime admits the same page');
         } finally {
-          helpers.detachInlineViewportWatchers(fresh);
+          fresh.viewport.scanner.stop();
         }
       }, { headroom: 2 });
-    },
-  },
-  {
-    name: 'detects excluded inline code tags',
-    fn() {
-      assert.equal(helpers.isInlineTranslationExcludedTag('CODE'), true);
-      assert.equal(helpers.isInlineTranslationExcludedTag('nav'), true);
-      assert.equal(helpers.isInlineTranslationExcludedTag('footer'), true);
-      assert.equal(helpers.isInlineTranslationExcludedTag('button'), true);
-      assert.equal(helpers.isInlineTranslationExcludedTag('header'), false);
-      assert.equal(helpers.isInlineTranslationExcludedTag('aside'), false);
-      assert.equal(helpers.isInlineTranslationExcludedTag('p'), false);
-    },
-  },
-  {
-    name: 'detects excluded inline page chrome roles',
-    fn() {
-      const elementWithRole = (role) => ({
-        tagName: 'DIV',
-        getAttribute(name) {
-          return name === 'role' ? role : null;
-        },
-      });
-
-      assert.equal(
-        helpers.isInlineTranslationExcludedElement(
-          elementWithRole('navigation')
-        ),
-        true
-      );
-      assert.equal(
-        helpers.isInlineTranslationExcludedElement(
-          elementWithRole('complementary')
-        ),
-        true
-      );
-      assert.equal(
-        helpers.isInlineTranslationExcludedElement(elementWithRole('main')),
-        false
-      );
     },
   },
   {
@@ -1187,369 +1204,11 @@ exports.tests = [
     },
   },
   {
-    name: 'detects text rects inside viewport with prefetch margin',
-    fn() {
-      const viewport = { width: 1000, height: 800 };
-
-      assert.equal(
-        helpers.isInlineRectInViewport(
-          { top: 100, bottom: 140, left: 10, right: 700 },
-          viewport
-        ),
-        true
-      );
-      assert.equal(
-        helpers.isInlineRectInViewport(
-          { top: 1000, bottom: 1040, left: 10, right: 700 },
-          viewport
-        ),
-        true
-      );
-      assert.equal(
-        helpers.isInlineRectInViewport(
-          { top: 1300, bottom: 1340, left: 10, right: 700 },
-          viewport
-        ),
-        false
-      );
-      assert.equal(
-        helpers.isInlineRectInViewport(
-          { top: 100, bottom: 140, left: 1100, right: 1200 },
-          viewport
-        ),
-        false
-      );
-    },
-  },
-  {
-    name: 'includes body and scrollable ancestors in viewport scroll targets',
-    fn() {
-      withFakeViewportDom(({ FakeElement }) => {
-        function makeEventTarget(el) {
-          return Object.assign(el, {
-            addEventListener() {},
-            removeEventListener() {},
-          });
-        }
-
-        makeEventTarget(global.window);
-        makeEventTarget(global.document);
-
-        const root = makeEventTarget(new FakeElement([]));
-        const scrollContainer = makeEventTarget(new FakeElement([root]));
-        scrollContainer.clientHeight = 300;
-        scrollContainer.scrollHeight = 900;
-        scrollContainer.overflowY = 'auto';
-
-        const body = makeEventTarget(new FakeElement([scrollContainer]));
-        body.tagName = 'BODY';
-        body.clientHeight = 577;
-        body.scrollHeight = 13648;
-        body.overflowY = 'auto';
-
-        const html = makeEventTarget(new FakeElement([body]));
-        html.tagName = 'HTML';
-        html.clientHeight = 577;
-        html.scrollHeight = 577;
-        body.parentElement = html;
-
-        global.document.body = body;
-        global.document.documentElement = html;
-        global.document.scrollingElement = html;
-        global.window.getComputedStyle = (el) => ({
-          display: 'block',
-          visibility: 'visible',
-          opacity: '1',
-          overflow: el.overflowY || 'visible',
-          overflowY: el.overflowY || 'visible',
-        });
-
-        const targets = helpers.getInlineViewportScrollTargets(root);
-
-        assert.equal(targets.includes(global.window), true);
-        assert.equal(targets.includes(global.document), true);
-        assert.equal(targets.includes(html), true);
-        assert.equal(targets.includes(body), true);
-        assert.equal(targets.includes(scrollContainer), true);
-      });
-    },
-  },
-  {
-    // The viewport-change listener stopped being one module-level function when the scan it
-    // schedules became a scan of a particular state's store, so it is now made per attach
-    // and kept on that store. That is the only reason detaching can take off the same
-    // reference attaching put on: a listener rebuilt at detach time is a different function
-    // and `removeEventListener` would silently keep the old one, leaving a dead store's
-    // scans firing for the life of the page. Asserting the identity is what catches that —
-    // counting calls would not, because a removal aimed at the wrong reference removes
-    // nothing and throws nothing.
-    name: 'takes off the viewport-change listener it put on',
-    fn() {
-      const previousMutationObserver = global.MutationObserver;
-      const observed = [];
-      let disconnected = 0;
-
-      global.MutationObserver = class {
-        constructor(listener) {
-          this.listener = listener;
-        }
-        observe(root, options) {
-          observed.push({ root, options, listener: this.listener });
-        }
-        disconnect() {
-          disconnected += 1;
-        }
-      };
-
-      try {
-        withFakeViewportDom(({ FakeElement }) => {
-          // Every target records what was added and removed against it, so a removal aimed
-          // at the wrong reference reads as a listener that was never taken off rather than
-          // as an error.
-          const record = (target) => {
-            target.added = [];
-            target.removed = [];
-            target.addEventListener = (type, listener) =>
-              target.added.push({ type, listener });
-            target.removeEventListener = (type, listener) =>
-              target.removed.push({ type, listener });
-            return target;
-          };
-
-          const root = record(new FakeElement([]));
-          const scrollTarget = record(new FakeElement([]));
-          scrollTarget.clientHeight = 300;
-          scrollTarget.scrollHeight = 900;
-          scrollTarget.overflowY = 'auto';
-          root.parentElement = scrollTarget;
-
-          record(global.window);
-          global.window.getComputedStyle = (el) => ({
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-            overflow: el?.overflowY || 'visible',
-            overflowY: el?.overflowY || 'visible',
-          });
-          global.document.scrollingElement = null;
-          global.document.body = null;
-
-          const state = createActiveInlineTranslationState();
-          const store = state.viewport;
-
-          helpers.attachInlineViewportWatchers(root, state);
-
-          const listener = store.viewportChangeListener;
-          assert.equal(typeof listener, 'function');
-          assert.deepEqual(store.scrollTargets, [global.window, scrollTarget]);
-          assert.deepEqual(scrollTarget.added, [{ type: 'scroll', listener }]);
-          assert.deepEqual(global.window.added, [
-            { type: 'scroll', listener },
-            { type: 'resize', listener },
-          ]);
-          assert.equal(observed.length, 1);
-          assert.equal(observed[0].root, root);
-          assert.equal(observed[0].listener, listener);
-
-          helpers.detachInlineViewportWatchers(state);
-
-          assert.deepEqual(scrollTarget.removed, [{ type: 'scroll', listener }]);
-          assert.deepEqual(global.window.removed, [
-            { type: 'scroll', listener },
-            { type: 'resize', listener },
-          ]);
-          assert.equal(disconnected, 1);
-          // Nothing is left for a later detach to aim at, so the store cannot hand a stale
-          // listener to whatever attaches next.
-          assert.equal(store.viewportChangeListener, null);
-          assert.deepEqual(store.scrollTargets, []);
-          assert.equal(store.observer, null);
-
-          helpers.detachInlineViewportWatchers(state);
-
-          assert.equal(scrollTarget.removed.length, 1);
-          assert.equal(global.window.removed.length, 2);
-          assert.equal(disconnected, 1);
-        });
-      } finally {
-        if (previousMutationObserver === undefined) delete global.MutationObserver;
-        else global.MutationObserver = previousMutationObserver;
-      }
-    },
-  },
-  {
-    name: 'schedules another viewport scan when the scan budget is exhausted',
-    fn() {
-      let timerCalls = 0;
-
-      withFakeViewportDom(({ FakeElement, text }) => {
-        const nodes = Array.from({ length: 1201 }, (_item, index) =>
-          text(`Visible article sentence ${index + 1}.`)
-        );
-        const root = new FakeElement(nodes);
-        const state = createActiveInlineTranslationState();
-        const store = state.viewport;
-        store.root = root;
-
-        helpers.runInlineViewportScan(state);
-
-        assert.equal(store.scanStartIndex, 1200);
-        assert.equal(timerCalls, 1);
-      }, {
-        chrome: {
-          runtime: {
-            sendMessage() {
-              return new Promise(() => {});
-            },
-          },
-        },
-        clearTimeout() {},
-        setTimeout() {
-          timerCalls += 1;
-          return 123;
-        },
-      });
-    },
-  },
-  {
-    // The scan position is the reason a long page finishes at all: a scan that runs out of
-    // budget must record where it stopped, or every later scan re-inspects the same head of
-    // the page and the tail is never reached. `docs/design/inline-restore-cache-design.md`
-    // is where the rule is written down.
-    name: 'resumes a Semantic Block scan where the previous one ran out of budget',
-    fn() {
-      const previous = {
-        document: global.document,
-        HTMLElement: global.HTMLElement,
-        window: global.window,
-      };
-      const { document, element, text } = createTestDocument();
-      const root = element('div');
-      const sentences = [
-        'First article sentence.',
-        'Second article sentence.',
-        'Third article sentence.',
-      ];
-      for (const sentence of sentences) {
-        root.appendChild(element('p', text(sentence)));
-      }
-      document.body.appendChild(root);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => {
-        throw new Error('range unavailable');
-      };
-      global.document = document;
-      global.HTMLElement = root.constructor;
-      global.window = {
-        innerWidth: 500,
-        innerHeight: 300,
-        getComputedStyle() {
-          return {
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-          };
-        },
-      };
-
-      try {
-        const state = createActiveInlineTranslationState();
-        const store = state.viewport;
-
-        const first = helpers.collectVisibleInlineBlocks(root, state, 2);
-        assert.deepEqual(
-          first.map((record) => record.template),
-          [sentences[0], sentences[1]]
-        );
-        assert.equal(store.scanStartIndex, 2);
-
-        const second = helpers.collectVisibleInlineBlocks(root, state, 2);
-        assert.deepEqual(
-          second.map((record) => record.template),
-          [sentences[2]]
-        );
-        // Nothing was left unread, so the next scan starts from the top again.
-        assert.equal(store.scanStartIndex, 0);
-      } finally {
-        global.document = previous.document;
-        global.HTMLElement = previous.HTMLElement;
-        global.window = previous.window;
-      }
-    },
-  },
-  {
-    // The scan budget is spent on text nodes, but it is only reached by nodes whose
-    // ancestors survived the element-level offscreen check. Without that pruning the
-    // budget goes on content the reader cannot see, and the blocks in front of them are
-    // never queued — the failure looks like Inline Translation doing nothing at all.
-    name: 'does not let offscreen blocks exhaust the Semantic Block scan budget',
-    fn() {
-      const previous = {
-        document: global.document,
-        HTMLElement: global.HTMLElement,
-        window: global.window,
-      };
-      const { document, element, text } = createTestDocument();
-      const offscreen = ['Far above one.', 'Far above two.', 'Far above three.'].map(
-        (sentence) => element('p', text(sentence))
-      );
-      const visible = element('p', text('The paragraph the reader is looking at.'));
-      const root = element('div');
-      for (const paragraph of [...offscreen, visible]) root.appendChild(paragraph);
-      document.body.appendChild(root);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => {
-        throw new Error('range unavailable');
-      };
-      const offscreenRect = {
-        top: -1000,
-        bottom: -976,
-        left: 10,
-        right: 300,
-        width: 290,
-        height: 24,
-      };
-      for (const paragraph of offscreen) paragraph.rect = offscreenRect;
-      root.rect = { top: 0, bottom: 900, left: 10, right: 300, width: 290, height: 900 };
-      global.document = document;
-      global.HTMLElement = root.constructor;
-      global.window = {
-        innerWidth: 500,
-        innerHeight: 300,
-        getComputedStyle() {
-          return {
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-          };
-        },
-      };
-
-      try {
-        const state = createActiveInlineTranslationState();
-        const store = state.viewport;
-
-        // A budget of one: it has to survive three offscreen paragraphs to be spent on the
-        // visible one.
-        const queued = helpers.collectVisibleInlineBlocks(root, state, 1);
-
-        assert.deepEqual(
-          queued.map((record) => record.template),
-          ['The paragraph the reader is looking at.']
-        );
-        assert.equal(store.scanStartIndex, 0);
-      } finally {
-        global.document = previous.document;
-        global.HTMLElement = previous.HTMLElement;
-        global.window = previous.window;
-      }
-    },
-  },
-  {
     name: 'drains semantic block page-change retries through the runtime loop',
     async fn() {
       const state = createActiveInlineTranslationState();
       const previous = {
+        MutationObserver: global.MutationObserver,
         chrome: global.chrome,
         document: global.document,
         HTMLElement: global.HTMLElement,
@@ -1566,7 +1225,9 @@ exports.tests = [
       };
       global.document = fixture.document;
       global.HTMLElement = fixture.block.constructor;
+      global.MutationObserver = class { observe() {} disconnect() {} };
       global.window = {
+        addEventListener() {}, removeEventListener() {},
         innerWidth: 500,
         innerHeight: 300,
         getComputedStyle() {
@@ -1603,10 +1264,7 @@ exports.tests = [
       };
 
       try {
-        const store = state.viewport;
-        store.root = fixture.block;
-
-        helpers.runInlineViewportScan(state);
+        state.viewport.scanner.start(fixture.block);
         await flushMicrotasks(16);
 
         const translationCalls = calls.filter(
@@ -1633,6 +1291,8 @@ exports.tests = [
           failed: 0,
         });
       } finally {
+        state.viewport.scanner.stop();
+        global.MutationObserver = previous.MutationObserver;
         global.chrome = previous.chrome;
         global.document = previous.document;
         global.HTMLElement = previous.HTMLElement;
@@ -1786,8 +1446,7 @@ exports.tests = [
         document.createRange = () => { throw new Error('range unavailable'); };
         global.document = document;
         global.HTMLElement = block.constructor;
-        run.state.viewport.root = block;
-        helpers.runInlineViewportScan(run.state);
+        run.state.viewport.scanner.start(block);
         await flushMicrotasks();
         assert.equal(run.requests.length, 1, 'the scanner sends its local preflight rejection');
         assert.equal(run.requests[0].message.diagnostics[0].code, 'runtime.unsupported_block');
@@ -2087,463 +1746,5 @@ exports.tests = [
       );
     },
   },
-  {
-    name: 'selects the nearest supported semantic block',
-    fn() {
-      const { block, strong } = createReasoningFixture();
 
-      assert.equal(
-        helpers.findInlineSemanticBlock(strong.childNodes[0], block),
-        block
-      );
-    },
-  },
-  {
-    name: 'collects data-as paragraphs once and preserves inline elements through apply and restore',
-    fn() {
-      const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
-      const { document, element, text } = createTestDocument();
-      const link = element('a', text('the guide'));
-      link.setAttribute('href', '/guide');
-      const emphasis = element('em', text('carefully'));
-      const code = element('code', text('/advisor'));
-      const block = element('span', text('Read '), link, text(' '), emphasis, text(' before using '), code, text('.'));
-      block.setAttribute('data-as', 'p');
-      const root = element('div', block);
-      document.body.appendChild(root);
-      const original = [...block.childNodes];
-      const originalText = block.textContent;
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => { throw new Error('range unavailable'); };
-      global.document = document;
-      global.HTMLElement = block.constructor;
-      global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
-      try {
-        const state = createActiveInlineTranslationState();
-        const records = helpers.collectVisibleInlineBlocks(root, state);
-        assert.equal(records.length, 1);
-        const [record] = records;
-        assert.deepEqual(helpers.collectVisibleInlineBlocks(root, state), []);
-        assert.equal(state.session.progress().counts.pending, 1);
-        const [anchor, em, atom] = record.contract.entries;
-        const translated = `${atom.token} 사용 전에 ${em.openToken}주의 깊게${em.closeToken} ${anchor.openToken}안내서${anchor.closeToken}를 읽으세요.`;
-        state.session.settle(state.session.takeBatch(), { ok: true, results: [{ id: record.id, disposition: 'apply', template: translated }] });
-        assert.equal(state.session.progress().counts.translated, 1);
-        assert.equal(block.textContent, '/advisor 사용 전에 주의 깊게 안내서를 읽으세요.');
-        assert.equal(block.childNodes[0], code);
-        assert.equal(link.parentNode, block);
-        assert.equal(emphasis.parentNode, block);
-        assert.equal(link.getAttribute('href'), '/guide');
-        assert.equal(block.getAttribute('data-as'), 'p');
-        state.session.restore();
-        assert.deepEqual(block.childNodes, original);
-        assert.equal(block.textContent, originalText);
-      } finally {
-        Object.assign(global, previous);
-      }
-    },
-  },
-  {
-    name: 'keeps data-as paragraph scope and existing local preflight rejections',
-    fn() {
-      const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
-      const { document, element, text } = createTestDocument();
-      const paragraph = (...children) => {
-        const node = element('span', ...children);
-        node.setAttribute('data-as', 'p');
-        return node;
-      };
-      const ordinary = element('p', text('An ordinary paragraph stays supported.'));
-      const unsupported = [element('div', text('Not a paragraph.')), element('span', text('Not a paragraph.'))];
-      for (const [tag, value] of [['div', 'p'], ['span', 'div'], ['span', 'P'], ['span', ' p ']]) {
-        const node = element(tag, text('Not a supported paragraph marker.'));
-        node.setAttribute('data-as', value);
-        unsupported.push(node);
-      }
-      const hidden = element('span', text('Hidden prose must not be sent.'));
-      hidden.hidden = true;
-      const editor = element('span', text('Editable prose must not be sent.'));
-      editor.setAttribute('contenteditable', 'true');
-      const rejected = [hidden, element('button', text('Press me')), editor].map(child =>
-        paragraph(text('Visible prose before the child. '), child));
-      const inner = paragraph(text('Inner paragraph has its own owner.'));
-      const outer = paragraph(text('Outer prose cannot absorb an inner paragraph. '), inner);
-      const root = element('div', ordinary, ...unsupported, ...rejected, outer);
-      document.body.appendChild(root);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => { throw new Error('range unavailable'); };
-      global.document = document;
-      global.HTMLElement = root.constructor;
-      global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
-      try {
-        const state = createActiveInlineTranslationState();
-        helpers.collectVisibleInlineBlocks(root, state);
-        helpers.collectVisibleInlineBlocks(root, state);
-        assert.deepEqual(state.session.takeBatch().map(record => record.template), ['An ordinary paragraph stays supported.', 'Inner paragraph has its own owner.']);
-        assert.deepEqual(state.session.progress().counts, { translated: 0, partial: 0, pending: 2, changed: 0, failed: 4 });
-        assert.deepEqual(state.session.outbox.map(item => item.localRejection), [
-          { reason: 'hidden_content', tag: 'SPAN' },
-          { reason: 'interactive_content', tag: 'BUTTON' },
-          { reason: 'editable_content', tag: 'SPAN' },
-          { reason: 'nested_semantic_block', tag: 'SPAN' },
-        ]);
-      } finally {
-        Object.assign(global, previous);
-      }
-    },
-  },
-  {
-    name: 'rejects overlapping data-as paragraphs inside protected links and code atoms',
-    fn() {
-      const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
-      try {
-        for (const tag of ['a', 'code', 'kbd', 'samp']) {
-          const { document, element, text } = createTestDocument();
-          const inner = element('span', text('Responses API'));
-          inner.setAttribute('data-as', 'p');
-          const atom = element(tag, inner);
-          if (tag === 'a') atom.setAttribute('href', '/docs');
-          const outer = element('p', text('Read this documentation: '), atom);
-          document.body.appendChild(outer);
-          const original = [...outer.childNodes];
-          const originalText = outer.textContent;
-          document.documentElement = { clientWidth: 0, clientHeight: 0 };
-          document.createRange = () => { throw new Error('range unavailable'); };
-          global.document = document;
-          global.HTMLElement = outer.constructor;
-          global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
-          const state = createActiveInlineTranslationState();
-          helpers.collectVisibleInlineBlocks(outer, state);
-          helpers.collectVisibleInlineBlocks(outer, state);
-          assert.equal(state.session.progress().counts.failed, 1, tag);
-          assert.deepEqual(state.session.outbox.map(item => item.localRejection), [
-            { reason: 'nested_semantic_block', tag: 'SPAN' },
-          ], tag);
-          const batch = state.session.takeBatch();
-          assert.deepEqual(batch.map(record => record.template), tag === 'a' ? ['Responses API'] : [], tag);
-          if (tag === 'a') {
-            const [record] = batch;
-            state.session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: '응답 API' }] });
-            assert.equal(state.session.progress().counts.translated, 1);
-            assert.equal(outer.textContent, 'Read this documentation: 응답 API');
-            state.session.restore();
-            assert.equal(atom.getAttribute('href'), '/docs');
-          }
-          assert.deepEqual(outer.childNodes, original);
-          assert.equal(atom.childNodes[0], inner);
-          assert.equal(outer.textContent, originalText);
-        }
-      } finally {
-        Object.assign(global, previous);
-      }
-    },
-  },
-  {
-    name: 'collects a heading with a local permalink and restores its exact graph',
-    fn() {
-      const previous = { document: global.document, HTMLElement: global.HTMLElement, window: global.window };
-      const { document, element, text } = createTestDocument();
-      const link = element('a', text('\u200b'), element('svg', element('path')));
-      link.setAttribute('href', '#heading');
-      link.setAttribute('aria-label', 'Link to this heading');
-      const control = element('div', link);
-      control.rect = { top: 20, bottom: 44, left: 10, right: 10, width: 0, height: 24 };
-      const emphasis = element('em', text('advisor'));
-      const proseLink = element('a', text('guide'));
-      proseLink.setAttribute('href', '/guide');
-      const block = element('h2', control, text('Use the '), emphasis, text(' '), proseLink);
-      block.setAttribute('id', 'heading');
-      const original = [...block.childNodes];
-      const originalText = block.textContent;
-      document.body.appendChild(block);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => { throw new Error('range unavailable'); };
-      global.document = document;
-      global.HTMLElement = block.constructor;
-      global.window = { innerWidth: 500, innerHeight: 300, getComputedStyle: document.defaultView.getComputedStyle };
-      try {
-        const state = createActiveInlineTranslationState();
-        const records = helpers.collectVisibleInlineBlocks(block, state);
-        assert.equal(records.length, 1);
-        const [record] = records;
-        const request = JSON.stringify({ template: record.template, atoms: record.atoms, contract: record.contract });
-        for (const local of ['Link to this heading', '#heading', '\u200b', 'DIV', 'SVG']) {
-          assert.equal(request.includes(local), false, local);
-        }
-        const [em, anchor] = record.contract.entries;
-        assert.equal(em.tagName, 'EM');
-        assert.equal(anchor.tagName, 'A');
-        const translated = `${anchor.openToken}안내${anchor.closeToken}: ${em.openToken}조언자${em.closeToken} 사용`;
-        state.session.settle(state.session.takeBatch(), { ok: true, results: [{ id: record.id, disposition: 'apply', template: translated }] });
-        assert.equal(block.childNodes[0], control);
-        assert.equal(control.childNodes[0], link);
-        assert.equal(link.getAttribute('href'), '#heading');
-        assert.equal(link.getAttribute('aria-label'), 'Link to this heading');
-        assert.equal(block.childNodes[1], proseLink);
-        state.session.restore();
-        assert.deepEqual(block.childNodes, original);
-        assert.equal(block.textContent, originalText);
-        assert.equal(control.childNodes[0], link);
-      } finally {
-        Object.assign(global, previous);
-      }
-    },
-  },
-  {
-    name: 'uses short prose around inline code to discover a block',
-    fn() {
-      const previous = {
-        document: global.document,
-        HTMLElement: global.HTMLElement,
-        window: global.window,
-      };
-      const { document, element, text } = createTestDocument();
-      const code = element('code', text('x'));
-      const block = element('p', text('Run '), code, text('.'));
-      document.body.appendChild(block);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => {
-        throw new Error('range unavailable');
-      };
-      global.document = document;
-      global.HTMLElement = block.constructor;
-      global.window = {
-        innerWidth: 500,
-        innerHeight: 300,
-        getComputedStyle() {
-          return {
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-          };
-        },
-      };
-
-      try {
-        const state = createActiveInlineTranslationState();
-        const queued = helpers.collectVisibleInlineBlocks(block, state);
-
-        assert.equal(queued.length, 1);
-        assert.equal(state.session.progress().counts.pending, 1);
-        assert.equal(state.session.takeBatch()[0].atoms[0].label, 'x');
-      } finally {
-        global.document = previous.document;
-        global.HTMLElement = previous.HTMLElement;
-        global.window = previous.window;
-      }
-    },
-  },
-  {
-    name: 'skips a code-like block on the scan the reader actually triggers',
-    fn() {
-      // The identity assertion above binds the exported predicate. This one binds the other
-      // end: the scan that walks the page. Without it, a local copy reintroduced inside
-      // shouldSkipInlineBlockCandidateTextNode would leave the suite green while the scanner
-      // and the codec answered differently again.
-      const previous = {
-        document: global.document,
-        HTMLElement: global.HTMLElement,
-        window: global.window,
-      };
-      const { document, element, text } = createTestDocument();
-      const command = element('p', text('npm run build'));
-      const prose = element('p', text('Then reload the extension.'));
-      const root = element('div', command, prose);
-      document.body.appendChild(root);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => {
-        throw new Error('range unavailable');
-      };
-      global.document = document;
-      global.HTMLElement = root.constructor;
-      global.window = {
-        innerWidth: 500,
-        innerHeight: 300,
-        getComputedStyle() {
-          return {
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-          };
-        },
-      };
-
-      try {
-        const state = createActiveInlineTranslationState();
-        const queued = helpers.collectVisibleInlineBlocks(root, state);
-
-        assert.equal(queued.length, 1);
-        assert.equal(queued[0].template, 'Then reload the extension.');
-      } finally {
-        global.document = previous.document;
-        global.HTMLElement = previous.HTMLElement;
-        global.window = previous.window;
-      }
-    },
-  },
-  {
-    name: 'does not collect blocks inside inherited editable regions',
-    fn() {
-      const previous = {
-        document: global.document,
-        HTMLElement: global.HTMLElement,
-        window: global.window,
-      };
-      const { document, element, text } = createTestDocument();
-      const block = element('p', text('Unpublished draft text.'));
-      const editor = element('div', block);
-      editor.setAttribute('contenteditable', 'true');
-      document.body.appendChild(editor);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => {
-        throw new Error('range unavailable');
-      };
-      global.document = document;
-      global.HTMLElement = block.constructor;
-      global.window = {
-        innerWidth: 500,
-        innerHeight: 300,
-        getComputedStyle() {
-          return {
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-          };
-        },
-      };
-
-      try {
-        const state = createActiveInlineTranslationState();
-        const queued = helpers.collectVisibleInlineBlocks(editor, state);
-
-        assert.deepEqual(queued, []);
-        assert.equal(state.session.progress().counts.pending, 0);
-      } finally {
-        global.document = previous.document;
-        global.HTMLElement = previous.HTMLElement;
-        global.window = previous.window;
-      }
-    },
-  },
-  {
-    name: 'collects a disclosure summary separately from its body paragraphs',
-    fn() {
-      const previous = {
-        document: global.document,
-        HTMLElement: global.HTMLElement,
-        window: global.window,
-      };
-      const { document, element, text } = createTestDocument();
-      const summary = element(
-        'summary',
-        text('Disclosure title is its own block.')
-      );
-      const body = element(
-        'p',
-        text('Body paragraph remains a separate block.')
-      );
-      const extra = element('p', text('Second body paragraph stays distinct.'));
-      const disclosure = element('details', summary, body, extra);
-      const heading = element('h2', text('Ordinary heading stays a heading.'));
-      const root = element('div', heading, disclosure);
-      document.body.appendChild(root);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => {
-        throw new Error('range unavailable');
-      };
-      global.document = document;
-      global.HTMLElement = root.constructor;
-      global.window = {
-        innerWidth: 500,
-        innerHeight: 300,
-        getComputedStyle() {
-          return {
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-          };
-        },
-      };
-
-      try {
-        const state = createActiveInlineTranslationState();
-        const queued = helpers.collectVisibleInlineBlocks(root, state);
-
-        assert.equal(queued.length, 4);
-        assert.deepEqual(
-          queued.map((record) => record.template),
-          ['Ordinary heading stays a heading.', 'Disclosure title is its own block.', 'Body paragraph remains a separate block.', 'Second body paragraph stays distinct.']
-        );
-        assert.equal(queued[1].template, 'Disclosure title is its own block.');
-        assert.equal(
-          queued[2].template,
-          'Body paragraph remains a separate block.'
-        );
-      } finally {
-        global.document = previous.document;
-        global.HTMLElement = previous.HTMLElement;
-        global.window = previous.window;
-      }
-    },
-  },
-  {
-    name: 'collects a wrapped disclosure as one enclosing block',
-    fn() {
-      const previous = {
-        document: global.document,
-        HTMLElement: global.HTMLElement,
-        window: global.window,
-      };
-      const { document, element, text } = createTestDocument();
-      const summary = element(
-        'summary',
-        text('Wrapped disclosure title.')
-      );
-      const block = element(
-        'p',
-        summary,
-        text(' Body prose stays in the enclosing block.')
-      );
-      const extra = element('p', text('Sibling paragraph stays distinct.'));
-      const disclosure = element('details', block, extra);
-      const heading = element('h2', text('Ordinary heading stays a heading.'));
-      const root = element('div', heading, disclosure);
-      document.body.appendChild(root);
-      document.documentElement = { clientWidth: 0, clientHeight: 0 };
-      document.createRange = () => {
-        throw new Error('range unavailable');
-      };
-      global.document = document;
-      global.HTMLElement = root.constructor;
-      global.window = {
-        innerWidth: 500,
-        innerHeight: 300,
-        getComputedStyle() {
-          return {
-            display: 'block',
-            visibility: 'visible',
-            opacity: '1',
-          };
-        },
-      };
-
-      try {
-        const state = createActiveInlineTranslationState();
-        const queued = helpers.collectVisibleInlineBlocks(root, state);
-
-        assert.equal(queued.length, 3);
-        assert.equal(queued[0].template, 'Ordinary heading stays a heading.');
-        assert.equal(queued[2].template, 'Sibling paragraph stays distinct.');
-        assert.equal(queued[1].template.includes('Wrapped disclosure title.'), true);
-        assert.equal(
-          queued[1].template.includes('Body prose stays in the enclosing block.'),
-          true
-        );
-      } finally {
-        global.document = previous.document;
-        global.HTMLElement = previous.HTMLElement;
-        global.window = previous.window;
-      }
-    },
-  },
 ];

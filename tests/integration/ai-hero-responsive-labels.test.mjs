@@ -2,10 +2,11 @@
 // It uses the shipped collector and deterministic output at desktop and mobile
 // widths. No key is read and no translation request is made.
 import { readFileSync } from 'node:fs';
+import viewportHarness from '../viewport-harness.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  closeAllBrowsers,
+  browser,
   createChecks,
   launchExtensionBrowser,
   until,
@@ -25,7 +26,7 @@ async function injectInlineTranslation(evaluate) {
     'inline-diagnostics-protocol.js',
     'placeholder-tokens.js',
     'inline-block.js',
-    'inline-translation-session.js',
+    'inline-translation-session.js', 'inline-viewport.js',
     'content.js',
   ]) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
@@ -45,6 +46,7 @@ async function exerciseLabels(page, context, width) {
   );
   await wait(250);
   return page.evaluate(`(async () => {
+    const createViewportProbe = ${viewportHarness.createViewportProbe.toString()};
     const cards = [
         ['/skills-to-spec', 'Previous skill'],
         ['/skills-implement', 'Next skill'],
@@ -87,7 +89,9 @@ async function exerciseLabels(page, context, width) {
         host.appendChild(block);
         const state = createInlineTranslationState();
         beginInlineTranslationOperation(state, {});
-        const records = collectVisibleInlineBlocks(block, state);
+        const viewport = createViewportProbe(state.session);
+        try { viewport.start(block); } finally { viewport.stop(); }
+        const records = viewport.records;
         const [record] = records;
         const responsiveAtom = record?.atoms.find(
           (atom) => atom.kind === 'responsive-label'
@@ -229,7 +233,7 @@ try {
     }`
   );
 } finally {
-  await closeAllBrowsers();
+  await browser(['--session', SESSION, 'close']).catch(() => {});
 }
 
 finish();

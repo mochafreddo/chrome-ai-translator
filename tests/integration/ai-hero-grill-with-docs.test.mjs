@@ -4,10 +4,11 @@
 // `npm run test:integration:ai-hero-grill-with-docs`.
 
 import { readFileSync } from 'node:fs';
+import viewportHarness from '../viewport-harness.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  closeAllBrowsers,
+  browser,
   createChecks,
   launchExtensionBrowser,
   until,
@@ -42,7 +43,7 @@ async function injectInlineTranslation(evaluate) {
     'inline-diagnostics-protocol.js',
     'placeholder-tokens.js',
     'inline-block.js',
-    'inline-translation-session.js',
+    'inline-translation-session.js', 'inline-viewport.js',
     'translation-settings.js',
     'inline-model-execution.js',
     'content.js',
@@ -76,6 +77,7 @@ async function main() {
 
     await injectInlineTranslation(page.evaluate);
     const result = await page.evaluate(`(async () => {
+      const createViewportProbe = ${viewportHarness.createViewportProbe.toString()};
       const originalFetch = window.fetch;
       let modelRequests = 0;
       window.fetch = function patchedFetch(input) {
@@ -96,8 +98,11 @@ async function main() {
         ) {
           window.scrollTo(0, top);
           await new Promise((resolve) => setTimeout(resolve, 75));
-          state.viewport.scanStartIndex = 0;
-          records.push(...collectVisibleInlineBlocks(root, state, 5000));
+          const viewport = createViewportProbe(state.session);
+          try {
+            viewport.start(root);
+            records.push(...viewport.records);
+          } finally { viewport.stop(); }
         }
         window.scrollTo(0, 0);
 
@@ -199,7 +204,7 @@ try {
     }`
   );
 } finally {
-  await closeAllBrowsers();
+  await browser(['--session', SESSION, 'close']).catch(() => {});
 }
 
 finish();

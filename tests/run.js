@@ -11,6 +11,7 @@ const suites = [
   require('./translation-diagnostics.test'),
   require('./inline-diagnostics-controller.test'),
   require('./content-helpers.test'),
+  require('./inline-viewport.test'),
   require('./background-helpers.test'),
   require('./options-helpers.test'),
   require('./sidepanel-failure.test'),

@@ -3,6 +3,7 @@
 // No key is read and no translation request is made. The live heading count is
 // observed, not pinned; markup drift or a missing page fails this check.
 import { readFileSync } from 'node:fs';
+import viewportHarness from '../viewport-harness.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until } from './harness.mjs';
@@ -14,9 +15,10 @@ const PAGE_URL = 'https://code.claude.com/docs/en/advisor';
 const { check, failures, finish } = createChecks('heading permalink');
 
 async function inject(evaluate) {
-  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'content.js']) {
+  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'inline-viewport.js', 'content.js']) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
+  await evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
 }
 
 // Runs in the page, so references never leave the DOM being checked.
@@ -48,7 +50,9 @@ async function exerciseHeadings() {
     link.addEventListener('click', onClick);
     const state = createInlineTranslationState();
     beginInlineTranslationOperation(state, {});
-    const records = collectVisibleInlineBlocks(heading, state);
+    const viewport = createViewportProbe(state.session);
+    try { viewport.start(heading); } finally { viewport.stop(); }
+    const records = viewport.records;
     const [record] = records;
     if (records.length !== 1 || state.session.progress().counts.pending !== 1) {
       results.push({ collected: false, rejection: state.session.outbox.map((item) => item.localRejection) });

@@ -433,6 +433,8 @@ exports.tests = [
         ['inline-block.js', 'inline-translation-session.js', ['page']],
         ['inline-diagnostics-protocol.js', 'inline-translation-session.js', ['page']],
         ['inline-translation-session.js', 'content.js', ['page']],
+        ['inline-block.js', 'inline-viewport.js', ['page']],
+        ['inline-viewport.js', 'content.js', ['page']],
       ];
 
       for (const [shared, reader, runtimes] of dependencies) {
