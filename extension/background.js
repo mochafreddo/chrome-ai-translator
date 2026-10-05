@@ -64,11 +64,11 @@ const translationChunks =
     ? require('./translation-chunks.js')
     : null);
 if (typeof importScripts === 'function') {
-  if (!globalThis.ChromeAiTranslatorValidation) {
-    importScripts('translation-validation.js');
+  if (!globalThis.ChromeAiTranslatorTranslationSettings) {
+    importScripts('translation-settings.js');
   }
-  if (!globalThis.ChromeAiTranslatorPolicy) {
-    importScripts('translation-policy.js');
+  if (!globalThis.ChromeAiTranslatorInlineModelExecution) {
+    importScripts('inline-model-execution.js');
   }
   if (!globalThis.ChromeAiTranslatorButtonVisibility) {
     importScripts('button-visibility.js');
@@ -92,10 +92,10 @@ if (typeof importScripts === 'function') {
     importScripts('default-model.js');
   }
 }
-const translationValidation =
-  globalThis.ChromeAiTranslatorValidation || require('./translation-validation.js');
-const translationPolicy =
-  globalThis.ChromeAiTranslatorPolicy || require('./translation-policy.js');
+const { getToneInstruction, getTargetLanguageCode } =
+  globalThis.ChromeAiTranslatorTranslationSettings || require('./translation-settings.js');
+const inlineModelExecution =
+  globalThis.ChromeAiTranslatorInlineModelExecution || require('./inline-model-execution.js');
 const { ALL_SITES_ORIGINS, BUTTON_VISIBILITY, readButtonVisibility } =
   globalThis.ChromeAiTranslatorButtonVisibility || require('./button-visibility.js');
 const {
@@ -160,17 +160,9 @@ const INLINE_BLOCK_MAX_RECORD_COST = 12000;
 const INLINE_BLOCK_MAX_BATCH_COST = 12000;
 // There is deliberately no session cap here: the Semantic Block session is the content
 // script's, and only it knows when one starts, resets, or resumes. See ADR-0003.
-const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
-const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 const MIN_MAX_OUTPUT_TOKENS = 256;
 const MAX_MAX_OUTPUT_TOKENS = 128000;
-const TONE_INSTRUCTIONS = {
-  technical: 'Use a clear, technical tone suitable for docs.',
-  natural: 'Use natural, fluent tone.',
-  formal: 'Use formal and polite tone.',
-};
-
 function nowIso() {
   return new Date().toISOString();
 }
@@ -564,99 +556,6 @@ function buildInstructions({ targetLanguage, tone }, repair = null) {
   return instructions.join('\n');
 }
 
-function getToneInstruction(tone) {
-  return TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.technical;
-}
-
-function getTargetLanguageCode(targetLanguage) {
-  const normalized = String(targetLanguage || '')
-    .normalize('NFKC')
-    .trim()
-    .replace(/\s+/g, ' ');
-  if (!normalized) return '';
-  if (
-    /^en(?:[-_][a-z0-9]+)*$/i.test(normalized) ||
-    /^english\b/i.test(normalized) ||
-    /^(?:american|british|us|uk|australian|canadian|new zealand) english\b/i.test(
-      normalized
-    ) ||
-    /^(?:(?:미국|영국|호주|캐나다|뉴질랜드)(?:식)?\s*)?(?:영어|영문)(?:\s|$|\()/.test(
-      normalized
-    )
-  ) {
-    return 'en';
-  }
-  if (
-    /^ko(?:[-_][a-z0-9]+)*$/i.test(normalized) ||
-    /^(?:korean|south korean|north korean)\b/i.test(normalized) ||
-    /^(?:한국어|한국말|조선어|조선말)(?:\s|$|\()/.test(normalized)
-  ) {
-    return 'ko';
-  }
-  return '';
-}
-
-function isKoreanTargetLanguage(targetLanguage) {
-  return getTargetLanguageCode(targetLanguage) === 'ko';
-}
-
-function buildBlockInstructions({ targetLanguage, tone }) {
-  const instructions = [
-    `Translate each complete semantic block into ${targetLanguage}.`,
-    getToneInstruction(tone),
-    'Return one translation object for every input record and preserve every id exactly.',
-    'Preserve every token byte-for-byte and emit each token exactly once.',
-    'Translate all source-language prose, including text between wrapper OPEN and CLOSE tokens; wrapper tokens preserve formatting, not wording.',
-    'Use atom labels only as context; atomic visible text remains represented by its token and only atom text marked preserveText may remain unchanged.',
-    'Reorder and rewrite grammar naturally for the target language; source word order is not a constraint, but token parent relationships must not change.',
-    'Never return the source template unchanged or partially copy source-language prose.',
-  ];
-  if (isKoreanTargetLanguage(targetLanguage)) {
-    instructions.push(
-      'For Korean, place a preserved atom before the translated noun phrase when natural. Example: “Reasoning models like [GPT-5.5] use ...” becomes “[GPT-5.5]와 같은 추론 모델은 ...”; write “모델은”, never “모델는”, choose particles from the visible label, and never emit empty example parenthesis.',
-      'For Korean, do not guess a particle after an opaque technical or model atom. Add an appropriate classifier and attach the particle there, such as “[gpt-5.4] 모델을 고려하세요,” never “[gpt-5.4]을 고려하세요,” or rewrite the sentence to avoid a direct particle.'
-    );
-  }
-  instructions.push(
-    'When repair is non-null, redo the translation and correct previousErrorCode.',
-    'Do not output HTML, Markdown, commentary, or any field not required by the schema.'
-  );
-  return instructions.join('\n');
-}
-
-function buildBlockResponseFormat(recordCount) {
-  const count = Number(recordCount);
-  if (!Number.isInteger(count) || count < 1) {
-    throw new Error('Semantic Block response format needs a record count');
-  }
-  return {
-    type: 'json_schema',
-    name: 'inline_block_translations',
-    strict: true,
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        translations: {
-          type: 'array',
-          minItems: count,
-          maxItems: count,
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              id: { type: 'string' },
-              template: { type: 'string' },
-            },
-            required: ['id', 'template'],
-          },
-        },
-      },
-      required: ['translations'],
-    },
-  };
-}
-
 const INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
   'token_missing',
   'token_duplicate',
@@ -722,21 +621,7 @@ function normalizeBlockRepair(repair, recordId) {
   };
 }
 
-function getBlockRecordCost(record) {
-  return (
-    String(record?.template || '').length +
-    JSON.stringify(record?.atoms || []).length +
-    JSON.stringify(record?.repair ?? null).length
-  );
-}
-
-function getBlockBatchMaxOutputTokens(recordCost) {
-  const scaled = Math.ceil((Number(recordCost) || 0) * 1.25);
-  return Math.min(
-    INLINE_BLOCK_MAX_OUTPUT_TOKENS,
-    Math.max(INLINE_BLOCK_MIN_OUTPUT_TOKENS, scaled)
-  );
-}
+const getBlockRecordCost = inlineBlockCodec.getRecordCost;
 
 function normalizeVisibleBlockBatchRecords(records) {
   if (!Array.isArray(records)) {
@@ -1229,111 +1114,14 @@ function createBackgroundWorker(platform = {}) {
       run.describe({ targetLanguageCode: getTargetLanguageCode(settings.targetLanguage) });
       await run.preflight();
 
-      async function requestAndValidate(batch) {
+      const results = await inlineModelExecution.execute(normalized, {
+        model: settings.model,
+        reasoningEffort: settings.reasoningEffort,
+        targetLanguage: settings.targetLanguage,
+        tone: settings.tone,
+      }, (request) => {
         run.modelAttempt();
-        const modelRecords = batch.map((record) => ({
-          id: record.id,
-          template: record.template,
-          atoms: record.atoms,
-          repair: record.repair || null,
-        }));
-        const output = await openaiTranslateChunk({
-          apiKey: settings.apiKey,
-          model: settings.model,
-          reasoningEffort: settings.reasoningEffort,
-          instructions: buildBlockInstructions(settings),
-          input: JSON.stringify({ records: modelRecords }),
-          textFormat: buildBlockResponseFormat(batch.length),
-          maxOutputTokens: getBlockBatchMaxOutputTokens(
-            batch.reduce((sum, record) => sum + getBlockRecordCost(record), 0)
-          ),
-        });
-        return translationValidation.validateBlockResponse(output, batch, {
-          targetLanguage: settings.targetLanguage,
-        }).records;
-      }
-
-      const initial = await requestAndValidate(normalized);
-      const terminalById = new Map();
-      const initialById = new Map(initial.map((result) => [result.id, result]));
-      const repairs = [];
-      for (const result of initial) {
-        const decision = translationPolicy.decideBlockDisposition(result, 1);
-        if (decision.disposition === 'retry') {
-          const source = normalized.find((record) => record.id === result.id);
-          repairs.push({
-            ...source,
-            repair: { attempt: 1, previousErrorCode: decision.terminalCode },
-          });
-        } else {
-          terminalById.set(result.id, {
-            result,
-            decision,
-            attemptCount: 1,
-            timeline: [{
-              stage: 'initial_validation',
-              disposition: decision.disposition,
-              codes: [decision.terminalCode].filter(Boolean),
-            }],
-          });
-        }
-      }
-      if (repairs.length) {
-        try {
-          const repaired = await requestAndValidate(repairs);
-          for (const result of repaired) {
-            const initialResult = initialById.get(result.id);
-            const initialDecision = translationPolicy.decideBlockDisposition(initialResult, 1);
-            const decision = translationPolicy.decideBlockDisposition(result, 2);
-            terminalById.set(result.id, {
-              result,
-              decision,
-              attemptCount: 2,
-              timeline: [
-                { stage: 'initial_validation', disposition: 'retry', codes: [initialDecision.terminalCode].filter(Boolean) },
-                { stage: 'repair_validation', disposition: decision.disposition, codes: [decision.terminalCode].filter(Boolean) },
-              ],
-            });
-          }
-        } catch (error) {
-          const repairCode = String(error?.code || '').startsWith('protocol.')
-            ? error.code
-            : 'runtime.repair_request_failed';
-          for (const repair of repairs) {
-            const initialResult = initialById.get(repair.id);
-            const initialDecision = translationPolicy.decideBlockDisposition(initialResult, 1);
-            terminalById.set(repair.id, {
-              result: initialResult,
-              decision: {
-                disposition: 'reject',
-                terminalCode: repairCode,
-                messageKey: 'repair_request_failed',
-              },
-              attemptCount: 2,
-              timeline: [
-                { stage: 'initial_validation', disposition: 'retry', codes: [initialDecision.terminalCode].filter(Boolean) },
-                { stage: 'repair_validation', disposition: 'reject', codes: [repairCode] },
-              ],
-            });
-          }
-        }
-      }
-      const results = normalized.map((record) => {
-        const terminal = terminalById.get(record.id);
-        const apply = terminal.decision.disposition !== 'reject';
-        return {
-          id: record.id,
-          disposition: terminal.decision.disposition,
-          ...(apply ? { template: terminal.result.template } : {}),
-          terminalCode: terminal.decision.terminalCode,
-          messageKey: terminal.decision.messageKey,
-          attemptCount: terminal.attemptCount,
-          diagnostic: {
-            structure: terminal.result.structure,
-            quality: terminal.result.quality,
-            timeline: terminal.timeline,
-          },
-        };
+        return openaiTranslateChunk({ ...request, apiKey: settings.apiKey });
       });
       return await run.complete(results);
     } catch (error) {
@@ -1837,9 +1625,6 @@ if (typeof module !== 'undefined' && module.exports) {
     mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,
     assertFullPageTranslationBudget,
-    buildBlockInstructions,
-    buildBlockResponseFormat,
-    getBlockBatchMaxOutputTokens,
     getBlockRecordCost,
     getInlineContentScriptFiles,
     classifyContentScriptFailure,

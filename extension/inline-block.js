@@ -859,6 +859,14 @@
     return result;
   }
 
+  function getRecordCost(record) {
+    return (
+      String(record?.template || '').length +
+      JSON.stringify(record?.atoms || []).length +
+      JSON.stringify(record?.repair ?? null).length
+    );
+  }
+
   function serializeBlock(block) {
     if (!block || block.nodeType !== 1) {
       return createUnsupportedResult(describeLocalRejection('invalid_root', block));
@@ -1162,7 +1170,7 @@
   // atom entry is an atom, and nothing else in a contract is a Placeholder Token. The other
   // half is that the failure strings the shared module returns are already this codec's
   // reported codes, so `validationError` passes them through unchanged — they cross the worker
-  // seam and `translation-validation.js` maps them into `structure.*` from there.
+  // seam and `inline-model-execution.js` maps them into `structure.*` from there.
   function classifyContractEntry(entry) {
     if (entry.kind === 'wrapper') return placeholderTokens.PAIR;
     if (entry.kind === 'atom') return placeholderTokens.ATOM;
@@ -1536,6 +1544,7 @@
 
   return {
     CODEC_VERSION,
+    getRecordCost,
     applyPatchPlan,
     createPatchPlan,
     matchesAppliedOwnership,

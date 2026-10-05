@@ -26,7 +26,6 @@ async function injectInlineTranslation(evaluate) {
     'placeholder-tokens.js',
     'inline-block.js',
     'inline-translation-session.js',
-    'translation-validation.js',
     'content.js',
   ]) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));

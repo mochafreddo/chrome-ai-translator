@@ -43,7 +43,8 @@ async function injectInlineTranslation(evaluate) {
     'placeholder-tokens.js',
     'inline-block.js',
     'inline-translation-session.js',
-    'translation-validation.js',
+    'translation-settings.js',
+    'inline-model-execution.js',
     'content.js',
   ]) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
@@ -103,29 +104,49 @@ async function main() {
         const repository = records.find((record) =>
           record.template?.includes('mattpocock/skills')
         );
-        const quality = repository
-          ? ChromeAiTranslatorValidation.assessTranslationQuality(
-              repository.template,
-              repository.template,
-              'Korean',
-              repository.contract
+        const modelRecord = repository ? {
+          id: repository.id,
+          template: repository.template,
+          atoms: repository.atoms,
+          contract: repository.contract,
+          repair: null,
+        } : null;
+        const settings = {
+          model: 'deterministic-test', reasoningEffort: 'none',
+          targetLanguage: 'Korean', tone: 'technical',
+        };
+        let unchangedAttempts = 0;
+        let changedAttempts = 0;
+        const [unchanged] = modelRecord
+          ? await ChromeAiTranslatorInlineModelExecution.execute(
+              [modelRecord], settings, async () => {
+                unchangedAttempts += 1;
+                return JSON.stringify({ translations: [{
+                  id: modelRecord.id, template: modelRecord.template,
+                }] });
+              }
             )
-          : null;
-        const changed = repository
-          ? ChromeAiTranslatorInlineBlock.validateTranslatedTemplate(
-              repository.template.replace(
-                'mattpocock/skills',
-                'other/project'
-              ),
-              repository.contract
+          : [];
+        const [changed] = modelRecord
+          ? await ChromeAiTranslatorInlineModelExecution.execute(
+              [modelRecord], settings, async () => {
+                changedAttempts += 1;
+                return JSON.stringify({ translations: [{
+                  id: modelRecord.id,
+                  template: modelRecord.template.replace('mattpocock/skills', 'other/project'),
+                }] });
+              }
             )
-          : null;
+          : [];
         return {
           attempted: records.length,
           failed: state.session.progress().counts.failed,
           repositoryFound: Boolean(repository),
-          repositoryQuality: quality?.status || '',
-          changedSourceSyntaxCode: changed?.errorCode || '',
+          repositoryDisposition: unchanged?.disposition || '',
+          changedDisposition: changed?.disposition || '',
+          changedSourceSyntaxCode: changed?.terminalCode || '',
+          unchangedAttempts,
+          changedAttempts,
           modelRequests,
         };
       } finally {
@@ -144,11 +165,17 @@ async function main() {
     check(
       'the repository coordinate is Source Syntax rather than untranslated prose',
       result?.repositoryFound === true &&
-        result?.repositoryQuality === 'complete' &&
-        result?.changedSourceSyntaxCode === 'source_syntax_changed',
+        result?.repositoryDisposition === 'apply' &&
+        result?.unchangedAttempts === 1 &&
+        result?.changedDisposition === 'reject' &&
+        result?.changedAttempts === 2 &&
+        result?.changedSourceSyntaxCode === 'structure.source_syntax_changed',
       JSON.stringify({
         repositoryFound: result?.repositoryFound,
-        repositoryQuality: result?.repositoryQuality,
+        repositoryDisposition: result?.repositoryDisposition,
+        changedDisposition: result?.changedDisposition,
+        unchangedAttempts: result?.unchangedAttempts,
+        changedAttempts: result?.changedAttempts,
         changedSourceSyntaxCode: result?.changedSourceSyntaxCode,
       })
     );
