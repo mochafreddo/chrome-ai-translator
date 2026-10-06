@@ -124,7 +124,8 @@ exports.tests = [
         const child = element(tag, text('private page prose'));
         for (const [key, value] of Object.entries(attributes)) child.setAttribute(key, value);
         if (tag === 'span' && 'hidden' in attributes) child.hidden = true;
-        const block = element('p', text('Visible article prose. '), child);
+        const block = element('p', text('Visible article prose. '), child,
+          text(' Article prose continues.'));
         block.setAttribute('id', 'private-selector');
         document.body.appendChild(block);
         visit.admit(block);
@@ -352,7 +353,8 @@ exports.tests = [
       changed.document.body.replaceChildren();
       visit.settle(changed.batch, answer(changed.batch));
       const { document, element, text } = createTestDocument();
-      const unsupported = element('li', text('Outer prose'), element('p', text('Nested prose')));
+      const unsupported = element('li', text('Outer prose'), element('p', text('Nested prose')),
+        text(' Outer prose continues.'));
       document.body.appendChild(unsupported);
       visit.admit(unsupported);
       visit.admit(paragraph(7000));
@@ -555,7 +557,8 @@ exports.tests = [
     name: 'refuses a block it cannot serialize without sending it',
     fn() {
       const { document, element, text } = createTestDocument();
-      const block = element('li', text('Outer item text.'), element('p', text('Nested paragraph.')));
+      const block = element('li', text('Outer item text.'), element('p', text('Nested paragraph.')),
+        text(' Outer item continues.'));
       document.body.appendChild(block);
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);

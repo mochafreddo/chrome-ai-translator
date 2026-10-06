@@ -34,7 +34,8 @@ const INLINE_SESSION_BUDGET = 150000;
 
 function admitUnsupported(state) {
   const { document, element, text } = createTestDocument();
-  const block = element('li', text('Outer prose.'), element('p', text('Nested prose.')));
+  const block = element('li', text('Outer prose.'), element('p', text('Nested prose.')),
+    text(' Outer prose continues.'));
   document.body.appendChild(block);
   state.session.admit(block);
 }

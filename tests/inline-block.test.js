@@ -230,6 +230,281 @@ function createHeadingControlFixture(trailing = false) {
 exports.name = 'inline block codec';
 exports.tests = [
   {
+    name: 'translates the reported bold and inline-code introduction without a token for its nested list',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const strong = element('strong', text('Yes'));
+      const code = element('code', text('/to-spec'));
+      const nestedText = text('Nested child prose has a separate owner.');
+      const child = element('li', nestedText);
+      const list = element('ul', child);
+      const block = element('li', strong, text(' → '), code,
+        text(' Then work the tickets one of two ways:'), list);
+      document.body.appendChild(block);
+      const original = [...block.childNodes];
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      assert.deepEqual(serialized.contract.entries.map((entry) => entry.tagName), ['STRONG', 'CODE']);
+      assert.deepEqual(serialized.atoms.map((atom) => [atom.kind, atom.label]), [['code', '/to-spec']]);
+      assert.equal(serialized.template.includes('Nested child prose'), false);
+      assert.equal(serialized.template.match(/⟦[^⟧]+⟧/g).length, 3);
+      const translated = serialized.template.replace('Yes', '예')
+        .replace('Then work the tickets one of two ways:', '이후 티켓을 두 가지 방법 중 하나로 처리합니다:');
+      assert.equal(codec.applyPatchPlan(serialized.snapshot,
+        codec.createPatchPlan(serialized.snapshot, translated)).ok, true);
+      assert.equal(strong.textContent, '예');
+      assert.equal(code.textContent, '/to-spec');
+      assert.equal(block.childNodes.at(-1), list);
+      assert.deepEqual(child.childNodes, [nestedText]);
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, original);
+      assert.equal(strong.textContent, 'Yes');
+      assert.equal(code.textContent, '/to-spec');
+    },
+  },
+  {
+    name: 'accepts each allowed Block Child at either own-prose edge',
+    fn() {
+      for (const tag of ['ul', 'ol', 'dl', 'table', 'blockquote', 'pre', 'details', 'figure',
+        'p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'figcaption', 'dt', 'dd', 'th', 'td', 'span']) {
+        for (const leading of [true, false]) {
+          const { document, element, text } = createTestDocument();
+          const childText = text('Child content remains excluded.');
+          const child = element(tag, childText);
+          if (tag === 'span') child.setAttribute('data-as', 'p');
+          const prose = text(' Parent own prose. ');
+          const block = element('li', text('\n'), ...(leading ? [child, prose] : [prose, child]), text('\n'));
+          document.body.appendChild(block);
+          const original = [...block.childNodes];
+          const serialized = codec.serializeBlock(block);
+          assert.equal(serialized.ok, true, `${tag}, leading=${leading}`);
+          assert.equal(serialized.template.trim(), 'Parent own prose.');
+          assert.deepEqual(serialized.atoms, []);
+          assert.deepEqual(serialized.contract.entries, []);
+          assert.equal(codec.applyPatchPlan(serialized.snapshot,
+            codec.createPatchPlan(serialized.snapshot, '부모 본문입니다.')).ok, true);
+          assert.equal(leading ? block.childNodes[0] : block.childNodes.at(-1), child);
+          assert.deepEqual(child.childNodes, [childText]);
+          assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+          assert.deepEqual(block.childNodes, original);
+          assert.equal(childText.nodeValue, 'Child content remains excluded.');
+        }
+      }
+    },
+  },
+  {
+    name: 'keeps interior Block Children and generic DIV outside supported own prose',
+    fn() {
+      for (const [tag, reason] of [['ul', 'unsupported_descendant'], ['pre', 'unsupported_descendant'],
+        ['p', 'nested_semantic_block'], ['li', 'nested_semantic_block'], ['span', 'nested_semantic_block']]) {
+        const { document, element, text } = createTestDocument();
+        const child = element(tag, text('Child content.'));
+        if (tag === 'span') child.setAttribute('data-as', 'p');
+        const block = element('li', text('Before the child.'), child, text('After the child.'));
+        document.body.appendChild(block);
+        assert.deepEqual(codec.serializeBlock(block), unsupportedBlock(reason, tag.toUpperCase()));
+      }
+      for (const leading of [true, false]) {
+        const { document, element, text } = createTestDocument();
+        const child = element('div', text('Generic container.'));
+        const block = element('li', ...(leading ? [child, text('Own prose.')] : [text('Own prose.'), child]));
+        document.body.appendChild(block);
+        assert.deepEqual(codec.serializeBlock(block), unsupportedBlock('unsupported_descendant', 'DIV'));
+      }
+      const { document, element, text } = createTestDocument();
+      const block = element('li', element('span', text('Own prose.'), element('ul', element('li', text('Nested prose.')))));
+      document.body.appendChild(block);
+      assert.deepEqual(codec.serializeBlock(block), unsupportedBlock('unsupported_descendant', 'UL'));
+    },
+  },
+  {
+    name: 'refuses removed replaced or moved Block Children before apply and restore',
+    fn() {
+      for (const applied of [false, true]) {
+        for (const mutation of ['remove', 'replace', 'move-edge', 'reorder-edge', 'move-whitespace', 'lose-boundary']) {
+          const { document, element, text } = createTestDocument();
+          const child = element('span', text('Nested paragraph.'));
+          child.setAttribute('data-as', 'p');
+          const other = element('pre', text('source code'));
+          const whitespace = text('\n');
+          const block = element('li', text('Parent own prose.'), child, whitespace, other);
+          document.body.appendChild(block);
+          const serialized = codec.serializeBlock(block);
+          assert.equal(serialized.ok, true);
+          const plan = codec.createPatchPlan(serialized.snapshot, '부모 본문입니다.');
+          assert.equal(plan.ok, true);
+          if (applied) assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+          if (mutation === 'remove') block.removeChild(child);
+          else if (mutation === 'replace') {
+            const replacement = element('span', text('Nested paragraph.'));
+            replacement.setAttribute('data-as', 'p');
+            block.insertBefore(replacement, child);
+            block.removeChild(child);
+          } else if (mutation === 'move-edge') block.insertBefore(child, block.childNodes[0]);
+          else if (mutation === 'reorder-edge') block.appendChild(child);
+          else if (mutation === 'move-whitespace') block.insertBefore(text('\n'), child);
+          else child.setAttribute('data-as', 'span');
+          const children = [...block.childNodes];
+          const value = block.textContent;
+          assert.equal(applied ? codec.matchesAppliedOwnership(serialized.snapshot) :
+            codec.matchesOriginalOwnership(serialized.snapshot), false, mutation);
+          assert.deepEqual(applied ? codec.restoreBlock(serialized.snapshot) : codec.applyPatchPlan(serialized.snapshot, plan),
+            { ok: false, errorCode: 'block_changed' }, `${mutation}, applied=${applied}`);
+          if (!applied) assert.deepEqual(codec.createPatchPlan(serialized.snapshot, '새 본문입니다.'),
+            { ok: false, errorCode: 'block_changed' });
+          assert.deepEqual(block.childNodes, children);
+          assert.equal(block.textContent, value);
+        }
+      }
+    },
+  },
+  {
+    name: 'parent and nested Semantic Blocks apply and restore independently in either order',
+    fn() {
+      for (const childFirst of [true, false]) {
+        for (const restoreChildFirst of [true, false]) {
+          const { document, element, text } = createTestDocument();
+          const parentText = text('Parent original prose.');
+          const childText = text('Nested original prose.');
+          const child = element('li', childText);
+          const list = element('ul', child);
+          const block = element('li', parentText, list);
+          document.body.appendChild(block);
+          const parent = codec.serializeBlock(block);
+          const nested = codec.serializeBlock(child);
+          assert.equal(parent.ok, true);
+          assert.equal(nested.ok, true);
+          const parentPlan = codec.createPatchPlan(parent.snapshot, '부모 번역입니다.');
+          const childPlan = codec.createPatchPlan(nested.snapshot, '자식 번역입니다.');
+          const applyOrder = childFirst ? [[nested, childPlan], [parent, parentPlan]] :
+            [[parent, parentPlan], [nested, childPlan]];
+          for (const [serialized, plan] of applyOrder) {
+            assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+          }
+          assert.equal(block.textContent, '부모 번역입니다.자식 번역입니다.');
+          assert.equal(codec.matchesAppliedOwnership(parent.snapshot), true);
+          assert.equal(codec.matchesAppliedOwnership(nested.snapshot), true);
+          const restoreOrder = restoreChildFirst ? [nested, parent] : [parent, nested];
+          assert.equal(codec.restoreBlock(restoreOrder[0].snapshot).ok, true);
+          assert.equal(codec.matchesAppliedOwnership(restoreOrder[1].snapshot), true);
+          assert.equal(codec.restoreBlock(restoreOrder[1].snapshot).ok, true);
+          assert.deepEqual(block.childNodes, [parentText, list]);
+          assert.deepEqual(list.childNodes, [child]);
+          assert.deepEqual(child.childNodes, [childText]);
+        }
+      }
+    },
+  },
+  {
+    name: 'restoring either half-translated nested structure leaves the other record valid',
+    fn() {
+      for (const translateChild of [true, false]) {
+        const { document, element, text } = createTestDocument();
+        const ownText = text('Parent own prose.');
+        const childText = text('Nested own prose.');
+        const child = element('li', childText);
+        const list = element('ul', child);
+        const block = element('li', ownText, list);
+        document.body.appendChild(block);
+        const parent = codec.serializeBlock(block);
+        const nested = codec.serializeBlock(child);
+        const translated = translateChild ? nested : parent;
+        const pending = translateChild ? parent : nested;
+        assert.equal(codec.applyPatchPlan(translated.snapshot,
+          codec.createPatchPlan(translated.snapshot, '번역된 본문입니다.')).ok, true);
+        assert.equal(codec.matchesOriginalOwnership(pending.snapshot), true);
+        assert.equal(codec.restoreBlock(translated.snapshot).ok, true);
+        assert.equal(codec.matchesOriginalOwnership(pending.snapshot), true);
+        assert.deepEqual(block.childNodes, [ownText, list]);
+        assert.deepEqual(child.childNodes, [childText]);
+      }
+    },
+  },
+  {
+    name: 'retains adjacent Block Children in order at both edges around own prose',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const leading = [element('pre', text('source code')), element('ul', element('li', text('Leading item.')))];
+      const trailing = [element('blockquote', text('Quotation.')), element('ol', element('li', text('Trailing item.')))];
+      const block = element('li', text('\n'), leading[0], text('\n '), leading[1],
+        text(' Own prose. '), trailing[0], text('\n '), trailing[1], text('\n'));
+      document.body.appendChild(block);
+      const original = [...block.childNodes];
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      assert.equal(serialized.template.trim(), 'Own prose.');
+      assert.deepEqual(serialized.atoms, []);
+      assert.deepEqual(serialized.contract.entries, []);
+      assert.equal(codec.applyPatchPlan(serialized.snapshot,
+        codec.createPatchPlan(serialized.snapshot, '부모 본문입니다.')).ok, true);
+      assert.deepEqual(block.childNodes.slice(0, 2), leading);
+      assert.deepEqual(block.childNodes.slice(-2), trailing);
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, original);
+    },
+  },
+  {
+    name: 'parent ownership and request identity exclude Block Child subtree changes',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const child = element('li', text('Nested source prose.'));
+      const list = element('ul', child);
+      const block = element('li', text('Parent source prose.'), list);
+      document.body.appendChild(block);
+      const parent = codec.serializeBlock(block);
+      assert.equal(parent.ok, true);
+      child.textContent = '자식이 먼저 번역되었습니다.';
+      assert.equal(codec.matchesOriginalOwnership(parent.snapshot), true);
+      const afterChild = codec.serializeBlock(block);
+      assert.equal(afterChild.originalSignature, parent.originalSignature);
+      assert.equal(afterChild.cacheKey, parent.cacheKey);
+      assert.deepEqual(afterChild.contract, parent.contract);
+      // A token-like literal in excluded text cannot rename the parent's tokens.
+      child.textContent = `⟦${parent.contract.namespace}:ATOM:A1⟧`;
+      assert.deepEqual(codec.serializeBlock(block).contract, parent.contract);
+      child.textContent = 'Excluded nested prose. '.repeat(10000);
+      assert.equal(codec.serializeBlock(block).ok, true);
+      assert.equal(codec.matchesOriginalOwnership(parent.snapshot), true);
+      assert.equal(codec.applyPatchPlan(parent.snapshot,
+        codec.createPatchPlan(parent.snapshot, '부모가 번역되었습니다.')).ok, true);
+      child.replaceChildren(element('strong', text('Nested page update.')));
+      assert.equal(codec.matchesAppliedOwnership(parent.snapshot), true);
+      const nestedChildren = [...child.childNodes];
+      assert.equal(codec.restoreBlock(parent.snapshot).ok, true);
+      assert.equal(block.childNodes.at(-1), list);
+      assert.deepEqual(child.childNodes, nestedChildren);
+      assert.equal(child.textContent, 'Nested page update.');
+    },
+  },
+  {
+    name: 'translates a list item own prose while retaining its trailing Block Child',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const prose = text('First line introduces a nested list.');
+      const nestedText = text('Nested item keeps its own prose.');
+      const nestedItem = element('li', nestedText);
+      const list = element('ul', nestedItem);
+      const block = element('li', prose, list);
+      document.body.appendChild(block);
+      const originalChildren = [...block.childNodes];
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      assert.equal(serialized.template, 'First line introduces a nested list.');
+      assert.deepEqual(serialized.atoms, []);
+      assert.deepEqual(serialized.contract.entries, []);
+      assert.equal(codec.applyPatchPlan(serialized.snapshot,
+        codec.createPatchPlan(serialized.snapshot, '중첩 목록을 소개하는 첫 줄입니다.')).ok, true);
+      assert.equal(block.childNodes.at(-1), list);
+      assert.deepEqual(list.childNodes, [nestedItem]);
+      assert.deepEqual(nestedItem.childNodes, [nestedText]);
+      assert.equal(nestedText.nodeValue, 'Nested item keeps its own prose.');
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, originalChildren);
+      assert.equal(prose.nodeValue, 'First line introduces a nested list.');
+      assert.deepEqual(nestedItem.childNodes, [nestedText]);
+    },
+  },
+  {
     name: 'refuses apply and restore when data-as changes Semantic Block ownership',
     fn() {
       for (const stage of ['apply', 'restore']) {
@@ -394,7 +669,8 @@ exports.tests = [
       const nested = element(
         'li',
         text('Outer item text.'),
-        element('p', text('Nested paragraph text.'))
+        element('p', text('Nested paragraph text.')),
+        text(' More outer item text.')
       );
       document.body.appendChild(nested);
       assert.deepEqual(

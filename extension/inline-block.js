@@ -36,6 +36,9 @@
     'TH',
     'TD',
   ]);
+  const BLOCK_CHILD_TAGS = new Set([
+    'UL', 'OL', 'DL', 'TABLE', 'BLOCKQUOTE', 'PRE', 'DETAILS', 'FIGURE',
+  ]);
   const WRAPPER_TAGS = new Set([
     'STRONG',
     'B',
@@ -190,13 +193,19 @@
     return leading === summaries[0] ? leading : null;
   }
 
-  function getEdgeRetainedPlacement(node, block, classifier) {
+  function getEdgeRetainedPlacement(node, block, classifier, blockChildNodes) {
     if (node?.parentNode !== block || !classifier(node, block)) return null;
-    const siblings = getChildNodes(block).filter((child) => !isIgnorableWhitespace(child));
+    const siblings = getChildNodes(block).filter((child) =>
+      !isIgnorableWhitespace(child) && (child === node || !blockChildNodes.has(child)));
     const placement = siblings[0] === node
       ? 'leading'
       : siblings[siblings.length - 1] === node ? 'trailing' : null;
     return placement;
+  }
+
+  function isBlockChild(node) {
+    return node?.nodeType === 1 &&
+      (BLOCK_CHILD_TAGS.has(getTagName(node)) || isSemanticBlockElement(node));
   }
 
   // A heading's edge control is local UI, never a translatable atom. Requiring
@@ -792,7 +801,7 @@
     return (hash >>> 0).toString(36);
   }
 
-  function getStructureFingerprint(node) {
+  function getStructureFingerprint(node, blockChildNodes) {
     if (!node) return '';
     const parts = [];
     const stack = [{ node, depth: 0, closing: false }];
@@ -814,6 +823,10 @@
         continue;
       }
       const current = item.node;
+      if (blockChildNodes.has(current)) {
+        if (!append('BLOCK_CHILD')) return null;
+        continue;
+      }
       if (current?.nodeType === 3) {
         if (!append(`T(${String(current.nodeValue || '')})`)) return null;
         continue;
@@ -845,8 +858,11 @@
     return parts.join('');
   }
 
-  function createTokenNamespace(block, fingerprint) {
-    const visibleText = String(block?.textContent || '');
+  function createTokenNamespace(block, fingerprint, blockChildNodes) {
+    const visibleText = blockChildNodes.size ? getChildNodes(block)
+      .filter((child) => child.nodeType !== 8 && !blockChildNodes.has(child))
+      .map((child) => String(child.textContent || ''))
+      .join('') : String(block?.textContent || '');
     const base = `CAT_${hashText(fingerprint)}`;
     let namespace = base;
     let suffix = 1;
@@ -878,13 +894,14 @@
     if (!isSemanticBlockElement(block)) {
       return createUnsupportedResult(describeLocalRejection('invalid_root', block));
     }
-    const sourceFingerprint = getStructureFingerprint(block);
+    const blockChildNodes = new Set(getChildNodes(block).filter(isBlockChild));
+    const sourceFingerprint = getStructureFingerprint(block, blockChildNodes);
     if (sourceFingerprint == null) {
       return createUnsupportedResult(describeLocalRejection('structure_limit_exceeded', block));
     }
     const unsupportedRoot = classifyUnsupportedElement(block);
     if (unsupportedRoot) return createUnsupportedResult(unsupportedRoot);
-    const namespace = createTokenNamespace(block, sourceFingerprint);
+    const namespace = createTokenNamespace(block, sourceFingerprint, blockChildNodes);
     const contractEntries = [];
     const snapshotEntries = new Map();
     const originalContainers = [];
@@ -979,10 +996,11 @@
         failed = describeLocalRejection('unsupported_descendant', node);
         return '';
       }
-      const placement = parentId === 'ROOT' && getEdgeRetainedPlacement(node, block, isHeadingControl);
+      const classifier = isBlockChild(node) ? isBlockChild : isHeadingControl;
+      const placement = parentId === 'ROOT' && getEdgeRetainedPlacement(node, block, classifier, blockChildNodes);
       if (placement) {
-        edgeRetainedNodes.push({ node, placement, classifier: isHeadingControl });
-        rememberOpaqueSubtree(node, edgeRetainedSubtreeNodes);
+        edgeRetainedNodes.push({ node, placement, classifier });
+        if (classifier === isHeadingControl) rememberOpaqueSubtree(node, edgeRetainedSubtreeNodes);
         return '';
       }
       const tagName = getTagName(node);
@@ -1146,6 +1164,7 @@
       originalTextValues,
       edgeRetainedNodes,
       edgeRetainedSubtreeNodes,
+      blockChildNodes,
       opaqueAtomNodes,
       inertPageNodes,
       originalSignature,
@@ -1308,7 +1327,7 @@
     const block = snapshot?.blockElement;
     if (!block?.isConnected) return false;
     if (!matchesSupportedClassification(snapshot)) return false;
-    const fingerprint = getStructureFingerprint(block);
+    const fingerprint = getStructureFingerprint(block, snapshot.blockChildNodes);
     if (fingerprint == null || hashText(fingerprint) !== snapshot.originalSignature) {
       return false;
     }
@@ -1329,7 +1348,8 @@
   function matchesSupportedClassification(snapshot) {
     if (isUnsupportedElement(snapshot?.blockElement)) return false;
     for (const retained of snapshot?.edgeRetainedNodes || []) {
-      if (getEdgeRetainedPlacement(retained.node, snapshot.blockElement, retained.classifier) !== retained.placement) return false;
+      if (getEdgeRetainedPlacement(retained.node, snapshot.blockElement, retained.classifier,
+        snapshot.blockChildNodes) !== retained.placement) return false;
     }
     for (const node of snapshot?.inertPageNodes || []) {
       if (
@@ -1432,10 +1452,9 @@
       snapshot
     );
     if (failed) return validationError(failed);
-    for (const retained of snapshot.edgeRetainedNodes || []) {
-      if (retained.placement === 'leading') rootChildren.unshift(retained.node);
-      else rootChildren.push(retained.node);
-    }
+    const retained = snapshot.edgeRetainedNodes || [];
+    rootChildren.unshift(...retained.filter((entry) => entry.placement === 'leading').map((entry) => entry.node));
+    rootChildren.push(...retained.filter((entry) => entry.placement === 'trailing').map((entry) => entry.node));
     return {
       ok: true,
       translatedTemplate,
@@ -1501,7 +1520,7 @@
       replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.edgeRetainedNodes);
       snapshot.appliedOwnership = captureAppliedOwnership(snapshot, plan);
       const translatedFingerprint = getStructureFingerprint(
-        snapshot.blockElement
+        snapshot.blockElement, snapshot.blockChildNodes
       );
       if (translatedFingerprint == null) throw new Error('block_too_large');
       snapshot.translatedSignature = hashText(translatedFingerprint);
@@ -1522,7 +1541,7 @@
     const block = snapshot?.blockElement;
     if (!block?.isConnected || !snapshot?.appliedOwnership) return false;
     if (!matchesSupportedClassification(snapshot)) return false;
-    const fingerprint = getStructureFingerprint(block);
+    const fingerprint = getStructureFingerprint(block, snapshot.blockChildNodes);
     if (
       fingerprint == null ||
       hashText(fingerprint) !== snapshot.translatedSignature
