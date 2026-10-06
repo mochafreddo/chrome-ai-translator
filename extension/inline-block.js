@@ -36,6 +36,9 @@
     'TH',
     'TD',
   ]);
+  const BLOCK_CHILD_TAGS = new Set([
+    'UL', 'OL', 'DL', 'TABLE', 'BLOCKQUOTE', 'PRE', 'DETAILS', 'FIGURE',
+  ]);
   const WRAPPER_TAGS = new Set([
     'STRONG',
     'B',
@@ -190,18 +193,31 @@
     return leading === summaries[0] ? leading : null;
   }
 
-  // A heading's edge control is local UI, never a translatable atom. Requiring
-  // one labelled self-fragment link and no prose prevents a hidden-subtree bypass.
-  // TODO: #59 - Interior controls need a stable prose anchor before they can be supported.
-  function getHeadingControlPlacement(node, block) {
-    if (!/^H[1-6]$/.test(getTagName(block)) || node?.parentNode !== block) return null;
-    const id = getAttribute(block, 'id');
-    if (!id) return null;
-    const siblings = getChildNodes(block).filter((child) => !isIgnorableWhitespace(child));
+  function getEdgeRetainedPlacement(node, block, classifier, blockChildNodes) {
+    if (node?.parentNode !== block || !classifier(node, block)) return null;
+    const siblings = getChildNodes(block).filter((child) =>
+      !isIgnorableWhitespace(child) && (child === node || !blockChildNodes.has(child)));
     const placement = siblings[0] === node
       ? 'leading'
       : siblings[siblings.length - 1] === node ? 'trailing' : null;
-    if (!placement) return null;
+    return placement;
+  }
+
+  function isBlockChildContainerElement(node) {
+    return node?.nodeType === 1 && BLOCK_CHILD_TAGS.has(getTagName(node));
+  }
+
+  function isBlockChild(node) {
+    return isBlockChildContainerElement(node) || isSemanticBlockElement(node);
+  }
+
+  // A heading's edge control is local UI, never a translatable atom. Requiring
+  // one labelled self-fragment link and no prose prevents a hidden-subtree bypass.
+  // TODO: #59 - Interior controls need a stable prose anchor before they can be supported.
+  function isHeadingControl(node, block) {
+    if (!/^H[1-6]$/.test(getTagName(block))) return false;
+    const id = getAttribute(block, 'id');
+    if (!id) return false;
     const allowed = new Set([
       'DIV', 'SPAN', 'A', 'SVG', 'G', 'PATH', 'CIRCLE', 'RECT', 'LINE',
       'POLYLINE', 'POLYGON', 'ELLIPSE',
@@ -211,30 +227,30 @@
     let visited = 0;
     while (stack.length) {
       const current = stack.pop();
-      if (++visited > MAX_STRUCTURE_NODES) return null;
+      if (++visited > MAX_STRUCTURE_NODES) return false;
       if (current?.nodeType === 3) {
-        if (!/^[\s\u200b#¶🔗]*$/u.test(String(current.nodeValue || ''))) return null;
+        if (!/^[\s\u200b#¶🔗]*$/u.test(String(current.nodeValue || ''))) return false;
         continue;
       }
       const tag = getTagName(current);
-      if (current?.nodeType !== 1 || !allowed.has(tag) || isEffectivelyEditable(current)) return null;
-      if (hasAttribute(current, 'onclick')) return null;
+      if (current?.nodeType !== 1 || !allowed.has(tag) || isEffectivelyEditable(current)) return false;
+      if (hasAttribute(current, 'onclick')) return false;
       const role = getAttribute(current, 'role').toLowerCase();
-      if (!['', 'link', 'img', 'none', 'presentation'].includes(role)) return null;
-      if (tag !== 'A' && hasAttribute(current, 'tabindex') && Number(getAttribute(current, 'tabindex')) >= 0) return null;
+      if (!['', 'link', 'img', 'none', 'presentation'].includes(role)) return false;
+      if (tag !== 'A' && hasAttribute(current, 'tabindex') && Number(getAttribute(current, 'tabindex')) >= 0) return false;
       if (tag === 'A') {
         const href = getAttribute(current, 'href');
-        if (!href.startsWith('#') || !getAttribute(current, 'aria-label').trim()) return null;
+        if (!href.startsWith('#') || !getAttribute(current, 'aria-label').trim()) return false;
         try {
-          if (decodeURIComponent(href.slice(1)) !== id) return null;
+          if (decodeURIComponent(href.slice(1)) !== id) return false;
         } catch {
-          return null;
+          return false;
         }
-        if (++links > 1) return null;
+        if (++links > 1) return false;
       }
       stack.push(...getChildNodes(current));
     }
-    return links === 1 ? placement : null;
+    return links === 1;
   }
 
   function getChildNodes(node) {
@@ -788,7 +804,7 @@
     return (hash >>> 0).toString(36);
   }
 
-  function getStructureFingerprint(node) {
+  function getStructureFingerprint(node, blockChildNodes) {
     if (!node) return '';
     const parts = [];
     const stack = [{ node, depth: 0, closing: false }];
@@ -810,6 +826,10 @@
         continue;
       }
       const current = item.node;
+      if (blockChildNodes.has(current)) {
+        if (!append('BLOCK_CHILD')) return null;
+        continue;
+      }
       if (current?.nodeType === 3) {
         if (!append(`T(${String(current.nodeValue || '')})`)) return null;
         continue;
@@ -841,8 +861,11 @@
     return parts.join('');
   }
 
-  function createTokenNamespace(block, fingerprint) {
-    const visibleText = String(block?.textContent || '');
+  function createTokenNamespace(block, fingerprint, blockChildNodes) {
+    const visibleText = blockChildNodes.size ? getChildNodes(block)
+      .filter((child) => child.nodeType !== 8 && !blockChildNodes.has(child))
+      .map((child) => String(child.textContent || ''))
+      .join('') : String(block?.textContent || '');
     const base = `CAT_${hashText(fingerprint)}`;
     let namespace = base;
     let suffix = 1;
@@ -874,13 +897,14 @@
     if (!isSemanticBlockElement(block)) {
       return createUnsupportedResult(describeLocalRejection('invalid_root', block));
     }
-    const sourceFingerprint = getStructureFingerprint(block);
+    const blockChildNodes = new Set(getChildNodes(block).filter(isBlockChild));
+    const sourceFingerprint = getStructureFingerprint(block, blockChildNodes);
     if (sourceFingerprint == null) {
       return createUnsupportedResult(describeLocalRejection('structure_limit_exceeded', block));
     }
     const unsupportedRoot = classifyUnsupportedElement(block);
     if (unsupportedRoot) return createUnsupportedResult(unsupportedRoot);
-    const namespace = createTokenNamespace(block, sourceFingerprint);
+    const namespace = createTokenNamespace(block, sourceFingerprint, blockChildNodes);
     const contractEntries = [];
     const snapshotEntries = new Map();
     const originalContainers = [];
@@ -888,8 +912,8 @@
     const atoms = [];
     const literalTokenCounts = new Map();
     const anchoredSummary = findAnchoredLeadingSummary(block);
-    const localControls = [];
-    const localControlNodes = new Set();
+    const edgeRetainedNodes = [];
+    const edgeRetainedSubtreeNodes = new Set();
     const opaqueAtomNodes = new Set();
     const inertPageNodes = new Set();
     const contextualSourceSyntax = new Set();
@@ -975,10 +999,11 @@
         failed = describeLocalRejection('unsupported_descendant', node);
         return '';
       }
-      const placement = parentId === 'ROOT' && getHeadingControlPlacement(node, block);
+      const classifier = isBlockChild(node) ? isBlockChild : isHeadingControl;
+      const placement = parentId === 'ROOT' && getEdgeRetainedPlacement(node, block, classifier, blockChildNodes);
       if (placement) {
-        localControls.push({ node, placement });
-        rememberOpaqueSubtree(node, localControlNodes);
+        edgeRetainedNodes.push({ node, placement, classifier });
+        if (classifier === isHeadingControl) rememberOpaqueSubtree(node, edgeRetainedSubtreeNodes);
         return '';
       }
       const tagName = getTagName(node);
@@ -1140,8 +1165,9 @@
       entries: snapshotEntries,
       originalContainers,
       originalTextValues,
-      localControls,
-      localControlNodes,
+      edgeRetainedNodes,
+      edgeRetainedSubtreeNodes,
+      blockChildNodes,
       opaqueAtomNodes,
       inertPageNodes,
       originalSignature,
@@ -1304,7 +1330,7 @@
     const block = snapshot?.blockElement;
     if (!block?.isConnected) return false;
     if (!matchesSupportedClassification(snapshot)) return false;
-    const fingerprint = getStructureFingerprint(block);
+    const fingerprint = getStructureFingerprint(block, snapshot.blockChildNodes);
     if (fingerprint == null || hashText(fingerprint) !== snapshot.originalSignature) {
       return false;
     }
@@ -1324,8 +1350,9 @@
 
   function matchesSupportedClassification(snapshot) {
     if (isUnsupportedElement(snapshot?.blockElement)) return false;
-    for (const control of snapshot?.localControls || []) {
-      if (getHeadingControlPlacement(control.node, snapshot.blockElement) !== control.placement) return false;
+    for (const retained of snapshot?.edgeRetainedNodes || []) {
+      if (getEdgeRetainedPlacement(retained.node, snapshot.blockElement, retained.classifier,
+        snapshot.blockChildNodes) !== retained.placement) return false;
     }
     for (const node of snapshot?.inertPageNodes || []) {
       if (
@@ -1340,7 +1367,7 @@
     // matchesOriginalOwnership already refuses any entry that left the block.
     for (const container of snapshot?.originalContainers || []) {
       if (
-        snapshot.localControlNodes?.has(container.node) ||
+        snapshot.edgeRetainedSubtreeNodes?.has(container.node) ||
         snapshot.opaqueAtomNodes?.has(container.node) ||
         !isNodeWithinBlock(container.node, snapshot.blockElement)
       ) continue;
@@ -1428,10 +1455,9 @@
       snapshot
     );
     if (failed) return validationError(failed);
-    for (const control of snapshot.localControls || []) {
-      if (control.placement === 'leading') rootChildren.unshift(control.node);
-      else rootChildren.push(control.node);
-    }
+    const retained = snapshot.edgeRetainedNodes || [];
+    rootChildren.unshift(...retained.filter((entry) => entry.placement === 'leading').map((entry) => entry.node));
+    rootChildren.push(...retained.filter((entry) => entry.placement === 'trailing').map((entry) => entry.node));
     return {
       ok: true,
       translatedTemplate,
@@ -1442,11 +1468,11 @@
     };
   }
 
-  function replaceNodeChildren(node, children, localControls = []) {
+  function replaceNodeChildren(node, children, edgeRetainedNodes = []) {
     if (sameNodeList(node, children)) return;
-    const retained = new Set(localControls.map((control) => control.node));
+    const retained = new Set(edgeRetainedNodes.map((entry) => entry.node));
     if (retained.size) {
-      // Never detach the control: focus, listeners, and icon state stay live.
+      // Never detach retained nodes: focus, listeners, and local state stay live.
       for (const child of getChildNodes(node)) {
         if (!retained.has(child)) node.removeChild(child);
       }
@@ -1472,7 +1498,7 @@
     }
     for (const container of snapshot.originalContainers || []) {
       replaceNodeChildren(container.node, container.children,
-        container.node === snapshot.blockElement ? snapshot.localControls : []);
+        container.node === snapshot.blockElement ? snapshot.edgeRetainedNodes : []);
     }
     snapshot.appliedOwnership = null;
     snapshot.translatedSignature = null;
@@ -1494,10 +1520,10 @@
       for (const container of plan.containerPlans) {
         replaceNodeChildren(container.node, container.children);
       }
-      replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.localControls);
+      replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.edgeRetainedNodes);
       snapshot.appliedOwnership = captureAppliedOwnership(snapshot, plan);
       const translatedFingerprint = getStructureFingerprint(
-        snapshot.blockElement
+        snapshot.blockElement, snapshot.blockChildNodes
       );
       if (translatedFingerprint == null) throw new Error('block_too_large');
       snapshot.translatedSignature = hashText(translatedFingerprint);
@@ -1518,7 +1544,7 @@
     const block = snapshot?.blockElement;
     if (!block?.isConnected || !snapshot?.appliedOwnership) return false;
     if (!matchesSupportedClassification(snapshot)) return false;
-    const fingerprint = getStructureFingerprint(block);
+    const fingerprint = getStructureFingerprint(block, snapshot.blockChildNodes);
     if (
       fingerprint == null ||
       hashText(fingerprint) !== snapshot.translatedSignature
@@ -1550,6 +1576,7 @@
     matchesAppliedOwnership,
     matchesOriginalOwnership,
     isSemanticBlockElement,
+    isBlockChildContainerElement,
     serializeBlock,
     isCodeLikeInlineText,
     isProtectedAtomicLinkLabel,

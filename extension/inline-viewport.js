@@ -108,6 +108,7 @@
         if (inlineBlockCodec?.isSemanticBlockElement(element)) {
           return element;
         }
+        if (inlineBlockCodec?.isBlockChildContainerElement(element)) break;
         if (element === root) break;
       }
       return null;

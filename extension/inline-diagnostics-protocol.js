@@ -15,6 +15,8 @@
       'editable_content',
       'interactive_content',
       'custom_element',
+      // Direct edge Block Children are retained. Interior Semantic Blocks still use
+      // nested_semantic_block; other interior Block Children use unsupported_descendant.
       'nested_semantic_block',
       'unsupported_descendant',
       'structure_limit_exceeded',

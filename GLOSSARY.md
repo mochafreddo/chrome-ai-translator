@@ -25,8 +25,12 @@ An Inline Translation result applied after its one repair still leaves a materia
 _Avoid_: warning, degraded translation, incomplete result
 
 **Semantic Block**:
-The unit Inline Translation works in: one paragraph, heading, list item, quotation, caption, disclosure summary, term or definition, or table cell, taken whole. Progress counts, size limits, and retries are expressed in these; a Translation Chunk instead belongs to Side Panel Translation and holds many Semantic Blocks.
+The unit Inline Translation works in: the own prose of one paragraph, heading, list item, quotation, caption, disclosure summary, term or definition, or table cell, taken whole and excluding any Block Child. Progress counts, size limits, and retries are expressed in these; a Translation Chunk instead belongs to Side Panel Translation and holds many Semantic Blocks.
 _Avoid_: node, chunk, segment, fragment
+
+**Block Child**:
+A page-owned block-level child at the leading or trailing edge of a Semantic Block's own prose, such as a nested list, code block, quotation, table, disclosure, figure, or nested Semantic Block. It is excluded from that Semantic Block's model request and preserved by identity and position; any Semantic Blocks inside it translate independently.
+_Avoid_: block atom, nested chunk, protected block
 
 **Inert Page Node**:
 A page-owned DOM node inside a Semantic Block that carries no language visible in the current viewport or exposed to accessibility APIs, and exposes no role, focus, action, or editing semantics through the page DOM, but whose identity must survive Inline Translation, such as a React separator comment, a text-free image or SVG decoration, or the hidden half of a responsive alternative-label pair. A responsive alternative may contain page-owned text, but that text is excluded from the model request while its viewport counterpart is visible. A node with a role declaration, accessible label, observable focus or action semantics, editable state, or prose that is not part of such a structurally identified responsive alternative is not inert.
