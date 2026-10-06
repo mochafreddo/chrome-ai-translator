@@ -6,9 +6,6 @@
   const inlineBlockCodec = globalScope.ChromeAiTranslatorInlineBlock ||
     (typeof module !== 'undefined' && module.exports ? require('./inline-block.js') : null);
   const INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
-  const INLINE_BLOCK_CHILD_CONTAINER_TAGS = new Set([
-    'UL', 'OL', 'DL', 'TABLE', 'BLOCKQUOTE', 'PRE', 'DETAILS', 'FIGURE',
-  ]);
   const INLINE_EXCLUDED_TAGS = new Set([
     'SCRIPT',
     'STYLE',
@@ -111,7 +108,7 @@
         if (inlineBlockCodec?.isSemanticBlockElement(element)) {
           return element;
         }
-        if (INLINE_BLOCK_CHILD_CONTAINER_TAGS.has(element.tagName)) break;
+        if (inlineBlockCodec?.isBlockChildContainerElement(element)) break;
         if (element === root) break;
       }
       return null;
