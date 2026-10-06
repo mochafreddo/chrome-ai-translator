@@ -493,6 +493,55 @@ exports.tests = [
     },
   },
   {
+    name: 'does not admit enclosing list items from bare text inside Block Child containers',
+    fn() {
+      for (const tag of ['ul', 'ol', 'dl', 'table', 'pre', 'details', 'figure']) {
+        const { document, element, text } = createTestDocument();
+        const block = element('li', element(tag, text('Child content stays outside the parent prose.')));
+        document.body.appendChild(block);
+        const f = scannerFixture(block);
+        try {
+          f.viewport.start(block);
+          assert.deepEqual(f.admissions, [], tag);
+          assert.equal(f.session.progress().counts.failed, 0, tag);
+        } finally { f.viewport.stop(); }
+      }
+    },
+  },
+  {
+    name: 'admits list item prose outside its code Block Child',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const block = element('li', text('Run the following example.'),
+        element('pre', element('code', text('Example code is not parent prose.'))));
+      document.body.appendChild(block);
+      const f = scannerFixture(block);
+      try {
+        f.viewport.start(block);
+        assert.deepEqual(f.admissions, [block]);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'admits nested list items before reaching their Block Child container',
+    fn() {
+      for (const tag of ['ul', 'ol']) {
+        const { document, element, text } = createTestDocument();
+        const inner = element('li', text('Nested item has its own prose.'));
+        const outer = element('li', element(tag, inner));
+        document.body.appendChild(outer);
+        const f = scannerFixture(outer);
+        try {
+          f.viewport.start(outer);
+          assert.deepEqual(f.admissions, [inner], tag);
+          assert.deepEqual(f.session.takeBatch().map(record => record.template),
+            ['Nested item has its own prose.'], tag);
+          assert.equal(f.session.progress().counts.failed, 0, tag);
+        } finally { f.viewport.stop(); }
+      }
+    },
+  },
+  {
     name: 'excludes page chrome tags and roles while keeping article headings and asides',
     fn() {
       const { document, element, text } = createTestDocument();
