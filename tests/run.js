@@ -1,4 +1,6 @@
 const suites = [
+  require('./commit-format.test'),
+  require('./integration-harness.test'),
   require('./placeholder-tokens.test'),
   require('./inline-block.test'),
   require('./inline-translation-session.test'),

@@ -1,6 +1,7 @@
 {
   "private": true,
   "scripts": {
+    "check:commits": "node scripts/check-commits.js",
     "test": "node tests/run.js",
     "test:integration": "node tests/integration/action-click.test.mjs",
     "test:integration:disclosure-summary": "node tests/integration/disclosure-summary.test.mjs",

@@ -112,31 +112,49 @@ export function createChecks(label) {
   return { check, failures, finish };
 }
 
-function connect(endpoint) {
-  const ws = new WebSocket(endpoint);
+export function connect(endpoint, platform = globalThis) {
+  const ws = new platform.WebSocket(endpoint);
   let seq = 0;
   const pending = new Map();
   const listeners = new Map();
+  let closed = false;
+  const settle = (id, result) => {
+    const waiter = pending.get(id);
+    if (!waiter) return;
+    pending.delete(id);
+    platform.clearTimeout(waiter.timer);
+    waiter.resolve(result);
+  };
+  const terminate = () => {
+    closed = true;
+    for (const id of pending.keys()) settle(id, { __error: 'CDP connection closed' });
+  };
+  ws.addEventListener('close', terminate);
+  ws.addEventListener('error', terminate);
   ws.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (message.id === undefined) {
       for (const handler of listeners.get(message.method) || []) handler(message.params, message.sessionId);
       return;
     }
-    const waiter = pending.get(message.id);
-    if (!waiter) return;
-    pending.delete(message.id);
-    waiter(message.error ? { __error: message.error.message } : message.result);
+    settle(message.id, message.error ? { __error: message.error.message } : message.result);
   });
-  const ready = new Promise((resolve) => ws.addEventListener('open', resolve));
+  const ready = new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve);
+    ws.addEventListener('close', () => reject(new Error('CDP connection closed before opening')));
+    ws.addEventListener('error', () => reject(new Error('CDP connection failed before opening')));
+  });
   const send = (method, params = {}, sessionId, timeoutMs = 20000) =>
     new Promise((resolve) => {
+      if (closed) { resolve({ __error: 'CDP connection closed' }); return; }
       const id = ++seq;
-      pending.set(id, resolve);
-      setTimeout(() => {
-        if (pending.delete(id)) resolve({ __timeout: true });
-      }, timeoutMs);
-      ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      const timer = platform.setTimeout(() => settle(id, { __timeout: true }), timeoutMs);
+      pending.set(id, { resolve, timer });
+      try {
+        ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      } catch (error) {
+        settle(id, { __error: error.message });
+      }
     });
   // Events carry no id, so they are delivered by method name. Returns an unsubscribe.
   const on = (method, handler) => {
@@ -145,7 +163,7 @@ function connect(endpoint) {
     listeners.set(method, handlers);
     return () => listeners.set(method, (listeners.get(method) || []).filter((h) => h !== handler));
   };
-  return { ready, send, on, close: () => ws.close() };
+  return { ready, send, on, close: () => { terminate(); ws.close(); } };
 }
 
 function extensionManifest(extensionDir) {

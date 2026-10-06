@@ -1,5 +1,7 @@
 # Tests
 
+GitHub Actions runs the browser-free unit suite, extension syntax checks, and commit format checks on branch pushes and pull requests. The workflow requires no API key and runs no browser or model. Commit format can also be checked locally with `npm run check:commits -- <base> <head>`; without arguments it checks `HEAD^..HEAD`. The checker enforces the subject structure, an explanatory body, and an 80-column body limit with an exception for standalone URLs. Whether the description explains the change well and uses an imperative remains a review decision.
+
 Three tiers, deliberately separate: one needs nothing, one needs a browser, one needs a browser and spends money. Each line is a wall, not a gradient — the reason a check lives in one tier is the reason it must not creep into the one below.
 
 ## `npm test` — the suite you run constantly
