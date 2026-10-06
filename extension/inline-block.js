@@ -190,18 +190,22 @@
     return leading === summaries[0] ? leading : null;
   }
 
-  // A heading's edge control is local UI, never a translatable atom. Requiring
-  // one labelled self-fragment link and no prose prevents a hidden-subtree bypass.
-  // TODO: #59 - Interior controls need a stable prose anchor before they can be supported.
-  function getHeadingControlPlacement(node, block) {
-    if (!/^H[1-6]$/.test(getTagName(block)) || node?.parentNode !== block) return null;
-    const id = getAttribute(block, 'id');
-    if (!id) return null;
+  function getEdgeRetainedPlacement(node, block, classifier) {
+    if (node?.parentNode !== block || !classifier(node, block)) return null;
     const siblings = getChildNodes(block).filter((child) => !isIgnorableWhitespace(child));
     const placement = siblings[0] === node
       ? 'leading'
       : siblings[siblings.length - 1] === node ? 'trailing' : null;
-    if (!placement) return null;
+    return placement;
+  }
+
+  // A heading's edge control is local UI, never a translatable atom. Requiring
+  // one labelled self-fragment link and no prose prevents a hidden-subtree bypass.
+  // TODO: #59 - Interior controls need a stable prose anchor before they can be supported.
+  function isHeadingControl(node, block) {
+    if (!/^H[1-6]$/.test(getTagName(block))) return false;
+    const id = getAttribute(block, 'id');
+    if (!id) return false;
     const allowed = new Set([
       'DIV', 'SPAN', 'A', 'SVG', 'G', 'PATH', 'CIRCLE', 'RECT', 'LINE',
       'POLYLINE', 'POLYGON', 'ELLIPSE',
@@ -211,30 +215,30 @@
     let visited = 0;
     while (stack.length) {
       const current = stack.pop();
-      if (++visited > MAX_STRUCTURE_NODES) return null;
+      if (++visited > MAX_STRUCTURE_NODES) return false;
       if (current?.nodeType === 3) {
-        if (!/^[\s\u200b#¶🔗]*$/u.test(String(current.nodeValue || ''))) return null;
+        if (!/^[\s\u200b#¶🔗]*$/u.test(String(current.nodeValue || ''))) return false;
         continue;
       }
       const tag = getTagName(current);
-      if (current?.nodeType !== 1 || !allowed.has(tag) || isEffectivelyEditable(current)) return null;
-      if (hasAttribute(current, 'onclick')) return null;
+      if (current?.nodeType !== 1 || !allowed.has(tag) || isEffectivelyEditable(current)) return false;
+      if (hasAttribute(current, 'onclick')) return false;
       const role = getAttribute(current, 'role').toLowerCase();
-      if (!['', 'link', 'img', 'none', 'presentation'].includes(role)) return null;
-      if (tag !== 'A' && hasAttribute(current, 'tabindex') && Number(getAttribute(current, 'tabindex')) >= 0) return null;
+      if (!['', 'link', 'img', 'none', 'presentation'].includes(role)) return false;
+      if (tag !== 'A' && hasAttribute(current, 'tabindex') && Number(getAttribute(current, 'tabindex')) >= 0) return false;
       if (tag === 'A') {
         const href = getAttribute(current, 'href');
-        if (!href.startsWith('#') || !getAttribute(current, 'aria-label').trim()) return null;
+        if (!href.startsWith('#') || !getAttribute(current, 'aria-label').trim()) return false;
         try {
-          if (decodeURIComponent(href.slice(1)) !== id) return null;
+          if (decodeURIComponent(href.slice(1)) !== id) return false;
         } catch {
-          return null;
+          return false;
         }
-        if (++links > 1) return null;
+        if (++links > 1) return false;
       }
       stack.push(...getChildNodes(current));
     }
-    return links === 1 ? placement : null;
+    return links === 1;
   }
 
   function getChildNodes(node) {
@@ -888,8 +892,8 @@
     const atoms = [];
     const literalTokenCounts = new Map();
     const anchoredSummary = findAnchoredLeadingSummary(block);
-    const localControls = [];
-    const localControlNodes = new Set();
+    const edgeRetainedNodes = [];
+    const edgeRetainedSubtreeNodes = new Set();
     const opaqueAtomNodes = new Set();
     const inertPageNodes = new Set();
     const contextualSourceSyntax = new Set();
@@ -975,10 +979,10 @@
         failed = describeLocalRejection('unsupported_descendant', node);
         return '';
       }
-      const placement = parentId === 'ROOT' && getHeadingControlPlacement(node, block);
+      const placement = parentId === 'ROOT' && getEdgeRetainedPlacement(node, block, isHeadingControl);
       if (placement) {
-        localControls.push({ node, placement });
-        rememberOpaqueSubtree(node, localControlNodes);
+        edgeRetainedNodes.push({ node, placement, classifier: isHeadingControl });
+        rememberOpaqueSubtree(node, edgeRetainedSubtreeNodes);
         return '';
       }
       const tagName = getTagName(node);
@@ -1140,8 +1144,8 @@
       entries: snapshotEntries,
       originalContainers,
       originalTextValues,
-      localControls,
-      localControlNodes,
+      edgeRetainedNodes,
+      edgeRetainedSubtreeNodes,
       opaqueAtomNodes,
       inertPageNodes,
       originalSignature,
@@ -1324,8 +1328,8 @@
 
   function matchesSupportedClassification(snapshot) {
     if (isUnsupportedElement(snapshot?.blockElement)) return false;
-    for (const control of snapshot?.localControls || []) {
-      if (getHeadingControlPlacement(control.node, snapshot.blockElement) !== control.placement) return false;
+    for (const retained of snapshot?.edgeRetainedNodes || []) {
+      if (getEdgeRetainedPlacement(retained.node, snapshot.blockElement, retained.classifier) !== retained.placement) return false;
     }
     for (const node of snapshot?.inertPageNodes || []) {
       if (
@@ -1340,7 +1344,7 @@
     // matchesOriginalOwnership already refuses any entry that left the block.
     for (const container of snapshot?.originalContainers || []) {
       if (
-        snapshot.localControlNodes?.has(container.node) ||
+        snapshot.edgeRetainedSubtreeNodes?.has(container.node) ||
         snapshot.opaqueAtomNodes?.has(container.node) ||
         !isNodeWithinBlock(container.node, snapshot.blockElement)
       ) continue;
@@ -1428,9 +1432,9 @@
       snapshot
     );
     if (failed) return validationError(failed);
-    for (const control of snapshot.localControls || []) {
-      if (control.placement === 'leading') rootChildren.unshift(control.node);
-      else rootChildren.push(control.node);
+    for (const retained of snapshot.edgeRetainedNodes || []) {
+      if (retained.placement === 'leading') rootChildren.unshift(retained.node);
+      else rootChildren.push(retained.node);
     }
     return {
       ok: true,
@@ -1442,11 +1446,11 @@
     };
   }
 
-  function replaceNodeChildren(node, children, localControls = []) {
+  function replaceNodeChildren(node, children, edgeRetainedNodes = []) {
     if (sameNodeList(node, children)) return;
-    const retained = new Set(localControls.map((control) => control.node));
+    const retained = new Set(edgeRetainedNodes.map((entry) => entry.node));
     if (retained.size) {
-      // Never detach the control: focus, listeners, and icon state stay live.
+      // Never detach retained nodes: focus, listeners, and local state stay live.
       for (const child of getChildNodes(node)) {
         if (!retained.has(child)) node.removeChild(child);
       }
@@ -1472,7 +1476,7 @@
     }
     for (const container of snapshot.originalContainers || []) {
       replaceNodeChildren(container.node, container.children,
-        container.node === snapshot.blockElement ? snapshot.localControls : []);
+        container.node === snapshot.blockElement ? snapshot.edgeRetainedNodes : []);
     }
     snapshot.appliedOwnership = null;
     snapshot.translatedSignature = null;
@@ -1494,7 +1498,7 @@
       for (const container of plan.containerPlans) {
         replaceNodeChildren(container.node, container.children);
       }
-      replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.localControls);
+      replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.edgeRetainedNodes);
       snapshot.appliedOwnership = captureAppliedOwnership(snapshot, plan);
       const translatedFingerprint = getStructureFingerprint(
         snapshot.blockElement
