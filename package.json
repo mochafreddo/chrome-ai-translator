@@ -6,6 +6,7 @@
     "test:integration:disclosure-summary": "node tests/integration/disclosure-summary.test.mjs",
     "test:integration:ai-hero-disclosure": "node tests/integration/ai-hero-disclosure.smoke.test.mjs",
     "test:integration:ai-hero-grill-with-docs": "node tests/integration/ai-hero-grill-with-docs.test.mjs",
+    "test:integration:github-skill-page": "node tests/integration/github-skill-page.test.mjs",
     "test:integration:ai-hero-responsive-labels": "node tests/integration/ai-hero-responsive-labels.test.mjs",
     "test:integration:heading-permalink": "node tests/integration/heading-permalink.test.mjs",
     "test:integration:data-as-paragraph": "node tests/integration/data-as-paragraph.test.mjs",
