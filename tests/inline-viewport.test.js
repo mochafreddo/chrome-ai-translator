@@ -154,7 +154,8 @@ exports.tests = [
       const rejected = [hidden, element('button', text('Press me')), editor].map(child =>
         paragraph(text('Visible prose before the child. '), child));
       const inner = paragraph(text('Inner paragraph has its own owner.'));
-      const outer = paragraph(text('Outer prose cannot absorb an inner paragraph. '), inner);
+      const outer = paragraph(text('Outer prose cannot absorb an interior paragraph. '), inner,
+        text(' Outer prose continues after the paragraph.'));
       const root = element('div', ordinary, ...unsupported, ...rejected, outer);
       document.body.appendChild(root);
       const state = createActiveInlineTranslationState();
