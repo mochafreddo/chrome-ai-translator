@@ -203,9 +203,12 @@
     return placement;
   }
 
+  function isBlockChildContainerElement(node) {
+    return node?.nodeType === 1 && BLOCK_CHILD_TAGS.has(getTagName(node));
+  }
+
   function isBlockChild(node) {
-    return node?.nodeType === 1 &&
-      (BLOCK_CHILD_TAGS.has(getTagName(node)) || isSemanticBlockElement(node));
+    return isBlockChildContainerElement(node) || isSemanticBlockElement(node);
   }
 
   // A heading's edge control is local UI, never a translatable atom. Requiring
@@ -1573,6 +1576,7 @@
     matchesAppliedOwnership,
     matchesOriginalOwnership,
     isSemanticBlockElement,
+    isBlockChildContainerElement,
     serializeBlock,
     isCodeLikeInlineText,
     isProtectedAtomicLinkLabel,
