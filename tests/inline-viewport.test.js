@@ -97,6 +97,82 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
 exports.name = 'inline viewport';
 exports.tests = [
   {
+    name: 'skips CSS-hidden headings and ancestors before admission and discovers revealed prose',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const heading = element('h2', text('Repository navigation'));
+      heading.computedStyle = { clip: 'rect(0px, 0px, 0px, 0px)', overflow: 'hidden' };
+      heading.rect = { top: 20, bottom: 21, left: 10, right: 11, width: 1, height: 1 };
+      const hiddenParent = element('div', element('p', text('Hidden navigation prose.')));
+      hiddenParent.computedStyle = { clipPath: 'inset(50%)', overflow: 'hidden' };
+      hiddenParent.rect = { ...heading.rect };
+      const visible = element('p', text('Visible release notes.'));
+      const root = element('div', heading, hiddenParent, visible);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.admissions, [visible]);
+        assert.equal(f.session.progress().counts.failed, 0);
+        heading.computedStyle = {};
+        hiddenParent.computedStyle = {};
+        f.viewport.rescan();
+        f.advance();
+        assert.ok(f.admissions.includes(heading));
+        assert.ok(f.admissions.includes(hiddenParent.childNodes[0]));
+        assert.equal(f.session.progress().counts.failed, 0);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'collects visible paragraphs under boxless and non-hiding styled ancestors',
+    fn() {
+      for (const style of [
+        { display: 'contents', overflow: 'hidden' },
+        { overflow: 'visible' },
+        { fontSize: '0px' },
+        { clipPath: 'inset(0px)' },
+      ]) {
+        const { document, element, text } = createTestDocument();
+        const paragraph = element('p', text('Visible release notes.'));
+        paragraph.computedStyle = { fontSize: '16px' };
+        const root = element('div', paragraph);
+        root.computedStyle = style;
+        if (style.display || style.overflow === 'visible') {
+          root.rect = { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+        }
+        document.body.appendChild(root);
+        const f = scannerFixture(root);
+        try {
+          f.viewport.start(root);
+          assert.deepEqual(f.admissions, [paragraph], JSON.stringify(style));
+          assert.equal(f.session.progress().counts.failed, 0);
+        } finally { f.viewport.stop(); }
+      }
+    },
+  },
+  {
+    name: 'does not read ancestor textContent while discovering paragraphs',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const paragraphs = Array.from({ length: 100 }, () => element('p', text('Visible prose.')));
+      const root = element('div', ...paragraphs);
+      document.body.appendChild(root);
+      let reads = 0;
+      for (const ancestor of [root, document.body]) {
+        Object.defineProperty(ancestor, 'textContent', {
+          get() { reads += 1; return paragraphs.map(p => p.textContent).join(''); },
+        });
+      }
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.admissions, paragraphs);
+        assert.equal(reads, 0);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
     name: 'collects data-as paragraphs once and preserves inline elements through apply and restore',
     fn() {
       const { document, element, text } = createTestDocument();

@@ -117,10 +117,18 @@
     function isElementHidden(el) {
       if (!el || !(el instanceof platform.HTMLElement)) return false;
       const style = platform.window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      // A boxless ancestor can still have visible descendants. Only prune a
+      // tiny box when overflow actually clips its contents in both directions.
+      const tinyClippedBox = style.display !== 'contents' &&
+        rect.width <= 1 && rect.height <= 1 &&
+        /^(hidden|clip)$/.test(style.overflowX || style.overflow) &&
+        /^(hidden|clip)$/.test(style.overflowY || style.overflow);
       return (
         style.display === 'none' ||
         style.visibility === 'hidden' ||
         style.opacity === '0' ||
+        tinyClippedBox ||
         el.hidden ||
         el.getAttribute('aria-hidden') === 'true'
       );
