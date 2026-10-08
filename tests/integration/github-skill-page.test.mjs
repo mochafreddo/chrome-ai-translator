@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import viewportHarness from '../viewport-harness.js';
+import background from '../../extension/background.js';
 import { browser, createChecks, launchExtensionBrowser, until } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -14,10 +15,7 @@ const PAGE_URL = 'https://github.com/mattpocock/skills/blob/main/skills/engineer
 const { check, failures, finish } = createChecks('github skill page');
 
 async function inject(evaluate) {
-  for (const file of [
-    'default-model.js', 'inline-diagnostics-protocol.js', 'placeholder-tokens.js',
-    'inline-block.js', 'inline-translation-session.js', 'inline-viewport.js', 'content.js',
-  ]) {
+  for (const file of background.getInlineContentScriptFiles()) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
   await evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
@@ -26,14 +24,14 @@ async function inject(evaluate) {
 async function collectArticle() {
   const root = document.querySelector('article.markdown-body');
   if (!root) throw new Error('Rendered Markdown article is missing');
-  const state = createInlineTranslationState();
-  beginInlineTranslationOperation(state, {});
+  const session = ChromeAiTranslatorInlineTranslationSession.createInlineTranslationSession();
+  session.begin({});
   const records = [];
   const step = Math.max(1, Math.floor(window.innerHeight * 0.75));
   for (let top = 0; top <= document.documentElement.scrollHeight; top += step) {
     window.scrollTo(0, top);
     await new Promise((resolve) => setTimeout(resolve, 75));
-    const viewport = createViewportProbe(state.session);
+    const viewport = createViewportProbe(session);
     try {
       viewport.start(root);
       records.push(...viewport.records);
@@ -42,8 +40,8 @@ async function collectArticle() {
   window.scrollTo(0, 0);
   return {
     attempted: records.length,
-    counts: state.session.progress().counts,
-    localRejections: state.session.outbox.map(({ code, localRejection }) => ({ code, localRejection })),
+    counts: session.progress().counts,
+    localRejections: session.outbox.map(({ code, localRejection }) => ({ code, localRejection })),
   };
 }
 

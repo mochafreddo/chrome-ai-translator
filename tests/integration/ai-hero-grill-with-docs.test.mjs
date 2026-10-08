@@ -5,6 +5,7 @@
 
 import { readFileSync } from 'node:fs';
 import viewportHarness from '../viewport-harness.js';
+import background from '../../extension/background.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -38,16 +39,7 @@ async function attachReportedPage(context) {
 }
 
 async function injectInlineTranslation(evaluate) {
-  for (const file of [
-    'default-model.js',
-    'inline-diagnostics-protocol.js',
-    'placeholder-tokens.js',
-    'inline-block.js',
-    'inline-translation-session.js', 'inline-viewport.js',
-    'translation-settings.js',
-    'inline-model-execution.js',
-    'content.js',
-  ]) {
+  for (const file of background.getInlineContentScriptFiles()) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
 }
@@ -87,8 +79,8 @@ async function main() {
       };
       try {
         const root = pickArticleRoot();
-        const state = createInlineTranslationState();
-        beginInlineTranslationOperation(state, {});
+        const session = ChromeAiTranslatorInlineTranslationSession.createInlineTranslationSession();
+        session.begin({});
         const records = [];
         const step = Math.max(1, Math.floor(window.innerHeight * 0.75));
         for (
@@ -98,7 +90,7 @@ async function main() {
         ) {
           window.scrollTo(0, top);
           await new Promise((resolve) => setTimeout(resolve, 75));
-          const viewport = createViewportProbe(state.session);
+          const viewport = createViewportProbe(session);
           try {
             viewport.start(root);
             records.push(...viewport.records);
@@ -145,7 +137,7 @@ async function main() {
           : [];
         return {
           attempted: records.length,
-          failed: state.session.progress().counts.failed,
+          failed: session.progress().counts.failed,
           repositoryFound: Boolean(repository),
           repositoryDisposition: unchanged?.disposition || '',
           changedDisposition: changed?.disposition || '',
