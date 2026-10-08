@@ -318,6 +318,30 @@ async function collectWorkerResponses(worker, messages, sender = {}) {
   return responses;
 }
 
+function createSettingsWorker({ settings = {}, get, set, chrome = {} } = {}) {
+  let persisted = { ...settings };
+  const worker = helpers.createBackgroundWorker({
+    chrome: {
+      ...chrome,
+      storage: { local: {
+        async get() {
+          if (get) await get();
+          return { settings: { ...persisted } };
+        },
+        async set(value) {
+          if (set) await set(value.settings);
+          persisted = { ...value.settings };
+        },
+      } },
+    },
+  });
+  const send = (message) => new Promise((resolve) =>
+    worker.handlers.onMessage(message, {}, resolve)
+  );
+  return { worker, send };
+}
+
+
 // The five namespaces a whole-tab translation reaches and nothing else: `runtime` for the
 // state broadcast the panel listens to, `sidePanel` for the panel it opens beside the page,
 // `scripting` for the content script it makes sure is there, `storage` for the settings it
@@ -421,6 +445,137 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'later overlapping settings request owns the same field and final Button Visibility registration',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      const registrations = [];
+      const { send } = createSettingsWorker({
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: {
+          permissions: { contains: async () => true, remove: async () => true },
+          scripting: {
+            getRegisteredContentScripts: async () => [],
+            registerContentScripts: async () => { registrations.push('allPages'); },
+            unregisterContentScripts: async () => { registrations.push('never'); },
+          },
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { model: 'first', buttonVisibility: 'allPages' } });
+      await ready;
+      const second = send({ type: 'SAVE_SETTINGS', settings: { model: 'last', buttonVisibility: 'never' } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.model, 'last');
+      assert.equal(result.settings.buttonVisibility, 'never');
+      assert.equal(registrations.at(-1), 'never');
+    },
+  },
+  {
+    name: 'installation normalization cannot overwrite an overlapping user save',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      const { worker, send } = createSettingsWorker({
+        settings: { model: 'initial-model', inlineAutoShow: true },
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: { sidePanel: { setPanelBehavior: async () => {} } },
+      });
+      const install = worker.handlers.onInstalled();
+      await ready;
+      const save = send({ type: 'SAVE_SETTINGS', settings: { model: 'user-model' } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      await install;
+      assert.deepEqual(await save, { ok: true });
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.model, 'user-model');
+      assert.equal(result.settings.buttonVisibility, 'allPages');
+    },
+  },
+  ...['get', 'set'].map((failure) => ({
+    name: `settings ${failure} failure stays private and does not retry or block the next save`,
+    async fn() {
+      let fail = true;
+      let attempts = 0;
+      const { send } = createSettingsWorker({
+        settings: { model: 'initial', apiKey: 'sk-synthetic' },
+        async [failure]() {
+          attempts += 1;
+          if (fail) { fail = false; throw new Error('Storage rejected sk-synthetic'); }
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { model: 'failed' } });
+      const second = send({ type: 'SAVE_SETTINGS', settings: { tone: 'formal' } });
+      const [failed, saved] = await Promise.all([first, second]);
+      assert.equal(failed.ok, false);
+      assert.doesNotMatch(JSON.stringify(failed), /sk-synthetic/);
+      assert.deepEqual(saved, { ok: true });
+      assert.equal(attempts, 2);
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.model, 'initial');
+      assert.equal(result.settings.tone, 'formal');
+      assert.equal(result.settings.apiKey, '***');
+    },
+  })),
+  {
+    name: 'registration failure leaves settings saved and public reads conceal storage errors',
+    async fn() {
+      let failRead = false;
+      const { send } = createSettingsWorker({
+        get: async () => { if (failRead) throw new Error('sk-synthetic'); },
+        chrome: {
+          permissions: { contains: async () => true },
+          scripting: { registerContentScripts: async () => { throw new Error('registration failure'); } },
+        },
+      });
+      assert.deepEqual(await send({ type: 'SAVE_SETTINGS', settings: { model: 'saved', buttonVisibility: 'allPages' } }), { ok: true });
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.model, 'saved');
+      failRead = true;
+      const response = await send({ type: 'GET_SETTINGS' });
+      assert.equal(response.ok, false);
+      assert.doesNotMatch(JSON.stringify(response), /sk-synthetic/);
+    },
+  },
+  {
+    name: 'preserves different fields from overlapping settings saves after storage completes',
+    async fn() {
+      let releaseWrite;
+      let writeStarted;
+      const started = new Promise((resolve) => { writeStarted = resolve; });
+      const blocked = new Promise((resolve) => { releaseWrite = resolve; });
+      let writes = 0;
+      const { send } = createSettingsWorker({
+        settings: { model: 'initial-model', apiKey: 'sk-synthetic' },
+        async set() {
+          writes += 1;
+          if (writes === 1) { writeStarted(); await blocked; }
+        },
+      });
+      let firstAnswered = false;
+      const first = send({ type: 'SAVE_SETTINGS', settings: { model: 'new-model' } })
+        .then((response) => { firstAnswered = true; return response; });
+      await started;
+      const second = send({ type: 'SAVE_SETTINGS', settings: { tone: 'formal' } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(firstAnswered, false);
+      releaseWrite();
+      assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
+      const response = await send({ type: 'GET_SETTINGS' });
+      assert.equal(response.settings.model, 'new-model');
+      assert.equal(response.settings.tone, 'formal');
+      assert.equal(response.settings.apiKey, '***');
+    },
+  },
   {
     // The platform contract, and the reason every check below can name the namespaces its
     // path touches and be believed: what a worker was handed is all it can reach. There is

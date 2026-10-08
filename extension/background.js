@@ -730,7 +730,7 @@ function isDuplicateInlineContentScriptError(error) {
 // namespaces the one path it drives touches and can be certain nothing else was in play.
 //
 // The state below is this instance's rather than the module's — the three long-lived maps,
-// the two promise chains that serialize writes to them, and the diagnostics module it
+// the promise chains that serialize mutations, and the diagnostics module it
 // signs and writes runs through — so a second construction is a second worker carrying
 // nothing over. That is what a restarting service worker is, and what a caller wanting a
 // clean one used to have to delete the require cache to get.
@@ -767,6 +767,7 @@ function createBackgroundWorker(platform = {}) {
   const activeTranslationsByTab = new Map();
   const inlineControlsByTab = new Map();
   let buttonVisibilityRegistrationSync = Promise.resolve();
+  let settingsMutation = Promise.resolve();
 
   async function getSettings() {
     const chrome = getChrome();
@@ -777,9 +778,17 @@ function createBackgroundWorker(platform = {}) {
     return mergeSettings({ ...settings, apiKey });
   }
 
-  async function saveSettings(settings) {
-    const chrome = getChrome();
-    await chrome.storage.local.set({ settings: mergeSettings(settings) });
+  function saveSettings(partial = {}) {
+    // Read inside the ordered mutation: queued saves and install normalization must see
+    // completed writes, and a failed storage operation must leave later requests usable.
+    const nextMutation = settingsMutation.catch(() => {}).then(async () => {
+      const current = await getSettings();
+      const next = mergeSettingsWithExisting(current, partial);
+      await getChrome().storage.local.set({ settings: next });
+      await syncButtonVisibilityRegistrationSafely(next);
+    });
+    settingsMutation = nextMutation;
+    return nextMutation;
   }
 
   function setTabState(tabId, patch) {
@@ -1395,9 +1404,7 @@ function createBackgroundWorker(platform = {}) {
 
   // chrome.runtime.onInstalled.
   async function onInstalled() {
-    const settings = await getSettings();
-    await saveSettings(settings);
-    await syncButtonVisibilityRegistrationSafely(settings);
+    await saveSettings();
     await releaseActionClickToExtension();
   }
 
@@ -1549,17 +1556,17 @@ function createBackgroundWorker(platform = {}) {
           return;
         }
         if (msg?.type === 'SAVE_SETTINGS') {
-          const current = await getSettings();
-          const next = mergeSettingsWithExisting(current, msg.settings || {});
-          await saveSettings(next);
-          await syncButtonVisibilityRegistrationSafely(next);
+          await saveSettings(msg.settings || {});
           sendResponse({ ok: true });
           return;
         }
 
         sendResponse({ ok: false, error: { message: 'Unknown message' } });
       } catch (e) {
-        sendResponse({ ok: false, error: safeError(e) });
+        const error = ['GET_SETTINGS', 'SAVE_SETTINGS'].includes(msg?.type)
+          ? { message: 'Settings request failed' }
+          : safeError(e);
+        sendResponse({ ok: false, error });
       }
     })();
 
