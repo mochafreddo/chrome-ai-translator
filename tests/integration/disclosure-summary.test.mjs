@@ -103,11 +103,8 @@ async function main() {
       }
 
       const serialized = codec.serializeBlock(summary);
-      const plan = serialized.ok
-        ? codec.createPatchPlan(serialized.snapshot, '번역된 공개 제목')
-        : { ok: false };
-      const applied = plan.ok
-        ? codec.applyPatchPlan(serialized.snapshot, plan)
+      const applied = serialized.ok
+        ? codec.applyTranslatedTemplate(serialized.snapshot, '번역된 공개 제목')
         : { ok: false };
       const translatedTitle = summary.textContent;
 
@@ -244,17 +241,28 @@ async function main() {
       const translated = wrapper
         ? \`번역된 본문 \${wrapper.openToken}번역된 제목\${wrapper.closeToken}\`
         : '';
-      const plan = serialized.ok
-        ? codec.createPatchPlan(serialized.snapshot, translated)
-        : { ok: false };
       const extra = document.createTextNode(' mutated');
-      block.appendChild(extra);
-      const mutatedPlan = serialized.ok
-        ? codec.createPatchPlan(serialized.snapshot, translated)
-        : { ok: false };
+      const createTextNode = document.createTextNode;
+      let mutated = false;
+      document.createTextNode = function (value) {
+        if (!mutated) {
+          mutated = true;
+          block.appendChild(extra);
+        }
+        return createTextNode.call(this, value);
+      };
+      let mutatedApplication;
+      try {
+        mutatedApplication = serialized.ok
+          ? codec.applyTranslatedTemplate(serialized.snapshot, translated)
+          : { ok: false };
+      } finally {
+        document.createTextNode = createTextNode;
+      }
+      const mutationPreserved = extra.parentNode === block && block.textContent === originalText + ' mutated';
       extra.remove();
-      const applied = plan.ok
-        ? codec.applyPatchPlan(serialized.snapshot, plan)
+      const applied = serialized.ok
+        ? codec.applyTranslatedTemplate(serialized.snapshot, translated)
         : { ok: false };
       const firstChildAfterApply = block.childNodes[0];
       const translatedTitle = summary.textContent;
@@ -279,7 +287,7 @@ async function main() {
             )
         ),
         applyOk: applied.ok === true,
-        mutationRejected: mutatedPlan.errorCode === 'block_changed',
+        mutationRejected: mutatedApplication.errorCode === 'block_changed' && mutationPreserved,
         firstChildIsSummary: firstChildAfterApply === summary,
         sameSummary: details.querySelector('summary') === summary,
         translatedTitle,
