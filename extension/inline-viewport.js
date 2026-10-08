@@ -114,7 +114,24 @@
       return null;
     }
 
-    function isElementHidden(el) {
+    function hasUnclippedPositionedDescendant(el, candidate) {
+      const stack = candidate ? [candidate] : getInlineChildNodes(el);
+      while (stack.length) {
+        const node = stack.pop();
+        if (!node || node === el || !(node instanceof platform.HTMLElement)) continue;
+        const position = platform.window.getComputedStyle(node).position;
+        if (position === 'fixed' || position === 'absolute') {
+          let container = node.offsetParent;
+          while (container && container !== el) container = container.parentElement;
+          if (!container) return true;
+        }
+        if (candidate) stack.push(node.parentElement);
+        else stack.push(...getInlineChildNodes(node));
+      }
+      return false;
+    }
+
+    function isElementHidden(el, candidate = null) {
       if (!el || !(el instanceof platform.HTMLElement)) return false;
       const style = platform.window.getComputedStyle(el);
       const rect = el.getBoundingClientRect();
@@ -128,7 +145,7 @@
         style.display === 'none' ||
         style.visibility === 'hidden' ||
         style.opacity === '0' ||
-        tinyClippedBox ||
+        (tinyClippedBox && !hasUnclippedPositionedDescendant(el, candidate)) ||
         el.hidden ||
         el.getAttribute('aria-hidden') === 'true'
       );
@@ -166,7 +183,7 @@
       if (isInlineEffectivelyEditable(parent)) return true;
       for (let element = parent; element; element = element.parentElement) {
         if (isInlineTranslationExcludedElement(element)) return true;
-        if (isElementHidden(element)) return true;
+        if (isElementHidden(element, parent)) return true;
       }
       const value = String(textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
       if (!/[A-Za-z]/.test(value)) return true;

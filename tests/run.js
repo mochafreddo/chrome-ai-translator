@@ -14,6 +14,7 @@ const suites = [
   require('./inline-diagnostics-controller.test'),
   require('./content-helpers.test'),
   require('./inline-viewport.test'),
+  require('./inline-viewport.regression-1.test'),
   require('./background-helpers.test'),
   require('./options-helpers.test'),
   require('./sidepanel-failure.test'),
