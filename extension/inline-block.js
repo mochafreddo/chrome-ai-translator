@@ -1288,7 +1288,7 @@
     }
 
     // The walk with parents enforced: this codec's entries record which entry they sat inside,
-    // and the tree it returns is what `createPatchPlan` rebuilds the block's children from.
+    // and its tree supplies the children prepared by `applyTranslatedTemplate`.
     const walked = placeholderTokens.walkExpectedTokens(
       template,
       expectedTokens,
@@ -1493,8 +1493,9 @@
     }));
   }
 
-  function applyPatchPlan(snapshot, plan) {
-    if (!plan?.ok) return validationError('output_parse_failed');
+  function applyTranslatedTemplate(snapshot, translatedTemplate) {
+    const plan = createPatchPlan(snapshot, translatedTemplate);
+    if (!plan.ok) return plan;
     if (!matchesOriginalOwnership(snapshot)) {
       return validationError('block_changed');
     }
@@ -1553,8 +1554,7 @@
   return {
     CODEC_VERSION,
     getRecordCost,
-    applyPatchPlan,
-    createPatchPlan,
+    applyTranslatedTemplate,
     matchesAppliedOwnership,
     matchesOriginalOwnership,
     isSemanticBlockElement,

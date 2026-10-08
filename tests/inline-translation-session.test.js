@@ -656,11 +656,11 @@ exports.tests = [
     name: 'fails a batch whose answer the page could not settle, rather than leaving it pending',
     fn() {
       const codec = require('../extension/inline-block.js');
-      const previousCreatePatchPlan = codec.createPatchPlan;
+      const previousApplyTranslatedTemplate = codec.applyTranslatedTemplate;
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);
       const { batch } = sendBlock(visit);
-      codec.createPatchPlan = () => {
+      codec.applyTranslatedTemplate = () => {
         throw new Error('synthetic codec failure');
       };
       try {
@@ -670,7 +670,7 @@ exports.tests = [
           diagnosticsUnavailable: false,
         });
       } finally {
-        codec.createPatchPlan = previousCreatePatchPlan;
+        codec.applyTranslatedTemplate = previousApplyTranslatedTemplate;
       }
       assert.deepEqual(visit.progress().counts, { ...NOTHING, failed: 1 });
       // The request it ended no longer holds one of the two places in flight.

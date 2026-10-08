@@ -182,11 +182,8 @@ async function main() {
       } else if (serialized.ok) {
         translated = '번역';
       }
-      const plan = serialized.ok
-        ? codec.createPatchPlan(serialized.snapshot, translated)
-        : { ok: false };
-      const applied = plan.ok
-        ? codec.applyPatchPlan(serialized.snapshot, plan)
+      const applied = serialized.ok
+        ? codec.applyTranslatedTemplate(serialized.snapshot, translated)
         : { ok: false };
       const firstChildAfterApply = block.childNodes[0];
       const translatedTitle = summary.textContent;
@@ -204,7 +201,7 @@ async function main() {
         serializeOk: serialized.ok === true,
         placement: wrapper && wrapper.placement,
         applyOk: applied.ok === true,
-        planError: plan.errorCode || applied.errorCode || '',
+        applyError: applied.errorCode || '',
         firstChildIsSummary: firstChildAfterApply === summary,
         sameSummary: details.querySelector('summary') === summary,
         translatedTitle,
@@ -246,7 +243,7 @@ async function main() {
         String(result?.translatedTitle || '').includes('번역'),
       JSON.stringify({
         applyOk: result?.applyOk,
-        planError: result?.planError,
+        applyError: result?.applyError,
         firstChildIsSummary: result?.firstChildIsSummary,
         sameSummary: result?.sameSummary,
         translatedTitle: result?.translatedTitle,

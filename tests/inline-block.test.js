@@ -250,8 +250,7 @@ exports.tests = [
       assert.equal(serialized.template.match(/⟦[^⟧]+⟧/g).length, 3);
       const translated = serialized.template.replace('Yes', '예')
         .replace('Then work the tickets one of two ways:', '이후 티켓을 두 가지 방법 중 하나로 처리합니다:');
-      assert.equal(codec.applyPatchPlan(serialized.snapshot,
-        codec.createPatchPlan(serialized.snapshot, translated)).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
       assert.equal(strong.textContent, '예');
       assert.equal(code.textContent, '/to-spec');
       assert.equal(block.childNodes.at(-1), list);
@@ -281,8 +280,7 @@ exports.tests = [
           assert.equal(serialized.template.trim(), 'Parent own prose.');
           assert.deepEqual(serialized.atoms, []);
           assert.deepEqual(serialized.contract.entries, []);
-          assert.equal(codec.applyPatchPlan(serialized.snapshot,
-            codec.createPatchPlan(serialized.snapshot, '부모 본문입니다.')).ok, true);
+          assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, '부모 본문입니다.').ok, true);
           assert.equal(leading ? block.childNodes[0] : block.childNodes.at(-1), child);
           assert.deepEqual(child.childNodes, [childText]);
           assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
@@ -331,9 +329,8 @@ exports.tests = [
           document.body.appendChild(block);
           const serialized = codec.serializeBlock(block);
           assert.equal(serialized.ok, true);
-          const plan = codec.createPatchPlan(serialized.snapshot, '부모 본문입니다.');
-          assert.equal(plan.ok, true);
-          if (applied) assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+          const translatedTemplate = '부모 본문입니다.';
+          if (applied) assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
           if (mutation === 'remove') block.removeChild(child);
           else if (mutation === 'replace') {
             const replacement = element('span', text('Nested paragraph.'));
@@ -348,10 +345,8 @@ exports.tests = [
           const value = block.textContent;
           assert.equal(applied ? codec.matchesAppliedOwnership(serialized.snapshot) :
             codec.matchesOriginalOwnership(serialized.snapshot), false, mutation);
-          assert.deepEqual(applied ? codec.restoreBlock(serialized.snapshot) : codec.applyPatchPlan(serialized.snapshot, plan),
+          assert.deepEqual(applied ? codec.restoreBlock(serialized.snapshot) : codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate),
             { ok: false, errorCode: 'block_changed' }, `${mutation}, applied=${applied}`);
-          if (!applied) assert.deepEqual(codec.createPatchPlan(serialized.snapshot, '새 본문입니다.'),
-            { ok: false, errorCode: 'block_changed' });
           assert.deepEqual(block.childNodes, children);
           assert.equal(block.textContent, value);
         }
@@ -374,12 +369,12 @@ exports.tests = [
           const nested = codec.serializeBlock(child);
           assert.equal(parent.ok, true);
           assert.equal(nested.ok, true);
-          const parentPlan = codec.createPatchPlan(parent.snapshot, '부모 번역입니다.');
-          const childPlan = codec.createPatchPlan(nested.snapshot, '자식 번역입니다.');
-          const applyOrder = childFirst ? [[nested, childPlan], [parent, parentPlan]] :
-            [[parent, parentPlan], [nested, childPlan]];
-          for (const [serialized, plan] of applyOrder) {
-            assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+          const parentTemplate = '부모 번역입니다.';
+          const childTemplate = '자식 번역입니다.';
+          const applyOrder = childFirst ? [[nested, childTemplate], [parent, parentTemplate]] :
+            [[parent, parentTemplate], [nested, childTemplate]];
+          for (const [serialized, translatedTemplate] of applyOrder) {
+            assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
           }
           assert.equal(block.textContent, '부모 번역입니다.자식 번역입니다.');
           assert.equal(codec.matchesAppliedOwnership(parent.snapshot), true);
@@ -410,8 +405,7 @@ exports.tests = [
         const nested = codec.serializeBlock(child);
         const translated = translateChild ? nested : parent;
         const pending = translateChild ? parent : nested;
-        assert.equal(codec.applyPatchPlan(translated.snapshot,
-          codec.createPatchPlan(translated.snapshot, '번역된 본문입니다.')).ok, true);
+        assert.equal(codec.applyTranslatedTemplate(translated.snapshot, '번역된 본문입니다.').ok, true);
         assert.equal(codec.matchesOriginalOwnership(pending.snapshot), true);
         assert.equal(codec.restoreBlock(translated.snapshot).ok, true);
         assert.equal(codec.matchesOriginalOwnership(pending.snapshot), true);
@@ -435,8 +429,7 @@ exports.tests = [
       assert.equal(serialized.template.trim(), 'Own prose.');
       assert.deepEqual(serialized.atoms, []);
       assert.deepEqual(serialized.contract.entries, []);
-      assert.equal(codec.applyPatchPlan(serialized.snapshot,
-        codec.createPatchPlan(serialized.snapshot, '부모 본문입니다.')).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, '부모 본문입니다.').ok, true);
       assert.deepEqual(block.childNodes.slice(0, 2), leading);
       assert.deepEqual(block.childNodes.slice(-2), trailing);
       assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
@@ -465,8 +458,7 @@ exports.tests = [
       child.textContent = 'Excluded nested prose. '.repeat(10000);
       assert.equal(codec.serializeBlock(block).ok, true);
       assert.equal(codec.matchesOriginalOwnership(parent.snapshot), true);
-      assert.equal(codec.applyPatchPlan(parent.snapshot,
-        codec.createPatchPlan(parent.snapshot, '부모가 번역되었습니다.')).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(parent.snapshot, '부모가 번역되었습니다.').ok, true);
       child.replaceChildren(element('strong', text('Nested page update.')));
       assert.equal(codec.matchesAppliedOwnership(parent.snapshot), true);
       const nestedChildren = [...child.childNodes];
@@ -492,8 +484,7 @@ exports.tests = [
       assert.equal(serialized.template, 'First line introduces a nested list.');
       assert.deepEqual(serialized.atoms, []);
       assert.deepEqual(serialized.contract.entries, []);
-      assert.equal(codec.applyPatchPlan(serialized.snapshot,
-        codec.createPatchPlan(serialized.snapshot, '중첩 목록을 소개하는 첫 줄입니다.')).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, '중첩 목록을 소개하는 첫 줄입니다.').ok, true);
       assert.equal(block.childNodes.at(-1), list);
       assert.deepEqual(list.childNodes, [nestedItem]);
       assert.deepEqual(nestedItem.childNodes, [nestedText]);
@@ -517,16 +508,14 @@ exports.tests = [
           const serialized = codec.serializeBlock(block);
           assert.equal(serialized.ok, true);
           const entry = serialized.contract.entries[0];
-          const plan = codec.createPatchPlan(serialized.snapshot, `${entry.openToken}번역된 문단${entry.closeToken}`);
-          assert.equal(plan.ok, true);
-          if (stage === 'restore') assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+          const translatedTemplate = `${entry.openToken}번역된 문단${entry.closeToken}`;
+          if (stage === 'restore') assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
           if (target === 'root') block.setAttribute('data-as', 'div');
           else wrapper.setAttribute('data-as', 'p');
           const children = [...block.childNodes];
           const content = block.textContent;
           if (stage === 'apply') {
-            assert.equal(codec.createPatchPlan(serialized.snapshot, plan.translatedTemplate).errorCode, 'block_changed');
-            assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).errorCode, 'block_changed');
+            assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).errorCode, 'block_changed');
           } else {
             assert.equal(codec.restoreBlock(serialized.snapshot).errorCode, 'block_changed');
           }
@@ -546,8 +535,7 @@ exports.tests = [
       assert.equal(serialized.template, 'Visible heading');
       assert.deepEqual(serialized.atoms, []);
       assert.deepEqual(serialized.contract.entries, []);
-      assert.equal(codec.applyPatchPlan(serialized.snapshot,
-        codec.createPatchPlan(serialized.snapshot, '번역된 제목')).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, '번역된 제목').ok, true);
       assert.equal(block.childNodes.at(-1), control);
       assert.equal(control.childNodes[0], link);
       assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
@@ -587,9 +575,8 @@ exports.tests = [
           const { block, control, link, icon, element, text } = fixture;
           const serialized = codec.serializeBlock(block);
           assert.equal(serialized.ok, true);
-          const plan = codec.createPatchPlan(serialized.snapshot, '번역된 제목');
-          assert.equal(plan.ok, true);
-          if (afterApply) assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+          const translatedTemplate = '번역된 제목';
+          if (afterApply) assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
           if (change === 'replace-control') {
             const replacement = createHeadingControlFixture().control;
             block.insertBefore(replacement, control);
@@ -605,7 +592,7 @@ exports.tests = [
           }
           const changedChildren = [...block.childNodes];
           const changedText = block.textContent;
-          const result = afterApply ? codec.restoreBlock(serialized.snapshot) : codec.applyPatchPlan(serialized.snapshot, plan);
+          const result = afterApply ? codec.restoreBlock(serialized.snapshot) : codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate);
           assert.deepEqual(result, { ok: false, errorCode: 'block_changed' }, `${change}, applied=${afterApply}`);
           assert.deepEqual(block.childNodes, changedChildren);
           assert.equal(block.textContent, changedText);
@@ -733,9 +720,7 @@ exports.tests = [
         .map((entry) => entry.token)
         .filter(Boolean)
         .join('')}.`;
-      const plan = codec.createPatchPlan(serialized.snapshot, translated);
-      assert.equal(plan.ok, true);
-      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
       assert.equal(directComment.parentNode, block);
       assert.equal(codeComment.parentNode, code);
       assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
@@ -767,12 +752,8 @@ exports.tests = [
           (entry) => entry.kind === 'atom'
         );
         assert.ok(atom);
-        const plan = codec.createPatchPlan(
-          serialized.snapshot,
-          `${atom.token} 번역`
-        );
-        assert.equal(plan.ok, true);
-        assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+        const translatedTemplate = `${atom.token} 번역`;
+        assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
         assert.equal(decoration.parentNode, block);
         assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
         assert.deepEqual(block.childNodes, originalChildren);
@@ -1103,9 +1084,7 @@ exports.tests = [
       const validated = codec.validateTranslatedTemplate(translated, serialized.contract);
       assert.equal(validated.ok, true);
       assert.deepEqual(validated.droppedWrappers, ['W1']);
-      const plan = codec.createPatchPlan(serialized.snapshot, translated);
-      assert.equal(plan.ok, true);
-      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
       assert.equal(block.textContent, translated);
       assert.equal(em.parentNode, null);
       assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
@@ -1300,13 +1279,7 @@ exports.tests = [
       );
       const translated = `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
 
-      const plan = codec.createPatchPlan(serialized.snapshot, translated);
-
-      assert.equal(plan.ok, true);
-      assert.deepEqual(block.childNodes, originalBlockChildren);
-      assert.equal(block.textContent, 'Reasoning models like GPT-5.5 use internal reasoning tokens.');
-
-      const applied = codec.applyPatchPlan(serialized.snapshot, plan);
+      const applied = codec.applyTranslatedTemplate(serialized.snapshot, translated);
 
       assert.equal(applied.ok, true);
       assert.equal(block.childNodes[0], link);
@@ -1326,6 +1299,33 @@ exports.tests = [
     },
   },
   {
+    name: 'rejects page-owned replacements made while translated nodes are prepared',
+    fn() {
+      const { document, block, link, serialized } = createReasoningFixture();
+      const pageOwnedText = document.createTextNode('GPT-5.5');
+      const originalChildren = [...block.childNodes];
+      const createTextNode = document.createTextNode;
+      let mutated = false;
+      document.createTextNode = function (value) {
+        if (!mutated) {
+          mutated = true;
+          link.replaceChildren(pageOwnedText);
+        }
+        return createTextNode.call(this, value);
+      };
+      let applied;
+      try {
+        applied = codec.applyTranslatedTemplate(serialized.snapshot, serialized.template);
+      } finally {
+        document.createTextNode = createTextNode;
+      }
+      assert.deepEqual(applied, { ok: false, errorCode: 'block_changed' });
+      assert.equal(link.childNodes[0], pageOwnedText);
+      assert.deepEqual(block.childNodes, originalChildren);
+      assert.equal(block.textContent, 'Reasoning models like GPT-5.5 use internal reasoning tokens.');
+    },
+  },
+  {
     name: 'rolls back the original graph when synchronous application fails',
     fn() {
       const { block, strong, serialized } = createReasoningFixture();
@@ -1337,13 +1337,10 @@ exports.tests = [
       const atom = serialized.contract.entries.find(
         (entry) => entry.kind === 'atom'
       );
-      const plan = codec.createPatchPlan(
-        serialized.snapshot,
-        `${atom.token} ${wrapper.openToken}번역${wrapper.closeToken}`
-      );
+      const translatedTemplate = `${atom.token} ${wrapper.openToken}번역${wrapper.closeToken}`;
       block.throwOnNextReplace = true;
 
-      const applied = codec.applyPatchPlan(serialized.snapshot, plan);
+      const applied = codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate);
 
       assert.deepEqual(applied, { ok: false, errorCode: 'apply_failed' });
       assert.deepEqual(block.childNodes, originalBlockChildren);
@@ -1361,11 +1358,8 @@ exports.tests = [
       const atom = serialized.contract.entries.find(
         (entry) => entry.kind === 'atom'
       );
-      const plan = codec.createPatchPlan(
-        serialized.snapshot,
-        `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}`
-      );
-      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      const translatedTemplate = `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}`;
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
       const translatedText = block.childNodes[1];
       const pageOwnedCopy = document.createTextNode(translatedText.nodeValue);
       block.childNodes.splice(1, 1, pageOwnedCopy);
@@ -1385,7 +1379,7 @@ exports.tests = [
       link.replaceChildren(document.createTextNode('GPT-5.5'));
 
       assert.deepEqual(
-        codec.createPatchPlan(serialized.snapshot, serialized.template),
+        codec.applyTranslatedTemplate(serialized.snapshot, serialized.template),
         { ok: false, errorCode: 'block_changed' }
       );
     },
@@ -1400,11 +1394,8 @@ exports.tests = [
       const atom = serialized.contract.entries.find(
         (entry) => entry.kind === 'atom'
       );
-      const plan = codec.createPatchPlan(
-        serialized.snapshot,
-        `${atom.token} ${wrapper.openToken}번역${wrapper.closeToken}`
-      );
-      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      const translatedTemplate = `${atom.token} ${wrapper.openToken}번역${wrapper.closeToken}`;
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
       const pageOwnedText = document.createTextNode('GPT-5.5');
       link.replaceChildren(pageOwnedText);
 
@@ -1423,7 +1414,7 @@ exports.tests = [
       firstFixture.strong.hidden = true;
 
       assert.deepEqual(
-        codec.createPatchPlan(
+        codec.applyTranslatedTemplate(
           firstRecord.snapshot,
           firstRecord.template
         ),
@@ -1437,12 +1428,9 @@ exports.tests = [
       const atom = secondFixture.serialized.contract.entries.find(
         (entry) => entry.kind === 'atom'
       );
-      const plan = codec.createPatchPlan(
-        secondFixture.serialized.snapshot,
-        `${atom.token} ${wrapper.openToken}번역${wrapper.closeToken}`
-      );
+      const translatedTemplate = `${atom.token} ${wrapper.openToken}번역${wrapper.closeToken}`;
       assert.equal(
-        codec.applyPatchPlan(secondFixture.serialized.snapshot, plan).ok,
+        codec.applyTranslatedTemplate(secondFixture.serialized.snapshot, translatedTemplate).ok,
         true
       );
       secondFixture.strong.setAttribute('contenteditable', 'true');
@@ -1497,7 +1485,7 @@ exports.tests = [
       const beforeApply = createReasoningFixture();
       beforeApply.document.body.setAttribute('contenteditable', 'true');
       assert.deepEqual(
-        codec.createPatchPlan(
+        codec.applyTranslatedTemplate(
           beforeApply.serialized.snapshot,
           beforeApply.serialized.template
         ),
@@ -1511,12 +1499,9 @@ exports.tests = [
       const atom = beforeRestore.serialized.contract.entries.find(
         (entry) => entry.kind === 'atom'
       );
-      const plan = codec.createPatchPlan(
-        beforeRestore.serialized.snapshot,
-        `${atom.token} ${wrapper.openToken}번역${wrapper.closeToken}`
-      );
+      const translatedTemplate = `${atom.token} ${wrapper.openToken}번역${wrapper.closeToken}`;
       assert.equal(
-        codec.applyPatchPlan(beforeRestore.serialized.snapshot, plan).ok,
+        codec.applyTranslatedTemplate(beforeRestore.serialized.snapshot, translatedTemplate).ok,
         true
       );
       beforeRestore.document.body.setAttribute('contenteditable', 'true');
@@ -1601,17 +1586,13 @@ exports.tests = [
           (atom) => atom.token === hiddenEntry.token
         )?.preserveText, false);
 
-        const plan = codec.createPatchPlan(
-          serialized.snapshot,
-          serialized.template.replace(
-            visible.textContent,
-            hiddenLabel === 'short'
-              ? '번역된 /implement 스킬'
-              : '/implement 번역'
-          )
+        const translatedTemplate = serialized.template.replace(
+          visible.textContent,
+          hiddenLabel === 'short'
+            ? '번역된 /implement 스킬'
+            : '/implement 번역'
         );
-        assert.equal(plan.ok, true);
-        assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+        assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
         assert.equal(hidden.parentNode, labels);
         assert.equal(hidden.childNodes[0], hiddenChildren[0]);
         assert.equal(hidden.getAttribute('class'), hiddenClass);
@@ -2377,7 +2358,7 @@ exports.tests = [
       let result;
 
       assert.doesNotThrow(() => {
-        result = codec.createPatchPlan(
+        result = codec.applyTranslatedTemplate(
           fixture.serialized.snapshot,
           fixture.serialized.template
         );
@@ -2427,12 +2408,8 @@ exports.tests = [
       const originalChildren = [...summary.childNodes];
       const originalBody = body;
 
-      const plan = codec.createPatchPlan(
-        serialized.snapshot,
-        `번역된 제목 ${wrapper.openToken}유지${wrapper.closeToken}`
-      );
-      assert.equal(plan.ok, true);
-      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      const translatedTemplate = `번역된 제목 ${wrapper.openToken}유지${wrapper.closeToken}`;
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translatedTemplate).ok, true);
       assert.equal(disclosure.childNodes[0], summary);
       assert.equal(disclosure.childNodes[1], originalBody);
       assert.equal(summary.textContent, '번역된 제목 유지');
@@ -2556,20 +2533,9 @@ exports.tests = [
       const originalSummaryChildren = [...summary.childNodes];
       const translated = `번역된 본문 ${wrapper.openToken}번역된 제목 ${inner.openToken}유지${inner.closeToken}${wrapper.closeToken}`;
 
-      const plan = codec.createPatchPlan(serialized.snapshot, translated);
-      assert.equal(plan.ok, true);
-      assert.equal(plan.rootChildren[0], summary);
-      assert.equal(
-        plan.rootChildren.includes(summary),
-        true
-      );
-      assert.equal(
-        plan.rootChildren.filter((node) => node === summary).length,
-        1
-      );
-
-      assert.equal(codec.applyPatchPlan(serialized.snapshot, plan).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
       assert.equal(block.childNodes[0], summary);
+      assert.equal(block.childNodes.filter((node) => node === summary).length, 1);
       assert.equal(summary.textContent, '번역된 제목 유지');
       assert.equal(emphasis.parentNode, summary);
       assert.equal(emphasis.textContent, '유지');
@@ -2639,7 +2605,7 @@ exports.tests = [
       block.appendChild(text(' mutated'));
 
       assert.deepEqual(
-        codec.createPatchPlan(
+        codec.applyTranslatedTemplate(
           serialized.snapshot,
           `${wrapper.openToken}번역된 제목${wrapper.closeToken} 번역된 본문.`
         ),
