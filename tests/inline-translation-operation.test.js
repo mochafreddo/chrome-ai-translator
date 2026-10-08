@@ -388,7 +388,6 @@ exports.tests.push(
         block.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
         for (const control of controls) await instruct(control);
         const before = operation.getStatus();
-        const statusBefore = operation.getStatus();
         request.resolve({ ok: true, results: [{
           id: record.id,
           disposition: 'apply',
@@ -402,7 +401,6 @@ exports.tests.push(
           assert.equal(block.textContent, originalText);
           assert.deepEqual(block.childNodes, originalChildren);
           assert.deepEqual(operation.getStatus(), before);
-          assert.deepEqual(operation.getStatus(), statusBefore);
           assert.equal(pending.length, 1, 'obsolete work cannot re-enter the queue');
         } else {
           assert.equal(block.textContent, 'GPT-5.5와 같은 추론 모델은 내부 추론 토큰을 사용합니다.');
