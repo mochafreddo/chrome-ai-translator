@@ -346,6 +346,17 @@ function createSettingsWorker({ settings = {}, legacyKey, get, set, remove, chro
   return { worker, send, snapshot: () => ({ settings: { ...persisted }, openai_api_key: legacyKey }) };
 }
 
+async function completeSettingsWork(work) {
+  let timer;
+  try {
+    return await Promise.race([work, new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('settings event work did not complete')), 1000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 
 // The five namespaces a whole-tab translation reaches and nothing else: `runtime` for the
 // state broadcast the panel listens to, `sidePanel` for the panel it opens beside the page,
@@ -450,6 +461,173 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'startup waits for the pending all-pages save before checking its permission',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let granted = true;
+      let registered = false;
+      const { worker, send } = createSettingsWorker({
+        settings: { buttonVisibility: 'never' },
+        async set() { started(); await gate; },
+        chrome: {
+          sidePanel: { setPanelBehavior: async () => {} },
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            unregisterContentScripts: async () => { registered = false; },
+          },
+        },
+      });
+      const save = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'allPages' } });
+      await completeSettingsWork(ready);
+      const startup = worker.handlers.onStartup();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(granted, true);
+      release();
+      await completeSettingsWork(Promise.all([save, startup]));
+      assert.equal(granted, true);
+      assert.equal(registered, true);
+    },
+  },
+  {
+    name: 'a newer all-pages gesture keeps its grant while an older unregister is pending',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let granted = false;
+      let registered = false;
+      const { send } = createSettingsWorker({
+        chrome: {
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            async unregisterContentScripts() { started(); await gate; registered = false; },
+          },
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'never' } });
+      await completeSettingsWork(ready);
+      granted = true;
+      const second = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'allPages' } });
+      release();
+      assert.deepEqual(await completeSettingsWork(Promise.all([first, second])), [{ ok: true }, { ok: true }]);
+      assert.equal(granted, true);
+      assert.equal(registered, true);
+    },
+  },
+  ...[['get', true], ['set', true], ['get', false], ['set', false]].map(([failure, laterGrant]) => ({
+    name: `an earlier visibility save still synchronizes after a newer ${laterGrant ? 'all-pages' : 'tone'} ${failure} fails`,
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      let reads = 0;
+      let granted = true;
+      let registered = true;
+      const { send } = createSettingsWorker({
+        settings: { buttonVisibility: 'allPages' },
+        async get() { if (++reads === 2 && failure === 'get') throw new Error('read failed'); },
+        async set() {
+          if (++writes === 1) { started(); await gate; }
+          else if (writes === 2 && failure === 'set') throw new Error('write failed');
+        },
+        chrome: {
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            unregisterContentScripts: async () => { registered = false; },
+          },
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'never' } });
+      await completeSettingsWork(ready);
+      granted = true;
+      const second = send({ type: 'SAVE_SETTINGS', settings: laterGrant ? { buttonVisibility: 'allPages' } : { tone: 'formal' } });
+      release();
+      const results = await completeSettingsWork(Promise.all([first, second]));
+      assert.deepEqual(results[0], { ok: true });
+      assert.equal(results[1].ok, false);
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.buttonVisibility, 'never');
+      assert.equal(registered, false);
+      // Permission and persistence are not transactional: the later gesture's grant survives
+      // its failed save, while registration still matches the successful persisted choice.
+      assert.equal(granted, laterGrant);
+    },
+  })),
+  ...['onStartup', 'onInstalled'].map((event) => ({
+    name: `${event} overlapping visibility saves completes with the latest all-pages grant`,
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      let granted = false;
+      let registered = false;
+      const { worker, send } = createSettingsWorker({
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: {
+          sidePanel: { setPanelBehavior: async () => {} },
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            unregisterContentScripts: async () => { registered = false; },
+          },
+        },
+      });
+      const first = event === 'onInstalled' ? worker.handlers.onInstalled()
+        : send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'never' } });
+      await completeSettingsWork(ready);
+      const startup = event === 'onStartup' ? worker.handlers.onStartup() : Promise.resolve();
+      await Promise.resolve();
+      granted = true;
+      const second = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'allPages' } });
+      release();
+      await completeSettingsWork(Promise.all([first, startup, second]));
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.buttonVisibility, 'allPages');
+      assert.equal(granted, true);
+      assert.equal(registered, true);
+    },
+  })),
+  {
+    name: 'a later all-pages gesture keeps access when an earlier never save finishes',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      let granted = false;
+      let registered = false;
+      const { send } = createSettingsWorker({
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: {
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            unregisterContentScripts: async () => { registered = false; },
+          },
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'never' } });
+      await ready;
+      granted = true; // The later Options gesture grants access before sending its save.
+      const second = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'allPages' } });
+      release();
+      assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.buttonVisibility, 'allPages');
+      assert.equal(granted, true);
+      assert.equal(registered, true);
+    },
+  },
   ...[true, false].map((clearFirst) => ({
     name: `${clearFirst ? 'key removal then installation' : 'installation then key removal'} leaves no stored key`,
     async fn() {

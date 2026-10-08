@@ -768,6 +768,8 @@ function createBackgroundWorker(platform = {}) {
   const inlineControlsByTab = new Map();
   let buttonVisibilityRegistrationSync = Promise.resolve();
   let settingsMutation = Promise.resolve();
+  let settingsChangeGeneration = 0;
+  let allPagesAccessGeneration = 0;
 
   async function getSettings() {
     const chrome = getChrome();
@@ -779,6 +781,10 @@ function createBackgroundWorker(platform = {}) {
   }
 
   function changeSettings({ settings = {}, clearApiKey = false } = {}) {
+    const generation = ++settingsChangeGeneration;
+    if (readButtonVisibility(settings) === BUTTON_VISIBILITY.ALL_PAGES) {
+      allPagesAccessGeneration = generation;
+    }
     // Read inside the ordered mutation: queued saves and install normalization must see
     // completed writes, and a failed storage operation must leave later requests usable.
     const nextMutation = settingsMutation.catch(() => {}).then(async () => {
@@ -787,7 +793,7 @@ function createBackgroundWorker(platform = {}) {
       if (clearApiKey) delete next.apiKey;
       await getChrome().storage.local.set({ settings: next });
       if (clearApiKey) await getChrome().storage.local.remove('openai_api_key');
-      await syncButtonVisibilityRegistrationSafely(next);
+      await syncButtonVisibilityRegistrationSafely(next, generation);
     });
     settingsMutation = nextMutation;
     return nextMutation;
@@ -1169,18 +1175,21 @@ function createBackgroundWorker(platform = {}) {
     }
   }
 
-  async function syncButtonVisibilityRegistration(settings = null) {
+  async function syncButtonVisibilityRegistration(settings = null, generation = settingsChangeGeneration) {
+    // Startup reads after accepted writes, before joining the registration queue. Waiting
+    // inside that queue would deadlock a settings write awaiting its own registration.
+    if (!settings) await settingsMutation.catch(() => {});
     const previousSync = buttonVisibilityRegistrationSync.catch(() => {});
     const nextSync = previousSync.then(() =>
-      syncButtonVisibilityRegistrationNow(settings)
+      syncButtonVisibilityRegistrationNow(settings, generation)
     );
     buttonVisibilityRegistrationSync = nextSync;
     return nextSync;
   }
 
-  async function syncButtonVisibilityRegistrationSafely(settings = null) {
+  async function syncButtonVisibilityRegistrationSafely(settings = null, generation = settingsChangeGeneration) {
     try {
-      await syncButtonVisibilityRegistration(settings);
+      await syncButtonVisibilityRegistration(settings, generation);
       return true;
     } catch {
       return false;
@@ -1198,7 +1207,7 @@ function createBackgroundWorker(platform = {}) {
 
   // Brings both things the all-pages choice needs — access to every site and a content script
   // registered across pages — into line with the choice the reader has made.
-  async function syncButtonVisibilityRegistrationNow(settings = null) {
+  async function syncButtonVisibilityRegistrationNow(settings = null, generation = settingsChangeGeneration) {
     const chrome = getChrome();
     const effective = settings || (await getSettings());
     const visibility = readButtonVisibility(effective);
@@ -1209,7 +1218,9 @@ function createBackgroundWorker(platform = {}) {
       // migrating off the old checkbox reaches never without the reader opening options at
       // all, and the access that checkbox asked for would otherwise outlive it.
       try {
-        if (chrome.permissions?.remove) {
+        // A newer Options gesture may have granted access while this older write waited.
+        // Keep registration ordered even if that newer write fails, but do not revoke its grant.
+        if (generation >= allPagesAccessGeneration && chrome.permissions?.remove) {
           await chrome.permissions.remove({ origins: ALL_SITES_ORIGINS });
         }
       } catch {}
