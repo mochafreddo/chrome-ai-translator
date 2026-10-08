@@ -318,7 +318,7 @@ async function collectWorkerResponses(worker, messages, sender = {}) {
   return responses;
 }
 
-function createSettingsWorker({ settings = {}, get, set, chrome = {} } = {}) {
+function createSettingsWorker({ settings = {}, legacyKey, get, set, remove, chrome = {} } = {}) {
   let persisted = { ...settings };
   const worker = helpers.createBackgroundWorker({
     chrome: {
@@ -326,11 +326,16 @@ function createSettingsWorker({ settings = {}, get, set, chrome = {} } = {}) {
       storage: { local: {
         async get() {
           if (get) await get();
-          return { settings: { ...persisted } };
+          return { settings: { ...persisted }, openai_api_key: legacyKey };
         },
         async set(value) {
           if (set) await set(value.settings);
           persisted = { ...value.settings };
+        },
+        async remove(key) {
+          assert.equal(key, 'openai_api_key');
+          if (remove) await remove();
+          legacyKey = undefined;
         },
       } },
     },
@@ -338,7 +343,7 @@ function createSettingsWorker({ settings = {}, get, set, chrome = {} } = {}) {
   const send = (message) => new Promise((resolve) =>
     worker.handlers.onMessage(message, {}, resolve)
   );
-  return { worker, send };
+  return { worker, send, snapshot: () => ({ settings: { ...persisted }, openai_api_key: legacyKey }) };
 }
 
 
@@ -445,6 +450,138 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  ...[true, false].map((clearFirst) => ({
+    name: `${clearFirst ? 'key removal then installation' : 'installation then key removal'} leaves no stored key`,
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      const { worker, send } = createSettingsWorker({
+        settings: { model: 'retained-model' }, legacyKey: 'sk-legacy-synthetic',
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: { sidePanel: { setPanelBehavior: async () => {} } },
+      });
+      const first = clearFirst ? send({ type: 'CLEAR_API_KEY' }) : worker.handlers.onInstalled();
+      await ready;
+      const second = clearFirst ? worker.handlers.onInstalled() : send({ type: 'CLEAR_API_KEY' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      await Promise.all([first, second]);
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.apiKey, '');
+      assert.equal(result.settings.model, 'retained-model');
+    },
+  })),
+  ...[
+    ['save then clear', { tone: 'formal' }, false],
+    ['clear then save', { tone: 'formal' }, true],
+    ['new key then clear', { apiKey: 'sk-new-synthetic', tone: 'formal' }, false],
+    ['clear then new key', { apiKey: 'sk-new-synthetic', tone: 'formal' }, true],
+  ].map(([order, settings, clearFirst]) => ({
+    name: `overlapping ${order} preserves settings and follows explicit key intent`,
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      const { send, snapshot } = createSettingsWorker({
+        settings: { apiKey: 'sk-current-synthetic', model: 'retained-model' },
+        legacyKey: 'sk-legacy-synthetic',
+        async set() { if (++writes === 1) { started(); await gate; } },
+      });
+      const save = { type: 'SAVE_SETTINGS', settings };
+      const clear = { type: 'CLEAR_API_KEY' };
+      const first = send(clearFirst ? clear : save);
+      await ready;
+      const second = send(clearFirst ? save : clear);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.tone, 'formal');
+      assert.equal(result.settings.model, 'retained-model');
+      assert.equal(snapshot().openai_api_key, undefined);
+      const expectedKey = clearFirst && settings.apiKey ? 'sk-new-synthetic' : '';
+      assert.equal(snapshot().settings.apiKey || '', expectedKey);
+      assert.equal(result.settings.apiKey, expectedKey ? '***' : '');
+    },
+  })),
+  ...['get', 'set', 'remove'].map((failure) => ({
+    name: `key removal ${failure} failure remains private without retry and later changes recover`,
+    async fn() {
+      let fail = true;
+      let attempts = 0;
+      const { send, snapshot } = createSettingsWorker({
+        settings: { apiKey: 'sk-current-synthetic', model: 'retained-model' },
+        legacyKey: 'sk-legacy-synthetic',
+        async [failure]() {
+          attempts += 1;
+          if (fail) { fail = false; throw new Error('sk-current-synthetic sk-legacy-synthetic'); }
+        },
+      });
+      const clear = send({ type: 'CLEAR_API_KEY' });
+      const save = send({ type: 'SAVE_SETTINGS', settings: { tone: 'formal' } });
+      const [failed, saved] = await Promise.all([clear, save]);
+      assert.equal(failed.ok, false);
+      assert.doesNotMatch(JSON.stringify(failed), /sk-current|sk-legacy/);
+      assert.deepEqual(saved, { ok: true });
+      assert.equal(attempts, failure === 'remove' ? 1 : 2);
+      assert.deepEqual(await send({ type: 'CLEAR_API_KEY' }), { ok: true });
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.apiKey, '');
+      assert.equal(result.settings.model, 'retained-model');
+      assert.equal(result.settings.tone, 'formal');
+      assert.equal(snapshot().settings.apiKey, undefined);
+      assert.equal(snapshot().openai_api_key, undefined);
+    },
+  })),
+  {
+    name: 'key removal responds only after the legacy key removal finishes',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      const { send } = createSettingsWorker({
+        settings: { apiKey: 'sk-current-synthetic' }, legacyKey: 'sk-legacy-synthetic',
+        async remove() { started(); await gate; },
+      });
+      let answered = false;
+      const clear = send({ type: 'CLEAR_API_KEY' }).then((result) => { answered = true; return result; });
+      await ready;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(answered, false);
+      release();
+      assert.deepEqual(await clear, { ok: true });
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.apiKey, '');
+    },
+  },
+  {
+    name: 'clears both API key locations without changing other settings or permitting new translation',
+    async fn() {
+      const { send } = createSettingsWorker({
+        settings: { apiKey: 'sk-current-synthetic', model: 'retained-model', tone: 'formal',
+          targetLanguage: 'Japanese', buttonVisibility: 'onInvocation', chunkMaxChars: 9000, viewMode: 'bilingual' },
+        legacyKey: 'sk-legacy-synthetic',
+      });
+      assert.deepEqual(await send({ type: 'CLEAR_API_KEY' }), { ok: true });
+      const { settings } = await send({ type: 'GET_SETTINGS' });
+      assert.equal(settings.apiKey, '');
+      assert.equal(settings.model, 'retained-model');
+      assert.equal(settings.tone, 'formal');
+      assert.equal(settings.targetLanguage, 'Japanese');
+      assert.equal(settings.buttonVisibility, 'onInvocation');
+      assert.equal(settings.chunkMaxChars, 9000);
+      assert.equal(settings.viewMode, 'bilingual');
+      const translated = await send({ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH', operationId: 'after-delete',
+        records: [createTestPlainBlockRecord('b1')] });
+      assert.equal(translated.ok, false);
+      assert.match(translated.error.message, /API key is not set/);
+    },
+  },
   {
     name: 'later overlapping settings request owns the same field and final Button Visibility registration',
     async fn() {
