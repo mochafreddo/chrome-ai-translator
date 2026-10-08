@@ -183,6 +183,7 @@ async function save() {
 }
 
 async function clearKey() {
+  setError(null);
   if (
     !shouldClearStoredApiKey(() =>
       window.confirm('Clear the stored OpenAI API key? This cannot be undone here.')
@@ -192,6 +193,7 @@ async function clearKey() {
     setTimeout(() => setStatus(''), 1200);
     return;
   }
+  setStatus('Clearing key...');
   await clearStoredApiKey(chrome);
   elApiKey.value = '';
   setStatus('Key cleared.');
@@ -203,13 +205,15 @@ function shouldClearStoredApiKey(confirmFn) {
 }
 
 async function clearStoredApiKey(chromeApi) {
-  const stored = await chromeApi.storage.local.get(['settings']);
-  const next = { ...(stored.settings || {}) };
-  delete next.apiKey;
-  await chromeApi.storage.local.set({ settings: next });
-  if (chromeApi.storage.local.remove) {
-    await chromeApi.storage.local.remove('openai_api_key');
-  }
+  const response = await chromeApi.runtime.sendMessage({ type: 'CLEAR_API_KEY' });
+  if (!response?.ok) throw new Error('Failed to clear stored API key');
+}
+
+function handleClearClick() {
+  clearKey().catch(() => {
+    setError('Failed to clear stored API key');
+    setStatus('');
+  });
 }
 
 let saveInFlight = false;
@@ -234,7 +238,7 @@ if (hasDocument) {
   elModel.placeholder = DEFAULT_MODEL;
 
   document.getElementById('btnSave').addEventListener('click', handleSaveClick);
-  document.getElementById('btnClear').addEventListener('click', clearKey);
+  document.getElementById('btnClear').addEventListener('click', handleClearClick);
   btnCopyDiagnostics.addEventListener('click', () => copyDiagnostics().catch((error) => setError(error?.message || String(error))));
   btnSaveDiagnostics.addEventListener('click', () => saveDiagnostics().catch((error) => setError(error?.message || String(error))));
 

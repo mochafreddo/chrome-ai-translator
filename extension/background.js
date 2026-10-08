@@ -778,13 +778,15 @@ function createBackgroundWorker(platform = {}) {
     return mergeSettings({ ...settings, apiKey });
   }
 
-  function saveSettings(partial = {}) {
+  function changeSettings({ settings = {}, clearApiKey = false } = {}) {
     // Read inside the ordered mutation: queued saves and install normalization must see
     // completed writes, and a failed storage operation must leave later requests usable.
     const nextMutation = settingsMutation.catch(() => {}).then(async () => {
       const current = await getSettings();
-      const next = mergeSettingsWithExisting(current, partial);
+      const next = mergeSettingsWithExisting(current, settings);
+      if (clearApiKey) delete next.apiKey;
       await getChrome().storage.local.set({ settings: next });
+      if (clearApiKey) await getChrome().storage.local.remove('openai_api_key');
       await syncButtonVisibilityRegistrationSafely(next);
     });
     settingsMutation = nextMutation;
@@ -1404,7 +1406,7 @@ function createBackgroundWorker(platform = {}) {
 
   // chrome.runtime.onInstalled.
   async function onInstalled() {
-    await saveSettings();
+    await changeSettings();
     await releaseActionClickToExtension();
   }
 
@@ -1556,14 +1558,19 @@ function createBackgroundWorker(platform = {}) {
           return;
         }
         if (msg?.type === 'SAVE_SETTINGS') {
-          await saveSettings(msg.settings || {});
+          await changeSettings({ settings: msg.settings || {} });
+          sendResponse({ ok: true });
+          return;
+        }
+        if (msg?.type === 'CLEAR_API_KEY') {
+          await changeSettings({ clearApiKey: true });
           sendResponse({ ok: true });
           return;
         }
 
         sendResponse({ ok: false, error: { message: 'Unknown message' } });
       } catch (e) {
-        const error = ['GET_SETTINGS', 'SAVE_SETTINGS'].includes(msg?.type)
+        const error = ['GET_SETTINGS', 'SAVE_SETTINGS', 'CLEAR_API_KEY'].includes(msg?.type)
           ? { message: 'Settings request failed' }
           : safeError(e);
         sendResponse({ ok: false, error });

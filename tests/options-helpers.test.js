@@ -28,10 +28,10 @@ function createChoiceInputs(checkedValue = null) {
   }));
 }
 
-async function withOptionsScreen(check, { granted = true, response = { ok: true } } = {}) {
+async function withOptionsScreen(check, { granted = true, confirmed = true, response = { ok: true } } = {}) {
   const modulePath = require.resolve('../extension/options.js');
   const originalModule = require.cache[modulePath];
-  const originals = { document: global.document, chrome: global.chrome,
+  const originals = { document: global.document, chrome: global.chrome, window: global.window,
     diagnostics: global.ChromeAiTranslatorDiagnostics, setTimeout: global.setTimeout };
   const elements = new Map();
   const inputs = createChoiceInputs();
@@ -43,6 +43,7 @@ async function withOptionsScreen(check, { granted = true, response = { ok: true 
     return elements.get(id);
   };
   global.document = { getElementById: element, querySelectorAll: () => inputs };
+  global.window = { confirm: () => confirmed };
   global.setTimeout = () => {};
   global.ChromeAiTranslatorDiagnostics = { loadDiagnostics: async () => ({ runs: [] }) };
   global.chrome = {
@@ -53,7 +54,7 @@ async function withOptionsScreen(check, { granted = true, response = { ok: true 
     storage: { local: { async get() {
       events.push('storage');
       return { settings: { viewMode: 'translation', apiKey: 'sk-stale', model: 'stale-model' } };
-    } } },
+    }, async set() { events.push('storage'); }, async remove() { events.push('storage'); } } },
     runtime: { async sendMessage(message) {
       messages.push(message);
       events.push(message.type);
@@ -71,6 +72,7 @@ async function withOptionsScreen(check, { granted = true, response = { ok: true 
     await check({ element, inputs, messages, events, flush });
   } finally {
     global.document = originals.document;
+    global.window = originals.window;
     global.chrome = originals.chrome;
     global.ChromeAiTranslatorDiagnostics = originals.diagnostics;
     global.setTimeout = originals.setTimeout;
@@ -80,6 +82,64 @@ async function withOptionsScreen(check, { granted = true, response = { ok: true 
 
 exports.name = 'options helpers';
 exports.tests = [
+  {
+    name: 'Options cancellation leaves the key and storage untouched',
+    async fn() {
+      await withOptionsScreen(async ({ element, messages, events, flush }) => {
+        element('apiKey').value = 'sk-input-synthetic';
+        element('btnClear').listeners.click();
+        await flush();
+        assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }]);
+        assert.equal(events.includes('storage'), false);
+        assert.equal(element('apiKey').value, 'sk-input-synthetic');
+        assert.equal(element('status').textContent, 'Key not changed.');
+      }, { confirmed: false });
+    },
+  },
+  ...['rejected', 'unanswered', 'disconnected'].map((failure) => ({
+    name: `Options catches ${failure} key removal and permits another attempt`,
+    async fn() {
+      let attempts = 0;
+      await withOptionsScreen(async ({ element, messages, flush }) => {
+        element('apiKey').value = 'sk-input-synthetic';
+        element('btnClear').listeners.click();
+        await flush();
+        assert.equal(element('apiKey').value, 'sk-input-synthetic');
+        assert.equal(element('status').textContent, '');
+        assert.equal(element('errorBox').textContent, 'Failed to clear stored API key');
+        assert.equal(element('errorBox').hidden, false);
+        element('btnClear').listeners.click();
+        await flush();
+        assert.equal(messages.filter((message) => message.type === 'CLEAR_API_KEY').length, 2);
+        assert.equal(element('status').textContent, 'Key cleared.');
+        assert.equal(element('errorBox').hidden, true);
+      }, { response() {
+        if (++attempts > 1) return { ok: true };
+        if (failure === 'disconnected') throw new Error('sk-current-synthetic disconnected');
+        if (failure === 'unanswered') return undefined;
+        return { ok: false, error: { message: 'sk-current-synthetic rejected' } };
+      } });
+    },
+  })),
+  {
+    name: 'Options confirms key removal through the worker and waits for its reply',
+    async fn() {
+      let resolveClear;
+      const response = new Promise((resolve) => { resolveClear = resolve; });
+      await withOptionsScreen(async ({ element, messages, events, flush }) => {
+        element('apiKey').value = 'sk-input-synthetic';
+        element('btnClear').listeners.click();
+        await flush();
+        assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }, { type: 'CLEAR_API_KEY' }]);
+        assert.equal(events.includes('storage'), false);
+        assert.notEqual(element('status').textContent, 'Key cleared.');
+        resolveClear({ ok: true });
+        await flush();
+        assert.equal(element('apiKey').value, '');
+        assert.equal(element('status').textContent, 'Key cleared.');
+      }, { response: () => response });
+    },
+  },
   {
     name: 'Options requests all-sites permission before awaiting and restores the public choice after denial',
     async fn() {
@@ -234,40 +294,6 @@ exports.tests = [
         inputs.filter((input) => input.checked).map((input) => input.value),
         ['never']
       );
-    },
-  },
-  {
-    name: 'clears current and legacy API key storage',
-    async fn() {
-      const removed = [];
-      let savedSettings = null;
-      const fakeChrome = {
-        storage: {
-          local: {
-            async get(keys) {
-              assert.deepEqual(keys, ['settings']);
-              return {
-                settings: {
-                  apiKey: 'sk-current',
-                  model: 'gpt-5.4-mini',
-                },
-              };
-            },
-            async set(value) {
-              savedSettings = value.settings;
-            },
-            async remove(key) {
-              removed.push(key);
-            },
-          },
-        },
-      };
-
-      await helpers.clearStoredApiKey(fakeChrome);
-
-      assert.equal(savedSettings.apiKey, undefined);
-      assert.equal(savedSettings.model, 'gpt-5.4-mini');
-      assert.deepEqual(removed, ['openai_api_key']);
     },
   },
   {
