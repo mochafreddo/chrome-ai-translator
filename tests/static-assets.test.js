@@ -35,30 +35,51 @@ exports.tests = [
     },
   },
   {
-    name: 'allows content scripts to be injected twice into one page',
-    fn() {
-      const { getInlineContentScriptFiles } = require(
-        path.join(EXTENSION_DIR, 'background.js')
-      );
-      const pageScope = vm.createContext({ console });
-      const inject = () => {
-        for (const name of getInlineContentScriptFiles()) {
-          loadClassicScript(pageScope, name);
-        }
-      };
-
-      inject();
-      const session = pageScope.__chromeAiTranslatorInlineState.session;
-      session.begin({});
-      const { block } = require('./inline-block.test').createReasoningFixture();
-      session.admit(block);
-      inject();
-
-      // The second injection continues the page visit rather than starting a new budget.
-      assert.equal(pageScope.__chromeAiTranslatorInlineState.session, session);
-      assert.equal(session.takeBatch().length, 1);
-      assert.equal(session.takeBatch().length, 0);
-      assert.equal(session.status, 'active');
+    name: 'reinjection preserves admitted work, cache and the page visit budget',
+    async fn() {
+      const { createOperationFixture, flushMicrotasks } = require('./inline-translation-operation.test');
+      const { createContentPage } = require('./content-harness');
+      const { getRecordCost } = require('../extension/inline-translation-session');
+      const f = createOperationFixture();
+      const cost = getRecordCost(f.serialized);
+      f.document.body.replaceChildren();
+      let remaining = 150000 - 2 * cost;
+      while (remaining > 0) {
+        const charge = Math.min(4000, remaining);
+        f.document.body.appendChild(f.paragraph(charge));
+        remaining -= charge;
+      }
+      f.setWarming(true);
+      const page = createContentPage(f);
+      page.inject();
+      page.instruct('grantInlineTranslationAuthorization');
+      page.instruct('startInlineTranslation');
+      await flushMicrotasks();
+      assert.match(page.snapshot().progress, /Pending 0/);
+      f.setWarming(false);
+      f.document.body.replaceChildren(f.block);
+      page.instruct('startInlineTranslation');
+      f.advance();
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 1);
+      page.inject();
+      await flushMicrotasks();
+      assert.equal(page.listenerCount(), 1);
+      assert.equal(page.startupCount(), 1);
+      await f.settle(0, { attemptCount: 2 });
+      assert.match(f.block.textContent, /추론 모델/);
+      page.instruct('restoreInlineOriginal');
+      page.instruct('startInlineTranslation');
+      await flushMicrotasks();
+      assert.match(f.block.textContent, /추론 모델/);
+      assert.equal(f.pending.length, 1, 'cached output sends no request after reinjection');
+      f.document.body.appendChild(f.paragraph(cost));
+      page.instruct('startInlineTranslation');
+      f.advance();
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 1, 'the original visit budget refuses the next admission');
+      assert.match(page.snapshot().error, /reached this page visit's limit/);
+      page.instruct('stopInlineTranslation');
     },
   },
   {
@@ -432,7 +453,10 @@ exports.tests = [
         ['markdown-entries.js', 'markdown-document.js', ['page']],
         ['inline-block.js', 'inline-translation-session.js', ['page']],
         ['inline-diagnostics-protocol.js', 'inline-translation-session.js', ['page']],
-        ['inline-translation-session.js', 'content.js', ['page']],
+        ['inline-translation-session.js', 'inline-translation-operation.js', ['page']],
+        ['inline-viewport.js', 'inline-translation-operation.js', ['page']],
+        ['inline-local-diagnostic-transport.js', 'inline-translation-operation.js', ['page']],
+        ['inline-translation-operation.js', 'content.js', ['page']],
         ['inline-block.js', 'inline-viewport.js', ['page']],
         ['inline-viewport.js', 'content.js', ['page']],
       ];

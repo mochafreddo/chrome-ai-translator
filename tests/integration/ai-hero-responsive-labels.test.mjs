@@ -3,6 +3,7 @@
 // widths. No key is read and no translation request is made.
 import { readFileSync } from 'node:fs';
 import viewportHarness from '../viewport-harness.js';
+import background from '../../extension/background.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -21,14 +22,7 @@ const PAGE_URL = 'https://www.aihero.dev/skills-to-tickets';
 const { check, failures, finish } = createChecks('ai hero responsive labels');
 
 async function injectInlineTranslation(evaluate) {
-  for (const file of [
-    'default-model.js',
-    'inline-diagnostics-protocol.js',
-    'placeholder-tokens.js',
-    'inline-block.js',
-    'inline-translation-session.js', 'inline-viewport.js',
-    'content.js',
-  ]) {
+  for (const file of background.getInlineContentScriptFiles()) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
 }
@@ -87,9 +81,9 @@ async function exerciseLabels(page, context, width) {
           'position:fixed;left:20px;top:20px;width:400px;z-index:-1';
         document.body.appendChild(host);
         host.appendChild(block);
-        const state = createInlineTranslationState();
-        beginInlineTranslationOperation(state, {});
-        const viewport = createViewportProbe(state.session);
+        const session = ChromeAiTranslatorInlineTranslationSession.createInlineTranslationSession();
+        session.begin({});
+        const viewport = createViewportProbe(session);
         try { viewport.start(block); } finally { viewport.stop(); }
         const records = viewport.records;
         const [record] = records;
@@ -105,18 +99,18 @@ async function exerciseLabels(page, context, width) {
         // Mobile labels may be protected Source Syntax. Add visible prose around the
         // preserved template so both viewports exercise a real DOM change.
         const output = record ? record.template + ' 번역' : '';
-        if (record) state.session.settle(state.session.takeBatch(), {
+        if (record) session.settle(session.takeBatch(), {
           ok: true, results: [{ id: record.id, disposition: 'apply', template: output }],
         });
-        const applied = state.session.progress().counts.translated === 1 && block.textContent.includes('번역');
+        const applied = session.progress().counts.translated === 1 && block.textContent.includes('번역');
         const preservedAfterApply = Boolean(
           hidden &&
           hidden.isConnected &&
           hidden.outerHTML === hiddenHtml
         );
-        const localDiagnostics = state.session.outbox.slice();
-        state.session.restore();
-        const restored = state.session.status === 'original';
+        const localDiagnostics = session.outbox.slice();
+        session.restore();
+        const restored = session.status === 'original';
         originalParent.insertBefore(block, originalNextSibling);
         host.remove();
         const exactGraph = graph.every(({ node, children, value }) =>

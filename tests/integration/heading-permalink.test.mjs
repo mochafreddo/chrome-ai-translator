@@ -4,6 +4,7 @@
 // observed, not pinned; markup drift or a missing page fails this check.
 import { readFileSync } from 'node:fs';
 import viewportHarness from '../viewport-harness.js';
+import background from '../../extension/background.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until } from './harness.mjs';
@@ -15,7 +16,7 @@ const PAGE_URL = 'https://code.claude.com/docs/en/advisor';
 const { check, failures, finish } = createChecks('heading permalink');
 
 async function inject(evaluate) {
-  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'inline-viewport.js', 'content.js']) {
+  for (const file of background.getInlineContentScriptFiles()) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
   await evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
@@ -48,14 +49,14 @@ async function exerciseHeadings() {
     let clicks = 0;
     const onClick = () => { clicks += 1; };
     link.addEventListener('click', onClick);
-    const state = createInlineTranslationState();
-    beginInlineTranslationOperation(state, {});
-    const viewport = createViewportProbe(state.session);
+    const session = ChromeAiTranslatorInlineTranslationSession.createInlineTranslationSession();
+    session.begin({});
+    const viewport = createViewportProbe(session);
     try { viewport.start(heading); } finally { viewport.stop(); }
     const records = viewport.records;
     const [record] = records;
-    if (records.length !== 1 || state.session.progress().counts.pending !== 1) {
-      results.push({ collected: false, rejection: state.session.outbox.map((item) => item.localRejection) });
+    if (records.length !== 1 || session.progress().counts.pending !== 1) {
+      results.push({ collected: false, rejection: session.outbox.map((item) => item.localRejection) });
       link.removeEventListener('click', onClick);
       continue;
     }
@@ -66,8 +67,8 @@ async function exerciseHeadings() {
       .join('');
     link.focus();
     const focusedBefore = document.activeElement === link;
-    state.session.settle(state.session.takeBatch(), { ok: true, results: [{ id: record.id, disposition: 'apply', template: output }] });
-    const applied = state.session.progress().counts.translated === 1 && heading.textContent.includes('번역된 제목');
+    session.settle(session.takeBatch(), { ok: true, results: [{ id: record.id, disposition: 'apply', template: output }] });
+    const applied = session.progress().counts.translated === 1 && heading.textContent.includes('번역된 제목');
     const request = JSON.stringify({ template: record.template, atoms: record.atoms, contract: record.contract });
     const localOnly = !request.includes(href) && !request.includes(label) && !request.includes('\u200b');
     const preserved = control.outerHTML === controlHtml && link.isConnected &&
@@ -79,8 +80,8 @@ async function exerciseHeadings() {
     // again so restoration is tested independently from that native behavior.
     link.focus();
     const focusedBeforeRestore = document.activeElement === link;
-    state.session.restore();
-    const restored = state.session.status === 'original';
+    session.restore();
+    const restored = session.status === 'original';
     const exactGraph = graph.every(({ node, children, value }) =>
       node.nodeValue === value && node.childNodes.length === children.length &&
       children.every((child, index) => node.childNodes[index] === child));
