@@ -2,6 +2,7 @@
 // and the reported page. No key is read and no model request is sent.
 import { readFileSync } from 'node:fs';
 import viewportHarness from '../viewport-harness.js';
+import background from '../../extension/background.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until } from './harness.mjs';
@@ -30,14 +31,14 @@ async function exerciseParagraphs() {
     const attributes = elements.map(node => JSON.stringify([...node.attributes].map(a => [a.name, a.value])));
     const codeNodes = [...block.querySelectorAll('code')];
     const codeHtml = codeNodes.map(node => node.outerHTML);
-    const state = createInlineTranslationState();
-    beginInlineTranslationOperation(state, {});
-    const viewport = createViewportProbe(state.session);
+    const session = ChromeAiTranslatorInlineTranslationSession.createInlineTranslationSession();
+    session.begin({});
+    const viewport = createViewportProbe(session);
     try {
       viewport.start(block);
       const collected = viewport.records;
       const duplicate = viewport.rescan();
-      const batch = state.session.takeBatch();
+      const batch = session.takeBatch();
       const [record] = batch;
       if (collected.length !== 1 || batch.length !== 1) {
         results.push({ collected: false });
@@ -46,15 +47,15 @@ async function exerciseParagraphs() {
       const output = record.template.split(/(⟦[^⟧]+⟧)/g)
         .map(part => part.startsWith('⟦') || !part.trim() ? part : '번역된 문단 ')
         .join('');
-      state.session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: output }] });
+      session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: output }] });
       const rescanned = viewport.rescan();
-      const translated = state.session.progress().counts.translated === 1 && block.textContent.includes('번역된 문단');
+      const translated = session.progress().counts.translated === 1 && block.textContent.includes('번역된 문단');
       const preserved = elements.every((node, i) => node.isConnected &&
         JSON.stringify([...node.attributes].map(a => [a.name, a.value])) === attributes[i]) &&
         codeNodes.every((node, i) => node.outerHTML === codeHtml[i]);
-      const unique = duplicate.length === 0 && rescanned.length === 0 && state.session.takeBatch().length === 0;
-      state.session.restore();
-      const restored = state.session.status === 'original';
+      const unique = duplicate.length === 0 && rescanned.length === 0 && session.takeBatch().length === 0;
+      session.restore();
+      const restored = session.status === 'original';
       const exactGraph = graph.every(({ node, children, value }) =>
         node.nodeValue === value && node.childNodes.length === children.length &&
         children.every((child, index) => node.childNodes[index] === child));
@@ -66,7 +67,7 @@ async function exerciseParagraphs() {
 }
 
 async function verifyPage(page, label, expectedCount) {
-  for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'inline-viewport.js', 'content.js']) {
+  for (const file of background.getInlineContentScriptFiles()) {
     await page.evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
   await page.evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
@@ -99,25 +100,25 @@ async function exerciseProtectedAtoms() {
     let viewport;
     try {
       outer.scrollIntoView({ block: 'center', behavior: 'instant' });
-      const state = createInlineTranslationState();
-      beginInlineTranslationOperation(state, {});
-      viewport = createViewportProbe(state.session);
+      const session = ChromeAiTranslatorInlineTranslationSession.createInlineTranslationSession();
+      session.begin({});
+      viewport = createViewportProbe(session);
       viewport.start(outer);
       viewport.rescan();
       const expected = tag === 'a' ? ['Responses API'] : [];
-      const batch = state.session.takeBatch();
+      const batch = session.takeBatch();
       const unique = batch.length === expected.length &&
         batch.every((record, i) => record.template === expected[i]);
-      const rejected = state.session.progress().counts.failed === 1;
-      const diagnostics = state.session.outbox.slice();
+      const rejected = session.progress().counts.failed === 1;
+      const diagnostics = session.outbox.slice();
       let appliedAndRestored = true;
       if (tag === 'a') {
         const [record] = batch;
         if (!record) appliedAndRestored = false;
         else {
-          state.session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: '응답 API' }] });
-          appliedAndRestored = state.session.progress().counts.translated === 1 && inner.textContent === '응답 API';
-          state.session.restore();
+          session.settle(batch, { ok: true, results: [{ id: record.id, disposition: 'apply', template: '응답 API' }] });
+          appliedAndRestored = session.progress().counts.translated === 1 && inner.textContent === '응답 API';
+          session.restore();
         }
       }
       results.push({ tag, rejected, unique, appliedAndRestored,

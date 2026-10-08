@@ -306,6 +306,8 @@ function getInlineContentScriptFiles() {
     'inline-diagnostics-protocol.js',
     'inline-translation-session.js',
     'inline-viewport.js',
+    'inline-local-diagnostic-transport.js',
+    'inline-translation-operation.js',
     'inline-translation-controls.js',
     'markdown-entries.js',
     'markdown-document.js',

@@ -12,6 +12,8 @@ const suites = [
   require('./default-model.test'),
   require('./translation-diagnostics.test'),
   require('./inline-diagnostics-controller.test'),
+  require('./inline-local-diagnostic-transport.test'),
+  require('./inline-translation-operation.test'),
   require('./content-helpers.test'),
   require('./inline-viewport.test'),
   require('./inline-viewport.regression-1.test'),
