@@ -242,6 +242,25 @@ exports.tests = [
     },
   },
   {
+    name: 'reports an unanswered settings save and allows another attempt',
+    async fn() {
+      const rendered = [];
+      let attempts = 0;
+      const controller = helpers.createSettingsSaveController({
+        sendMessage: async () => (++attempts === 1 ? undefined : { ok: true }),
+        readSettings: () => ({ tone: 'formal' }),
+        render: (state) => rendered.push(state),
+      });
+      assert.equal(await controller.save(), false);
+      assert.deepEqual(rendered.at(-1), {
+        saving: false, status: '', error: 'Failed to save settings.',
+      });
+      assert.equal(controller.isSaving(), false);
+      assert.equal(await controller.save(), true);
+      assert.equal(rendered.at(-1).status, 'Saved.');
+    },
+  },
+  {
     name: 'saves settings and renders success',
     async fn() {
       const sent = [];

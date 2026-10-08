@@ -28,8 +28,195 @@ function createChoiceInputs(checkedValue = null) {
   }));
 }
 
+async function withOptionsScreen(check, { granted = true, confirmed = true, response = { ok: true } } = {}) {
+  const modulePath = require.resolve('../extension/options.js');
+  const originalModule = require.cache[modulePath];
+  const originals = { document: global.document, chrome: global.chrome, window: global.window,
+    diagnostics: global.ChromeAiTranslatorDiagnostics, setTimeout: global.setTimeout };
+  const elements = new Map();
+  const inputs = createChoiceInputs();
+  const messages = [];
+  const events = [];
+  const element = (id) => {
+    if (!elements.has(id)) elements.set(id, { value: '', textContent: '', hidden: true,
+      listeners: {}, addEventListener(name, listener) { this.listeners[name] = listener; } });
+    return elements.get(id);
+  };
+  global.document = { getElementById: element, querySelectorAll: () => inputs };
+  global.window = { confirm: () => confirmed };
+  global.setTimeout = () => {};
+  global.ChromeAiTranslatorDiagnostics = { loadDiagnostics: async () => ({ runs: [] }) };
+  global.chrome = {
+    permissions: {
+      request() { events.push('permission'); return Promise.resolve(granted); },
+      remove() { events.push('permission'); return Promise.resolve(true); },
+    },
+    storage: { local: { async get() {
+      events.push('storage');
+      return { settings: { viewMode: 'translation', apiKey: 'sk-stale', model: 'stale-model' } };
+    }, async set() { events.push('storage'); }, async remove() { events.push('storage'); } } },
+    runtime: { async sendMessage(message) {
+      messages.push(message);
+      events.push(message.type);
+      if (message.type === 'GET_SETTINGS') return { ok: true, settings: {
+        apiKey: '***', model: 'current-model', viewMode: 'bilingual', buttonVisibility: 'onInvocation',
+      } };
+      return typeof response === 'function' ? response() : response;
+    } },
+  };
+  const flush = async () => { for (let i = 0; i < 32; i += 1) await Promise.resolve(); };
+  try {
+    delete require.cache[modulePath];
+    require('../extension/options.js');
+    await flush();
+    await check({ element, inputs, messages, events, flush });
+  } finally {
+    global.document = originals.document;
+    global.window = originals.window;
+    global.chrome = originals.chrome;
+    global.ChromeAiTranslatorDiagnostics = originals.diagnostics;
+    global.setTimeout = originals.setTimeout;
+    require.cache[modulePath] = originalModule;
+  }
+}
+
 exports.name = 'options helpers';
 exports.tests = [
+  {
+    name: 'Options cancellation leaves the key and storage untouched',
+    async fn() {
+      await withOptionsScreen(async ({ element, messages, events, flush }) => {
+        element('apiKey').value = 'sk-input-synthetic';
+        element('btnClear').listeners.click();
+        await flush();
+        assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }]);
+        assert.equal(events.includes('storage'), false);
+        assert.equal(element('apiKey').value, 'sk-input-synthetic');
+        assert.equal(element('status').textContent, 'Key not changed.');
+      }, { confirmed: false });
+    },
+  },
+  ...['rejected', 'unanswered', 'disconnected'].map((failure) => ({
+    name: `Options catches ${failure} key removal and permits another attempt`,
+    async fn() {
+      let attempts = 0;
+      await withOptionsScreen(async ({ element, messages, flush }) => {
+        element('apiKey').value = 'sk-input-synthetic';
+        element('btnClear').listeners.click();
+        await flush();
+        assert.equal(element('apiKey').value, 'sk-input-synthetic');
+        assert.equal(element('status').textContent, '');
+        assert.equal(element('errorBox').textContent, 'Failed to clear stored API key');
+        assert.equal(element('errorBox').hidden, false);
+        element('btnClear').listeners.click();
+        await flush();
+        assert.equal(messages.filter((message) => message.type === 'CLEAR_API_KEY').length, 2);
+        assert.equal(element('status').textContent, 'Key cleared.');
+        assert.equal(element('errorBox').hidden, true);
+      }, { response() {
+        if (++attempts > 1) return { ok: true };
+        if (failure === 'disconnected') throw new Error('sk-current-synthetic disconnected');
+        if (failure === 'unanswered') return undefined;
+        return { ok: false, error: { message: 'sk-current-synthetic rejected' } };
+      } });
+    },
+  })),
+  {
+    name: 'Options confirms key removal through the worker and waits for its reply',
+    async fn() {
+      let resolveClear;
+      const response = new Promise((resolve) => { resolveClear = resolve; });
+      await withOptionsScreen(async ({ element, messages, events, flush }) => {
+        element('apiKey').value = 'sk-input-synthetic';
+        element('btnClear').listeners.click();
+        await flush();
+        assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }, { type: 'CLEAR_API_KEY' }]);
+        assert.equal(events.includes('storage'), false);
+        assert.notEqual(element('status').textContent, 'Key cleared.');
+        resolveClear({ ok: true });
+        await flush();
+        assert.equal(element('apiKey').value, '');
+        assert.equal(element('status').textContent, 'Key cleared.');
+      }, { response: () => response });
+    },
+  },
+  {
+    name: 'Options requests all-sites permission before awaiting and restores the public choice after denial',
+    async fn() {
+      await withOptionsScreen(async ({ element, inputs, messages, events, flush }) => {
+        helpers.checkChoice(inputs, 'allPages');
+        events.length = 0;
+        element('btnSave').listeners.click();
+        assert.deepEqual(events, ['permission']);
+        await flush();
+        assert.equal(messages.some((message) => message.type === 'SAVE_SETTINGS'), false);
+        assert.equal(inputs.find((input) => input.checked).value, 'onInvocation');
+        assert.equal(element('status').textContent, '');
+        assert.match(element('errorBox').textContent, /Nothing was saved/);
+      }, { granted: false });
+    },
+  },
+  ...[undefined, { ok: false, error: { message: 'sk-synthetic' } }].map((response) => ({
+    name: `Options reports ${response ? 'a rejected' : 'an unanswered'} settings save without success`,
+    async fn() {
+      await withOptionsScreen(async ({ element, flush }) => {
+        element('btnSave').listeners.click();
+        await flush();
+        assert.equal(element('status').textContent, '');
+        assert.equal(element('errorBox').textContent, 'Failed to save settings');
+        assert.equal(element('btnSave').disabled, false);
+      }, { response: () => response });
+    },
+  })),
+  {
+    name: 'Options saves a new key once and reports a lost worker response without exposing the key',
+    async fn() {
+      let rejectSave;
+      const pending = new Promise((_resolve, reject) => { rejectSave = reject; });
+      await withOptionsScreen(async ({ element, messages, flush }) => {
+        element('apiKey').value = 'sk-new-synthetic';
+        const click = element('btnSave').listeners.click;
+        click();
+        click();
+        await flush();
+        const saves = messages.filter((message) => message.type === 'SAVE_SETTINGS');
+        assert.equal(saves.length, 1);
+        assert.equal(saves[0].settings.apiKey, 'sk-new-synthetic');
+        assert.equal(element('status').textContent, 'Saving...');
+        rejectSave(new Error('Worker disconnected sk-new-synthetic'));
+        await flush();
+        assert.equal(element('status').textContent, '');
+        assert.equal(element('btnSave').disabled, false);
+        assert.equal(element('errorBox').textContent, 'Failed to save settings');
+        click();
+        await flush();
+        assert.equal(messages.filter((message) => message.type === 'SAVE_SETTINGS').length, 2);
+      }, { response: () => pending });
+    },
+  },
+  {
+    name: 'loads public settings and saves only Options fields while a blank key keeps the existing key',
+    async fn() {
+      await withOptionsScreen(async ({ element, messages, events, flush }) => {
+        assert.equal(element('model').value, 'current-model');
+        assert.equal(element('apiKey').value, '');
+        element('targetLanguage').value = 'Japanese';
+        element('tone').value = 'formal';
+        element('chunkMaxChars').value = '9000';
+        element('btnSave').listeners.click();
+        await flush();
+        assert.deepEqual(messages, [
+          { type: 'GET_SETTINGS' },
+          { type: 'SAVE_SETTINGS', settings: {
+            targetLanguage: 'Japanese', tone: 'formal', model: 'current-model',
+            chunkMaxChars: 9000, buttonVisibility: 'onInvocation',
+          } },
+        ]);
+        assert.equal(events.includes('storage'), false);
+        assert.equal(element('status').textContent, 'Saved.');
+      });
+    },
+  },
   {
     name: 'asks for access to all sites only for the all-pages choice',
     async fn() {
@@ -87,9 +274,7 @@ exports.tests = [
   {
     name: 'shows a migrated install its all-pages choice',
     fn() {
-      // The options page reads storage itself, so it has to see the same migration the
-      // worker does — otherwise it would offer never to a reader who had the old checkbox on
-      // and quietly revoke their access on the next save.
+      // A migrated choice must stay visible so the next save preserves the reader's access.
       const inputs = createChoiceInputs();
       helpers.checkChoice(inputs, readButtonVisibility({ inlineAutoShow: true }));
 
@@ -109,40 +294,6 @@ exports.tests = [
         inputs.filter((input) => input.checked).map((input) => input.value),
         ['never']
       );
-    },
-  },
-  {
-    name: 'clears current and legacy API key storage',
-    async fn() {
-      const removed = [];
-      let savedSettings = null;
-      const fakeChrome = {
-        storage: {
-          local: {
-            async get(keys) {
-              assert.deepEqual(keys, ['settings']);
-              return {
-                settings: {
-                  apiKey: 'sk-current',
-                  model: 'gpt-5.4-mini',
-                },
-              };
-            },
-            async set(value) {
-              savedSettings = value.settings;
-            },
-            async remove(key) {
-              removed.push(key);
-            },
-          },
-        },
-      };
-
-      await helpers.clearStoredApiKey(fakeChrome);
-
-      assert.equal(savedSettings.apiKey, undefined);
-      assert.equal(savedSettings.model, 'gpt-5.4-mini');
-      assert.deepEqual(removed, ['openai_api_key']);
     },
   },
   {

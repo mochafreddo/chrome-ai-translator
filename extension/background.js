@@ -730,7 +730,7 @@ function isDuplicateInlineContentScriptError(error) {
 // namespaces the one path it drives touches and can be certain nothing else was in play.
 //
 // The state below is this instance's rather than the module's — the three long-lived maps,
-// the two promise chains that serialize writes to them, and the diagnostics module it
+// the promise chains that serialize mutations, and the diagnostics module it
 // signs and writes runs through — so a second construction is a second worker carrying
 // nothing over. That is what a restarting service worker is, and what a caller wanting a
 // clean one used to have to delete the require cache to get.
@@ -767,6 +767,9 @@ function createBackgroundWorker(platform = {}) {
   const activeTranslationsByTab = new Map();
   const inlineControlsByTab = new Map();
   let buttonVisibilityRegistrationSync = Promise.resolve();
+  let settingsMutation = Promise.resolve();
+  let settingsChangeGeneration = 0;
+  let allPagesAccessGeneration = 0;
 
   async function getSettings() {
     const chrome = getChrome();
@@ -777,9 +780,23 @@ function createBackgroundWorker(platform = {}) {
     return mergeSettings({ ...settings, apiKey });
   }
 
-  async function saveSettings(settings) {
-    const chrome = getChrome();
-    await chrome.storage.local.set({ settings: mergeSettings(settings) });
+  function changeSettings({ settings = {}, clearApiKey = false } = {}) {
+    const generation = ++settingsChangeGeneration;
+    if (readButtonVisibility(settings) === BUTTON_VISIBILITY.ALL_PAGES) {
+      allPagesAccessGeneration = generation;
+    }
+    // Read inside the ordered mutation: queued saves and install normalization must see
+    // completed writes, and a failed storage operation must leave later requests usable.
+    const nextMutation = settingsMutation.catch(() => {}).then(async () => {
+      const current = await getSettings();
+      const next = mergeSettingsWithExisting(current, settings);
+      if (clearApiKey) delete next.apiKey;
+      await getChrome().storage.local.set({ settings: next });
+      if (clearApiKey) await getChrome().storage.local.remove('openai_api_key');
+      await syncButtonVisibilityRegistrationSafely(next, generation);
+    });
+    settingsMutation = nextMutation;
+    return nextMutation;
   }
 
   function setTabState(tabId, patch) {
@@ -1158,18 +1175,21 @@ function createBackgroundWorker(platform = {}) {
     }
   }
 
-  async function syncButtonVisibilityRegistration(settings = null) {
+  async function syncButtonVisibilityRegistration(settings = null, generation = settingsChangeGeneration) {
+    // Startup reads after accepted writes, before joining the registration queue. Waiting
+    // inside that queue would deadlock a settings write awaiting its own registration.
+    if (!settings) await settingsMutation.catch(() => {});
     const previousSync = buttonVisibilityRegistrationSync.catch(() => {});
     const nextSync = previousSync.then(() =>
-      syncButtonVisibilityRegistrationNow(settings)
+      syncButtonVisibilityRegistrationNow(settings, generation)
     );
     buttonVisibilityRegistrationSync = nextSync;
     return nextSync;
   }
 
-  async function syncButtonVisibilityRegistrationSafely(settings = null) {
+  async function syncButtonVisibilityRegistrationSafely(settings = null, generation = settingsChangeGeneration) {
     try {
-      await syncButtonVisibilityRegistration(settings);
+      await syncButtonVisibilityRegistration(settings, generation);
       return true;
     } catch {
       return false;
@@ -1187,7 +1207,7 @@ function createBackgroundWorker(platform = {}) {
 
   // Brings both things the all-pages choice needs — access to every site and a content script
   // registered across pages — into line with the choice the reader has made.
-  async function syncButtonVisibilityRegistrationNow(settings = null) {
+  async function syncButtonVisibilityRegistrationNow(settings = null, generation = settingsChangeGeneration) {
     const chrome = getChrome();
     const effective = settings || (await getSettings());
     const visibility = readButtonVisibility(effective);
@@ -1198,7 +1218,9 @@ function createBackgroundWorker(platform = {}) {
       // migrating off the old checkbox reaches never without the reader opening options at
       // all, and the access that checkbox asked for would otherwise outlive it.
       try {
-        if (chrome.permissions?.remove) {
+        // A newer Options gesture may have granted access while this older write waited.
+        // Keep registration ordered even if that newer write fails, but do not revoke its grant.
+        if (generation >= allPagesAccessGeneration && chrome.permissions?.remove) {
           await chrome.permissions.remove({ origins: ALL_SITES_ORIGINS });
         }
       } catch {}
@@ -1395,9 +1417,7 @@ function createBackgroundWorker(platform = {}) {
 
   // chrome.runtime.onInstalled.
   async function onInstalled() {
-    const settings = await getSettings();
-    await saveSettings(settings);
-    await syncButtonVisibilityRegistrationSafely(settings);
+    await changeSettings();
     await releaseActionClickToExtension();
   }
 
@@ -1549,17 +1569,22 @@ function createBackgroundWorker(platform = {}) {
           return;
         }
         if (msg?.type === 'SAVE_SETTINGS') {
-          const current = await getSettings();
-          const next = mergeSettingsWithExisting(current, msg.settings || {});
-          await saveSettings(next);
-          await syncButtonVisibilityRegistrationSafely(next);
+          await changeSettings({ settings: msg.settings || {} });
+          sendResponse({ ok: true });
+          return;
+        }
+        if (msg?.type === 'CLEAR_API_KEY') {
+          await changeSettings({ clearApiKey: true });
           sendResponse({ ok: true });
           return;
         }
 
         sendResponse({ ok: false, error: { message: 'Unknown message' } });
       } catch (e) {
-        sendResponse({ ok: false, error: safeError(e) });
+        const error = ['GET_SETTINGS', 'SAVE_SETTINGS', 'CLEAR_API_KEY'].includes(msg?.type)
+          ? { message: 'Settings request failed' }
+          : safeError(e);
+        sendResponse({ ok: false, error });
       }
     })();
 

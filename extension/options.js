@@ -48,8 +48,7 @@ function setError(text) {
 }
 
 async function load() {
-  const stored = await chrome.storage.local.get(['settings']);
-  const s = stored.settings || {};
+  const s = await getPublicSettings();
 
   // We never show the existing key in plain text.
   elApiKey.value = '';
@@ -58,6 +57,16 @@ async function load() {
   elModel.value = s.model || DEFAULT_MODEL;
   elChunkMaxChars.value = s.chunkMaxChars || 12000;
   checkChoice(elButtonVisibility, readButtonVisibility(s));
+}
+
+async function getPublicSettings() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
+    if (!response?.ok) throw new Error('Failed to load settings');
+    return response.settings || {};
+  } catch {
+    throw new Error('Failed to load settings');
+  }
 }
 
 function readCheckedChoice(inputs, fallback) {
@@ -141,10 +150,8 @@ async function save() {
   );
   const accessApplied = applyButtonVisibilityAccess(chrome, buttonVisibility);
 
-  const stored = await chrome.storage.local.get(['settings']);
-  const prev = stored.settings || {};
-
   if (!(await accessApplied)) {
+    const prev = await getPublicSettings();
     checkChoice(elButtonVisibility, readButtonVisibility(prev));
     setError(
       'Showing the floating translate button on every web page needs access to all sites. Nothing was saved.'
@@ -154,7 +161,6 @@ async function save() {
   }
 
   const next = {
-    ...prev,
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
     model: elModel.value.trim() || DEFAULT_MODEL,
@@ -170,13 +176,14 @@ async function save() {
     settings: next,
   });
   if (!resp?.ok) {
-    throw new Error(resp?.error?.message || 'Failed to save settings');
+    throw new Error('Failed to save settings');
   }
   setStatus('Saved.');
   setTimeout(() => setStatus(''), 1200);
 }
 
 async function clearKey() {
+  setError(null);
   if (
     !shouldClearStoredApiKey(() =>
       window.confirm('Clear the stored OpenAI API key? This cannot be undone here.')
@@ -186,6 +193,7 @@ async function clearKey() {
     setTimeout(() => setStatus(''), 1200);
     return;
   }
+  setStatus('Clearing key...');
   await clearStoredApiKey(chrome);
   elApiKey.value = '';
   setStatus('Key cleared.');
@@ -197,19 +205,30 @@ function shouldClearStoredApiKey(confirmFn) {
 }
 
 async function clearStoredApiKey(chromeApi) {
-  const stored = await chromeApi.storage.local.get(['settings']);
-  const next = { ...(stored.settings || {}) };
-  delete next.apiKey;
-  await chromeApi.storage.local.set({ settings: next });
-  if (chromeApi.storage.local.remove) {
-    await chromeApi.storage.local.remove('openai_api_key');
-  }
+  const response = await chromeApi.runtime.sendMessage({ type: 'CLEAR_API_KEY' });
+  if (!response?.ok) throw new Error('Failed to clear stored API key');
 }
 
-function handleSaveClick() {
-  save().catch((error) => {
-    setError(error?.message || String(error));
+function handleClearClick() {
+  clearKey().catch(() => {
+    setError('Failed to clear stored API key');
     setStatus('');
+  });
+}
+
+let saveInFlight = false;
+
+function handleSaveClick() {
+  if (saveInFlight) return;
+  saveInFlight = true;
+  const button = document.getElementById('btnSave');
+  button.disabled = true;
+  save().catch(() => {
+    setError('Failed to save settings');
+    setStatus('');
+  }).finally(() => {
+    saveInFlight = false;
+    button.disabled = false;
   });
 }
 
@@ -219,7 +238,7 @@ if (hasDocument) {
   elModel.placeholder = DEFAULT_MODEL;
 
   document.getElementById('btnSave').addEventListener('click', handleSaveClick);
-  document.getElementById('btnClear').addEventListener('click', clearKey);
+  document.getElementById('btnClear').addEventListener('click', handleClearClick);
   btnCopyDiagnostics.addEventListener('click', () => copyDiagnostics().catch((error) => setError(error?.message || String(error))));
   btnSaveDiagnostics.addEventListener('click', () => saveDiagnostics().catch((error) => setError(error?.message || String(error))));
 

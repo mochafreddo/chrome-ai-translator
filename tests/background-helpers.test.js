@@ -318,6 +318,46 @@ async function collectWorkerResponses(worker, messages, sender = {}) {
   return responses;
 }
 
+function createSettingsWorker({ settings = {}, legacyKey, get, set, remove, chrome = {} } = {}) {
+  let persisted = { ...settings };
+  const worker = helpers.createBackgroundWorker({
+    chrome: {
+      ...chrome,
+      storage: { local: {
+        async get() {
+          if (get) await get();
+          return { settings: { ...persisted }, openai_api_key: legacyKey };
+        },
+        async set(value) {
+          if (set) await set(value.settings);
+          persisted = { ...value.settings };
+        },
+        async remove(key) {
+          assert.equal(key, 'openai_api_key');
+          if (remove) await remove();
+          legacyKey = undefined;
+        },
+      } },
+    },
+  });
+  const send = (message) => new Promise((resolve) =>
+    worker.handlers.onMessage(message, {}, resolve)
+  );
+  return { worker, send, snapshot: () => ({ settings: { ...persisted }, openai_api_key: legacyKey }) };
+}
+
+async function completeSettingsWork(work) {
+  let timer;
+  try {
+    return await Promise.race([work, new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('settings event work did not complete')), 1000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
 // The five namespaces a whole-tab translation reaches and nothing else: `runtime` for the
 // state broadcast the panel listens to, `sidePanel` for the panel it opens beside the page,
 // `scripting` for the content script it makes sure is there, `storage` for the settings it
@@ -421,6 +461,436 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'startup waits for the pending all-pages save before checking its permission',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let granted = true;
+      let registered = false;
+      const { worker, send } = createSettingsWorker({
+        settings: { buttonVisibility: 'never' },
+        async set() { started(); await gate; },
+        chrome: {
+          sidePanel: { setPanelBehavior: async () => {} },
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            unregisterContentScripts: async () => { registered = false; },
+          },
+        },
+      });
+      const save = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'allPages' } });
+      await completeSettingsWork(ready);
+      const startup = worker.handlers.onStartup();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(granted, true);
+      release();
+      await completeSettingsWork(Promise.all([save, startup]));
+      assert.equal(granted, true);
+      assert.equal(registered, true);
+    },
+  },
+  {
+    name: 'a newer all-pages gesture keeps its grant while an older unregister is pending',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let granted = false;
+      let registered = false;
+      const { send } = createSettingsWorker({
+        chrome: {
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            async unregisterContentScripts() { started(); await gate; registered = false; },
+          },
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'never' } });
+      await completeSettingsWork(ready);
+      granted = true;
+      const second = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'allPages' } });
+      release();
+      assert.deepEqual(await completeSettingsWork(Promise.all([first, second])), [{ ok: true }, { ok: true }]);
+      assert.equal(granted, true);
+      assert.equal(registered, true);
+    },
+  },
+  ...[['get', true], ['set', true], ['get', false], ['set', false]].map(([failure, laterGrant]) => ({
+    name: `an earlier visibility save still synchronizes after a newer ${laterGrant ? 'all-pages' : 'tone'} ${failure} fails`,
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      let reads = 0;
+      let granted = true;
+      let registered = true;
+      const { send } = createSettingsWorker({
+        settings: { buttonVisibility: 'allPages' },
+        async get() { if (++reads === 2 && failure === 'get') throw new Error('read failed'); },
+        async set() {
+          if (++writes === 1) { started(); await gate; }
+          else if (writes === 2 && failure === 'set') throw new Error('write failed');
+        },
+        chrome: {
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            unregisterContentScripts: async () => { registered = false; },
+          },
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'never' } });
+      await completeSettingsWork(ready);
+      granted = true;
+      const second = send({ type: 'SAVE_SETTINGS', settings: laterGrant ? { buttonVisibility: 'allPages' } : { tone: 'formal' } });
+      release();
+      const results = await completeSettingsWork(Promise.all([first, second]));
+      assert.deepEqual(results[0], { ok: true });
+      assert.equal(results[1].ok, false);
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.buttonVisibility, 'never');
+      assert.equal(registered, false);
+      // Permission and persistence are not transactional: the later gesture's grant survives
+      // its failed save, while registration still matches the successful persisted choice.
+      assert.equal(granted, laterGrant);
+    },
+  })),
+  ...['onStartup', 'onInstalled'].map((event) => ({
+    name: `${event} overlapping visibility saves completes with the latest all-pages grant`,
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      let granted = false;
+      let registered = false;
+      const { worker, send } = createSettingsWorker({
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: {
+          sidePanel: { setPanelBehavior: async () => {} },
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            unregisterContentScripts: async () => { registered = false; },
+          },
+        },
+      });
+      const first = event === 'onInstalled' ? worker.handlers.onInstalled()
+        : send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'never' } });
+      await completeSettingsWork(ready);
+      const startup = event === 'onStartup' ? worker.handlers.onStartup() : Promise.resolve();
+      await Promise.resolve();
+      granted = true;
+      const second = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'allPages' } });
+      release();
+      await completeSettingsWork(Promise.all([first, startup, second]));
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.buttonVisibility, 'allPages');
+      assert.equal(granted, true);
+      assert.equal(registered, true);
+    },
+  })),
+  {
+    name: 'a later all-pages gesture keeps access when an earlier never save finishes',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      let granted = false;
+      let registered = false;
+      const { send } = createSettingsWorker({
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: {
+          permissions: { contains: async () => granted, remove: async () => { granted = false; } },
+          scripting: {
+            registerContentScripts: async () => { registered = true; },
+            unregisterContentScripts: async () => { registered = false; },
+          },
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'never' } });
+      await ready;
+      granted = true; // The later Options gesture grants access before sending its save.
+      const second = send({ type: 'SAVE_SETTINGS', settings: { buttonVisibility: 'allPages' } });
+      release();
+      assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.buttonVisibility, 'allPages');
+      assert.equal(granted, true);
+      assert.equal(registered, true);
+    },
+  },
+  ...[true, false].map((clearFirst) => ({
+    name: `${clearFirst ? 'key removal then installation' : 'installation then key removal'} leaves no stored key`,
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      const { worker, send } = createSettingsWorker({
+        settings: { model: 'retained-model' }, legacyKey: 'sk-legacy-synthetic',
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: { sidePanel: { setPanelBehavior: async () => {} } },
+      });
+      const first = clearFirst ? send({ type: 'CLEAR_API_KEY' }) : worker.handlers.onInstalled();
+      await ready;
+      const second = clearFirst ? worker.handlers.onInstalled() : send({ type: 'CLEAR_API_KEY' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      await Promise.all([first, second]);
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.apiKey, '');
+      assert.equal(result.settings.model, 'retained-model');
+    },
+  })),
+  ...[
+    ['save then clear', { tone: 'formal' }, false],
+    ['clear then save', { tone: 'formal' }, true],
+    ['new key then clear', { apiKey: 'sk-new-synthetic', tone: 'formal' }, false],
+    ['clear then new key', { apiKey: 'sk-new-synthetic', tone: 'formal' }, true],
+  ].map(([order, settings, clearFirst]) => ({
+    name: `overlapping ${order} preserves settings and follows explicit key intent`,
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      const { send, snapshot } = createSettingsWorker({
+        settings: { apiKey: 'sk-current-synthetic', model: 'retained-model' },
+        legacyKey: 'sk-legacy-synthetic',
+        async set() { if (++writes === 1) { started(); await gate; } },
+      });
+      const save = { type: 'SAVE_SETTINGS', settings };
+      const clear = { type: 'CLEAR_API_KEY' };
+      const first = send(clearFirst ? clear : save);
+      await ready;
+      const second = send(clearFirst ? save : clear);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.tone, 'formal');
+      assert.equal(result.settings.model, 'retained-model');
+      assert.equal(snapshot().openai_api_key, undefined);
+      const expectedKey = clearFirst && settings.apiKey ? 'sk-new-synthetic' : '';
+      assert.equal(snapshot().settings.apiKey || '', expectedKey);
+      assert.equal(result.settings.apiKey, expectedKey ? '***' : '');
+    },
+  })),
+  ...['get', 'set', 'remove'].map((failure) => ({
+    name: `key removal ${failure} failure remains private without retry and later changes recover`,
+    async fn() {
+      let fail = true;
+      let attempts = 0;
+      const { send, snapshot } = createSettingsWorker({
+        settings: { apiKey: 'sk-current-synthetic', model: 'retained-model' },
+        legacyKey: 'sk-legacy-synthetic',
+        async [failure]() {
+          attempts += 1;
+          if (fail) { fail = false; throw new Error('sk-current-synthetic sk-legacy-synthetic'); }
+        },
+      });
+      const clear = send({ type: 'CLEAR_API_KEY' });
+      const save = send({ type: 'SAVE_SETTINGS', settings: { tone: 'formal' } });
+      const [failed, saved] = await Promise.all([clear, save]);
+      assert.equal(failed.ok, false);
+      assert.doesNotMatch(JSON.stringify(failed), /sk-current|sk-legacy/);
+      assert.deepEqual(saved, { ok: true });
+      assert.equal(attempts, failure === 'remove' ? 1 : 2);
+      assert.deepEqual(await send({ type: 'CLEAR_API_KEY' }), { ok: true });
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.apiKey, '');
+      assert.equal(result.settings.model, 'retained-model');
+      assert.equal(result.settings.tone, 'formal');
+      assert.equal(snapshot().settings.apiKey, undefined);
+      assert.equal(snapshot().openai_api_key, undefined);
+    },
+  })),
+  {
+    name: 'key removal responds only after the legacy key removal finishes',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      const { send } = createSettingsWorker({
+        settings: { apiKey: 'sk-current-synthetic' }, legacyKey: 'sk-legacy-synthetic',
+        async remove() { started(); await gate; },
+      });
+      let answered = false;
+      const clear = send({ type: 'CLEAR_API_KEY' }).then((result) => { answered = true; return result; });
+      await ready;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(answered, false);
+      release();
+      assert.deepEqual(await clear, { ok: true });
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.apiKey, '');
+    },
+  },
+  {
+    name: 'clears both API key locations without changing other settings or permitting new translation',
+    async fn() {
+      const { send } = createSettingsWorker({
+        settings: { apiKey: 'sk-current-synthetic', model: 'retained-model', tone: 'formal',
+          targetLanguage: 'Japanese', buttonVisibility: 'onInvocation', chunkMaxChars: 9000, viewMode: 'bilingual' },
+        legacyKey: 'sk-legacy-synthetic',
+      });
+      assert.deepEqual(await send({ type: 'CLEAR_API_KEY' }), { ok: true });
+      const { settings } = await send({ type: 'GET_SETTINGS' });
+      assert.equal(settings.apiKey, '');
+      assert.equal(settings.model, 'retained-model');
+      assert.equal(settings.tone, 'formal');
+      assert.equal(settings.targetLanguage, 'Japanese');
+      assert.equal(settings.buttonVisibility, 'onInvocation');
+      assert.equal(settings.chunkMaxChars, 9000);
+      assert.equal(settings.viewMode, 'bilingual');
+      const translated = await send({ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH', operationId: 'after-delete',
+        records: [createTestPlainBlockRecord('b1')] });
+      assert.equal(translated.ok, false);
+      assert.match(translated.error.message, /API key is not set/);
+    },
+  },
+  {
+    name: 'later overlapping settings request owns the same field and final Button Visibility registration',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      const registrations = [];
+      const { send } = createSettingsWorker({
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: {
+          permissions: { contains: async () => true, remove: async () => true },
+          scripting: {
+            getRegisteredContentScripts: async () => [],
+            registerContentScripts: async () => { registrations.push('allPages'); },
+            unregisterContentScripts: async () => { registrations.push('never'); },
+          },
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { model: 'first', buttonVisibility: 'allPages' } });
+      await ready;
+      const second = send({ type: 'SAVE_SETTINGS', settings: { model: 'last', buttonVisibility: 'never' } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.model, 'last');
+      assert.equal(result.settings.buttonVisibility, 'never');
+      assert.equal(registrations.at(-1), 'never');
+    },
+  },
+  {
+    name: 'installation normalization cannot overwrite an overlapping user save',
+    async fn() {
+      let release;
+      let started;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ready = new Promise((resolve) => { started = resolve; });
+      let writes = 0;
+      const { worker, send } = createSettingsWorker({
+        settings: { model: 'initial-model', inlineAutoShow: true },
+        async set() { if (++writes === 1) { started(); await gate; } },
+        chrome: { sidePanel: { setPanelBehavior: async () => {} } },
+      });
+      const install = worker.handlers.onInstalled();
+      await ready;
+      const save = send({ type: 'SAVE_SETTINGS', settings: { model: 'user-model' } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      await install;
+      assert.deepEqual(await save, { ok: true });
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.model, 'user-model');
+      assert.equal(result.settings.buttonVisibility, 'allPages');
+    },
+  },
+  ...['get', 'set'].map((failure) => ({
+    name: `settings ${failure} failure stays private and does not retry or block the next save`,
+    async fn() {
+      let fail = true;
+      let attempts = 0;
+      const { send } = createSettingsWorker({
+        settings: { model: 'initial', apiKey: 'sk-synthetic' },
+        async [failure]() {
+          attempts += 1;
+          if (fail) { fail = false; throw new Error('Storage rejected sk-synthetic'); }
+        },
+      });
+      const first = send({ type: 'SAVE_SETTINGS', settings: { model: 'failed' } });
+      const second = send({ type: 'SAVE_SETTINGS', settings: { tone: 'formal' } });
+      const [failed, saved] = await Promise.all([first, second]);
+      assert.equal(failed.ok, false);
+      assert.doesNotMatch(JSON.stringify(failed), /sk-synthetic/);
+      assert.deepEqual(saved, { ok: true });
+      assert.equal(attempts, 2);
+      const result = await send({ type: 'GET_SETTINGS' });
+      assert.equal(result.settings.model, 'initial');
+      assert.equal(result.settings.tone, 'formal');
+      assert.equal(result.settings.apiKey, '***');
+    },
+  })),
+  {
+    name: 'registration failure leaves settings saved and public reads conceal storage errors',
+    async fn() {
+      let failRead = false;
+      const { send } = createSettingsWorker({
+        get: async () => { if (failRead) throw new Error('sk-synthetic'); },
+        chrome: {
+          permissions: { contains: async () => true },
+          scripting: { registerContentScripts: async () => { throw new Error('registration failure'); } },
+        },
+      });
+      assert.deepEqual(await send({ type: 'SAVE_SETTINGS', settings: { model: 'saved', buttonVisibility: 'allPages' } }), { ok: true });
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.model, 'saved');
+      failRead = true;
+      const response = await send({ type: 'GET_SETTINGS' });
+      assert.equal(response.ok, false);
+      assert.doesNotMatch(JSON.stringify(response), /sk-synthetic/);
+    },
+  },
+  {
+    name: 'preserves different fields from overlapping settings saves after storage completes',
+    async fn() {
+      let releaseWrite;
+      let writeStarted;
+      const started = new Promise((resolve) => { writeStarted = resolve; });
+      const blocked = new Promise((resolve) => { releaseWrite = resolve; });
+      let writes = 0;
+      const { send } = createSettingsWorker({
+        settings: { model: 'initial-model', apiKey: 'sk-synthetic' },
+        async set() {
+          writes += 1;
+          if (writes === 1) { writeStarted(); await blocked; }
+        },
+      });
+      let firstAnswered = false;
+      const first = send({ type: 'SAVE_SETTINGS', settings: { model: 'new-model' } })
+        .then((response) => { firstAnswered = true; return response; });
+      await started;
+      const second = send({ type: 'SAVE_SETTINGS', settings: { tone: 'formal' } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(firstAnswered, false);
+      releaseWrite();
+      assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
+      const response = await send({ type: 'GET_SETTINGS' });
+      assert.equal(response.settings.model, 'new-model');
+      assert.equal(response.settings.tone, 'formal');
+      assert.equal(response.settings.apiKey, '***');
+    },
+  },
   {
     // The platform contract, and the reason every check below can name the namespaces its
     // path touches and be believed: what a worker was handed is all it can reach. There is
