@@ -207,9 +207,7 @@
     ) {
       return false;
     }
-    const plan = inlineBlockCodec.createPatchPlan(record.snapshot, cached.translatedTemplate);
-    if (!plan.ok) return false;
-    const applied = inlineBlockCodec.applyPatchPlan(record.snapshot, plan);
+    const applied = inlineBlockCodec.applyTranslatedTemplate(record.snapshot, cached.translatedTemplate);
     if (!applied.ok) return false;
     record.state = cached.state === 'translated_with_warning'
       ? 'translated_with_warning'
@@ -393,13 +391,7 @@
         continue;
       }
 
-      const plan = inlineBlockCodec.createPatchPlan(record.snapshot, result.template);
-      if (!plan.ok) {
-        if (plan.errorCode === 'block_changed') markChanged(record);
-        else failApplication(record, plan.errorCode);
-        continue;
-      }
-      const applied = inlineBlockCodec.applyPatchPlan(record.snapshot, plan);
+      const applied = inlineBlockCodec.applyTranslatedTemplate(record.snapshot, result.template);
       if (!applied.ok) {
         if (applied.errorCode === 'block_changed') markChanged(record);
         else failApplication(record, applied.errorCode);

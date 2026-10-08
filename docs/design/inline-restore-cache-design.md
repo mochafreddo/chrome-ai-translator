@@ -152,8 +152,8 @@ The cache must not apply fuzzy matches. It should only apply when:
 - the current run's settings signature matches the cache bucket;
 - the cached entry came from the current codec version;
 - the cached `translatedTemplate` is a string;
-- the cached template produces a patch plan that applies to the block's
-  snapshot.
+- the cached template applies successfully through `applyTranslatedTemplate`
+  with the block's snapshot.
 
 If any condition fails, the existing queue/stale behavior applies.
 
