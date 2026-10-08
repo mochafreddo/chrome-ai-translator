@@ -58,7 +58,7 @@
         if (start >= 0) spans.push({ start, end: start + entry.token.length });
       }
     }
-    return spans.sort((left, right) => left.start - right.start);
+    return spans;
   }
 
   function overlapsAtomicSpan(start, end, atomicSpans) {
@@ -168,15 +168,17 @@
 
     const grouped = [];
     let current = [];
+    let currentLength = 0;
     for (const block of prepared) {
-      const candidate = [...current, block]
-        .map((item) => String(item.template || ''))
-        .join('\n\n');
-      if (current.length && candidate.length > limit) {
+      const blockLength = String(block.template || '').length;
+      const candidateLength = currentLength + (current.length ? 2 : 0) + blockLength;
+      if (current.length && candidateLength > limit) {
         grouped.push(current);
         current = [block];
+        currentLength = blockLength;
       } else {
         current.push(block);
+        currentLength = candidateLength;
       }
     }
     if (current.length) grouped.push(current);

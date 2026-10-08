@@ -1596,6 +1596,7 @@ exports.tests = [
           (entry) => entry.kind === 'atom' && entry.tagName === 'SPAN'
         );
         assert.ok(hiddenEntry);
+        assert.equal(hiddenEntry.atomKind, 'responsive-label');
         assert.equal(serialized.atoms.find(
           (atom) => atom.token === hiddenEntry.token
         )?.preserveText, false);

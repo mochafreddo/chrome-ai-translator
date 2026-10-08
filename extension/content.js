@@ -647,7 +647,6 @@ async function drainInlineViewportQueue(state = inlineState) {
       .sendMessage({
         type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
         operationId,
-        validateTranslationCompleteness: true,
         settingsSnapshot: store.translationSettings,
         records: batch.map((record) => ({
           id: record.id,

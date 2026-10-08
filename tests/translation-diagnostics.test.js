@@ -414,6 +414,48 @@ exports.tests = [
     },
   },
   {
+    name: 'serializes discard with writes and continues after a deletion failure',
+    async fn() {
+      for (const failRemoval of [false, true]) {
+        const memory = createMemoryChrome();
+        const storage = memory.chromeApi.storage.local;
+        const get = storage.get;
+        const remove = storage.remove;
+        let release;
+        let entered;
+        const blocked = new Promise((resolve) => { release = resolve; });
+        const started = new Promise((resolve) => { entered = resolve; });
+        let reads = 0;
+        storage.get = async (...args) => {
+          if (++reads === 1) {
+            entered();
+            await blocked;
+          }
+          return get(...args);
+        };
+        let removals = 0;
+        storage.remove = async (...args) => {
+          if (failRemoval && ++removals === 1) throw new Error('deletion unavailable');
+          return remove(...args);
+        };
+        const writing = createDiagnostics();
+        const first = writing.persistRun(memory.chromeApi, { runId: 'provisional' });
+        await started;
+        const discard = writing.discardRun(memory.chromeApi, 'provisional');
+        const later = writing.persistRun(memory.chromeApi, { runId: 'later' });
+        await Promise.resolve();
+        await Promise.resolve();
+        const readsWhileBlocked = reads;
+        release();
+        assert.deepEqual(await first, { persisted: true });
+        assert.deepEqual(await discard, { discarded: !failRemoval });
+        assert.deepEqual(await later, { persisted: true });
+        assert.equal(readsWhileBlocked, 1);
+        assert.deepEqual(memory.stored['inlineDiagnostics:v3:index'], ['later']);
+      }
+    },
+  },
+  {
     name: 'repairs idempotent run indexes and replaces corrupt records',
     async fn() {
       const fingerprint = `hmac-sha256:${'A'.repeat(43)}`;

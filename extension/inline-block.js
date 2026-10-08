@@ -1007,7 +1007,8 @@
         return '';
       }
       const tagName = getTagName(node);
-      if (isResponsiveAlternativeLabel(node)) {
+      const responsive = isResponsiveAlternativeLabel(node);
+      if (responsive || isInertPageNode(node)) {
         inertPageNodes.add(node);
         const opaqueFailure = rememberOpaqueSubtree(node, opaqueAtomNodes);
         if (opaqueFailure) {
@@ -1018,22 +1019,7 @@
           node,
           parentId,
           tagName,
-          'responsive-label',
-          false
-        );
-      }
-      if (isInertPageNode(node)) {
-        inertPageNodes.add(node);
-        const opaqueFailure = rememberOpaqueSubtree(node, opaqueAtomNodes);
-        if (opaqueFailure) {
-          failed = opaqueFailure;
-          return '';
-        }
-        return registerAtom(
-          node,
-          parentId,
-          tagName,
-          tagName.toLowerCase(),
+          responsive ? 'responsive-label' : tagName.toLowerCase(),
           false
         );
       }
@@ -1413,7 +1399,6 @@
     if (!document?.createTextNode) return validationError('output_parse_failed');
 
     const containerPlans = [];
-    const createdTextNodes = [];
     let failed = null;
 
     function buildChildren(treeNode) {
@@ -1421,7 +1406,6 @@
       for (const child of treeNode.children || []) {
         if (child.type === 'text') {
           const textNode = document.createTextNode(child.value);
-          createdTextNodes.push(textNode);
           children.push(textNode);
           continue;
         }
@@ -1461,10 +1445,8 @@
     return {
       ok: true,
       translatedTemplate,
-      tree: validated.tree,
       rootChildren,
       containerPlans,
-      createdTextNodes,
     };
   }
 
@@ -1504,7 +1486,7 @@
     snapshot.translatedSignature = null;
   }
 
-  function captureAppliedOwnership(snapshot, plan) {
+  function captureAppliedOwnership(snapshot) {
     return (snapshot.originalContainers || []).map((container) => ({
       node: container.node,
       children: getChildNodes(container.node),
@@ -1521,7 +1503,7 @@
         replaceNodeChildren(container.node, container.children);
       }
       replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.edgeRetainedNodes);
-      snapshot.appliedOwnership = captureAppliedOwnership(snapshot, plan);
+      snapshot.appliedOwnership = captureAppliedOwnership(snapshot);
       const translatedFingerprint = getStructureFingerprint(
         snapshot.blockElement, snapshot.blockChildNodes
       );

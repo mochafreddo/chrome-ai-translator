@@ -384,8 +384,7 @@ exports.tests = [
         const requestsBefore = requestCount;
         const results = await worker.translateVisibleBlockBatch(
           [record],
-          settingsSnapshot,
-          { validateTranslationCompleteness: true }
+          settingsSnapshot
         );
         assert.equal(results.length, 1);
         assert.equal(results[0].id, record.id);

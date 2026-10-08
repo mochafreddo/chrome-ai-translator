@@ -355,7 +355,7 @@
     }
 
     async function discardRun(chromeApi, runId) {
-      const operation = storageMutation.catch(() => {}).then(async () => {
+      return serializeStorageMutation(async () => {
         const storage = chromeApi.storage.local;
         const stored = await storage.get([INDEX_KEY, V2_INDEX_KEY]);
         const normalizedRunId = String(runId || '');
@@ -370,9 +370,7 @@
           await storage.remove([`${RUN_PREFIX}${normalizedRunId}`, `${V2_RUN_PREFIX}${normalizedRunId}`]);
         }
         return { discarded: true };
-      }).catch(() => ({ discarded: false }));
-      storageMutation = operation;
-      return operation;
+      }, { discarded: false });
     }
 
     return {

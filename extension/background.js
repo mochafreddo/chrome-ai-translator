@@ -1490,8 +1490,6 @@ function createBackgroundWorker(platform = {}) {
             msg.records || [],
             msg.settingsSnapshot || null,
             {
-              validateTranslationCompleteness:
-                msg.validateTranslationCompleteness === true,
               correlationContext: {
                 tabId: sender?.tab?.id,
                 operationId: msg.operationId ?? null,

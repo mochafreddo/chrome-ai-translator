@@ -108,7 +108,6 @@
       localDiagnostics: [],
       translationByOriginal: translationCache instanceof Map ? translationCache : new Map(),
       stopped: false,
-      translationSettings: settingsSnapshot,
       translationSettingsSignature: settingsSnapshot
         ? getSettingsSignature(settingsSnapshot)
         : null,
@@ -220,7 +219,6 @@
       : null;
     record.attemptCount = Math.min(2, Math.max(1, Number(cached.attemptCount) || 1));
     record.translatedTemplate = cached.translatedTemplate;
-    record.translation = cached.translatedTemplate;
     return true;
   }
 
@@ -349,17 +347,10 @@
   // missing result are the worker's to record, so those records only release their tokens.
   function applyResults(records, results, operationId, operation = null) {
     const byId = new Map((results || []).map((result) => [result.id, result]));
-    const summary = {
-      applied: 0,
-      stale: 0,
-      retried: 0,
-      failed: 0,
-      ignored: 0,
-      runtimeOutcomes: [],
-    };
+    const runtimeOutcomes = [];
 
     function fileRuntimeOutcome(record) {
-      summary.runtimeOutcomes.push({
+      runtimeOutcomes.push({
         code: record.code,
         correlationToken: record.correlationToken,
       });
@@ -368,9 +359,7 @@
     function markChanged(record) {
       record.state = 'stale';
       record.code = 'runtime.page_changed';
-      summary.stale += 1;
       if (queuePageChangeRetry(operation, record)) {
-        summary.retried += 1;
         return;
       }
       fileRuntimeOutcome(record);
@@ -379,20 +368,17 @@
     function failApplication(record, codecCode) {
       record.state = 'failed';
       record.code = `runtime.${codecCode || 'apply_failed'}`;
-      summary.failed += 1;
       fileRuntimeOutcome(record);
     }
 
     for (const record of records || []) {
       const result = byId.get(record.id);
       if (record.operationId !== operationId) {
-        summary.ignored += 1;
         continue;
       }
       if (!result) {
         record.state = 'failed';
         record.code = 'runtime.request_failed';
-        summary.failed += 1;
         continue;
       }
       record.correlationToken = result.correlationToken || null;
@@ -404,7 +390,6 @@
         record.state = 'failed';
         record.code = result.terminalCode || 'runtime.request_failed';
         record.attemptCount = result.attemptCount || 1;
-        summary.failed += 1;
         continue;
       }
 
@@ -428,12 +413,10 @@
         (record.state === 'translated_with_warning' ? 'quality.target_language_uncertain' : null);
       record.attemptCount = result.attemptCount || 1;
       record.translatedTemplate = result.template;
-      record.translation = result.template;
       stampRecordSettings(operation, record);
       cacheTranslation(operation, record);
-      summary.applied += 1;
     }
-    return summary;
+    return runtimeOutcomes;
   }
 
   // A batch whose request failed outright has no results to say what became of each record.
@@ -494,7 +477,6 @@
         }
         clearRetrySupersession(operation, record);
         record.state = 'original';
-        record.translation = null;
         continue;
       }
       retained.push(record);
@@ -769,7 +751,7 @@
       }
       let runtimeOutcomes;
       try {
-        ({ runtimeOutcomes } = applyResults(records, response.results, batchOperationId, operation));
+        runtimeOutcomes = applyResults(records, response.results, batchOperationId, operation);
       } catch {
         // An answer the page could not settle reads as a failed request, as one that never
         // came back does, rather than leaving its blocks pending for good.

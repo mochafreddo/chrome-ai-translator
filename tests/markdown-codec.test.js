@@ -219,6 +219,46 @@ exports.tests = [
     },
   },
   {
+    name: 'counts separators and resets length at exact chunk boundaries',
+    fn() {
+      for (const [templates, limit, expected] of [
+        [['ab', '', 'cd', 'e', 'f'], 8, ['ab\n\n\n\ncd', 'e\n\nf']],
+        [['ab', 'cd', 'e', 'f'], 6, ['ab\n\ncd', 'e\n\nf']],
+        [[undefined, null, 0, false, '한글'], 4, ['\n\n\n\n', '\n\n한글']],
+      ]) {
+        const blocks = templates.map((template, index) => ({ id: `b${index}`, template }));
+        const chunks = translationChunks.createTranslationChunks({ blocks }, limit);
+        assert.deepEqual(chunks.map((chunk) => chunk.template), expected);
+        assert.deepEqual(chunks.flatMap((chunk) => chunk.blocks), blocks);
+      }
+    },
+  },
+  {
+    name: 'keeps multiple protected spans whole regardless of entry order',
+    fn() {
+      const entries = ['A', 'B'].map((id) => ({
+        id, kind: 'link', openToken: `⟦CAT_ORDER:LINK_OPEN:${id}⟧`,
+        closeToken: `⟦CAT_ORDER:LINK_CLOSE:${id}⟧`, destination: '',
+      }));
+      const spans = entries.map((entry) => `${entry.openToken}one two${entry.closeToken}`);
+      const documentModel = {
+        namespace: 'CAT_ORDER', entries,
+        blocks: [{ id: 'b1', template: `prefix ${spans[0]} middle ${spans[1]} suffix`,
+          entries: entries.map((entry) => entry.id) }],
+      };
+      const limit = spans[0].length + 8;
+      const chunks = translationChunks.createTranslationChunks(documentModel, limit);
+      const reversed = translationChunks.createTranslationChunks({
+        ...documentModel, entries: [...entries].reverse(),
+        blocks: [{ ...documentModel.blocks[0], entries: ['B', 'A'] }],
+      }, limit);
+      assert.deepEqual(reversed.map((chunk) => chunk.template), chunks.map((chunk) => chunk.template));
+      for (const span of spans) {
+        assert.equal(chunks.filter((chunk) => chunk.template.includes(span)).length, 1);
+      }
+    },
+  },
+  {
     name: 'splits oversized prose only at sentence or whitespace boundaries',
     fn() {
       const { element, text } = createTestDocument();
