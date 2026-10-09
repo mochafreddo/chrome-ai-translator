@@ -37,6 +37,7 @@ All ADRs below retain their existing numbers and accepted status. They are descr
 These documents use the imperative register for agent instructions. Each is loaded when its task applies rather than copied into general product documentation.
 
 - [Domain docs](agents/domain.md): before exploring code or proposing domain or architecture changes.
+- [Documentation review](agents/documentation-review.md): when reviewing repository documentation changes or claims.
 - [Issue tracker](agents/issue-tracker.md): before implementing a ticket or operating on GitHub issues.
 - [Triage labels](agents/triage-labels.md): before assigning triage labels.
 

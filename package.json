@@ -2,6 +2,8 @@
   "private": true,
   "scripts": {
     "check:commits": "node scripts/check-commits.js",
+    "check:docs": "node scripts/check-docs.js",
+    "check:docs:history": "node scripts/check-docs.js --history",
     "test": "node tests/run.js",
     "test:integration": "node tests/integration/action-click.test.mjs",
     "test:integration:disclosure-summary": "node tests/integration/disclosure-summary.test.mjs",

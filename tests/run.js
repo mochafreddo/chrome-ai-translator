@@ -1,6 +1,7 @@
 const suiteFiles = [
   'runner',
   'commit-format',
+  'docs-check',
   'integration-harness',
   'placeholder-tokens',
   'inline-block',

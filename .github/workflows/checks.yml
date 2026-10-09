@@ -34,5 +34,7 @@ jobs:
           npm run check:commits -- "$BASE_SHA" "$HEAD_SHA"
       - run: npm run check:syntax
         if: ${{ !cancelled() }}
+      - run: npm run check:docs
+        if: ${{ !cancelled() }}
       - run: npm test
         if: ${{ !cancelled() }}

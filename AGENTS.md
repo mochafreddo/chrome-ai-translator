@@ -4,7 +4,7 @@ Use `npm test` for "run the tests": it is the browser-free unit suite. `npm run 
 
 `npm run verify:live` runs both billed browser checks; `verify:live:inline` and `verify:live:sidepanel` can also run separately and each bills a real model. These commands need `agent-browser`, network access, and an OpenAI key in `.env.local`. Keep all `verify:live*` checks separate from unit and unbilled integration checks.
 
-`npm run check:syntax` parses every extension script outside a browser. There is no linter, formatter, or type checker — those commands are the whole verification story.
+`npm run check:syntax` parses every extension script outside a browser. There is no linter, formatter, or type checker. Documentation check commands and their scope are described in `tests/README.md`.
 
 The runner prints one `PASS`/`FAIL` line per check and no summary at all, so the exit code is the only verdict. Several check names contain the word "failed", so grepping the output for failure matches passing checks.
 

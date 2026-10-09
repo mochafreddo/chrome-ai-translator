@@ -8,6 +8,8 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | --- | --- | --- |
 | `npm test` | Registered browser-free unit suites | Node; no browser, network, or API key |
 | `npm run check:syntax` | Parse the extension scripts listed in the command | Node; no browser or model |
+| `npm run check:docs` | Check Git-tracked Markdown links and heading anchors, and `docs/README.md` coverage of other tracked Markdown under `docs/` | Node and Git; no network |
+| `npm run check:docs:history -- --base <full-commit-sha>` | Compare historical tracked Markdown with a fixed baseline | Node and Git; explicit full 40-character SHA-1 commit required |
 | `npm run check:commits -- <base> <head>` | Commit subject/body format | Node and Git; no browser or model |
 | `npm run test:integration` | Toolbar-action Chrome check only | `agent-browser` on `PATH` and network; no API key or model |
 | `npm run test:integration:<name>` | One dedicated unbilled Chrome check listed below | `agent-browser` and network; no API key or model |
@@ -17,7 +19,19 @@ Use this guide to choose verification by what it requires. The [package scripts]
 
 Run the unit suite and syntax checks for ordinary implementation changes. Choose browser checks for the path being changed rather than treating `test:integration` as an aggregate. Keep billed checks separate and run them only within authorized scope.
 
-GitHub Actions runs unit, syntax, and commit-format checks on branch pushes and pull requests, without a browser or API key. See the [workflow](../.github/workflows/checks.yml). Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
+## Documentation checks
+
+`npm run check:docs` checks Git-tracked `*.md` and `*.markdown` files for local inline links and heading anchors. It skips fenced and inline code and makes no network requests. By default it reads the working-tree content of tracked files. It also requires `docs/README.md` to cover every other tracked Markdown file under `docs/`, excluding `docs/README.md` itself. New files must be added to Git's index before the checker includes them; linking an untracked file in the documentation index is not enough. Tests registered in the existing unit suite cover checker behavior.
+
+`npm run check:docs:history` is an opt-in comparison against an explicit, fixed commit; it is not an immutable-history CI check. Supply the repository's full lowercase 40-character SHA-1 commit hash with `--base`, for example:
+
+```sh
+npm run check:docs:history -- --base 0123456789abcdef0123456789abcdef01234567
+```
+
+The example hash is illustrative and must be replaced with the intended baseline commit. The command rejects a missing or symbolic baseline such as `HEAD` or `main`, and rejects invalid commits. It compares each historical tracked Markdown file under `docs/design`, `docs/qa`, and `docs/superpowers` with that baseline: the title and exact original body must match. Content before `## Original record` is excluded from the body comparison; the title remains protected. When that marker is absent in the baseline, the whole baseline file is treated as the original. A file present at only one side fails the check.
+
+GitHub Actions runs unit, syntax, documentation, and commit-format checks on branch pushes and pull requests, without a browser or API key. See the [workflow](../.github/workflows/checks.yml). Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
 
 ## Unit suite
 
