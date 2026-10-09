@@ -32,7 +32,6 @@
   // characters, and it is charged in actual cost rather than the reserved cost the request-size
   // caps use — see ADR-0007 for why the two costs stay apart.
   const INLINE_BLOCK_SESSION_MAX_RECORD_COST = 150000;
-  const INLINE_BLOCK_MAX_DIAGNOSTIC_CODE_CHARS = 80;
   const INLINE_VIEWPORT_MAX_IN_FLIGHT = 2;
 
   const SETTINGS_DEFAULTS = Object.freeze({
@@ -60,30 +59,7 @@
     return state === 'translated' || state === 'translated_with_warning';
   }
 
-  const { getRecordCost } = inlineBlockCodec;
-
-  function getReservedRecordCost(record) {
-    function requestPayloadCost(candidate) {
-      return JSON.stringify({
-        records: [{
-          id: candidate.id,
-          template: candidate.template,
-          atoms: candidate.atoms,
-          repair: candidate.repair ?? null,
-        }],
-      }).length;
-    }
-    const repairRecord = {
-      ...record,
-      repair: {
-        attempt: 1,
-        previousErrorCode: 'x'.repeat(INLINE_BLOCK_MAX_DIAGNOSTIC_CODE_CHARS),
-      },
-    };
-    // Counting each record as its own request intentionally over-reserves the
-    // shared wrapper, guaranteeing the real batched JSON is no larger.
-    return requestPayloadCost(record) + requestPayloadCost(repairRecord);
-  }
+  const { getRecordCost, getReservedRecordCost } = inlineBlockCodec;
 
   // One Inline Translation Operation's Semantic Blocks: its queue, its records, and the outbox
   // of local diagnostics the content script's send-and-retry loop reads. `session` is the page
