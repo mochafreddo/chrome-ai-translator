@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const session = require('../extension/inline-translation-session.js');
+const { execute } = require('../extension/inline-model-execution.js');
 const { createReasoningFixture, createTestDocument } = require('./inline-block.test');
 const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
@@ -213,21 +214,33 @@ exports.tests = [
   },
   {
     name: 'splits requests on reserved cost while retaining every admitted paragraph',
-    fn() {
+    async fn() {
       for (const [length, sizes] of [[4000, [1, 1, 1]], [2500, [2, 1]]]) {
         const visit = session.createInlineTranslationSession();
         visit.begin(KOREAN);
-        for (let index = 0; index < 3; index++) visit.admit(paragraph(length));
+        const admitted = Array.from({ length: 3 }, () => visit.admit(paragraph(length)).id);
+        const sent = [];
         for (const size of sizes) {
           const batch = visit.takeBatch();
           assert.equal(batch.length, size);
-          const records = batch.map(({ id, template, atoms }) => ({ id, template, atoms, repair: null }));
-          const repairs = records.map(record => ({ ...record, repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) } }));
-          assert.equal(JSON.stringify({ records }).length + JSON.stringify({ records: repairs }).length <= 12000, true);
-          visit.settle(batch, null);
+          const inputs = [];
+          const results = await execute(batch, KOREAN, async ({ input }) => {
+            inputs.push(input);
+            const records = JSON.parse(input).records;
+            if (inputs.length === 1) sent.push(...records.map(({ id }) => id));
+            return JSON.stringify({ translations: records.map(({ id, template }) => ({
+              id, template: inputs.length === 1 ? template : '번역한 문장입니다.',
+            })) });
+          });
+          assert.equal(inputs.length, 2);
+          assert.equal(inputs[0].length + inputs[1].length <= 12000, true);
+          assert.deepEqual(JSON.parse(inputs[1]).records.map(({ id }) => id), batch.map(({ id }) => id));
+          assert.equal(results.every(({ disposition, attemptCount }) => disposition === 'apply' && attemptCount === 2), true);
+          visit.settle(batch, { ok: true, results });
         }
         assert.deepEqual(visit.takeBatch(), []);
-        assert.deepEqual(visit.progress().counts, { ...NOTHING, failed: 3 });
+        assert.deepEqual(sent, admitted);
+        assert.deepEqual(visit.progress().counts, { ...NOTHING, translated: 3 });
       }
     },
   },

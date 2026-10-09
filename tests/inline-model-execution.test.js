@@ -22,6 +22,24 @@ function translatedReasoning(record) {
 exports.name = 'inline model execution';
 exports.tests = [
   {
+    name: 'preserves Korean text, JSON escaping and record field order in the actual request',
+    async fn() {
+      const records = [plainRecord('한글', '한국어 "인용" \\ 경로\n다음\t줄'), plainRecord('second')];
+      let calls = 0;
+      const results = await execute(records, { ...SETTINGS, targetLanguage: 'English' }, async ({ input }) => {
+        calls += 1;
+        const expected = String.raw`{"records":[{"id":"한글","template":"한국어 \"인용\" \\ 경로\n다음\t줄","atoms":[],"repair":null},{"id":"second","template":"This is source prose.","atoms":[],"repair":null}]}`;
+        assert.equal(input, expected);
+        assert.equal(input.length, expected.length);
+        return response(records.map(({ id }) => ({ id, template: 'Translated prose.' })));
+      });
+      assert.equal(calls, 1);
+      assert.deepEqual(results.map(({ id, disposition }) => ({ id, disposition })), [
+        { id: '한글', disposition: 'apply' }, { id: 'second', disposition: 'apply' },
+      ]);
+    },
+  },
+  {
     name: 'repairs only failed Semantic Blocks and preserves input order and first successes',
     async fn() {
       const records = [plainRecord('first'), plainRecord('second'), plainRecord('third')];

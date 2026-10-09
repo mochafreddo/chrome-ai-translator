@@ -341,17 +341,11 @@
 
   async function execute(records, settings, request) {
     async function requestAndValidate(batch) {
-      const modelRecords = batch.map((record) => ({
-        id: record.id,
-        template: record.template,
-        atoms: record.atoms,
-        repair: record.repair || null,
-      }));
       const output = await request({
         model: settings.model,
         reasoningEffort: settings.reasoningEffort,
         instructions: buildBlockInstructions(settings),
-        input: JSON.stringify({ records: modelRecords }),
+        input: codec.serializeModelRequest(batch),
         textFormat: buildBlockResponseFormat(batch.length),
         maxOutputTokens: getBlockBatchMaxOutputTokens(
           batch.reduce((sum, record) => sum + codec.getRecordCost(record), 0)
