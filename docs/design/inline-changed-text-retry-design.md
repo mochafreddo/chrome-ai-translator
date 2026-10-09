@@ -1,5 +1,13 @@
 # Inline Changed Text Retry Design
 
+## Record context
+
+Historical record. This design is dated 2026-06-25. Its helper names, floating-menu status proposal, and test locations describe that design baseline.
+
+Current behavior: [architecture reference](../architecture.md). Current verification procedure: [test guide](../../tests/README.md). Record roles: [documentation index](../README.md#historical-design-and-verification).
+
+## Original record
+
 Date: 2026-06-25
 
 ## Goal

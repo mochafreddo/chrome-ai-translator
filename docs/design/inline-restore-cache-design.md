@@ -1,5 +1,13 @@
 # Inline Restore Cache Design
 
+## Record context
+
+Historical record. This is the original page-lifetime cache design, associated with the QA record dated 2026-06-15. Its helper names and ownership describe that design baseline.
+
+Current behavior: [architecture reference](../architecture.md). Current verification procedure: [test guide](../../tests/README.md). Record roles: [documentation index](../README.md#historical-design-and-verification).
+
+## Original record
+
 ## Goal
 
 When a user translates visible page text inline, clicks **Original text**, and

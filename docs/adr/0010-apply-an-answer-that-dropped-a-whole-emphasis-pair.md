@@ -2,6 +2,8 @@
 
 Status: accepted
 
+Current behavior and source ownership: [architecture reference](../architecture.md#dom-boundaries). Historical measurements and verification limitations below describe the recorded investigation.
+
 Inline Translation applies an answer that left out both tokens of an emphasis wrapper (`EM`, `I`, `STRONG`, or `B`) that wrapped visible text and no other Placeholder Token, and puts the block back without that emphasis. Every other Placeholder Token is still required back exactly once, and a link, code span, Inert Page Node, or any wrapper with tokens inside it still fails the block when it goes missing. The applied block is recorded in diagnostics as a safe structure with `structure.emphasis_dropped`, and the reader is told nothing.
 
 ## Why

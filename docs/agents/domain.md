@@ -2,23 +2,14 @@
 
 ## Before exploring
 
-Read `GLOSSARY.md` at the repo root and the ADRs in `docs/adr/` relevant to the area being explored.
+Read the root [GLOSSARY.md](../../GLOSSARY.md) before exploring code or proposing domain or architecture changes. Use the [architecture reference](../architecture.md) to locate current responsibilities, then read the relevant [ADRs](../README.md#accepted-decisions) for their rationale. If a document is absent, proceed without inventing its contents.
 
-If a document does not exist, proceed silently. Create domain documents through `/domain-modeling` when terms or decisions are resolved.
+## Vocabulary and decisions
 
-## File structure
+Use canonical glossary terms in issues, proposals, hypotheses, and tests, following each entry's synonyms to avoid. For a missing concept, first decide whether it belongs to this domain; resolve it through `domain-modeling` when needed.
 
-This repo uses a single-context layout:
+Flag a proposal that conflicts with an accepted ADR by identifying the decision and explaining why it should be reconsidered. Treat historical plans and QA records as evidence at their recorded baseline, not current instructions.
 
-- `GLOSSARY.md`: domain vocabulary.
-- `docs/adr/`: architecture decision records.
+## Structure and maintenance
 
-## Use the glossary's vocabulary
-
-Use the terms defined in `GLOSSARY.md` when naming domain concepts in issues, proposals, hypotheses, and tests. Follow its guidance on synonyms to avoid.
-
-If a needed concept is missing, reconsider whether it belongs to the domain or note the gap for `/domain-modeling`.
-
-## Flag ADR conflicts
-
-If a proposal contradicts an existing ADR, identify the ADR and explain why the decision should be reconsidered.
+This repository has one context: root `GLOSSARY.md` for vocabulary and `docs/adr/` for decisions. Keep definitions free of implementation details. Record current behavior and module relationships in the architecture reference, and create glossary entries or ADRs through `domain-modeling` as terms or qualifying decisions are resolved. The [documentation index](../README.md) identifies each document's role.

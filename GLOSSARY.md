@@ -1,77 +1,77 @@
 # Chrome AI Translator
 
-A personal Chrome extension that translates web pages with the OpenAI Responses API. It offers two distinct translation experiences over the same page, and most of the vocabulary below exists to keep those two apart. One term is shared by both, and its entry says so.
+Vocabulary for the extension's two translation experiences. Placeholder Token is shared by both; the other terms distinguish their content, controls, and lifetimes. Current behavior and implementation responsibilities are described in the [architecture reference](docs/architecture.md).
 
 ## Language
 
 **Side Panel Translation**:
-Translation of a page's article body into Markdown, presented in Chrome's side panel beside the untouched page.
+Translation of a page's article body into Markdown, presented in Chrome's side panel beside the unchanged page.
 _Avoid_: document translation, full-page translation, panel mode
 
 **Translation Chunk**:
-The unit Side Panel Translation works in: as much of the article's Markdown as one request may carry, cut at block boundaries so no block is split across two. Size limits and recovery are expressed in these — recovery from an over-long answer and from one that comes back without the placeholders it was sent, and a chunk gets one recovery in all (ADR-0005). A chunk that fails anyway ends the whole translation, and the chunks already translated are discarded with it: there is no partly-translated result to name (ADR-0006). Only Side Panel Translation has them.
+A block-aligned portion of an article's Markdown translated as a unit by Side Panel Translation. A block is never split between Translation Chunks.
 _Avoid_: batch, section, page part
 
 **Inline Translation**:
-Translation of a page's article content in place, one Semantic Block at a time, as the reader scrolls. Inline elements such as links, emphasis, and code survive the replacement and may move to match the translated word order.
+Translation of a page's article content in place, one Semantic Block at a time as the reader scrolls. Page-owned inline elements survive the replacement and may move with the translated word order.
 _Avoid_: in-page translation, overlay translation, live translation, text-node translation
 
 **Failed Semantic Block**:
-An Inline Translation Semantic Block for which no acceptable result could be safely applied, so its original is kept, progress reports it as `Failed`, and sibling Semantic Blocks continue independently. It is not a wholly failed Inline Translation, because other Semantic Blocks may still succeed, and it is not a Partial Translation, because no result was applied.
+A Semantic Block for which no acceptable Inline Translation could be safely applied, leaving its original content in place. Its failure is independent of sibling Semantic Blocks.
 _Avoid_: failed translation, rejected result, request failure
 
 **Partial Translation**:
-An Inline Translation result applied after its one repair still leaves a material amount of source-language prose. Progress reports the Semantic Block as `Partial`; isolated technical names and Source Syntax do not make a translation partial.
+An applied Inline Translation that still contains a material amount of source-language prose after its allowed repair. Isolated technical names and Source Syntax do not make a translation partial.
 _Avoid_: warning, degraded translation, incomplete result
 
 **Semantic Block**:
-The unit Inline Translation works in: the own prose of one paragraph, heading, list item, quotation, caption, disclosure summary, term or definition, or table cell, taken whole and excluding any Block Child. Progress counts, size limits, and retries are expressed in these; a Translation Chunk instead belongs to Side Panel Translation and holds many Semantic Blocks.
+The own prose of one paragraph, heading, list item, quotation, caption, disclosure summary, term or definition, or table cell, taken whole by Inline Translation and excluding any Block Child.
 _Avoid_: node, chunk, segment, fragment
 
 **Block Child**:
-A page-owned block-level child at the leading or trailing edge of a Semantic Block's own prose, such as a nested list, code block, quotation, table, disclosure, figure, or nested Semantic Block. It is excluded from that Semantic Block's model request and preserved by identity and position; any Semantic Blocks inside it translate independently.
+A page-owned block-level child at the leading or trailing edge of a Semantic Block's own prose, retained in its position and excluded from that parent's translation. Semantic Blocks within it have independent translations.
 _Avoid_: block atom, nested chunk, protected block
 
 **Inert Page Node**:
-A page-owned DOM node inside a Semantic Block that carries no language visible in the current viewport or exposed to accessibility APIs, and exposes no role, focus, action, or editing semantics through the page DOM, but whose identity must survive Inline Translation, such as a React separator comment, a text-free image or SVG decoration, or the hidden half of a responsive alternative-label pair. A responsive alternative may contain page-owned text, but that text is excluded from the model request while its viewport counterpart is visible. A node with a role declaration, accessible label, observable focus or action semantics, editable state, or prose that is not part of such a structurally identified responsive alternative is not inert.
+A page-owned node whose identity is preserved but that exposes no visible or accessible language, role, focus, action, or editing semantics, such as a separator comment or a text-free decoration. A hidden responsive alternative may contain text when its visible counterpart is structurally identifiable; other hidden prose is not inert.
 _Avoid_: decorative atom, trusted node, opaque node
 
 **Placeholder Token**:
-The stand-in a translation sends in place of page-owned structure it must preserve, such as a link, emphasis, code span, or Inert Page Node, so that the model may reorder the words around it without rewriting what it stands for. A translation replaces each one before sending, requires every one of them back byte-for-byte and exactly once, and puts the original page node back afterwards. One exception is Inline Translation's alone: an emphasis pair that wrapped visible text and no other Placeholder Token and came back with both tokens missing is applied without that emphasis, because a correct translation can leave it nothing to wrap (ADR-0010). This is the one term both translations share, and it is shared because they meet the same problem rather than because they resemble each other: the same contract, the same four failures — a token lost, repeated, invented, or crossed — and one implementation behind both, `extension/placeholder-tokens.js`, which each translation reaches through an adapter naming its own entry kinds. The reader is never shown this name. A failed check says "a link or code marker", which is a deliberate paraphrase and not a fifth vocabulary for the same thing.
-_Avoid_: bare `token`, which in this project already means two other things — a model token, which is what the reader is billed for and what `maxOutputTokens` bounds, and a correlation token, which pairs an inline result with the request that asked for it. Also marker, tag, sentinel, protected span.
+A stand-in for page-owned structure that translation preserves while reordering the surrounding prose. Both translation experiences use it for structure such as links or code; Inline Translation also uses it for wrappers and Inert Page Nodes.
+_Avoid_: bare token (ambiguous with a model token or a request correlation token), marker, tag, sentinel, protected span
 
 **Source Syntax**:
-Visible, page-owned notation whose spelling and delimiters carry meaning and therefore remains byte-for-byte unchanged during translation, identifiable from unambiguous syntax or a linked destination; examples include `mattpocock/skills`, `/usr/local/bin`, `./docs/guide.md`, and `[lite|full|ultra]`. Target-language grammar may touch its boundary without changing those bytes, while an ambiguous unlinked slash expression remains source-language prose and is translated; Source Syntax is content from the page, not a Placeholder Token inserted by the translation.
+Visible page-owned notation whose spelling and delimiters carry meaning, such as an unambiguous repository coordinate, path, or bracketed choice. Inline Translation preserves it unchanged; it is distinct from a Placeholder Token inserted by the extension.
 _Avoid_: code, literal token, protected text, technical term
 
 **Inline Translation Session**:
-The span the Session Budget is counted over: one page visit. It begins when the page loads and ends when the page is reloaded or left. It is not ended by **Original text** and not ended by stopping — both carry the Session Budget forward, so neither is a way to start spending afresh. It bounds one visit to one page, not the reader's spending: a reader who reloads three times has three of these and pays for all three.
+One page visit over which the Session Budget and reusable Inline Translations persist. It ends when the page is reloaded or left, rather than when translation is stopped or original text is restored.
 _Avoid_: reading session, run, operation, tab session
 
 **Inline Translation Operation**:
-One stretch of Inline Translation within an Inline Translation Session, from a Start that finds nothing already translating until the reader stops it or chooses **Original text**; pressing Start while one is live rescans what is in view instead of beginning another. Only the current one may apply or retry a result, though a request an earlier one sent still counts against the same Session Budget when it comes back, and Semantic Blocks a stopped one translated carry into the next when the translation settings are unchanged.
-_Avoid_: run, which the diagnostics already use for one batch request; session, which is the whole page visit
+One active stretch of Inline Translation within a Session, ending when the reader stops it or restores original text. Starting while it is active rescans visible content within the same Operation.
+_Avoid_: run (used by diagnostics for a batch request), session (the whole page visit)
 
 **Session Budget**:
-What one Inline Translation Session may spend, counted as the serialized size of the Semantic Block records sent — the initial request for each block, plus a second charge for a block whose answer needed a repair. It is a runaway guard, not a spending ceiling: its job is to catch an accounting slip or a pathological page before it empties the reader's account, and no spending ceiling exists in this extension. A page that reaches it is refused its next batch and told to reload; nothing is refunded, and the guard says no figure to the reader because the figure counts serialized records rather than anything on the page they can see (ADR-0007).
+A runaway guard on cumulative serialized Semantic Block record cost within one Inline Translation Session, including reported repairs. It is not a monetary spending ceiling, and a new page visit has a new budget.
 _Avoid_: character limit, quota, spending limit, budget cap
 
 **Floating Translate Button**:
-The control anchored to the page's bottom-right corner that is one of the two homes of Inline Translation's controls, the other being the Inline Translation Section. It is rendered over the host page and belongs to the extension, not to the site. It carries the controls alone: progress and errors are reported in the Inline Translation Section.
+The extension-owned control at the page's bottom-right corner, providing Inline Translation start, stop, and restore actions. Progress and errors appear in the Inline Translation Section.
 _Avoid_: FAB, inline button, page button, widget
 
 **Inline Translation Section**:
-The side panel's own home for Inline Translation, carrying the same start, stop, and restore controls as the Floating Translate Button, and the only place Inline Translation reports progress and errors. It is separate from the Side Panel Translation controls beside it, which translate something else, put the result somewhere else, and need different permissions.
+The side panel's home for Inline Translation controls, progress, and errors, separate from its Side Panel Translation controls.
 _Avoid_: inline panel, panel controls, inline pane
 
 **Inline Translation Shortcut**:
-The keyboard shortcut that starts Inline Translation on the page the reader is on. It is a third way in but not a third home for the controls: it only starts, and it opens the side panel so the Inline Translation Section can report what follows. Stopping and restoring stay with the two homes, where what a control will do is visible before it is pressed.
+The keyboard shortcut that starts Inline Translation on the current page and opens the side panel to report its progress. Stop and restore actions remain in the two control surfaces.
 _Avoid_: hotkey, keybinding, translate command, translate current tab
 
 **Button Visibility**:
-The reader's standing choice about when the Floating Translate Button may appear: never, only once the extension has been invoked on that page, or on every ordinary web page. The last of these grants the extension access to all sites; the others revoke it.
+The reader's standing choice of when the Floating Translate Button may appear: never, after invoking the extension on a page, or on every ordinary web page.
 _Avoid_: auto-show, always-on, auto-inject
 
 **Inline Translation Authorization**:
-The time-limited permission to run Inline Translation on a page, granted by a deliberate reader gesture through the extension. Inline Translation refuses to start without it; Side Panel Translation does not require it.
+The time-limited permission to start Inline Translation on a page, granted by a deliberate reader gesture through the extension. Side Panel Translation does not require this separate authorization.
 _Avoid_: inline consent, activeTab grant

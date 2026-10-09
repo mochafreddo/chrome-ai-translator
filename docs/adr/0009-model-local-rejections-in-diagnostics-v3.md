@@ -2,6 +2,8 @@
 
 Status: accepted
 
+Current behavior and source ownership: [architecture reference](../architecture.md#diagnostics-and-privacy). Historical measurements and verification limitations below describe the recorded investigation.
+
 Diagnostics schema v3 records a Semantic Block rejected before a model request at the `local_preflight` stage, with an optional `localRejection` containing only an allowlisted reason and offending tag name; source text, DOM paths, attributes, and arbitrary evidence remain excluded.
 
 ## Schema and count units

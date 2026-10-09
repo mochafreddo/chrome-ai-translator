@@ -2,6 +2,8 @@
 
 Status: accepted
 
+Current behavior and source ownership: [architecture reference](../architecture.md#dom-boundaries). Historical measurements and verification limitations below describe the recorded investigation.
+
 A list item often introduces a nested list or code block with its own prose. Inline Translation treats that prose as one Semantic Block and retains a leading or trailing Block Child by identity and position, excluding its text and structure from the parent's model request. Sending a Placeholder Token for the Block Child was rejected because the model could relocate a sub-list or code block into the middle of a translated sentence; a block boundary is not inline structure that translation may reorder.
 
 ## Ownership and restoration

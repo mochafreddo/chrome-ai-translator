@@ -1,5 +1,13 @@
 # Inline Translation Validation and Diagnostics Design
 
+## Record context
+
+Historical record. This is the schema-2 design dated 2026-07-11. Schema 3 is described in [ADR-0009](../../adr/0009-model-local-rejections-in-diagnostics-v3.md); module ownership has also changed.
+
+Current behavior: [architecture reference](../../architecture.md). Current verification procedure: [test guide](../../../tests/README.md). Record roles: [documentation index](../../README.md#historical-design-and-verification).
+
+## Original record
+
 Date: 2026-07-11
 
 ## Goal

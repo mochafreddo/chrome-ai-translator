@@ -1,112 +1,100 @@
 # Tests
 
-GitHub Actions runs the browser-free unit suite, extension syntax checks, and commit format checks on branch pushes and pull requests. The workflow requires no API key and runs no browser or model. Commit format can also be checked locally with `npm run check:commits -- <base> <head>`; without arguments it checks `HEAD^..HEAD`. The checker enforces the subject structure, an explanatory body, and an 80-column body limit with an exception for standalone URLs. Whether the description explains the change well and uses an imperative remains a review decision.
+Use this guide to choose verification by what it requires. The [package scripts](../package.json) own the commands; the [architecture reference](../docs/architecture.md) describes the behavior they exercise.
 
-Three tiers, deliberately separate: one needs nothing, one needs a browser, one needs a browser and spends money. Each line is a wall, not a gradient — the reason a check lives in one tier is the reason it must not creep into the one below.
+## Choose a check
 
-## `npm test` — the suite you run constantly
+| Command | Scope | Requirements and cost |
+| --- | --- | --- |
+| `npm test` | Registered browser-free unit suites | Node; no browser, network, or API key |
+| `npm run check:syntax` | Parse the extension scripts listed in the command | Node; no browser or model |
+| `npm run check:commits -- <base> <head>` | Commit subject/body format | Node and Git; no browser or model |
+| `npm run test:integration` | Toolbar-action Chrome check only | `agent-browser` on `PATH` and network; no API key or model |
+| `npm run test:integration:<name>` | One dedicated unbilled Chrome check listed below | `agent-browser` and network; no API key or model |
+| `npm run verify:live:inline` | Real Inline Translation, Stop, and Restore | Browser prerequisites plus an OpenAI key; billed |
+| `npm run verify:live:sidepanel` | Real Side Panel Translation and protected-span preservation | Browser prerequisites plus an OpenAI key; billed |
+| `npm run verify:live` | Both billed checks, sequentially | Same prerequisites; attempts the second even if the first fails |
 
-`node tests/run.js`. Pure Node: no browser, no network, no API key. Almost every check is a unit test against a function the extension exports, with a fake `chrome` object passed in as a parameter. It stays this way on purpose — the moment it needs a browser binary, it stops being the thing you can run without thinking.
+Run the unit suite and syntax checks for ordinary implementation changes. Choose browser checks for the path being changed rather than treating `test:integration` as an aggregate. Keep billed checks separate and run them only within authorized scope.
 
-For focused runs, use `npm test -- --suite sidepanel-translation-execution` (the exact test file stem without `.test.js`) or `npm test -- --test "exact check name"`. Both selectors may be combined. A test name alone selects every check with that exact name across registered suites. Unknown or repeated options, missing values, and selections matching no checks exit with an error. Without selectors, the runner and CI still run all registered checks.
+GitHub Actions runs unit, syntax, and commit-format checks on branch pushes and pull requests, without a browser or API key. See the [workflow](../.github/workflows/checks.yml). Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
 
-The wall is what a check *needs*, not which module it imports, and two checks make that distinction visible: `live-key.test.js` checks the live checks' own key handling against a fake page, so it imports `tests/integration/live-key.mjs` — and `harness.mjs` behind it — from this tier, and `protected-spans.test.js` does the same for `tests/integration/protected-spans.mjs`, which decides whether a page's links and inline code survived a translation. That is allowed only because importing those modules runs nothing: no browser is launched and no process is spawned at import time. Nothing enforces that; if any of them ever does work on import, the check that imports it has to move up a tier rather than quietly bring a browser into `npm test`.
+## Unit suite
 
-Both of those exist because a billed check that reasons wrongly reports a clean run, which is worse than not running at all. The judgement a billed check makes belongs here, where it is free to check; only the browser and the bill belong up there.
+`npm test` runs [run.js](run.js). Read its explicit suite list when adding a test: exporting `name` and `tests` does not register a file. Add the suite and confirm its checks appear in output. The runner prints a PASS/FAIL line per check and no summary; use its exit code as the verdict. A passing check name can itself contain “failed”.
 
-`inline-diagnostics-controller.test.js` exercises the diagnostic run, local rejection, and runtime outcome interfaces with fake Chrome storage and injected crypto. It reads saved results through the same diagnostics loader as Options. Failure checks distinguish an uncommitted record from a retained write whose cleanup failed, and cover compact fallback, discard, reservation release, and finalization failure. Worker checks retain the actual request-counting and message wiring; the diagnostics module does not execute model requests or decide repairs.
+For a focused run, use the test file stem without `.test.js`, an exact check name, or both:
 
-`inline-translation-session.test.js` drives admission, batching, settlement, stop, restore, progress and the local-diagnostic outbox through the Inline Translation Session interface. Budget checks admit real paragraphs and probe the next admission instead of changing or reading an internal counter. The ADR-0007 reconstruction is a synthetic approximation of the measured page, with its current serialized figures recorded in that ADR. `inline-translation-operation.test.js` retains the request lifecycle and late Session Budget settlement through Start, Stop, Original text and status, with controlled browser messages, time and viewport events. It observes DOM, outgoing requests, correlation token releases and subsequent admission without reaching the Session or scanner. Content checks retain actual button, worker and panel wiring, prompt control acknowledgements, displayed settings, hide/remount and classic-script reinjection; reinjection checks admitted work, cache reuse, the page visit's budget and listener/startup ownership through page behavior. The replacement checks' deliberately broken transitions and their observed failures are recorded in [the issue #70 verification report](../docs/qa/issue-70-session-checks.md).
+```sh
+npm test -- --suite sidepanel-translation-execution
+npm test -- --test "exact check name"
+npm test -- --suite sidepanel-translation-execution --test "exact check name"
+```
 
-`inline-viewport.test.js` drives discovery, scan continuation, viewport changes and watcher cleanup through `start`, `rescan` and `stop`, using a local DOM and controlled browser adapter. It observes admitted Semantic Blocks, queued callbacks and listener effects without reading the scanner's cursor. Operation checks retain control-to-scanner wiring, request transport, late settlement and Session Budget coverage through its control/status interface. `inline-local-diagnostic-transport.test.js` retains batching, deferred flushing, one retry and Stop-time final sending through the transport interface; Operation checks retain current feedback ownership and Original text's existing retry lifetime. The unbilled browser checks use `viewport-harness.js` to collect through the same interface without draining batches or sending model requests.
+A name alone selects every matching check across registered suites. Invalid/repeated options, missing values, and selections matching no checks fail. A run without selectors executes all registered checks.
 
-`sidepanel-translation-execution.test.js` drives Side Panel Translation through the same document execution interface the worker uses. It covers extraction validation, document size, safe chunking, request instructions, exclusive one-time recovery, progress for original Translation Chunks, and complete-result publication. The worker checks retain tab access, state broadcasts, failure classification, and request transport; the classic-script check runs the execution module through the worker's actual import order. Unit request adapters return deterministic answers and do not contact a model.
+Use deterministic request adapters, fake Chrome interfaces, and local DOM fixtures in this tier. Importing a helper used by browser checks is appropriate only while the import launches no browser or subprocess. The `live-key` and `protected-spans` unit suites verify billed-check decisions without executing the browser checks.
 
-`tests/run.js` holds an explicit list of suites, and **a test file that is not in that list does not run.** A file exporting `name` and `tests` is not picked up by discovery; there is no discovery.
+| Suite area | Observable contract |
+| --- | --- |
+| `inline-translation-session` | Admission, batches, settlement, accounting, cache, stop/restore, progress, and diagnostic outbox |
+| `inline-translation-operation` | Start/Stop/Original text wiring, transport, late settlement, feedback, and subsequent admission |
+| `inline-viewport` | Discovery, bounded continuation, rescan, and watcher cleanup through start/rescan/stop |
+| `inline-local-diagnostic-transport` | Batching, deferred flush, one retry, and final Stop-time sending |
+| `inline-diagnostics-controller` | Run lifecycle, local/runtime outcomes, persistence failures, retention, and finalization |
+| `inline-model-execution` | Request construction, output validation, repair, dispositions, and diagnostic metadata |
+| `sidepanel-translation-execution` | Extraction validation, chunking, one shared recovery, progress, and whole-document publication |
+| Content/worker/panel/options checks | Browser-message adapters, controls, state rendering, reinjection, request counts, and classic-script loading |
 
-This has bitten once already. `tests/qa-issue-003.regression-1.test.js` was written against `node:test` instead of this harness and was never added to the list, so from the day it landed until it was converted and registered it never ran — a file calling itself a regression test caught nothing for two months. It runs now. When adding a suite, add it to the list and confirm its checks appear in the output.
+Probe Session Budget behavior through admission of real paragraphs and subsequent requests rather than reading an internal counter. The Session reconstruction is a synthetic approximation of the page measured in [ADR-0007](../docs/adr/0007-charge-the-session-budget-in-actual-record-cost.md), not live-page validation. The [issue #70 report](../docs/qa/issue-70-session-checks.md) retains its interface checks and mutation evidence.
 
-## `npm run test:integration` — the check that needs a real browser
+## Unbilled Chrome checks
 
-`node tests/integration/action-click.test.mjs`. Drives a real Chrome with the unpacked extension loaded and triggers the extension's toolbar action, which is not reachable from the unit suite: it is browser UI, not page DOM.
+Use [integration/harness.mjs](integration/harness.mjs) for CDP/browser wiring. Read its header before diagnosing driver failures or adding a browser check. Page-based collector checks use [viewport-harness.js](viewport-harness.js) without draining batches or requesting a model.
 
-After each action, the check polls for Side Panel or Floating Translate Button readiness within a bounded timeout. On failure, it prints only the numeric browser version, target counts by type, Side Panel presence, CDP error codes and timeout count, and whether a Runtime exception was observed. A Side Panel readiness failure retains the target snapshot taken when polling ended. Unavailable observations, including failures before browser attachment, are marked `null`. Page content, target URLs, exception descriptions, and full browser logs are omitted.
+The toolbar check [action-click.test.mjs](integration/action-click.test.mjs) opens a real Chrome with the unpacked extension. It chooses on-invocation Button Visibility through Options and waits for panel/button readiness after the toolbar action. It guards [ADR-0001](../docs/adr/0001-open-side-panel-from-action-click-handler.md), rather than translation quality. Its bounded failure output reports numeric version, target counts, readiness, CDP codes, timeout count, and exception presence; unavailable observations use `null`. Page content, target URLs, exception descriptions, and full logs are excluded.
 
-Requires `agent-browser` on `PATH` and network access. Slower and flakier than `npm test`, and not part of it.
+Other checks run only through their dedicated scripts:
 
-It guards ADR-0001. If `setPanelBehavior({ openPanelOnActionClick: true })` ever comes back, Chrome consumes the action click, `chrome.action.onClicked` never fires, and this check goes red — which is the whole point, because the symptoms in a browser are indirect enough to cost an afternoon.
+| Script suffix after `test:integration:` | Scope |
+| --- | --- |
+| `disclosure-summary` | Local standard and renderer-wrapped disclosures: collection, apply, placement, disclosure behavior, exact restore |
+| `ai-hero-disclosure` | Reported AI Hero disclosure: deterministic apply and restore |
+| `ai-hero-grill-with-docs` | Reported skill page: visible-block preflight and repository-coordinate Source Syntax |
+| `github-skill-page` | Rendered GitHub skill article: scrolling collector, local rejection reporting, and zero model requests |
+| `ai-hero-responsive-labels` | Desktop/mobile skill navigation: hidden alternatives as text-free Inert Page Nodes, deterministic apply, exact DOM restore, zero model requests |
+| `heading-permalink` | Local and reported advisor headings: edge controls, node identity, focus/click behavior, deterministic apply, exact restore |
+| `data-as-paragraph` | Local and advisor `span[data-as="p"]` paragraphs: repeated collection, preserved inline elements, exact restoration, and ownership changes |
 
-The Floating Translate Button appearing is what it watches for, so it drives the real options page to choose on-invocation Button Visibility first: the default is never, under which a click correctly mounts nothing. That makes it the one check that the options control saves what the background worker reads.
+Reported-page checks navigate public pages read-only and use deterministic output where application is tested. They establish the local DOM paths stated above, not model quality or complete extension startup. Live-page block counts are observations rather than permanent assertions. Generic DIV/SPAN paragraph inference and other `data-as` values remain unsupported; headings with controls embedded within prose remain outside the edge-control contract.
 
-It stops short of asserting on translation output on purpose. Doing that needs an API key, which would turn a structural check into a billed one — that is `npm run verify:live` below.
+## Billed model checks
 
-The CDP gotchas involved are written up in and handled by `tests/integration/harness.mjs`. Read that header before concluding the driver is broken; several of the failures look like something other than what they are.
+Both live checks launch their own Chrome session, save a key through Options, and clear it through the real **Clear key** control in `finally`. Run them sequentially: the harness's `closeAllBrowsers()` can close other driver sessions.
 
-## Unbilled Chrome checks that are not `test:integration`
+Provide an OpenAI key in the gitignored `.env.local`. [integration/live-key.mjs](integration/live-key.mjs) accepts the named entries `OPENAI_API_KEY`, `OPENAI_KEY`, or `OPENAI_SECRET_KEY`, in that order when nonempty. A missing or unattributable key fails rather than silently skipping. Add a newly approved provider-specific name to that helper instead of guessing from an `sk-` value, which can also identify another provider. The helper hands the key to the local CDP session without returning it to its caller or printing it.
 
-Seven more commands launch a real Chrome without an API key. Each has its own `package.json` script, for the same reason `test:integration` is not folded into `npm test`: a different reason to start a browser is a different command.
+### Inline Translation
 
-- `npm run test:integration:disclosure-summary` — a local fixture with a standard disclosure and the renderer-wrapped leading-summary form. Collection ownership, apply, anchored placement, disclosure behaviour, and exact restore. No model, no key.
-- `npm run test:integration:ai-hero-disclosure` — the reported AI Hero page, read-only. Injects the local serializer and a deterministic translated template, then proves apply and restore. No model, no key. The billed live commands are skipped for this defect: it happens before a request is assembled, so paying for model output would not test the decision being changed.
-- `npm run test:integration:ai-hero-grill-with-docs` — the reported AI Hero skill page, read-only. Runs the shipped Semantic Block collector across the page, requires every visible block to pass local preflight, and checks that the linked repository coordinate is preserved as Source Syntax without being mistaken for untranslated prose. No model, no key.
-- `npm run test:integration:github-skill-page`: the reported [GitHub skill page](https://github.com/mattpocock/skills/blob/main/skills/engineering/ask-matt/SKILL.md), read-only and headless. Scrolls the rendered Markdown article through the shipped collector, requires every visible Semantic Block to pass local preflight, reports the observed block count and any local rejection diagnostics, and observes zero model requests from the page and extension worker. Requires `agent-browser` on `PATH` and network access; no API key is read. It runs only through its dedicated script, outside `npm test` and `npm run test:integration`.
-- `npm run test:integration:ai-hero-responsive-labels` — the reported AI Hero `/to-tickets` skill page, read-only, at desktop and mobile widths. Runs its previous/next skill titles through the shipped collector, verifies the hidden responsive label is represented only by a text-free Placeholder Token for an Inert Page Node, then applies deterministic output and restores the exact DOM graph. It also observes that no model request is sent. No model, no key.
+[inline-translation.live.test.mjs](integration/inline-translation.live.test.mjs) translates a [local fixture](integration/fixtures/inline-translation.html) and asserts target-language output, exact restoration, and control transitions rather than a model's wording.
 
-- `npm run test:integration:heading-permalink` — checks a deterministic local heading fixture and the reported [advisor page](https://code.claude.com/docs/en/advisor). It uses the content script's actual Semantic Block collection, then applies deterministic output and restores the exact DOM graph. It checks that permalink controls stay at the heading edge with the same nodes, attributes, focus, and click behavior. The run reports the observed number of affected visible headings; the page's current count is not a permanent assertion. No API key is read and no translation request is sent. This establishes local DOM handling, not model translation quality or full extension startup behavior.
+The first run translates three visible blocks. The second reveals a fourth short block that is absent from the cache, then waits for a pending request before pressing Stop and checks that its late answer is never applied. Restored cache hits alone would offer Stop without proving cancellation of an in-flight request. Expect the initial three blocks plus one new block and request overhead; output/repair behavior can change the actual bill.
 
-- `npm run test:integration:data-as-paragraph` — checks `span[data-as="p"]` Semantic Blocks on a local fixture and the advisor page through the content script's actual collection and application paths. Repeated scans must retain one record per paragraph. Deterministic output preserves inline elements, attributes, and code content, then restoration must recover the exact original DOM graph and HTML. The fixture expects two paragraphs; the reported page's visible count is observed rather than pinned. The fixture also checks that marked paragraphs inside protected links and code atoms cannot give two queued blocks ownership of the same content. Generic DIV/SPAN inference and other `data-as` values remain unsupported. The browser-free suite checks those limits and existing hidden-content, editable-content, interactive-content, and nested-block rejections. It also checks that a paragraph marker removed from the root or added to an inline descendant invalidates pending apply and restore operations without changing the page. No API key is read and no model request is sent.
+### Side Panel Translation
 
-The 2026-10-06 `github-skill-page` negative control against the pre-fix codec at `65d1a1e` observed 19 visible Semantic Blocks, with one rejected as `unsupported_descendant / UL` and zero model requests; the command exited with code 1. These are observed page counts, not permanent assertions.
+[sidepanel-translation.live.test.mjs](integration/sidepanel-translation.live.test.mjs) translates a [local protected-span fixture](integration/fixtures/sidepanel-translation.html). It counts every link destination and inline code span back rather than asserting translation wording. If the worker refuses output before rehydration, it reports the refusal and active chunk; if bad output is rendered, it identifies the missing span.
 
-The 2026-09-10 heading-permalink run observed 2 local fixture headings and 16 affected headings on the reported page. Against the pre-fix codec at `3d4848b`, all 18 were rejected with `hidden_content / DIV`; with the fix, all 18 passed collection, deterministic apply, control behavior, and exact restoration. The browser-free suite also checks hidden prose, editable and unsupported interactive content, and DOM ownership changes before apply and restore. Support is intentionally limited to labelled self-fragment controls at a heading's leading or trailing edge; controls embedded between prose need a stable placement rule before they can be preserved safely.
+The fixture has twelve links and twelve inline code spans in roughly 5,000 Markdown-template characters, close to 2,000 of them placeholder characters. The check saves a 2,000-character chunk target through Options to produce three Translation Chunks and uses `ATTEMPTS = 3`: nine initial requests on a clean run. Recovery can add requests and cost. Read the fixture and constants in the check before changing that expectation.
 
-## `npm run verify:live` — the checks that spend money
+[integration/protected-spans.mjs](integration/protected-spans.mjs) owns span counting; its unit suite checks the helper and fixture density. Separate live commands let you authorize one translation flow without paying for both.
 
-Two checks, one per translation, and the extension has two that share nothing but the page:
+## Historical verification evidence
 
-- `npm run verify:live:inline` — `tests/integration/inline-translation.live.test.mjs`. Inline Translation really translates a page, and Stop and Restore really behave.
-- `npm run verify:live:sidepanel` — `tests/integration/sidepanel-translation.live.test.mjs`. Side Panel Translation really brings the page's links and inline code back.
+These observations are retained from earlier verification, not rerun by reading or editing this guide:
 
-`verify:live` runs both, and **runs the second even when the first fails**, which is why it is not an `&&`. Neither depends on the other having run: each launches its own browser under its own session name, saves its own key through the real options page, and clears it again on the way out. They are still run one after the other rather than at once, because `closeAllBrowsers()` closes every browser the driver has, not only its own.
-
-Requires `agent-browser` on `PATH`, network access, and an OpenAI key in `.env.local` (gitignored). **A missing key fails the run; it does not skip it.** A check that quietly passes when it did not run is the failure mode this repo has already paid for once — see the `qa-issue-003` story above.
-
-### Inline Translation — `verify:live:inline`
-
-It exists because the unit suite drives `translateVisibleBlockBatch` with a fake `fetch`. That is what makes the suite fast and free, and it also means a green suite says nothing about whether a reader pointing the extension at a page gets a translated page. That gap is small and permanent, so the check closing it is small and separate.
-
-Three things about it are deliberate:
-
-- **`.live.` in the filename** says the file bills. `package.json` is the only wiring — integration checks appear in none of the four hand-maintained lists in `AGENTS.md` — so the name is what stops it being folded into `test:integration` by reflex.
-- **The page is a local fixture**, served from `127.0.0.1` by the check itself. A page on the open web serves until its owner edits a sentence, and then the check changes both what it costs and what it asserts without anyone having touched it. `tests/integration/fixtures/inline-translation.html` is what decides the size of the bill.
-- **It asserts invariants, never output.** A model's wording changes between runs and between models. What is asserted is that Hangul arrived, that Restore puts back exactly what was there, and that the controls move through the states `inline-translation-controls.js` gives them.
-
-**What the run costs, and what the second half of it buys.** The check translates the fixture twice, and the two halves are billed differently. The first run asks a model for the fixture's three visible blocks. The second exists for the Stop checks, and it bills exactly **one more short block** — the fourth, `hidden` in the fixture and revealed by the check between the runs.
-
-That fourth block is the whole reason the second run proves anything. The translation cache survives Restore: it lives on the Inline Translation Session, keyed by the settings signature, so translating the same page again under the same settings applies every block from the cache and issues no request. A run like that still turns the status active and still offers Stop, so Stop checks that watch only the status stay green even if cancelling an in-flight batch were broken outright — coverage in name only, and billed. Revealing a block the cache has never seen puts one real request in flight, and the checks then wait for the panel to report a pending block before clicking Stop, require the stopped status rather than merely a dimmed Stop, and hold for at least as long as the first run's own round trip to confirm the cancelled batch's answer is never applied.
-
-So the second run costs one block out of four, plus a second request's own overhead on a page whose requests are this small — call it a third to a half more than translating the fixture once. That was checked rather than assumed: with the then-current content-side eligibility check broken so that a stopped run applies the answer it had in flight, `npm run verify:live:inline` goes red on `a stopped run never applies the batch it had in flight` and green everywhere else.
-
-### Side Panel Translation — `verify:live:sidepanel`
-
-**The product of this check is an answer, not a green tick.** A reader reported `markdown.token_missing` — the refusal Side Panel Translation issues when an answer comes back without one of the placeholder tokens it sent — and nothing here had ever reproduced it. The unit suite drives that path with a fake `fetch`, so it cannot: the failure turns on a real model keeping tokens, and when this check was written `buildInstructions` in `background.js` had never asked it to. Whether it happens is a question only a billed run can answer, and this is the run that asks it.
-
-Since #26 the instructions do ask, and a chunk whose answer breaks the token contract buys one further attempt that names the refusal. Neither changes what this check asserts — it counts links and inline code across the whole translation, not requests — but both change what a red run costs: a chunk that fails on its tokens now bills twice, so an attempt that reproduces the reader's report is dearer than a clean one. The check remains the only thing that can say whether the asking worked.
-
-It is separate from the inline check, rather than more assertions inside it, because the two translations share nothing that matters: different controls, different unit of work — Translation Chunks against Semantic Blocks — different permissions, and different failure. Folding them together would also mean one bill you cannot decline half of. As it stands you can run either alone.
-
-**What it costs.** One attempt translates `tests/integration/fixtures/sidepanel-translation.html` end to end: roughly 5,000 characters of Markdown template, close to 2,000 of that the placeholder tokens themselves, split into three Translation Chunks and therefore three requests. The check makes **`ATTEMPTS` of those, three by default — nine requests in all**, because the failure it is looking for is not known to be deterministic and a single whole answer cannot tell "does not happen" from "did not happen this time". That constant is the bill: raise it to look harder, and say so here.
-
-The fixture is what fixes both the input and the bill, as in the inline check, and what makes it worth billing is written beside it: twelve links and twelve inline code spans, each unique and containing no other so that a loss can be counted and named, and enough of them to cross a chunk boundary. The check saves `chunkMaxChars` at **2,000** — the smallest the options page accepts — through the real options control, so it crosses that boundary on a fixture of 5,000 characters rather than one of 12,000, which is what the default limit would have cost every attempt.
-
-**What it asserts is a count, not a translation.** Every href and every inline code span comes back exactly as often as it went in; the wording around them is not on trial. `tests/integration/protected-spans.mjs` does that counting and `npm test` checks it, including that the shipped fixture is still dense enough to be worth billing.
-
-**What it can and cannot name.** When an answer survives, a lost span is named exactly — kind, place in the document, and the counts either side. When the worker refuses the answer instead, there is no output to name a token from, because the refusal happens before rehydration; what the check reports then is which refusal and which Translation Chunk was in flight, read off the panel's own progress while the run is still under way.
-
-That both of those really go red was checked rather than assumed, because a check written to catch something that has never happened is a check nobody has seen fail. With `translateFullPageChunk` stripping one `ATOM` token out of every answer before validating it, the run goes red on `attempt 1/3 is accepted with its token contract intact`, naming the refusal and `Chunk 1/3` as the chunk in flight — the reader's report, artificially. With the `count === 0` refusal in `validateAndRehydrateChunk` additionally neutered, so the damaged answer reaches the panel instead of being refused, it goes red on `code #3 spanGuard01() [lost: in 1, back 0]` and names the other two chunks' losses beside it. Both injections were reverted; neither is in the tree.
-
-Those two runs happened before the panel learned to say what a lost token means, so what they printed was the bare `markdown.token_missing`. The check quotes whatever the panel says rather than a code of its own, so the same injection now prints the sentence `extension/sidepanel-failure.js` gives that code, with the code still in parentheses after it.
-
-The key is read by `tests/integration/live-key.mjs` and handed only to the local CDP session — never a command argument, never printed, never returned to a caller. Clearing it is a `finally`, not a last step — and the save is inside that `try`, because a save outside it can put a real key in the browser profile on a path the cleanup never reaches. The clearing goes through the options page's own Clear key control rather than writing storage behind it. Written as a step it would run only when everything before it passed, which is exactly when it matters least.
-
-**The key is taken by name**: `OPENAI_API_KEY`, `OPENAI_KEY`, or `OPENAI_SECRET_KEY`, whichever comes first with a value. Nothing is accepted on the strength of its value, because `sk-` is also the start of Anthropic's `sk-ant-` and so says nothing about whose key it is — a run that cannot attribute a key to OpenAI stops and names the entries it saw rather than sending someone else's credential to `api.openai.com`. A key stored under any other name needs that name added to `PROVIDER_KEY_NAMES` in `live-key.mjs`, which is where the provider those names belong to is written down. Both halves are checked browser-free by `tests/live-key.test.js` in `npm test`.
+- The old `qa-issue-003.regression-1` file used `node:test` and was absent from the explicit suite list for two months. It now follows this harness and is registered; confirm both registration and output when adding a suite.
+- On 2026-10-06, the `github-skill-page` negative control against codec `65d1a1e` observed 19 visible blocks, one `unsupported_descendant / UL` rejection, zero model requests, and exit 1.
+- On 2026-09-10, heading-permalink verification observed 2 fixture and 16 reported-page headings. Codec `3d4848b` rejected all 18 as `hidden_content / DIV`; the fix passed collection, deterministic apply, control behavior, and exact restoration for all 18.
+- The billed Inline Stop check was observed failing on `a stopped run never applies the batch it had in flight` when content-side eligibility was broken, while its other checks passed. The extra block was estimated to add a third to a half to that fixture's initial translation cost; this is an estimate for that setup, not a general price.
+- The billed Side Panel check was observed failing on `attempt 1/3 is accepted with its token contract intact` at Chunk 1/3 when an `ATOM` token was stripped from every answer. Disabling the missing-token refusal as well made it fail on `code #3 spanGuard01() [lost: in 1, back 0]`, with the other chunk losses named. These controls preceded the current reader-facing error wording and were reverted.
+- [ADR-0005](../docs/adr/0005-one-recovery-per-translation-chunk.md) and [ADR-0006](../docs/adr/0006-a-failed-translation-chunk-ends-the-whole-side-panel-translation.md) record the earlier token-failure investigation and its live-verification limitations. [Local UI QA](../docs/qa/qa-report-local-extension-2026-06-15.md) and [Session verification](../docs/qa/issue-70-session-checks.md) retain their own baselines and results.

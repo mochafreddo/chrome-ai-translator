@@ -2,6 +2,8 @@
 
 Status: accepted
 
+Current behavior and source ownership: [architecture reference](../architecture.md#side-panel-translation). Historical measurements and verification limitations below describe the recorded investigation.
+
 Side Panel Translation cuts an article into Translation Chunks and translates them in a sequential loop. The first throw from any chunk escapes the loop, and the handler that catches it records an error with `translated: null`. So a document of five chunks that fails on the fourth discards the three answers that already came back, and those three were billed. The reader is shown a failure and no text, and pressing Translate again pays for all five afresh — nothing is resumed. Inline Translation made the opposite choice for the same problem: a Semantic Block that fails, fails alone, and the rest of the page is still translated. Issue #27 asked whether Side Panel Translation should follow it. **It should not: the discard stays, deliberately.**
 
 Two blockers were expected to settle it, and both have reported. #23 built a billed check that drives Side Panel Translation against a local fixture dense in links and inline code, cut into three Translation Chunks at the smallest chunk size the options page accepts, and counts every protected span back. It did not reproduce the reported `markdown.token_missing` in three attempts; all 24 spans returned each time. The check was proven able to fail — with a token stripped from every answer on purpose it goes red and names the chunk in flight — so its green is worth something, though three attempts against one model and one fixture is weak evidence of absence, and the account has had no credits since. #26 then made the panel ask: the instructions now require every placeholder back byte-for-byte, once each, none invented, with `LINK_OPEN` before the `LINK_CLOSE` of the same id, and a refused answer buys exactly one further attempt that is told which of the four codes refused the last one. That is landed and covered by unit checks, but no real model has been shown either sentence — the same missing credits stopped `verify:live:sidepanel` at Chunk 1/3.
@@ -15,12 +17,12 @@ One honest limit on the evidence, because the decision is wider than what was me
 ## Consequences
 
 - Any failure the loop does not recover from — a token contract broken twice, an over-long answer whose split child fails, an HTTP or network failure, a billing refusal — ends the translation and discards every answer before it. The billed cost of those answers is lost, and the next press re-bills them.
-- The cost of a late failure is written beside the loop in `extension/background.js`, so the next reader meets it as a decision rather than rediscovering it as a bug.
+- The cost of a late failure is written beside the loop in `extension/sidepanel-translation-execution.js`, so the next reader meets it as a decision rather than rediscovering it as a bug.
 - The discard is checked rather than only stated, in `tests/background-helpers.test.js`: three chunks with the third failing on the API, and three chunks with the third breaking its token contract twice — four billed requests, one repair, no split — each holding that no state the panel could render ever carried the first two answers. A companion check answers all three chunks, so the fixture is known to produce three and publish them in order; without it the discard would be checked against nothing.
 - The side panel no longer promises text "as chunks complete", because it never arrived that way. While a translation runs, the box says the translation appears when the last chunk is back and that a failure before then leaves nothing there. The `Chunk n/m` counter beside it is the only thing that moves per chunk.
 - Inline Translation keeps its own isolation, and the two translations differ here on purpose: a Semantic Block is one paragraph of a page the reader is already reading, and one that fails leaves the rest of the page usable; a Translation Chunk is an arbitrary slice of a document the panel renders as one text.
 
-## Do not revert this
+## Reconsideration
 
 Keeping what came back looks like strictly more value for one line in the catch, and it is the line that is cheap. What follows it is a result state to name against a vocabulary that has already spent `partial` elsewhere, a rendering that has to distinguish translated text from untranslated in both view modes, and a question — is this translation whole? — that every later feature must answer. Paying that for a recurrence nobody has observed, in a repo whose live check cannot currently reach a model, is paying for a guess and being unable to test it.
 

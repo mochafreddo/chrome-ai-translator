@@ -2,6 +2,8 @@
 
 Status: accepted
 
+Current behavior and source ownership: [architecture reference](../architecture.md#dom-boundaries). Historical measurements and verification limitations below describe the recorded investigation.
+
 The thing that stands in for a link, emphasis, or code span while a translation is in flight had no name in `CONTEXT.md`, and five vocabularies for it coexisted. The code's identifiers say token — `token`, `openToken`, `closeToken`, `expectedTokens`, `getTokenLikeLiterals`, `createTokenNamespace` — in both `extension/inline-block.js` and `extension/full-page-markdown.js`. The failure codes say token: `markdown.token_missing` and its three siblings, `structure.token_*`, and `token_parent_changed` on Inline Translation's side. One prose line in `full-page-markdown.js` says protected span, and the atom kinds beside it say `protected-link`. The reader is shown neither: `sidepanel-failure.js` says "a link or code marker". And the documentation's own prose already says placeholder — ADR-0005 on "the placeholder tokens the chunk was sent", ADR-0006 on requiring "every placeholder back byte-for-byte", and the Translation Chunk entry on an answer "that comes back without the placeholders it was sent". The decision is that the term is **Placeholder Token**, and that the homonym it creates is accepted and fenced rather than avoided.
 
 Naming it was deferred on 2026-08-14, out of issue #24's diff, because the obvious name collides. It collides worse than that: `token` in this project already carries two unrelated meanings, not one. A model token is what the reader is billed for — `maxOutputTokens`, `normalizeMaxOutputTokens`, "Translation output reached its token limit." A correlation token is what pairs an inline result with the request that asked for it — `createInlineRuntimeCorrelationToken`, `correlationToken`, `releaseTokens`. Adding a third sense to a word that already has two is the cost of this decision and the reason it needed one.
@@ -21,7 +23,7 @@ The reader keeps hearing "a link or code marker". Aligning the reader's wording 
 - The lowercase "placeholder" already in the Translation Chunk entry and in ADR-0005 and ADR-0006 now refers to this term. Those documents were written before it existed and are left as they stand; the term is capitalized where a document means it as a term.
 - Nothing in `extension/` changed and no check covers this. `tests/static-assets.test.js` does not read `CONTEXT.md`, and `npm test` is unaffected either way — it was run for this change and is green.
 
-## Do not revert this
+## Reconsideration
 
 Renaming to Protected Span later will look like a correction rather than a change, because it is the more precise name for the concept and reads better in prose. What it actually costs is the alignment this decision bought: the failure codes cannot follow it — #48 fixed them, they cross the worker seam, and they are what the four reader sentences key on — so the rename ends with the glossary and the codes disagreeing, which is the state issue #47 was opened to end. The name that matches the identifiers and the codes is worth more here than the name that reads best, because the mismatch is the thing that cost four sessions their bearings.
 

@@ -1,5 +1,13 @@
 # Issue #70: Session interface verification
 
+## Record context
+
+Historical record. This report records interface verification based on commit `2730fb4`. Its check counts, mutation results, and synthetic reconstruction measurements are evidence for that baseline, not a fresh run.
+
+Current behavior: [architecture reference](../architecture.md). Current verification procedure: [test guide](../../tests/README.md). Record roles: [documentation index](../README.md#historical-design-and-verification).
+
+## Original record
+
 This report records verification of [issue #70](https://github.com/mochafreddo/chrome-ai-translator/issues/70), against the work based on `2730fb4`. The checks use real DOM fixtures admitted through the Inline Translation Session. Session records, queues and counters are neither seeded nor inspected. Request payloads, progress, returned outcomes, the diagnostic outbox and page DOM are observable interfaces.
 
 ## Results

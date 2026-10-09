@@ -2,6 +2,8 @@
 
 Status: accepted
 
+Current behavior and source ownership: [architecture reference](../architecture.md#dom-boundaries). Historical measurements and verification limitations below describe the recorded investigation.
+
 Inline Translation once worked on individual text nodes: each visible node was sent and its text replaced in place. `16f577c` (2026-07-10) replaced that with Semantic Block translation — one paragraph, heading, list item, or table cell serialized whole, with protected tokens standing in for its inline elements — because a sentence split across `<em>`, `<a>`, and `<code>` children cannot be translated fragment by fragment without losing word order. Translating the block whole lets those elements keep their existing DOM objects and move to match the translated word order.
 
 That commit added the block path but did not remove the text-node one, so both lived in the tree for 63 commits. The text-node path is now removed.
@@ -12,7 +14,7 @@ That commit added the block path but did not remove the text-node one, so both l
 - Progress counts, size limits, and retries are expressed in Semantic Blocks, not text nodes. Those size limits are not all enforced in the same place: the per-batch and per-record caps are checked on both sides of the seam, while the session cap is the content script's alone. ADR-0003 says why.
 - `TRANSLATE_TEXT_NODES`, `TRANSLATE_VISIBLE_TEXT_BATCH`, and `INLINE_TRANSLATION_PROGRESS` are retired message names, and each one is guarded on the side that used to implement it. The first two were worker endpoints: a negative test in `tests/background-helpers.test.js` sends all three names to the worker and asserts it answers `Unknown message`. `INLINE_TRANSLATION_PROGRESS` ran the other way — the worker sent it and the content script acted on it — so its guard is in `tests/content-helpers.test.js`, which drives the content script's own listener and asserts the message changes nothing. Both halves are covered because reviving either one alone is what went unnoticed before.
 
-## Do not revert this
+## Reconsideration
 
 Restoring a text-node path looks like adding a safety net for blocks that are too large or fail validation. It is not: it is a second record lifecycle over the same page, and the two disagree about what a unit of work is.
 

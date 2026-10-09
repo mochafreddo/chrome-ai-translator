@@ -2,6 +2,8 @@
 
 Status: accepted
 
+Current behavior and source ownership: [architecture reference](../architecture.md#side-panel-translation). Historical measurements and verification limitations below describe the recorded investigation.
+
 Side Panel Translation now has two ways to recover a Translation Chunk, and they want the same chunk. The older one answers an over-long response: `splitChunkForRecovery` halves the chunk's character limit, re-cuts it at block boundaries, and translates each child, guarded by `recoveryDepth` so it happens once. The newer one (issue #26) answers a broken token contract: an answer that lost, repeated, invented, or crossed the placeholder tokens the chunk was sent buys one further attempt, told which of the four codes refused it.
 
 A chunk can fail both ways, and giving each recovery its own budget multiplies the bill: an over-long chunk splits into N children, each child then repairs, and one chunk the reader asked to translate once costs up to `1 + 2N` requests — a number that grows with the chunk's block count for a reader who never chose it. The decision is therefore that **a Translation Chunk carries one recovery budget, and whichever failure arrives first spends it.** `recoveryDepth` is that budget rather than a split depth: the split stamps it on the children it makes, the repair stamps it on the retry it sends, and in both cases the next failure of either kind ends the chunk instead of starting the other recovery.
@@ -17,6 +19,6 @@ The alternative worth naming is ordering the two by kind — always split first,
 - A repair is one attempt, not a loop, because every attempt is billed and the reader did not ask for it. If a second repair is ever wanted, the thing to change is this decision, not the guard.
 - The four codes are enumerated in `FULL_PAGE_TOKEN_ERROR_CODES` rather than matched on their shared `markdown.token_` prefix. `markdown.token_parent_changed` exists in the extension's vocabulary and Side Panel Translation's validator never raises it; a prefix match would quietly grant a second request to any code a future validator invents.
 
-## Do not revert this
+## Reconsideration
 
 Restoring a per-child repair budget looks like strictly more recovery for one line of code. What it actually buys is a bill that scales with the size of the article on the reader's worst path — the path where the model is already failing — and it buys it for a failure that has never been reproduced against a real model (#23: not reproduced, three attempts). If evidence arrives that a token loss survives one correction and is cured by a smaller chunk, that evidence belongs in a ticket beside a changed worst case, not in a guard loosened on the reasoning that retries are cheap.

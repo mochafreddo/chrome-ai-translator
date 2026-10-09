@@ -1,5 +1,13 @@
 # QA Report: Chrome AI Translator Extension
 
+## Record context
+
+Historical record. This report records static UI QA and follow-up work on 2026-06-15. Its scores, controls, paths, and measurements describe those runs, not current extension behavior.
+
+Current behavior: [architecture reference](../architecture.md). Current verification procedure: [test guide](../../tests/README.md). Record roles: [documentation index](../README.md#historical-design-and-verification).
+
+## Original record
+
 Date: 2026-06-15
 Branch: inline-restore-cache
 Mode: diff-aware standard QA

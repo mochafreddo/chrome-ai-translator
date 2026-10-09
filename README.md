@@ -1,89 +1,75 @@
-# chrome-ai-translator (personal)
+# Chrome AI Translator
 
-A **personal-only** Chrome extension that translates article pages with OpenAI Responses API. It keeps the translated Markdown in a **Side Panel** and can also translate page text inline, driven from that panel or from a floating page button.
+A personal Chrome extension that translates article pages with the OpenAI Responses API. Use **Side Panel Translation** to read translated Markdown beside the page, or **Inline Translation** to translate visible article text in place.
 
 ## Requirements
+
 - Chrome 116 or newer.
-- An OpenAI API key. Use a dedicated key/project because the key is stored client-side in Chrome extension storage.
+- An OpenAI API key. Use a dedicated key and project because the extension stores the key client-side in Chrome extension storage.
 
-## Load the extension
-1. Open Chrome → `chrome://extensions`
-2. Enable **Developer mode**
-3. Click **Load unpacked**
-4. Select: `chrome-ai-translator/extension`
+## Load and configure
 
-## Setup
-1. Open extension **Options**
-2. Paste your **OpenAI API Key**
-3. (Optional) change default target language, tone, model, and chunk size
-4. (Optional) choose **When the floating translate button may appear**
+1. Open `chrome://extensions` and enable **Developer mode**.
+2. Choose **Load unpacked** and select this repository's `extension/` directory.
+3. Open the extension's **Options** and enter your **OpenAI API Key**.
+4. Choose your default target language, tone, model, and chunk size.
+5. Choose **When the floating translate button may appear**.
 
-The three choices are exclusive: never, once you have opened the extension on the page, or on every web page. **Never** is the default. Only the every-page choice requests access to normal `http://` and `https://` pages, which is what lets Chrome inject the floating button before you open the extension; the other two give that access back.
+Button Visibility defaults to **Never**. You can also show the button after invoking the extension on a page, or on every ordinary web page. The every-page choice requests access to `http://` and `https://` sites; the other choices revoke that broad access. **Never** hides the floating button while leaving Inline Translation available from the side panel and shortcut.
 
-**Never** removes the button only. The Side Panel has its own **Inline translation** section carrying the same controls, so inline translation stays fully usable with the button switched off.
+The saved key is not shown again in the Options input. Leave the field blank to keep it, or choose **Clear key** to remove both the saved key and the legacy `openai_api_key` value.
 
-The saved key is never shown back in the Options input. Leaving the key field blank preserves the current key; **Clear key** removes the saved key and the legacy `openai_api_key` value.
+## Open the controls
 
-OpenAI Responses requests set `store: false`. Page text is still transmitted to OpenAI and remains subject to the applicable OpenAI data controls.
+Click the toolbar icon to open the side panel without starting a translation. Use the extension shortcut to open the panel and start Inline Translation:
 
-## Use
-- Click the extension toolbar icon, or use the Chrome extension shortcut if it is assigned:
-  - macOS: `Cmd+Shift+Y`
-  - Windows/Linux: `Ctrl+Shift+Y`
+- macOS: `Cmd+Shift+Y`
+- Windows/Linux: `Ctrl+Shift+Y`
 
-If the shortcut does not work, check `chrome://extensions/shortcuts`. Chrome can leave a suggested shortcut unassigned when it conflicts with another shortcut or has been changed locally. Version 0.3.0.0 renamed the command behind the shortcut, so a combination assigned by hand before that version is no longer honoured and has to be assigned once more.
+If the shortcut is unassigned or conflicts with another extension, set it in `chrome://extensions/shortcuts`. Version 0.3.0.0 renamed the command to `translate-inline`; reassign a shortcut you previously set by hand for the old command. The shortcut works even when the floating button is hidden.
 
-The Side Panel opens on either action. The shortcut also starts inline translation on the page it was pressed on, whatever the button visibility is set to, and the Side Panel's **Inline translation** section is where that run reports progress and failures. A floating **Translate** button appears on the page where the chosen visibility allows it.
+The extension cannot translate restricted pages such as `chrome://` pages. If Inline Translation asks for page access, click the extension's toolbar icon on that page and try again.
 
-In the Side Panel:
+## Translate in the side panel
 
-- **Translate current tab** extracts the current article, translates it, and updates progress by chunk.
-- Target language, tone, model, and view can be changed for the current run.
-- **Save as default** stores the visible settings for future runs.
-- **View** can show only the translation or a bilingual original/translation output.
-- The **Original** tab shows the extracted Markdown source.
-- Inline code in paragraphs and list items is marked as Markdown code before translation, so the model can keep snippets like API names and commands unchanged.
+1. Choose **Translate current tab** to extract and translate the article.
+2. Watch the chunk progress. The translated result appears after every chunk succeeds; a terminal failure leaves no translated result, including earlier chunks that may already have been billed.
+3. Choose a translation-only or bilingual **View**, or open the **Original** tab to inspect the extracted Markdown.
 
-For inline page translation, from the Side Panel's **Inline translation** section:
+You can change target language, tone, and model for the current translation. Choose **Save as default** to keep the visible settings for later translations. Links and code are preserved in the output.
 
-1. Choose **Translate visible text** to start viewport-first inline translation.
-2. As you scroll, newly visible article blocks are translated in place. Inline links, emphasis, and code keep their existing DOM objects and can move to match the translated word order.
-3. Choose **Stop** to stop translating newly visible text while keeping current translations.
-4. Choose **Original text** to restore the original text and inline-node order.
-5. Choose **Scan visible text** on the same page to reuse matching in-memory translations instead of sending the same visible text again.
+## Translate on the page
 
-Progress and errors for inline translation are reported in that section, whether the run was started there or from the page.
+Use the side panel's **Inline translation** section, the floating button, or the shortcut:
 
-The floating **Translate** button, where the chosen visibility allows it, carries the same three controls under **Page in Korean**, **Stop**, and **Original text**. Page text is sent for translation only after one of these controls, or one in the Side Panel, has been chosen.
+1. Choose **Translate visible text** to start. Newly visible article blocks translate as you scroll.
+2. Choose **Scan visible text** while active to rescan the current viewport.
+3. Choose **Stop** to stop new work and keep existing translations.
+4. Choose **Original text** to restore original text and inline-node order where the page still permits safe restoration.
+5. Start again on the same page to reuse matching cached translations without another model request for those blocks.
 
-## Limits and diagnostics
-- Full-page Side Panel translation stops before sending more than 60,000 extracted characters.
-- Full-page translation reserves at least 8,192 output tokens for each request and scales that cap up for larger chunks to reduce truncation.
-- Full-page link destinations and code contents are protected locally and restored after translation; they are not included in model input.
-- A full-page chunk that reaches its output-token limit is split and retried once. If recovery does not complete, the extension reports an error and does not publish a partial translation as complete.
-- A Translation Chunk that fails anyway ends the whole Side Panel Translation: the panel shows no translated text at all, including the chunks that already came back and were billed, and translating again re-sends every chunk. This is a decision rather than an oversight — see [ADR-0006](docs/adr/0006-a-failed-translation-chunk-ends-the-whole-side-panel-translation.md).
-- `Chunk max chars` defaults to `12000` and is clamped between `2000` and `60000`.
-- Inline translation translates only visible article text while active and scans again on scroll, resize, and page mutations. Large pages are scanned in bounded windows and viewport changes reset pending scan work so the current visible text is prioritized.
-- Inline translation serializes one semantic paragraph, heading, list item, or table cell with protected tokens for inline elements. A block and a batch are each capped at 12,000 serialized characters; the Session Budget for one Inline Translation Session (one page visit) is 150,000 of serialized record cost, which is not a count of the page's own characters. That budget covers the second request a repair sends, survives **Original text** and stop-then-restart, and is cleared only by reloading the page — see [ADR-0007](docs/adr/0007-charge-the-session-budget-in-actual-record-cost.md). Output caps scale from 4,096 to 16,000 tokens. Oversized or malformed blocks remain unchanged instead of falling back to fragment translation.
-- Protected visible labels such as model names, commands, and API names are sent as translation context. Link destinations, DOM attributes, hidden text, and event state are not sent.
-- Inline status separates complete, partial, page-change, and failed results. `Partial` means structurally safe output was applied after one quality repair still left a conservative quality warning. `Changed` means the page modified a block or replaced its owned DOM nodes before the extension could safely apply a returned translation. Page changes and invalid token output are retried at most once each. `Failed` means the request, protected-token contract, or safe DOM application failed. Counts represent semantic blocks rather than individual text nodes.
-- Inline translations restored with **Original text** are cached only in the current page instance. The cache is reused only when target language, tone, model, reasoning effort, semantic template, and protected-token context still match, and it is cleared by reloads, navigations, or browser restarts.
-- Options shows the 20 most recent inline translation runs and can copy or save schema-2 diagnostic JSON for RCA with Codex or another agent. Problem records include stable validation codes, attempt counts, bounded evidence, and installation-scoped HMAC fingerprints. Each run retains at most 100 problem blocks. Source text, translations, matched words, protected labels, URLs, request bodies, response bodies, and API keys are never persisted or exported.
-- Model-output validation gets at most one repair attempt. Structurally unsafe output is never applied. A structurally safe result that remains incomplete after repair is applied explicitly as `Partial` rather than discarded.
+The floating menu offers the same start, stop, and restore actions; its start label reflects the target language. Progress and errors appear in the side panel's Inline Translation section regardless of where translation starts.
 
-## Related docs
-- [Inline changed text retry design](docs/design/inline-changed-text-retry-design.md)
-- [Inline restore cache design](docs/design/inline-restore-cache-design.md)
-- [Local extension QA report](docs/qa/qa-report-local-extension-2026-06-15.md)
+| Status | Meaning |
+| --- | --- |
+| Translated | A complete translation was applied. |
+| Partial | Safe output was applied, but source-language prose remained after one repair. |
+| Pending | A block is queued or being translated. |
+| Changed | The page changed before a result could be applied safely. |
+| Failed | A block could not be translated or applied safely. Its original content remains. |
 
-## Development
-- Run tests: `npm test`
-- Check extension script syntax: `npm run check:syntax`
-- Drive a real Chrome: `npm run test:integration`. Needs `agent-browser` on `PATH` and network access. Not part of `npm test`.
-- Check that translation really works: `npm run verify:live`. Needs the above plus an OpenAI key in `.env.local`, and bills a real model — it is the only command that costs anything, so it is never run by the other two.
+Links, emphasis, and code retain their page-owned objects where the translation contract preserves them. Inline Translation skips unsupported or oversized blocks rather than translating fragments. An eligible missing emphasis pair may be omitted from a translated sentence; restoration keeps the original emphasis available.
 
-## Notes
-- Settings are stored in `chrome.storage.local` under `settings`.
-- It won't work on restricted pages like `chrome://`.
-- Inline translation excludes page chrome and editable controls. Code-like text, filenames, commands, versions, and protected link labels remain exact through atomic tokens; natural-language link text can be translated in place.
-- Inline translation uses structured JSON output and records recent run diagnostics in Options without storing source text, translations, protected labels, URLs, request bodies, or API keys.
+Stop and **Original text** keep the page visit's cache and Session Budget. Reloading or leaving the page clears them. The budget guards runaway work; it does not cap your spending across page visits. See [limits and accounting](docs/architecture.md#limits-and-accounting) for the implementation constraints.
+
+## Data and diagnostics
+
+Translation sends page content to OpenAI. Responses requests use `store: false`. Side Panel Translation sends article Markdown with link destinations and code contents replaced by placeholders; those values stay within the extension for restoration. Inline Translation sends serialized block records containing prose, structural metadata, and permitted visible labels; it does not send DOM attributes, event state, or hidden alternative-label text.
+
+Options lets you view recent Inline Translation diagnostics and copy or save diagnostic JSON. Diagnostics contain bounded validation metadata and installation-scoped HMAC fingerprints, rather than source text, translations, protected labels, URLs, request or response bodies, or API keys. See [diagnostics and privacy](docs/architecture.md#diagnostics-and-privacy) for the current schema and retention rules.
+
+## Development and documentation
+
+Run `npm test` for the browser-free unit suite and `npm run check:syntax` for extension script parsing. Browser checks have separate commands and prerequisites in the [test guide](tests/README.md). `npm run test:integration` runs only the toolbar-action check. `npm run verify:live` runs both real-model checks and incurs API charges.
+
+Start with the [documentation index](docs/README.md) for the current architecture, glossary, decisions, agent procedures, and historical design and QA records. Load `extension/` directly; the repository has no build step.
