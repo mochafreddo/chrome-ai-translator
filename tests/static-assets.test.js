@@ -28,10 +28,30 @@ exports.tests = [
       assert.equal((await worker.translateVisibleBlockBatch([])).length, 0);
 
       const optionsScope = vm.createContext({});
-      loadClassicScript(optionsScope, 'translation-diagnostics.js');
+      const optionsHtml = fs.readFileSync(path.join(EXTENSION_DIR, 'options.html'), 'utf8');
+      for (const [, file] of optionsHtml.matchAll(/<script src="([^"]+)"/g)) {
+        if (file === 'options.js') break;
+        loadClassicScript(optionsScope, file);
+      }
       const payload = await optionsScope.ChromeAiTranslatorDiagnostics.loadDiagnostics(chrome);
       assert.equal(payload.schemaVersion, 3);
       assert.equal(payload.runs.length, 0);
+      const stored = {
+        'inlineDiagnostics:v3:index': ['local-run'],
+        'inlineDiagnostics:v3:run:local-run': {
+          schemaVersion: 3,
+          runId: 'local-run',
+          blocks: [{
+            localRejection: { reason: 'custom_element', tag: 'MY-WIDGET', source: 'private prose' },
+          }],
+        },
+      };
+      const exported = await optionsScope.ChromeAiTranslatorDiagnostics.loadDiagnostics({
+        storage: { local: { async get() { return stored; } } },
+      });
+      assert.equal(JSON.stringify(exported.runs[0].blocks[0].localRejection),
+        JSON.stringify({ reason: 'custom_element' }));
+      assert.equal(JSON.stringify(exported).includes('private prose'), false);
     },
   },
   {

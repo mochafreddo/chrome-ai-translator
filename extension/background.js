@@ -79,11 +79,11 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorPageAccess) {
     importScripts('page-access.js');
   }
-  if (!globalThis.ChromeAiTranslatorDiagnostics) {
-    importScripts('translation-diagnostics.js');
-  }
   if (!globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol) {
     importScripts('inline-diagnostics-protocol.js');
+  }
+  if (!globalThis.ChromeAiTranslatorDiagnostics) {
+    importScripts('translation-diagnostics.js');
   }
   if (!globalThis.ChromeAiTranslatorInlineDiagnosticsController) {
     importScripts('inline-diagnostics-controller.js');

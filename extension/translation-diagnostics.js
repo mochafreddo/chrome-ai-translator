@@ -1,4 +1,9 @@
 (function initTranslationDiagnostics(globalScope) {
+  const { serializeLocalRejection } =
+    globalScope.ChromeAiTranslatorInlineDiagnosticsProtocol ||
+    (typeof module !== 'undefined' && module.exports
+      ? require('./inline-diagnostics-protocol.js')
+      : null);
   const SCHEMA_VERSION = 3;
   const MAX_RUNS = 20;
   const MAX_PROBLEM_BLOCKS = 100;
@@ -13,17 +18,6 @@
     'repair_validation',
     'runtime_application',
     'local_preflight',
-  ];
-  const LOCAL_REJECTION_REASONS = [
-    'invalid_root',
-    'hidden_content',
-    'editable_content',
-    'interactive_content',
-    'custom_element',
-    'nested_semantic_block',
-    'unsupported_descendant',
-    'structure_limit_exceeded',
-    'empty_content',
   ];
 
   function nonNegativeCount(value) {
@@ -89,17 +83,6 @@
       if (Number.isFinite(value[key])) allowed[key] = Math.max(0, Number(value[key]));
     }
     return allowed;
-  }
-
-  function serializeLocalRejection(value) {
-    if (!value || typeof value !== 'object') return null;
-    const reason = LOCAL_REJECTION_REASONS.includes(value.reason) ? value.reason : '';
-    if (!reason) return null;
-    if (reason === 'custom_element') return { reason };
-    const tag = typeof value.tag === 'string' && /^[A-Z][A-Z0-9]{0,31}$/.test(value.tag)
-      ? value.tag
-      : '';
-    return tag ? { reason, tag } : { reason };
   }
 
   function serializeProblemBlock(block = {}) {
