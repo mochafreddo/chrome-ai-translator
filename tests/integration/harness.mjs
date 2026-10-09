@@ -117,10 +117,14 @@ export function connect(endpoint, platform = globalThis) {
   let seq = 0;
   const pending = new Map();
   const listeners = new Map();
+  const protocolErrorCodes = new Set();
+  let timeouts = 0;
+  let runtimeExceptionPresent = false;
   let closed = false;
   const settle = (id, result) => {
     const waiter = pending.get(id);
     if (!waiter) return;
+    if (result?.__timeout) timeouts += 1;
     pending.delete(id);
     platform.clearTimeout(waiter.timer);
     waiter.resolve(result);
@@ -134,8 +138,15 @@ export function connect(endpoint, platform = globalThis) {
   ws.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
     if (message.id === undefined) {
+      if (message.method === 'Runtime.exceptionThrown') runtimeExceptionPresent = true;
       for (const handler of listeners.get(message.method) || []) handler(message.params, message.sessionId);
       return;
+    }
+    if (pending.has(message.id) && message.result?.exceptionDetails) {
+      runtimeExceptionPresent = true;
+    }
+    if (pending.has(message.id) && Number.isInteger(message.error?.code)) {
+      protocolErrorCodes.add(message.error.code);
     }
     settle(message.id, message.error ? { __error: message.error.message } : message.result);
   });
@@ -163,7 +174,12 @@ export function connect(endpoint, platform = globalThis) {
     listeners.set(method, handlers);
     return () => listeners.set(method, (listeners.get(method) || []).filter((h) => h !== handler));
   };
-  return { ready, send, on, close: () => { terminate(); ws.close(); } };
+  const getDiagnostics = () => ({
+    protocolErrorCodes: [...protocolErrorCodes].sort((a, b) => a - b),
+    timeouts,
+    runtimeExceptionPresent,
+  });
+  return { ready, send, on, getDiagnostics, close: () => { terminate(); ws.close(); } };
 }
 
 function extensionManifest(extensionDir) {
@@ -181,7 +197,9 @@ export async function launchExtensionBrowser({ session, url, extensionDir }) {
 
   const cdpUrl = (await browser(['get', 'cdp-url', '--session', session])).trim().split('\n').pop();
   const httpBase = cdpUrl.replace(/^ws:\/\/([^/]+)\/.*$/, 'http://$1');
-  const { webSocketDebuggerUrl } = await (await fetch(`${httpBase}/json/version`)).json();
+  const version = await (await fetch(`${httpBase}/json/version`)).json();
+  const browserVersion = /^(?:Chrome|HeadlessChrome)\/(\d+(?:\.\d+){0,3})$/.exec(version.Browser)?.[1] || null;
+  const { webSocketDebuggerUrl } = version;
   const cdp = connect(webSocketDebuggerUrl);
   await cdp.ready;
 
@@ -228,6 +246,7 @@ export async function launchExtensionBrowser({ session, url, extensionDir }) {
 
   return {
     cdp,
+    browserVersion,
     httpBase,
     extension,
     extensionsDomainResponded,

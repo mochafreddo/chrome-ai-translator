@@ -8,6 +8,8 @@ Three tiers, deliberately separate: one needs nothing, one needs a browser, one 
 
 `node tests/run.js`. Pure Node: no browser, no network, no API key. Almost every check is a unit test against a function the extension exports, with a fake `chrome` object passed in as a parameter. It stays this way on purpose — the moment it needs a browser binary, it stops being the thing you can run without thinking.
 
+For focused runs, use `npm test -- --suite sidepanel-translation-execution` (the exact test file stem without `.test.js`) or `npm test -- --test "exact check name"`. Both selectors may be combined. A test name alone selects every check with that exact name across registered suites. Unknown or repeated options, missing values, and selections matching no checks exit with an error. Without selectors, the runner and CI still run all registered checks.
+
 The wall is what a check *needs*, not which module it imports, and two checks make that distinction visible: `live-key.test.js` checks the live checks' own key handling against a fake page, so it imports `tests/integration/live-key.mjs` — and `harness.mjs` behind it — from this tier, and `protected-spans.test.js` does the same for `tests/integration/protected-spans.mjs`, which decides whether a page's links and inline code survived a translation. That is allowed only because importing those modules runs nothing: no browser is launched and no process is spawned at import time. Nothing enforces that; if any of them ever does work on import, the check that imports it has to move up a tier rather than quietly bring a browser into `npm test`.
 
 Both of those exist because a billed check that reasons wrongly reports a clean run, which is worse than not running at all. The judgement a billed check makes belongs here, where it is free to check; only the browser and the bill belong up there.
@@ -27,6 +29,8 @@ This has bitten once already. `tests/qa-issue-003.regression-1.test.js` was writ
 ## `npm run test:integration` — the check that needs a real browser
 
 `node tests/integration/action-click.test.mjs`. Drives a real Chrome with the unpacked extension loaded and triggers the extension's toolbar action, which is not reachable from the unit suite: it is browser UI, not page DOM.
+
+After each action, the check polls for Side Panel or Floating Translate Button readiness within a bounded timeout. On failure, it prints only the numeric browser version, target counts by type, Side Panel presence, CDP error codes and timeout count, and whether a Runtime exception was observed. A Side Panel readiness failure retains the target snapshot taken when polling ended. Unavailable observations, including failures before browser attachment, are marked `null`. Page content, target URLs, exception descriptions, and full browser logs are omitted.
 
 Requires `agent-browser` on `PATH` and network access. Slower and flakier than `npm test`, and not part of it.
 

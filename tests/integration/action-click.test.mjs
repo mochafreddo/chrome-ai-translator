@@ -30,7 +30,7 @@ import {
   closeAllBrowsers,
   createChecks,
   launchExtensionBrowser,
-  wait,
+  until,
 } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +39,24 @@ const SESSION = 'chrome-ai-translator-integration';
 const PAGE_URL = 'https://example.com/';
 
 const { check, failures, finish } = createChecks('action click');
+let diagnosticContext = null;
+let failureTargetSnapshot = null;
+
+async function targetDiagnostics(ctx) {
+  const response = await ctx.cdp.send('Target.getTargets', {}, undefined, 1000);
+  if (response.__error || response.__timeout || !Array.isArray(response.targetInfos)) {
+    return { targetTypes: null, sidePanelFound: null };
+  }
+  const targetTypes = {};
+  for (const target of response.targetInfos) {
+    const type = ['page', 'tab', 'service_worker', 'worker', 'iframe', 'browser'].includes(target.type)
+      ? target.type : 'other';
+    targetTypes[type] = (targetTypes[type] || 0) + 1;
+  }
+  const sidePanelFound = ctx.extension ? response.targetInfos.some(
+    (target) => target.url === `chrome-extension://${ctx.extension.id}/sidepanel.html`) : null;
+  return { targetTypes, sidePanelFound };
+}
 
 async function main() {
   const ctx = await launchExtensionBrowser({
@@ -46,13 +64,14 @@ async function main() {
     url: PAGE_URL,
     extensionDir: EXTENSION_DIR,
   });
+  diagnosticContext = ctx;
 
   if (!ctx.extensionsDomainResponded) {
     check('CDP Extensions domain responds', false,
       'every command hung — is --enable-unsafe-extension-debugging set?');
     return;
   }
-  check('extension is loaded', Boolean(ctx.extension), `saw ${JSON.stringify(ctx.extensionsSeen)}`);
+  check('extension is loaded', Boolean(ctx.extension));
   if (!ctx.extension) return;
 
   check('driver opened a page to act on', Boolean(ctx.tab) && Boolean(ctx.pageTarget));
@@ -62,32 +81,38 @@ async function main() {
   // A tab target has no page execution context, so guard against silently evaluating
   // into nothing — that would turn every DOM assertion below into a false negative.
   check('page execution context is reachable', (await evaluate('1 + 1')) === 2);
-  const buttonPresent = async () =>
-    (await evaluate("Boolean(document.getElementById('chrome-ai-translator-inline'))")) === true;
+  const buttonPresent = async () => {
+    const value = await evaluate("Boolean(document.getElementById('chrome-ai-translator-inline'))", 500);
+    return typeof value === 'boolean' ? value : null;
+  };
   // Unfiltered, for the target-type reason in the harness header. Asserted before the click
   // as well as after: the session is reused by name, so a run interrupted with the panel
   // open would otherwise satisfy the after-check without the click having done anything.
-  const sidePanelOpen = async () =>
-    (await ctx.listTargets()).some(
+  const sidePanelOpen = async () => {
+    const response = await ctx.cdp.send('Target.getTargets', {}, undefined, 500);
+    if (response.__error || response.__timeout || !Array.isArray(response.targetInfos)) return null;
+    return response.targetInfos.some(
       (target) => target.url === `chrome-extension://${ctx.extension.id}/sidepanel.html`);
+  };
   const triggerAction = async (name) => {
     const triggered = await ctx.cdp.send('Extensions.triggerAction',
       { id: ctx.extension.id, targetId: ctx.tab.targetId });
     check(`action can be triggered ${name}`, !triggered.__timeout && !triggered.__error,
-      triggered.__error || (triggered.__timeout ? 'no response' : ''));
-    await wait(3000);
+      triggered.__timeout ? 'no response' : triggered.__error ? 'CDP request failed' : '');
   };
 
   check('Floating Translate Button is absent before the click', (await buttonPresent()) === false);
-  check('side panel is closed before the click', (await sidePanelOpen()) === false,
-    'a leftover session would make the check below pass on its own');
+  if (!check('side panel is closed before the click', (await sidePanelOpen()) === false,
+    'a leftover session would make the check below pass on its own')) return;
 
   await triggerAction('on a fresh install');
+  const panelOpened = await until(sidePanelOpen, 10000, 250);
+  if (!panelOpened) failureTargetSnapshot = await targetDiagnostics(ctx);
 
   check('Floating Translate Button stays absent on a fresh install', (await buttonPresent()) === false,
     'Button Visibility defaults to never, so an invocation must mount nothing');
 
-  check('side panel opens after the click', await sidePanelOpen());
+  check('side panel opens after the click', panelOpened);
 
   // Choosing on-invocation through the real options page, rather than writing the setting
   // directly, is also the only check that the control saves what the worker reads.
@@ -102,7 +127,7 @@ async function main() {
     return document.getElementById('errorBox').textContent ||
       stored.settings?.buttonVisibility || 'nothing saved';
   })()`);
-  check('options page saves the on-invocation choice', chosen === 'onInvocation', String(chosen));
+  check('options page saves the on-invocation choice', chosen === 'onInvocation');
 
   await navigate(PAGE_URL);
   check('page execution context survives the options round trip', (await evaluate('1 + 1')) === 2);
@@ -110,18 +135,32 @@ async function main() {
 
   await triggerAction('with on-invocation chosen');
 
-  check('Floating Translate Button appears after the click', await buttonPresent(),
+  check('Floating Translate Button appears after the click', await until(buttonPresent, 10000, 250),
     'the click never reached the extension — see ADR-0001');
-
-  ctx.close();
 }
 
 try {
   await main();
-} catch (error) {
+} catch {
   failures.push('harness');
-  console.error(`FAIL action click - harness threw: ${error?.message || error}`);
+  console.error('FAIL action click - harness failed');
 } finally {
+  if (failures.length) {
+    const ctx = diagnosticContext;
+    const targets = failureTargetSnapshot || (ctx ? await targetDiagnostics(ctx) : {
+      targetTypes: null, sidePanelFound: null,
+    });
+    const protocol = ctx ? ctx.cdp.getDiagnostics() : {
+      protocolErrorCodes: [], timeouts: null, runtimeExceptionPresent: null,
+    };
+    const phase = failureTargetSnapshot ? 'side panel readiness' : ctx ? 'final state' : 'launch';
+    console.error(`DIAGNOSTIC action click - ${phase} ${JSON.stringify({
+      browserVersion: ctx?.browserVersion ?? null,
+      ...targets,
+      ...protocol,
+    })}`);
+  }
+  diagnosticContext?.close();
   await closeAllBrowsers();
 }
 

@@ -1,39 +1,55 @@
-const suites = [
-  require('./commit-format.test'),
-  require('./integration-harness.test'),
-  require('./placeholder-tokens.test'),
-  require('./inline-block.test'),
-  require('./inline-translation-session.test'),
-  require('./markdown-codec.test'),
-  require('./sidepanel-translation-execution.test'),
-  require('./openai-response.test'),
-  require('./inline-model-execution.test'),
-  require('./button-visibility.test'),
-  require('./inline-translation-controls.test'),
-  require('./default-model.test'),
-  require('./translation-diagnostics.test'),
-  require('./inline-diagnostics-controller.test'),
-  require('./inline-local-diagnostic-transport.test'),
-  require('./inline-translation-operation.test'),
-  require('./content-helpers.test'),
-  require('./inline-viewport.test'),
-  require('./inline-viewport.regression-1.test'),
-  require('./background-helpers.test'),
-  require('./options-helpers.test'),
-  require('./sidepanel-failure.test'),
-  require('./sidepanel-helpers.test'),
-  require('./sidepanel-tab-state.test'),
-  require('./static-assets.test'),
-  require('./live-key.test'),
-  require('./protected-spans.test'),
-  require('./qa-issue-003.regression-1.test'),
+const suiteFiles = [
+  'runner',
+  'commit-format',
+  'integration-harness',
+  'placeholder-tokens',
+  'inline-block',
+  'inline-translation-session',
+  'markdown-codec',
+  'sidepanel-translation-execution',
+  'openai-response',
+  'inline-model-execution',
+  'button-visibility',
+  'inline-translation-controls',
+  'default-model',
+  'translation-diagnostics',
+  'inline-diagnostics-controller',
+  'inline-local-diagnostic-transport',
+  'inline-translation-operation',
+  'content-helpers',
+  'inline-viewport',
+  'inline-viewport.regression-1',
+  'background-helpers',
+  'options-helpers',
+  'sidepanel-failure',
+  'sidepanel-helpers',
+  'sidepanel-tab-state',
+  'static-assets',
+  'live-key',
+  'protected-spans',
+  'qa-issue-003.regression-1',
 ];
 
 (async function run() {
   let failures = 0;
+  const options = {};
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i += 2) {
+    const option = args[i];
+    const value = args[i + 1];
+    if (!['--suite', '--test'].includes(option) || !value || value.startsWith('--') || options[option]) {
+      throw new Error('Usage: node tests/run.js [--suite <file-stem>] [--test <exact-name>]');
+    }
+    options[option] = value;
+  }
+  const files = suiteFiles.filter((file) => !options['--suite'] || file === options['--suite']);
+  let selected = 0;
 
-  for (const suite of suites) {
+  for (const file of files) {
+    const suite = require(`./${file}.test`);
     for (const test of suite.tests) {
+      if (options['--test'] && test.name !== options['--test']) continue;
+      selected += 1;
       try {
         await test.fn();
         console.log(`PASS ${suite.name} - ${test.name}`);
@@ -45,7 +61,12 @@ const suites = [
     }
   }
 
+  if (selected === 0) throw new Error('No tests matched the selection');
+
   if (failures > 0) {
     process.exitCode = 1;
   }
-})();
+})().catch((error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});

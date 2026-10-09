@@ -27,6 +27,84 @@ async function fixture(open = true) {
 exports.name = 'integration harness';
 exports.tests = [
   {
+    name: 'polls for delayed readiness and returns false when the deadline expires',
+    async fn() {
+      const { until } = await import('./integration/harness.mjs');
+      let ready = false;
+      const timer = setTimeout(() => { ready = true; }, 5);
+      try {
+        assert.equal(await until(() => ready, 1000, 1), true);
+        assert.equal(await until(() => false, 0, 1), false);
+        assert.equal(await until(() => true, 0, 1), true);
+      } finally { clearTimeout(timer); }
+    },
+  },
+  {
+    name: 'records Runtime exception presence without retaining exception or page content',
+    async fn() {
+      for (const source of ['response', 'event']) {
+        const { cdp, socket } = await fixture();
+        try {
+          const response = cdp.send('Runtime.evaluate', { expression: 'private expression' });
+          const exceptionDetails = { text: 'private exception', exception: { description: 'secret URL' } };
+          const result = { result: { value: 'normal page value' },
+            ...(source === 'response' ? { exceptionDetails } : {}),
+          };
+          if (source === 'event') {
+            socket.emit('message', { data: JSON.stringify({ method: 'Runtime.exceptionThrown',
+              params: { exceptionDetails },
+            }) });
+          }
+          socket.emit('message', { data: JSON.stringify({ id: socket.request.id, result }) });
+          assert.deepEqual(await response, result);
+          assert.deepEqual(cdp.getDiagnostics(), {
+            protocolErrorCodes: [], timeouts: 0, runtimeExceptionPresent: true,
+          });
+          assert.equal(JSON.stringify(cdp.getDiagnostics()).includes('private'), false);
+          assert.equal(JSON.stringify(cdp.getDiagnostics()).includes('secret'), false);
+        } finally { cdp.close(); }
+      }
+    },
+  },
+  {
+    name: 'counts actual timeouts once and ignores a late protocol error',
+    async fn() {
+      const { cdp, socket, timers } = await fixture();
+      try {
+        const response = cdp.send('Runtime.evaluate', {}, undefined, 500);
+        const id = socket.request.id;
+        const [timer] = timers.values();
+        timer.fn();
+        assert.deepEqual(await response, { __timeout: true });
+        socket.emit('message', { data: JSON.stringify({ id,
+          error: { code: -32600, message: 'late private failure' },
+        }) });
+        assert.deepEqual(cdp.getDiagnostics(), {
+          protocolErrorCodes: [], timeouts: 1, runtimeExceptionPresent: false,
+        });
+      } finally { cdp.close(); }
+    },
+  },
+  {
+    name: 'reports only numeric protocol failure codes without changing response values',
+    async fn() {
+      const { cdp, socket } = await fixture();
+      try {
+        const response = cdp.send('Runtime.evaluate', { expression: 'private page expression' });
+        socket.emit('message', { data: JSON.stringify({ id: socket.request.id,
+          error: { code: -32602, message: 'private page contents and URL' },
+        }) });
+        assert.deepEqual(await response, { __error: 'private page contents and URL' });
+        assert.deepEqual(cdp.getDiagnostics(), {
+          protocolErrorCodes: [-32602], timeouts: 0, runtimeExceptionPresent: false,
+        });
+        const snapshot = cdp.getDiagnostics();
+        snapshot.protocolErrorCodes.push(123);
+        assert.deepEqual(cdp.getDiagnostics().protocolErrorCodes, [-32602]);
+      } finally { cdp.close(); }
+    },
+  },
+  {
     name: 'ends readiness waiting when the connection fails before opening',
     async fn() {
       for (const event of ['close', 'error']) {
