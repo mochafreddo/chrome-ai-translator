@@ -890,6 +890,25 @@
     );
   }
 
+  function serializeModelRequest(records) {
+    return JSON.stringify({ records: records.map((record) => ({
+      id: record.id,
+      template: record.template,
+      atoms: record.atoms,
+      repair: record.repair ?? null,
+    })) });
+  }
+
+  function getReservedRecordCost(record) {
+    const repairRecord = {
+      ...record,
+      repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) },
+    };
+    // Counting each record as its own request intentionally over-reserves the
+    // shared wrapper, guaranteeing the real batched JSON is no larger.
+    return serializeModelRequest([record]).length + serializeModelRequest([repairRecord]).length;
+  }
+
   function serializeBlock(block) {
     if (!block || block.nodeType !== 1) {
       return createUnsupportedResult(describeLocalRejection('invalid_root', block));
@@ -1554,6 +1573,8 @@
   return {
     CODEC_VERSION,
     getRecordCost,
+    serializeModelRequest,
+    getReservedRecordCost,
     applyTranslatedTemplate,
     matchesAppliedOwnership,
     matchesOriginalOwnership,
