@@ -1,8 +1,7 @@
 const assert = require('node:assert/strict');
 const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
-const markdownRehydration = require('../extension/markdown-rehydration.js');
-const translationChunks = require('../extension/translation-chunks.js');
+const { createProtectedFullPageChunk } = require('./sidepanel-translation-execution.test.js');
 const { createReasoningFixture } = require('./inline-block.test');
 const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
@@ -37,45 +36,6 @@ function createIncompleteResponse() {
   };
 }
 
-function createProtectedFullPageChunk() {
-  const namespace = 'CAT_RECOVERY';
-  const link = {
-    id: 'L1',
-    kind: 'link',
-    openToken: `⟦${namespace}:LINK_OPEN:L1⟧`,
-    closeToken: `⟦${namespace}:LINK_CLOSE:L1⟧`,
-    destination: 'https://private.test/path?token=secret',
-  };
-  const code = {
-    id: 'C1',
-    kind: 'code',
-    token: `⟦${namespace}:ATOM:C1⟧`,
-    display: 'inline',
-    value: 'private-command --secret',
-    language: '',
-  };
-  const documentModel = {
-    namespace,
-    entries: [link, code],
-    blocks: [
-      {
-        id: 'm1',
-        kind: 'paragraph',
-        template: `Read ${link.openToken}the guide${link.closeToken}.`,
-        entries: [link.id],
-      },
-      {
-        id: 'm2',
-        kind: 'paragraph',
-        template: `Run ${code.token} now.`,
-        entries: [code.id],
-      },
-    ],
-  };
-  const [chunk] = translationChunks.createTranslationChunks(documentModel, 200);
-  return { chunk, link, code };
-}
-
 function createApiErrorResponse(message) {
   return { apiError: message };
 }
@@ -100,83 +60,6 @@ async function runTranslationRequest(request) {
 
   const output = await worker.openaiTranslateChunk(request);
   return { requestBody, output };
-}
-
-const FULL_PAGE_SETTINGS = Object.freeze({
-  apiKey: 'sk-test',
-  model: 'gpt-5.4-mini',
-  reasoningEffort: 'none',
-  targetLanguage: 'Korean',
-  tone: 'technical',
-});
-
-// Drives one Translation Chunk against a queue of answers and hands back what each request
-// carried, because every check below is about how many attempts were made and what the later
-// ones said. A queue that runs dry is a test asserting on an attempt that was never made, so
-// the extra request fails loudly instead of replaying the last answer.
-//
-// The network is the whole platform this worker gets. Translating a chunk decides how many
-// requests to make and what each one says, and reaches nothing else: a chunk that fails
-// throws to its caller rather than recording anything, so there is no per-tab state to
-// broadcast and no Chrome namespace to hand over.
-async function runFullPageChunk(chunk, responses, settings = FULL_PAGE_SETTINGS) {
-  const queue = [...responses];
-  const requestBodies = [];
-  const worker = helpers.createBackgroundWorker({
-    fetch: async (_url, options) => {
-      requestBodies.push(JSON.parse(options.body));
-      if (!queue.length) {
-        throw new Error(`Unexpected full-page request #${requestBodies.length}`);
-      }
-      const response = queue.shift();
-      if (response?.apiError) {
-        return {
-          ok: false,
-          status: 400,
-          async json() {
-            return { error: { message: response.apiError } };
-          },
-        };
-      }
-      return { ok: true, async json() { return response; } };
-    },
-  });
-
-  try {
-    const translated = await worker.translateFullPageChunk(chunk, settings);
-    return { requestBodies, translated, error: null };
-  } catch (error) {
-    return { requestBodies, translated: null, error };
-  }
-}
-
-// The four ways an answer can break the token contract, each written as an answer a model
-// could really return. They share a cause — the tokens were handled rather than carried —
-// which is why one correction is expected to speak to all four.
-function createTokenFailureAnswers({ link, code }) {
-  return [
-    {
-      code: 'markdown.token_missing',
-      answer: `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 실행.`,
-    },
-    {
-      code: 'markdown.token_duplicate',
-      answer:
-        `읽기 ${link.openToken}안내${link.closeToken}.\n\n` +
-        `지금 ${code.token} 그리고 ${code.token} 실행.`,
-    },
-    {
-      code: 'markdown.token_unknown',
-      answer:
-        `읽기 ${link.openToken}안내${link.closeToken}.\n\n` +
-        `지금 ${code.token} 및 ⟦CAT_RECOVERY:ATOM:C9⟧ 실행.`,
-    },
-    {
-      code: 'markdown.token_nesting_invalid',
-      answer:
-        `읽기 ${link.closeToken}안내${link.openToken}.\n\n지금 ${code.token} 실행.`,
-    },
-  ];
 }
 
 function createPlainTranslationDocument(markdown) {
@@ -405,7 +288,7 @@ function createTabTranslationChrome({
 }
 
 // Drives a whole Side Panel Translation the way the panel does — one TRANSLATE_TAB message
-// into the worker's own chunk loop — and hands back every state the panel would have seen,
+// through the worker's document execution adapter — and hands back every state the panel would have seen,
 // which is the only place the discard is visible. A queue that runs dry throws, so an
 // unexpected extra request fails loudly instead of replaying the last answer.
 //
@@ -461,6 +344,22 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'publishes extracted metadata and completes an empty document without model requests',
+    async fn() {
+      const { responses, states, requestInputs } = await runTabTranslation(55, [], {
+        namespace: 'EMPTY', entries: [], blocks: [],
+      });
+      assert.deepEqual(responses, [{ ok: true }]);
+      assert.deepEqual(requestInputs, []);
+      assert.deepEqual(states.map((state) => state.status), ['extracting', 'translating', 'done']);
+      assert.equal(states[1].extracted.title, 'Article');
+      assert.equal(states[1].settingsUsed.targetLanguage, 'Korean');
+      assert.equal(states[1].translated, null);
+      assert.equal(states.at(-1).translated, '');
+      assert.equal(states.at(-1).progress, null);
+    },
+  },
   {
     name: 'startup waits for the pending all-pages save before checking its permission',
     async fn() {
@@ -933,7 +832,6 @@ exports.tests = [
       // arriving here that needs a platform is an ambient worker come back.
       assert.deepEqual(Object.keys(helpers).sort(), [
         'INLINE_TRANSLATION_SHORTCUT_COMMAND',
-        'assertFullPageTranslationBudget',
         'classifyContentScriptFailure',
         'createBackgroundWorker',
         'describeInlineTranslationControlFailure',
@@ -950,242 +848,6 @@ exports.tests = [
         'safeError',
         'sanitizePublicTabState',
       ]);
-    },
-  },
-  {
-    name: 'recovers one incomplete full-page chunk with ordered protected children',
-    async fn() {
-      const { chunk, link, code } = createProtectedFullPageChunk();
-      const { requestBodies, translated, error } = await runFullPageChunk(chunk, [
-        createIncompleteResponse(),
-        createCompletedResponse(
-          `읽기 ${link.openToken}안내${link.closeToken}.`
-        ),
-        createCompletedResponse(`지금 ${code.token} 실행.`),
-      ]);
-
-      assert.equal(error, null);
-      assert.equal(requestBodies.length, 3);
-      assert.equal(
-        translated,
-        '읽기 [안내](<https://private.test/path?token=secret>).\n\n지금 ```private-command --secret``` 실행.'
-      );
-      assert.deepEqual(
-        requestBodies.map((body) => body.input),
-        [chunk.template, chunk.blocks[0].template, chunk.blocks[1].template]
-      );
-      for (const body of requestBodies) {
-        const request = JSON.stringify(body);
-        assert.equal(request.includes(link.destination), false);
-        assert.equal(request.includes(code.value), false);
-      }
-    },
-  },
-  {
-    name: 'stops after an incomplete recovery child without publishing success',
-    async fn() {
-      // The `runtime` this worker is given is what makes the second assertion mean
-      // anything: had the failed chunk recorded a state, the broadcast would be collected
-      // here. A chunk translation is not supposed to record one at all — the loop that
-      // does is a level up — so an empty collection is the check.
-      const { chunk, link } = createProtectedFullPageChunk();
-      const broadcasts = [];
-      const requestBodies = [];
-      const answers = [
-        createIncompleteResponse(),
-        createCompletedResponse(
-          `읽기 ${link.openToken}안내${link.closeToken}.`
-        ),
-        createIncompleteResponse(),
-      ];
-      const worker = helpers.createBackgroundWorker({
-        chrome: createStateBroadcastChrome(broadcasts),
-        fetch: async (_url, options) => {
-          requestBodies.push(JSON.parse(options.body));
-          return { ok: true, async json() { return answers.shift(); } };
-        },
-      });
-
-      await assert.rejects(
-        () => worker.translateFullPageChunk(chunk, FULL_PAGE_SETTINGS),
-        (error) => error.code === 'response.incomplete.max_output_tokens'
-      );
-      assert.equal(requestBodies.length, 3);
-      assert.equal(
-        broadcasts.some((message) => message?.state?.status === 'done'),
-        false
-      );
-    },
-  },
-  {
-    name: 'asks every full-page request to carry the placeholder tokens back',
-    async fn() {
-      const { chunk, link, code } = createProtectedFullPageChunk();
-      const { requestBodies, error } = await runFullPageChunk(chunk, [
-        createCompletedResponse(
-          `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
-        ),
-      ]);
-
-      assert.equal(error, null);
-      assert.equal(requestBodies.length, 1);
-      const { instructions } = requestBodies[0];
-      // The validator requires every token back, exactly once, and refuses one it never
-      // sent. Each of those three is asked for here, or the refusal is for something the
-      // model was never told.
-      assert.match(instructions, /⟦/);
-      assert.match(instructions, /exactly once/i);
-      assert.match(instructions, /byte-for-byte/i);
-      assert.match(instructions, /invent/i);
-      // The wrongly-nested failure is one of the four the instructions have to speak to, and
-      // the sentence aimed at it names a token shape. That shape is checked against a token
-      // the chunk really carries, so the sentence cannot describe a placeholder no page mints.
-      for (const word of ['LINK_OPEN', 'LINK_CLOSE']) {
-        assert.match(instructions, new RegExp(word));
-        assert.equal(`${link.openToken} ${link.closeToken}`.includes(word), true);
-      }
-    },
-  },
-  {
-    name: 'repairs a broken token contract with one further attempt that names the code',
-    async fn() {
-      const { chunk, link, code } = createProtectedFullPageChunk();
-      const { requestBodies, translated, error } = await runFullPageChunk(chunk, [
-        createCompletedResponse(
-          `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 실행.`
-        ),
-        createCompletedResponse(
-          `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
-        ),
-      ]);
-
-      assert.equal(error, null);
-      assert.equal(requestBodies.length, 2);
-      assert.deepEqual(
-        requestBodies.map((body) => body.input),
-        [chunk.template, chunk.template]
-      );
-      assert.equal(
-        requestBodies[0].instructions.includes('markdown.token_missing'),
-        false
-      );
-      assert.match(requestBodies[1].instructions, /markdown\.token_missing/);
-      assert.equal(
-        translated,
-        '읽기 [안내](<https://private.test/path?token=secret>).\n\n지금 ```private-command --secret``` 실행.'
-      );
-    },
-  },
-  {
-    name: 'takes the same one further attempt for each of the four token failures',
-    async fn() {
-      const { chunk, link, code } = createProtectedFullPageChunk();
-      for (const failure of createTokenFailureAnswers({ link, code })) {
-        const { requestBodies, translated, error } = await runFullPageChunk(chunk, [
-          createCompletedResponse(failure.answer),
-          createCompletedResponse(
-            `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
-          ),
-        ]);
-
-        assert.equal(error, null, `${failure.code} was not repaired`);
-        assert.equal(requestBodies.length, 2, `${failure.code} attempt count`);
-        assert.match(requestBodies[1].instructions, new RegExp(failure.code.replace('.', '\\.')));
-        assert.equal(
-          translated,
-          '읽기 [안내](<https://private.test/path?token=secret>).\n\n지금 ```private-command --secret``` 실행.'
-        );
-      }
-    },
-  },
-  {
-    name: 'gives up after one repair attempt rather than looping on the tokens',
-    async fn() {
-      const { chunk, link } = createProtectedFullPageChunk();
-      const lostToken = createCompletedResponse(
-        `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 실행.`
-      );
-      const { requestBodies, error } = await runFullPageChunk(chunk, [
-        lostToken,
-        lostToken,
-      ]);
-
-      assert.equal(error?.code, 'markdown.token_missing');
-      assert.equal(requestBodies.length, 2);
-    },
-  },
-  {
-    name: 'leaves a failure that is not about the tokens on its first attempt',
-    async fn() {
-      const { chunk } = createProtectedFullPageChunk();
-      const { requestBodies, error } = await runFullPageChunk(chunk, [
-        createApiErrorResponse('Incorrect API key provided'),
-      ]);
-
-      assert.match(String(error?.message), /Incorrect API key provided/);
-      assert.equal(requestBodies.length, 1);
-    },
-  },
-  {
-    name: 'repairs the four token codes and no fifth one',
-    async fn() {
-      // The repairable set is a list, not a prefix match: `markdown.token_parent_changed`
-      // is a real code elsewhere in the extension and Side Panel Translation's validator
-      // never raises it, so a chunk translation must not spend a second request on it.
-      // Only the validator can hand back a code, which is why it is the seam stubbed here.
-      const { chunk, link, code } = createProtectedFullPageChunk();
-      const originalValidate = markdownRehydration.validateAndRehydrateChunk;
-      markdownRehydration.validateAndRehydrateChunk = () => {
-        const error = new Error('markdown.token_parent_changed');
-        error.code = 'markdown.token_parent_changed';
-        throw error;
-      };
-
-      try {
-        const { requestBodies, error } = await runFullPageChunk(chunk, [
-          createCompletedResponse(
-            `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
-          ),
-        ]);
-
-        assert.equal(error?.code, 'markdown.token_parent_changed');
-        assert.equal(requestBodies.length, 1);
-      } finally {
-        markdownRehydration.validateAndRehydrateChunk = originalValidate;
-      }
-    },
-  },
-  {
-    name: 'does not repair the tokens of a chunk already split for an over-long answer',
-    async fn() {
-      // Both recoveries want the same chunk. The split claimed it first, so its children
-      // translate once each: a repair per child would turn one over-long chunk into twice
-      // as many billed attempts as blocks it holds.
-      const { chunk, link } = createProtectedFullPageChunk();
-      const { requestBodies, error } = await runFullPageChunk(chunk, [
-        createIncompleteResponse(),
-        createCompletedResponse(`읽기 ${link.openToken}안내.`),
-      ]);
-
-      assert.equal(error?.code, 'markdown.token_missing');
-      assert.equal(requestBodies.length, 2);
-    },
-  },
-  {
-    name: 'does not split a repair attempt that comes back over-long',
-    async fn() {
-      // The other order, and the same rule: the token failure claimed the chunk, so an
-      // over-long repair answer ends it instead of starting the second recovery.
-      const { chunk, link } = createProtectedFullPageChunk();
-      const { requestBodies, error } = await runFullPageChunk(chunk, [
-        createCompletedResponse(
-          `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 실행.`
-        ),
-        createIncompleteResponse(),
-      ]);
-
-      assert.equal(error?.code, 'response.incomplete.max_output_tokens');
-      assert.equal(requestBodies.length, 2);
     },
   },
   {
@@ -1637,18 +1299,6 @@ exports.tests = [
         helpers.mergeSettingsWithExisting({}, { chunkMaxChars: 900000 })
           .chunkMaxChars,
         60000
-      );
-    },
-  },
-  {
-    name: 'rejects full-page translations over the total character budget',
-    fn() {
-      assert.throws(
-        () => helpers.assertFullPageTranslationBudget('x'.repeat(60001)),
-        /Full-page translation has too much text/
-      );
-      assert.doesNotThrow(() =>
-        helpers.assertFullPageTranslationBudget('x'.repeat(60000))
       );
     },
   },

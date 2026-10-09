@@ -26,6 +26,24 @@ exports.tests = [
       const chrome = { storage: { local: { async get() { return {}; } } } };
       const worker = workerScope.createBackgroundWorker({ chrome });
       assert.equal((await worker.translateVisibleBlockBatch([])).length, 0);
+      const execution = workerScope.ChromeAiTranslatorSidePanelTranslationExecution;
+      assert.equal(JSON.stringify(Object.keys(execution)), '["execute"]');
+      const requests = [];
+      const translated = await execution.execute({
+        title: 'Article', url: 'https://example.test/', langHint: 'en',
+        contentMarkdown: 'Read this.',
+        translationDocument: { namespace: 'STATIC', entries: [], blocks: [
+          { id: 'p1', template: 'Read this.', entries: [] },
+        ] },
+      }, { targetLanguage: 'Korean', tone: 'technical', model: 'test',
+        reasoningEffort: 'none', chunkMaxChars: 2000 }, async (request) => {
+        requests.push(request);
+        return '읽으세요.';
+      });
+      assert.equal(translated, '읽으세요.');
+      assert.equal(requests.length, 1);
+      assert.equal('apiKey' in requests[0], false);
+
 
       const optionsScope = vm.createContext({});
       const optionsHtml = fs.readFileSync(path.join(EXTENSION_DIR, 'options.html'), 'utf8');
@@ -417,6 +435,7 @@ exports.tests = [
         'markdown-rehydration',
         'translation-chunks',
         'translation-settings',
+        'sidepanel-translation-execution',
         'inline-model-execution',
       ]) {
         assert.match(

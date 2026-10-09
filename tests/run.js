@@ -5,6 +5,7 @@ const suites = [
   require('./inline-block.test'),
   require('./inline-translation-session.test'),
   require('./markdown-codec.test'),
+  require('./sidepanel-translation-execution.test'),
   require('./openai-response.test'),
   require('./inline-model-execution.test'),
   require('./button-visibility.test'),

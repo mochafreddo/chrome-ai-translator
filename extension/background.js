@@ -32,9 +32,8 @@ const openAiResponse =
   (typeof module !== 'undefined' && module.exports
     ? require('./openai-response.js')
     : null);
-// Side Panel Translation's codec, in the two parts the worker calls. The entry module goes in
-// ahead of both, which read it as they load; the third part, the one that reads a page into a
-// document model, runs in the content script and is not imported here.
+// Side Panel Translation's execution dependencies load before its module. The document
+// serializer runs in the content script and is not imported here.
 if (
   typeof importScripts === 'function' &&
   !globalThis.ChromeAiTranslatorMarkdownEntries
@@ -47,25 +46,18 @@ if (
 ) {
   importScripts('markdown-rehydration.js');
 }
-const markdownRehydration =
-  globalThis.ChromeAiTranslatorMarkdownRehydration ||
-  (typeof module !== 'undefined' && module.exports
-    ? require('./markdown-rehydration.js')
-    : null);
 if (
   typeof importScripts === 'function' &&
   !globalThis.ChromeAiTranslatorTranslationChunks
 ) {
   importScripts('translation-chunks.js');
 }
-const translationChunks =
-  globalThis.ChromeAiTranslatorTranslationChunks ||
-  (typeof module !== 'undefined' && module.exports
-    ? require('./translation-chunks.js')
-    : null);
 if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorTranslationSettings) {
     importScripts('translation-settings.js');
+  }
+  if (!globalThis.ChromeAiTranslatorSidePanelTranslationExecution) {
+    importScripts('sidepanel-translation-execution.js');
   }
   if (!globalThis.ChromeAiTranslatorInlineModelExecution) {
     importScripts('inline-model-execution.js');
@@ -92,8 +84,11 @@ if (typeof importScripts === 'function') {
     importScripts('default-model.js');
   }
 }
-const { getToneInstruction, getTargetLanguageCode } =
+const { getTargetLanguageCode } =
   globalThis.ChromeAiTranslatorTranslationSettings || require('./translation-settings.js');
+const sidePanelTranslationExecution =
+  globalThis.ChromeAiTranslatorSidePanelTranslationExecution ||
+  require('./sidepanel-translation-execution.js');
 const inlineModelExecution =
   globalThis.ChromeAiTranslatorInlineModelExecution || require('./inline-model-execution.js');
 const { ALL_SITES_ORIGINS, BUTTON_VISIBILITY, readButtonVisibility } =
@@ -151,7 +146,6 @@ const PUBLIC_TAB_STATE_KEYS = Object.freeze([
 
 const MIN_CHUNK_MAX_CHARS = 2000;
 const MAX_CHUNK_MAX_CHARS = 60000;
-const FULL_PAGE_TRANSLATION_MAX_TOTAL_CHARS = 60000;
 // Named after the setting that used to govern it. Chrome keeps a registration under this id
 // across restarts, so renaming it would strand the old one on installs that already have it.
 const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
@@ -182,12 +176,6 @@ function normalizeMaxOutputTokens(value, fallback = DEFAULT_MAX_OUTPUT_TOKENS) {
   return Math.min(
     MAX_MAX_OUTPUT_TOKENS,
     Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(parsed))
-  );
-}
-
-function getFullPageMaxOutputTokens(markdownChunk) {
-  return normalizeMaxOutputTokens(
-    Math.max(DEFAULT_MAX_OUTPUT_TOKENS, String(markdownChunk || '').length)
   );
 }
 
@@ -519,46 +507,6 @@ function startSidePanelStep(handlers, tabId) {
   return started;
 }
 
-function assertFullPageTranslationBudget(
-  markdown,
-  maxChars = FULL_PAGE_TRANSLATION_MAX_TOTAL_CHARS
-) {
-  const totalChars = String(markdown || '').length;
-  if (totalChars > maxChars) {
-    throw new Error(
-      `Full-page translation has too much text (${totalChars}/${maxChars} characters)`
-    );
-  }
-}
-
-// By the time the model reads a Translation Chunk, its links and its code are neither: each
-// has been replaced by a placeholder token, and `validateAndRehydrateChunk` requires every one
-// of them back, exactly once and never invented. That requirement has to be said out loud —
-// asking for it is Inline Translation's line in `buildBlockInstructions`, adapted to an answer
-// that is plain Markdown rather than a schema.
-//
-// `repair` names the code the previous answer was refused for, in the spirit of the
-// `previousErrorCode` Inline Translation hands back. All four token failures share a cause —
-// the tokens were handled rather than carried — so one correction speaks to all of them.
-function buildInstructions({ targetLanguage, tone }, repair = null) {
-  const instructions = [
-    `Translate the user's input into ${targetLanguage}.`,
-    getToneInstruction(tone),
-    'Preserve Markdown structure (headings, lists, links).',
-    'Do NOT translate code blocks fenced by ``` or inline code wrapped by backticks. Keep them exactly as-is.',
-    'Text between ⟦ and ⟧ is a placeholder standing in for a link or for code. Copy every placeholder byte-for-byte, emit each one exactly once, and invent none: a placeholder the input does not contain is as wrong as a missing one.',
-    'A LINK_OPEN placeholder must still come before the LINK_CLOSE placeholder carrying the same id, with the translated link text between the two. Reorder the words around the placeholders however the target language needs, but never translate, reword, split, or drop anything between ⟦ and ⟧.',
-    'Do NOT add extra commentary. Output ONLY the translated Markdown.',
-  ];
-  if (repair) {
-    instructions.push(
-      `The previous answer to this same input was refused: ${repair.previousErrorCode}. Its placeholders were handled instead of carried.`,
-      'Translate it again, and this time reproduce every ⟦…⟧ placeholder from the input exactly, once each, adding none.'
-    );
-  }
-  return instructions.join('\n');
-}
-
 const INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
   'token_missing',
   'token_duplicate',
@@ -692,18 +640,6 @@ function normalizeVisibleBlockBatchRecords(records) {
   }
   return normalized;
 }
-
-// The four codes `validateAndRehydrateChunk` raises when an answer breaks the token contract.
-// They are listed rather than matched on a `markdown.token_` prefix because the prefix is
-// wider than this: `token_parent_changed` belongs to Inline Translation's validator, which
-// this path never calls, and a code that arrives from somewhere else is not evidence that a
-// second attempt would go any better.
-const FULL_PAGE_TOKEN_ERROR_CODES = new Set([
-  'markdown.token_missing',
-  'markdown.token_duplicate',
-  'markdown.token_unknown',
-  'markdown.token_nesting_invalid',
-]);
 
 function getAllPagesContentScript() {
   return {
@@ -1072,41 +1008,6 @@ function createBackgroundWorker(platform = {}) {
     return openAiResponse.parseCompletedResponse(json);
   }
 
-  // A Translation Chunk gets one recovery, and the first failure to happen owns it (ADR-0005).
-  // `recoveryDepth` is that budget: the split sets it on the children it makes, a repair sets it
-  // on the retry, and either way the second failure of any kind ends the chunk. Two independent
-  // budgets would let an over-long chunk split into N children and then repair each of them,
-  // which is 2N billed attempts for a chunk the reader asked to translate once.
-  async function translateFullPageChunk(chunk, settings, repair = null) {
-    try {
-      const output = await openaiTranslateChunk({
-        apiKey: settings.apiKey,
-        model: settings.model,
-        reasoningEffort: settings.reasoningEffort,
-        instructions: buildInstructions(settings, repair),
-        input: chunk.template,
-        maxOutputTokens: getFullPageMaxOutputTokens(chunk.template),
-      });
-      return markdownRehydration.validateAndRehydrateChunk(output, chunk);
-    } catch (error) {
-      if ((Number(chunk.recoveryDepth) || 0) >= 1) throw error;
-      if (FULL_PAGE_TOKEN_ERROR_CODES.has(error?.code)) {
-        return translateFullPageChunk({ ...chunk, recoveryDepth: 1 }, settings, {
-          previousErrorCode: error.code,
-        });
-      }
-      if (error?.code !== 'response.incomplete.max_output_tokens') {
-        throw error;
-      }
-      const children = translationChunks.splitChunkForRecovery(chunk);
-      const translated = [];
-      for (const child of children) {
-        translated.push(await translateFullPageChunk(child, settings));
-      }
-      return translated.join('\n\n');
-    }
-  }
-
   async function translateVisibleBlockBatch(
     records,
     settingsSnapshot = null,
@@ -1308,88 +1209,28 @@ function createBackgroundWorker(platform = {}) {
         return { skipped: true, reason: 'content_script_unavailable' };
       }
 
-      let translationDocument;
-      let extraction;
-      let chunks;
+      let translationStarted = false;
       try {
-        extraction = await extractArticle(tabId);
-        if (
-          !extraction ||
-          typeof extraction !== 'object' ||
-          Array.isArray(extraction)
-        ) {
-          throw new Error('Article extraction is malformed.');
-        }
-        const { title, url, langHint, contentMarkdown } = extraction;
-        if (
-          typeof title !== 'string' ||
-          typeof url !== 'string' ||
-          typeof langHint !== 'string' ||
-          typeof contentMarkdown !== 'string'
-        ) {
-          throw new Error('Article extraction is malformed.');
-        }
-        translationDocument = extraction.translationDocument;
-        if (!translationDocument || !Array.isArray(translationDocument.blocks)) {
-          throw new Error(
-            'Article extraction did not include a translation document.'
-          );
-        }
-        assertFullPageTranslationBudget(contentMarkdown);
-        chunks = translationChunks.createTranslationChunks(
-          translationDocument,
-          settings.chunkMaxChars
+        const extraction = await extractArticle(tabId);
+        const translated = await sidePanelTranslationExecution.execute(
+          extraction,
+          createPublicSettingsUsed(settings),
+          (request) => openaiTranslateChunk({ ...request, apiKey: settings.apiKey }),
+          ({ progress }) => {
+            if (!translationStarted) {
+              translationStarted = true;
+              setTabState(tabId, {
+                status: 'translating',
+                extracted: extraction,
+                translated: null,
+                settingsUsed: createPublicSettingsUsed(settings),
+                progress,
+              });
+              return;
+            }
+            setTabState(tabId, { status: 'translating', progress });
+          }
         );
-      } catch (e) {
-        setTabState(tabId, {
-          status: 'error',
-          error: safeError(e),
-          extracted: null,
-          translated: null,
-          progress: null,
-        });
-        return { skipped: true, reason: 'extract_failed' };
-      }
-
-      // The whole extraction, narrowed by `sanitizePublicTabState` on the way into tab state
-      // rather than a second time here. Both layers allowlisted the same four fields, and the
-      // copy here was the one no check could fail — deleting it left the suite green, because
-      // the sanitizer every write already passes through covered for it. The rule has one
-      // home now, and what the page handed back beyond those four fields — the translation
-      // document, its atoms and their destinations — reaches tab state in neither reading.
-      setTabState(tabId, {
-        status: 'translating',
-        extracted: extraction,
-        translated: null,
-        settingsUsed: createPublicSettingsUsed(settings),
-      });
-
-      try {
-        const translatedChunks = [];
-
-        // What a late failure costs, because it is a decision rather than an oversight
-        // (ADR-0006). A throw from any chunk leaves this loop, and the catch below records
-        // `translated: null`: the answers already in `translatedChunks` are discarded with
-        // it, and they were billed. A document of five chunks that fails on the fourth has
-        // paid for three the reader never sees, and pressing Translate again pays for all
-        // five afresh — nothing here resumes.
-        //
-        // Keeping what came back would invent a Side Panel Translation result that is
-        // neither done nor error, needing a name, a rendering, and a way for the reader to
-        // tell translated text from text still in its original language — to serve a failure
-        // #23 could not reproduce, that #26 now asks the model to avoid and repairs once.
-        // Inline Translation isolates its Semantic Blocks instead, and the two differ here
-        // on purpose; ADR-0006 has the reasoning and what evidence would overturn it.
-        for (let i = 0; i < chunks.length; i++) {
-          setTabState(tabId, {
-            status: 'translating',
-            progress: { current: i + 1, total: chunks.length },
-          });
-          const out = await translateFullPageChunk(chunks[i], settings);
-          translatedChunks.push(out.trim());
-        }
-
-        const translated = translatedChunks.join('\n\n');
         setTabState(tabId, {
           status: 'done',
           translated,
@@ -1397,13 +1238,18 @@ function createBackgroundWorker(platform = {}) {
         });
         return { skipped: false };
       } catch (e) {
-        setTabState(tabId, {
+        const failureState = {
           status: 'error',
           error: safeError(e),
           translated: null,
           progress: null,
-        });
-        return { skipped: true, reason: 'translate_failed' };
+        };
+        if (!translationStarted) failureState.extracted = null;
+        setTabState(tabId, failureState);
+        return {
+          skipped: true,
+          reason: translationStarted ? 'translate_failed' : 'extract_failed',
+        };
       }
     } finally {
       if (activeTranslationsByTab.get(tabId) === operationToken) {
@@ -1613,7 +1459,6 @@ function createBackgroundWorker(platform = {}) {
     sendInlineInstruction,
     syncButtonVisibilityRegistration,
     syncButtonVisibilityRegistrationSafely,
-    translateFullPageChunk,
     translateVisibleBlockBatch,
   };
 }
@@ -1650,7 +1495,6 @@ if (typeof module !== 'undefined' && module.exports) {
     sanitizePublicTabState,
     mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,
-    assertFullPageTranslationBudget,
     getBlockRecordCost,
     getInlineContentScriptFiles,
     classifyContentScriptFailure,
