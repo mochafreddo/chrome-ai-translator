@@ -26,6 +26,7 @@ const suiteFiles = [
   'sidepanel-helpers',
   'sidepanel-tab-state',
   'static-assets',
+  'syntax-check',
   'live-key',
   'protected-spans',
   'qa-issue-003.regression-1',

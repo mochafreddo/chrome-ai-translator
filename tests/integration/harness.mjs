@@ -8,7 +8,7 @@
 //   The Extensions CDP domain is gated behind a launch flag. Without
 //   --enable-unsafe-extension-debugging every Extensions.* command hangs, and the domain
 //   still appears in /json/protocol, so the hang is the only signal. launch() always
-//   passes it, and reports whether the domain answered rather than hanging silently.
+//   passes it, and fails launch when the domain cannot answer.
 //
 //   --extension is a global agent-browser flag and is ignored after the subcommand, so it
 //   goes before `open`.
@@ -33,7 +33,7 @@
 // page it can hold still needs the same loopback server, and the second copy of it was
 // written before this one existed.
 //
-// What does NOT belong here: assertions about the extension's behaviour, anything about
+// What does NOT belong here: assertions about translation behaviour, anything about
 // translation, and anything about API keys. This module knows how to drive a browser and
 // nothing about what is being checked -- that is what keeps one check's needs from
 // reshaping another's.
@@ -187,77 +187,102 @@ function extensionManifest(extensionDir) {
 }
 
 // Launches a Chrome with the unpacked extension and attaches to the page the driver opened.
-//
-// Nothing here asserts. It reports what it found -- a missing extension, a hung Extensions
-// domain, an absent page -- and leaves the caller to say which of those is a failure and in
-// what words, so a check's own output stays its own.
+// Missing launch prerequisites fail here so a caller cannot silently skip its checks.
 export async function launchExtensionBrowser({ session, url, extensionDir }) {
-  await browser(['--extension', extensionDir, '--args', '--enable-unsafe-extension-debugging',
-    '--session', session, 'open', url]);
+  let cdp;
+  let browserVersion = null;
+  let stage = 'browser open';
+  try {
+    await browser(['--extension', extensionDir, '--args', '--enable-unsafe-extension-debugging',
+      '--session', session, 'open', url]);
 
-  const cdpUrl = (await browser(['get', 'cdp-url', '--session', session])).trim().split('\n').pop();
-  const httpBase = cdpUrl.replace(/^ws:\/\/([^/]+)\/.*$/, 'http://$1');
-  const version = await (await fetch(`${httpBase}/json/version`)).json();
-  const browserVersion = /^(?:Chrome|HeadlessChrome)\/(\d+(?:\.\d+){0,3})$/.exec(version.Browser)?.[1] || null;
-  const { webSocketDebuggerUrl } = version;
-  const cdp = connect(webSocketDebuggerUrl);
-  await cdp.ready;
+    stage = 'CDP discovery';
+    const cdpUrl = (await browser(['get', 'cdp-url', '--session', session])).trim().split('\n').pop();
+    const httpBase = cdpUrl.replace(/^ws:\/\/([^/]+)\/.*$/, 'http://$1');
+    const version = await (await fetch(`${httpBase}/json/version`)).json();
+    browserVersion = /^(?:Chrome|HeadlessChrome)\/(\d+(?:\.\d+){0,3})$/.exec(version.Browser)?.[1] || null;
+    const { webSocketDebuggerUrl } = version;
+    stage = 'CDP connection';
+    cdp = connect(webSocketDebuggerUrl);
+    await cdp.ready;
 
-  const listed = await cdp.send('Extensions.getExtensions');
-  const extensionsDomainResponded = !listed.__timeout;
-  const extensionsSeen = (listed.extensions || []).map((candidate) => candidate.name);
-  const wanted = extensionManifest(extensionDir).name;
-  const extension = (listed.extensions || []).find((candidate) => candidate.name === wanted) || null;
+    stage = 'extension listing';
+    const listed = await cdp.send('Extensions.getExtensions');
+    const extensionsDomainResponded = !listed.__timeout && !listed.__error;
+    if (!extensionsDomainResponded) throw new Error();
+    const extensionsSeen = (listed.extensions || []).map((candidate) => candidate.name);
+    const wanted = extensionManifest(extensionDir).name;
+    const extension = (listed.extensions || []).find((candidate) => candidate.name === wanted) || null;
+    stage = 'extension presence';
+    if (!extension) throw new Error();
 
-  const listTargets = async () => (await cdp.send('Target.getTargets')).targetInfos || [];
-  const listPages = async () => (await (await fetch(`${httpBase}/json/list`)).json());
-  const findTarget = async (predicate) => (await listPages()).find(predicate) || null;
+    const listTargets = async () => (await cdp.send('Target.getTargets')).targetInfos || [];
+    const listPages = async () => (await (await fetch(`${httpBase}/json/list`)).json());
+    const findTarget = async (predicate) => (await listPages()).find(predicate) || null;
 
-  const tabs = await cdp.send('Target.getTargets', { filter: [{ type: 'tab' }] });
-  const tab = (tabs.targetInfos || []).filter((target) => target.url.startsWith(url)).pop() || null;
-  const pageTarget = (await listPages())
-    .filter((target) => target.type === 'page' && target.url.startsWith(url))
-    .pop() || null;
+    stage = 'initial targets';
+    const tabs = await cdp.send('Target.getTargets', { filter: [{ type: 'tab' }] });
+    const tab = (tabs.targetInfos || []).filter((target) => target.url.startsWith(url)).pop() || null;
+    const pageTarget = (await listPages())
+      .filter((target) => target.type === 'page' && target.url.startsWith(url))
+      .pop() || null;
 
-  const attach = async (targetId) => {
-    const attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-    const sessionId = attached.sessionId;
-    await cdp.send('Page.enable', {}, sessionId);
-    const evaluate = async (expression, timeoutMs = 20000) => {
-      const evaluated = await cdp.send('Runtime.evaluate',
-        { expression, returnByValue: true, awaitPromise: true }, sessionId, timeoutMs);
-      return evaluated.result?.value;
+    if (!tab || !pageTarget) throw new Error();
+
+    const attach = async (targetId, targetType = 'page') => {
+      const attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+      const sessionId = attached.sessionId;
+      if (!sessionId || attached.__error || attached.__timeout) throw new Error('Page attachment failed');
+      if (targetType === 'page') {
+        const enabled = await cdp.send('Page.enable', {}, sessionId);
+        if (enabled.__error || enabled.__timeout) throw new Error('Page enable failed');
+      }
+      const evaluate = async (expression, timeoutMs = 20000) => {
+        const evaluated = await cdp.send('Runtime.evaluate',
+          { expression, returnByValue: true, awaitPromise: true }, sessionId, timeoutMs);
+        return evaluated.result?.value;
+      };
+      const navigate = async (to, settleMs = 2500) => {
+        await cdp.send('Page.navigate', { url: to }, sessionId);
+        await wait(settleMs);
+      };
+      // window.confirm and friends block the page until something answers them, and a
+      // CDP-driven page has no one to. Answering makes controls that ask before acting
+      // reachable, so a check can drive the real control instead of writing past it.
+      const answerDialogs = (accept = true) =>
+        cdp.on('Page.javascriptDialogOpening', (_params, from) => {
+          if (from === sessionId) cdp.send('Page.handleJavaScriptDialog', { accept }, sessionId);
+        });
+      return { sessionId, evaluate, navigate, answerDialogs };
     };
-    const navigate = async (to, settleMs = 2500) => {
-      await cdp.send('Page.navigate', { url: to }, sessionId);
-      await wait(settleMs);
+
+    stage = 'initial page attachment';
+    const page = await attach(pageTarget.id);
+
+    return {
+      cdp,
+      browserVersion,
+      httpBase,
+      extension,
+      extensionsDomainResponded,
+      extensionsSeen,
+      tab,
+      pageTarget,
+      page,
+      attach,
+      listTargets,
+      listPages,
+      findTarget,
+      close: () => cdp.close(),
     };
-    // window.confirm and friends block the page until something answers them, and a
-    // CDP-driven page has no one to. Answering makes controls that ask before acting
-    // reachable, so a check can drive the real control instead of writing past it.
-    const answerDialogs = (accept = true) =>
-      cdp.on('Page.javascriptDialogOpening', (_params, from) => {
-        if (from === sessionId) cdp.send('Page.handleJavaScriptDialog', { accept }, sessionId);
-      });
-    return { sessionId, evaluate, navigate, answerDialogs };
-  };
-
-  const page = pageTarget ? await attach(pageTarget.id) : null;
-
-  return {
-    cdp,
-    browserVersion,
-    httpBase,
-    extension,
-    extensionsDomainResponded,
-    extensionsSeen,
-    tab,
-    pageTarget,
-    page,
-    attach,
-    listTargets,
-    listPages,
-    findTarget,
-    close: () => cdp.close(),
-  };
+  } catch {
+    const diagnostics = { stage, browserVersion, ...(cdp?.getDiagnostics() || {
+      protocolErrorCodes: [], timeouts: null, runtimeExceptionPresent: null,
+    }) };
+    console.error(`DIAGNOSTIC browser launch - ${JSON.stringify(diagnostics)}`);
+    try { cdp?.close(); } finally {
+      await browser(['close', '--session', session], 30000).catch(() => {});
+    }
+    throw new Error(`Browser launch failed: ${stage}`);
+  }
 }

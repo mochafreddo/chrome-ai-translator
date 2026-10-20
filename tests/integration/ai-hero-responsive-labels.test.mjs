@@ -185,7 +185,7 @@ async function main() {
     );
     const workerSessions = [];
     for (const target of workerTargets) {
-      const worker = await context.attach(target.targetId);
+      const worker = await context.attach(target.targetId, target.type);
       workerSessions.push(worker.sessionId);
       await context.cdp.send('Network.enable', {}, worker.sessionId);
     }

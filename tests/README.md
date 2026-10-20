@@ -7,7 +7,7 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | Command | Scope | Requirements and cost |
 | --- | --- | --- |
 | `npm test` | Registered browser-free unit suites | Node; no browser, network, or API key |
-| `npm run check:syntax` | Parse the extension scripts listed in the command | Node; no browser or model |
+| `npm run check:syntax` | Discover and parse regular `.js` files immediately inside `extension/`, sorted by path; fail on syntax errors or empty input | Node; no browser or model |
 | `npm run check:docs` | Check Git-tracked Markdown links and heading anchors, and `docs/README.md` coverage of other tracked Markdown under `docs/` | Node and Git; no network |
 | `npm run check:docs:history -- --base <full-commit-sha>` | Compare historical tracked Markdown with a fixed baseline | Node and Git; explicit full 40-character SHA-1 commit required |
 | `npm run check:commits -- <base> <head>` | Commit subject/body format | Node and Git; no browser or model |
@@ -52,6 +52,8 @@ Use deterministic request adapters, fake Chrome interfaces, and local DOM fixtur
 
 | Suite area | Observable contract |
 | --- | --- |
+| `syntax-check` | Directory discovery, invalid newly added scripts, and empty input through the syntax command |
+| `integration-harness` | CDP lifecycle plus launch success, missing prerequisites, redacted failure output, and cleanup through external browser adapters |
 | `inline-translation-session` | Admission, batches, settlement, accounting, cache, stop/restore, progress, and diagnostic outbox |
 | `inline-translation-operation` | Start/Stop/Original text wiring, transport, late settlement, feedback, and subsequent admission |
 | `inline-viewport` | Discovery, bounded continuation, rescan, and watcher cleanup through start/rescan/stop |
@@ -66,6 +68,10 @@ Probe Session Budget behavior through admission of real paragraphs and subsequen
 ## Unbilled Chrome checks
 
 Use [integration/harness.mjs](integration/harness.mjs) for CDP/browser wiring. Read its header before diagnosing driver failures or adding a browser check. Page-based collector checks use [viewport-harness.js](viewport-harness.js) without draining batches or requesting a model.
+
+The launch helper requires a responding CDP Extensions domain, the unpacked extension, initial page and tab targets, and a successful page attachment. Missing prerequisites throw before returning a context; the helper closes its CDP connection and attempts to close only its named browser session. Callers retain their check-specific failure reporting and cleanup after a successful launch. `attach(targetId)` enables the Page domain; callers attaching a service worker pass its target type as the second argument so page-only initialization is omitted. Launch diagnostics include only the failure stage, numeric browser version, protocol error codes, timeout count, and exception presence.
+
+Before running a browser check, confirm `agent-browser` is available and identify its network needs and any permission prompt described below. Treat missing tooling and pending approval separately from extension failures. Before restarting or reloading an existing browser incident, follow the evidence-preservation procedure in `~/.agents/docs/browser-tools.md`, installed from the dotfiles repository's `.agents/docs/browser-tools.md`. That shared procedure owns pre-change runtime observations and unavailable-evidence reporting; the [initialization investigation](../docs/qa/content-script-readiness-2026-10-20.md) remains historical evidence.
 
 The toolbar check [action-click.test.mjs](integration/action-click.test.mjs) opens a real Chrome with the unpacked extension. It chooses on-invocation Button Visibility through Options and waits for panel/button readiness after the toolbar action. It guards [ADR-0001](../docs/adr/0001-open-side-panel-from-action-click-handler.md), rather than translation quality. Its bounded failure output reports numeric version, target counts, readiness, CDP codes, timeout count, and exception presence; unavailable observations use `null`. Page content, target URLs, exception descriptions, and full logs are excluded.
 

@@ -66,7 +66,7 @@ try {
     );
     if (!workers.length) throw new Error('Extension worker network cannot be observed');
     for (const target of workers) {
-      const worker = await context.attach(target.targetId);
+      const worker = await context.attach(target.targetId, target.type);
       const network = await context.cdp.send('Network.enable', {}, worker.sessionId);
       if (network.__error || network.__timeout) throw new Error('Extension worker network observation failed');
     }

@@ -161,25 +161,17 @@ exports.tests = [
     },
   },
   {
-    name: 'is loaded by the panel that reads it, and checked with the rest',
+    name: 'is loaded by the panel that reads it',
     fn() {
       // The side panel takes its dependencies from its own script tags, so wording only the
-      // unit suite can require is wording the reader never sees. Neither list is derived
-      // from the directory.
+      // unit suite can require is wording the reader never sees.
       const html = readExtensionFile('sidepanel.html');
-      const packageJson = JSON.parse(
-        fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')
-      );
 
       assert.notEqual(html.indexOf('src="sidepanel-failure.js"'), -1);
       assert.equal(
         html.indexOf('src="sidepanel-failure.js"') <
           html.indexOf('src="sidepanel.js"'),
         true
-      );
-      assert.match(
-        packageJson.scripts['check:syntax'],
-        /node --check extension\/sidepanel-failure\.js/
       );
     },
   },

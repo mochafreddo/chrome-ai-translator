@@ -437,51 +437,13 @@ exports.tests = [
     },
   },
   {
-    name: 'checks semantic block codec syntax with extension scripts',
+    name: 'routes extension syntax checks through the directory scanner',
     fn() {
       const packageJson = JSON.parse(
         fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')
       );
 
-      assert.match(
-        packageJson.scripts['check:syntax'],
-        /node --check extension\/inline-block\.js/
-      );
-      assert.match(
-        packageJson.scripts['check:syntax'],
-        /node --check extension\/openai-response\.js/
-      );
-      assert.match(
-        packageJson.scripts['check:syntax'],
-        /node --check extension\/inline-translation-session\.js/
-      );
-      for (const file of [
-        'markdown-entries',
-        'markdown-document',
-        'markdown-rehydration',
-        'translation-chunks',
-        'translation-settings',
-        'sidepanel-translation-execution',
-        'inline-model-execution',
-      ]) {
-        assert.match(
-          packageJson.scripts['check:syntax'],
-          new RegExp(`node --check extension/${file}\\.js`),
-          file
-        );
-      }
-      assert.match(
-        packageJson.scripts['check:syntax'],
-        /node --check extension\/page-access\.js/
-      );
-      assert.match(
-        packageJson.scripts['check:syntax'],
-        /node --check extension\/default-model\.js/
-      );
-      assert.match(
-        packageJson.scripts['check:syntax'],
-        /node --check extension\/placeholder-tokens\.js/
-      );
+      assert.equal(packageJson.scripts['check:syntax'], 'node scripts/check-syntax.js');
     },
   },
   {
