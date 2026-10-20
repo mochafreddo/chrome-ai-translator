@@ -46,6 +46,7 @@ Every extension file is a classic script; there is no bundler or build step. The
 | Owner | Responsibility |
 | --- | --- |
 | [background.js](../extension/background.js) | Browser events, message routing, settings, per-tab state, Responses requests, and execution adapters |
+| [worker-invocation.js](../extension/worker-invocation.js) | Toolbar and shortcut preparation, page-load instructions, panel opening, content readiness, instruction transport, and invocation error handling |
 | [content.js](../extension/content.js) | Article selection and extraction, floating UI, page instruction handler, persistent page state, and browser adapters |
 | [inline-translation-operation.js](../extension/inline-translation-operation.js) | Start/Stop/Original text orchestration, authorization, settings lookup, scanner lifecycle, request transport, and feedback eligibility |
 | [inline-translation-session.js](../extension/inline-translation-session.js) | Page-visit budget, cache, progress, per-Operation records, admission, batching, settlement, application, retry, and restore |
@@ -86,6 +87,8 @@ Both flows require Placeholder Tokens exactly once with valid nesting. Inline an
 ## Controls and authorization
 
 The toolbar action opens the side panel and prepares page access without translating. The `translate-inline` shortcut opens the panel and starts Inline Translation. The worker initiates panel opening before awaiting stored settings to preserve the gesture-sensitive call order ([ADR-0001](adr/0001-open-side-panel-from-action-click-handler.md), [ADR-0004](adr/0004-give-the-keyboard-shortcut-to-inline-translation.md)).
+
+The invocation module expresses those paths directly, without a caller-visible step plan or handler dictionary. It owns preparation and its outcomes while the worker retains tab state through an error adapter. Side Panel Translation shares panel opening and content readiness, then keeps its own extraction and document execution. Section controls retain their separate authorization-first, stop-on-failure procedure and use the same instruction transport. General invocation preparation failures allow later instructions to run; an initialization failure stops them, and a failed shortcut start reports its own outcome. Automatic page load returns only the button instruction permitted by Button Visibility.
 
 The Floating Translate Button and Inline Translation Section share start, stop, and restore availability rules. Only the section displays progress and errors. Button Visibility controls where the floating button appears, rather than whether Inline Translation is available. Its every-page setting requests optional site permissions and enables dynamic injection; the other settings revoke that broad access. Automatic button appearance does not itself send a model request.
 

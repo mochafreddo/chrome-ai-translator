@@ -290,6 +290,34 @@ function createTabTranslationChrome({
   };
 }
 
+function createInvocationWorker(settings = {}) {
+  const calls = [];
+  const broadcasts = [];
+  const chrome = createTabTranslationChrome({ settings,
+    onStateMessage: (message) => broadcasts.push(message) });
+  chrome.sidePanel.open = async (options) => calls.push(['open', options]);
+  chrome.sidePanel.setOptions = async (options) => calls.push(['options', options]);
+  chrome.storage.local.get = async () => { calls.push(['settings']); return { settings }; };
+  chrome.scripting.executeScript = async (options) => calls.push(['inject', options]);
+  chrome.tabs.query = async (options) => { calls.push(['query', options]); return [{ id: 4201 }]; };
+  const answer = chrome.tabs.sendMessage;
+  chrome.tabs.sendMessage = async (tabId, message) => {
+    calls.push(['message', tabId, message]);
+    return answer(tabId, message);
+  };
+  const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => {
+    calls.push(['model']);
+    throw new Error('Unexpected model request');
+  } });
+  return { worker, chrome, calls, broadcasts, async invoke(trigger) {
+    if (trigger === 'command') await worker.handlers.onCommand('translate-inline');
+    else {
+      worker.handlers.onActionClicked({ id: 4201 });
+      await require('./inline-translation-operation.test').flushMicrotasks();
+    }
+  } };
+}
+
 // Drives a whole Side Panel Translation the way the panel does — one TRANSLATE_TAB message
 // through the worker's document execution adapter — and hands back every state the panel would have seen,
 // which is the only place the discard is visible. A queue that runs dry throws, so an
@@ -347,6 +375,87 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'toolbar opens once before settings resolve and prepares the page without translating',
+    async fn() {
+      const calls = [];
+      let releaseSettings;
+      const chrome = createTabTranslationChrome({ settings: {} });
+      chrome.sidePanel.open = async (options) => calls.push(['open', options]);
+      chrome.sidePanel.setOptions = async (options) => calls.push(['options', options]);
+      chrome.storage.local.get = () => {
+        calls.push(['settings']);
+        return new Promise((resolve) => {
+          releaseSettings = () => resolve({ settings: { buttonVisibility: 'onInvocation' } });
+        });
+      };
+      chrome.scripting.executeScript = async (options) => calls.push(['inject', options]);
+      const answer = chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        calls.push(['message', tabId, message]);
+        return answer(tabId, message);
+      };
+      const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => {
+        assert.fail('toolbar must not send a model request');
+      } });
+
+      worker.handlers.onActionClicked({ id: 9 });
+      assert.deepEqual(calls, [['open', { tabId: 9 }], ['settings']]);
+      releaseSettings();
+      await require('./inline-translation-operation.test').flushMicrotasks();
+
+      assert.deepEqual(calls, [
+        ['open', { tabId: 9 }],
+        ['settings'],
+        ['options', { tabId: 9, path: 'sidepanel.html', enabled: true }],
+        ['inject', { target: { tabId: 9 }, files: helpers.getInlineContentScriptFiles() }],
+        ['message', 9, { type: 'GET_INLINE_TRANSLATION_STATE' }],
+        ['message', 9, { type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' }],
+        ['message', 9, { type: 'RUN_INLINE_INSTRUCTION', instruction: 'mountFloatingTranslateButton' }],
+      ]);
+    },
+  },
+  {
+    name: 'shortcut waits for panel preparation before injecting the page',
+    async fn() {
+      const { chrome, calls, invoke } = createInvocationWorker();
+      let releasePanel;
+      chrome.sidePanel.setOptions = (options) => {
+        calls.push(['options', options]);
+        return new Promise((resolve) => { releasePanel = resolve; });
+      };
+      const running = invoke('command');
+      await require('./inline-translation-operation.test').flushMicrotasks();
+      assert.equal(typeof releasePanel, 'function');
+      assert.equal(calls.some(([kind]) => kind === 'inject'), false);
+      releasePanel();
+      await running;
+      assert.equal(calls.some(([kind]) => kind === 'inject'), true);
+    },
+  },
+  {
+    name: 'Side Panel preparation preserves an unrelated shortcut start error',
+    async fn() {
+      const { worker, chrome, broadcasts, invoke } = createInvocationWorker({ apiKey: 'synthetic-test-key' });
+      const answer = chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        if (message.instruction === 'startInlineTranslation') {
+          return { ok: false, error: { message: 'Shortcut could not start' } };
+        }
+        if (message.type === 'EXTRACT_ARTICLE') return { ok: true, data: {
+          title: 'Empty', url: 'https://example.test/', langHint: 'en', contentMarkdown: '',
+          translationDocument: { namespace: 'EMPTY', entries: [], blocks: [] },
+        } };
+        return answer(tabId, message);
+      };
+      await invoke('command');
+      const failure = broadcasts.at(-1).state.inlineTranslationError;
+      assert.equal(failure.message, 'Shortcut could not start');
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 4201 }]), [{ ok: true }]);
+      assert.equal(broadcasts.at(-1).state.status, 'done');
+      assert.deepEqual(broadcasts.at(-1).state.inlineTranslationError, failure);
+    },
+  },
   {
     name: 'toolbar reports unsuccessful content initialization after script injection',
     async fn() {
@@ -943,7 +1052,7 @@ exports.tests = [
         }),
         /built without a network/
       );
-      await assert.rejects(() => worker.ensureSidePanel(11), /built without chrome/);
+      await assert.rejects(() => worker.handlers.onCommand('translate-inline'), /built without chrome/);
       await assert.rejects(
         () => worker.syncButtonVisibilityRegistration({ showFloatingButton: 'always' }),
         /built without chrome/
@@ -966,14 +1075,12 @@ exports.tests = [
         'describeInlineTranslationControlFailure',
         'getBlockRecordCost',
         'getInlineContentScriptFiles',
-        'getInlineInstructions',
         'mergeSettingsWithExisting',
         'mergeVisibleBatchSettingsSnapshot',
         'normalizeChunkMaxChars',
         'normalizeMaxOutputTokens',
         'normalizeVisibleBlockBatchRecords',
         'planInlineTranslationControl',
-        'planInvocation',
         'safeError',
         'sanitizePublicTabState',
       ]);
@@ -3083,391 +3190,62 @@ exports.tests = [
     },
   },
 
-  {
-    name: 'plans the side panel as the first step for both triggers',
-    fn() {
-      for (const trigger of ['action', 'command']) {
-        assert.equal(helpers.planInvocation({ trigger }).steps[0], 'openSidePanel');
-      }
-    },
-  },
-  {
-    name: 'runs the first plan step before awaiting anything',
-    async fn() {
-      // ADR-0001. The gesture that authorizes sidePanel.open() is spent by the first
-      // await on the path from the listener to the call, so the guard has to be that
-      // nothing awaits ahead of it — not merely that the plan lists it first. An await
-      // added above the loop in runInvocationPlan fails here and nowhere else in this
-      // suite. Deliberately not awaiting the returned promise before asserting.
-      let openedSynchronously = false;
-      const worker = helpers.createBackgroundWorker();
-      const running = worker.runInvocationPlan(
-        helpers.planInvocation({ trigger: 'action' }),
-        1,
-        {
-          openSidePanel: () => {
-            openedSynchronously = true;
-          },
-          injectContentScripts: () => {},
-          grantInlineTranslationAuthorization: () => {},
-          mountFloatingTranslateButton: () => {},
-        }
-      );
-      assert.equal(openedSynchronously, true);
-      await running;
-    },
-  },
-  {
-    name: 'opens the side panel before reasserting its options',
-    async fn() {
-      // Same constraint one level down: setOptions only restates the manifest default,
-      // so awaiting it ahead of open() would spend the gesture for nothing.
-      const calls = [];
-      const chrome = {
-        sidePanel: {
-          async open() {
-            calls.push('open');
-          },
-          async setOptions() {
-            calls.push('setOptions');
-          },
-        },
-      };
-      const worker = helpers.createBackgroundWorker({ chrome });
-      await worker.ensureSidePanel(11);
-      assert.deepEqual(calls, ['open', 'setOptions']);
-    },
-  },
-  {
-    name: 'injects and authorizes inline translation from both the toolbar action and the command',
-    fn() {
-      for (const trigger of ['action', 'command']) {
-        const { steps } = helpers.planInvocation({ trigger });
-        assert.ok(steps.includes('injectContentScripts'));
-        assert.ok(steps.includes('grantInlineTranslationAuthorization'));
-      }
-    },
-  },
-  {
-    name: 'never mounts the Floating Translate Button where the reader chose never',
-    fn() {
-      // The invocation still injects the content scripts and grants Inline Translation
-      // Authorization. Mounting the button is a separate step, which is the whole reason
-      // never can be honoured without switching the rest of an invocation off with it.
-      for (const trigger of ['action', 'command', 'pageLoad']) {
-        assert.equal(
-          helpers
-            .planInvocation({ trigger, settings: { buttonVisibility: 'never' } })
-            .steps.includes('mountFloatingTranslateButton'),
-          false
-        );
-      }
-    },
-  },
-  {
-    name: 'mounts the Floating Translate Button on invocation where the reader chose on invocation',
-    fn() {
-      for (const trigger of ['action', 'command']) {
-        assert.ok(
-          helpers
-            .planInvocation({
-              trigger,
-              settings: { buttonVisibility: 'onInvocation' },
-            })
-            .steps.includes('mountFloatingTranslateButton')
-        );
-      }
-      assert.deepEqual(
-        helpers.planInvocation({
-          trigger: 'pageLoad',
-          settings: { buttonVisibility: 'onInvocation' },
-        }).steps,
-        []
-      );
-    },
-  },
-  {
-    name: 'mounts the Floating Translate Button on page load only where it shows on all pages',
-    fn() {
-      assert.deepEqual(
-        helpers.planInvocation({
-          trigger: 'pageLoad',
-          settings: { buttonVisibility: 'allPages' },
-        }).steps,
-        ['mountFloatingTranslateButton']
-      );
-      assert.deepEqual(
-        helpers.planInvocation({
-          trigger: 'pageLoad',
-          settings: { buttonVisibility: 'never' },
-        }).steps,
-        []
-      );
-      assert.deepEqual(helpers.planInvocation({ trigger: 'pageLoad' }).steps, []);
-    },
-  },
-  {
-    name: 'plans an invocation from a migrated install as the old checkbox did',
-    fn() {
-      assert.ok(
-        helpers
-          .planInvocation({
-            trigger: 'pageLoad',
-            settings: { buttonVisibility: 'allPages' },
-          })
-          .steps.includes('mountFloatingTranslateButton')
-      );
-      assert.deepEqual(
-        helpers.planInvocation({
-          trigger: 'pageLoad',
-          settings: { inlineAutoShow: false },
-        }).steps,
-        []
-      );
-    },
-  },
-  {
-    name: 'starts Inline Translation for the shortcut but not the toolbar action',
-    fn() {
-      // ADR-0004. Reaching the side panel spends nothing, and only the reader who reached
-      // for the Inline Translation Shortcut asked for a translation — so the shortcut is
-      // still the one invocation that starts one, and what it starts is now the feature
-      // the steps above it have just finished preparing the page for.
-      const settings = { buttonVisibility: 'onInvocation' };
-      assert.deepEqual(
-        helpers.planInvocation({ trigger: 'action', settings }).steps,
-        [
-          'openSidePanel',
-          'injectContentScripts',
-          'grantInlineTranslationAuthorization',
-          'mountFloatingTranslateButton',
-        ]
-      );
-      assert.deepEqual(
-        helpers.planInvocation({ trigger: 'command', settings }).steps,
-        [
-          'openSidePanel',
-          'injectContentScripts',
-          'grantInlineTranslationAuthorization',
-          'mountFloatingTranslateButton',
-          'startInlineTranslation',
-        ]
-      );
-    },
-  },
-  {
-    name: 'starts Inline Translation from the shortcut where the reader chose never',
-    fn() {
-      // Button Visibility says when the Floating Translate Button may appear, not whether
-      // Inline Translation may run. The side panel the shortcut opens carries the same
-      // controls, so a run under never still has a home to report from.
-      assert.deepEqual(
-        helpers.planInvocation({
-          trigger: 'command',
-          settings: { buttonVisibility: 'never' },
-        }).steps,
-        [
-          'openSidePanel',
-          'injectContentScripts',
-          'grantInlineTranslationAuthorization',
-          'startInlineTranslation',
-        ]
-      );
-    },
-  },
-  {
-    name: 'plans no step that starts Side Panel Translation',
-    fn() {
-      // ADR-0004: the step is removed rather than left unused. The side panel's own
-      // Translate button sends TRANSLATE_TAB straight to the worker without an invocation
-      // plan, so no plan has a caller to serve — and putting one back would be taking the
-      // shortcut away from Inline Translation again.
-      //
-      // The removed step's name is checked, which catches the plain revert, and so is the
-      // property that outlives the name: every step of a plan is either one of the two the
-      // worker carries out itself or an instruction the content script understands. A step
-      // that translates in the worker is neither, so it cannot come back under any name
-      // without failing here.
-      const workerSteps = ['openSidePanel', 'injectContentScripts'];
-      const understood = Object.keys(
-        contentHelpers.getDefaultInlineInstructionHandlers({})
-      );
-      for (const trigger of ['action', 'command', 'pageLoad', undefined]) {
-        for (const buttonVisibility of ['never', 'onInvocation', 'allPages']) {
-          const { steps } = helpers.planInvocation({
-            trigger,
-            settings: { buttonVisibility },
+  ...['never', 'onInvocation', 'allPages'].flatMap((buttonVisibility) =>
+    ['action', 'command', 'pageLoad'].map((trigger) => ({
+      name: `${trigger} honors ${buttonVisibility} Button Visibility through the worker entry`,
+      async fn() {
+        const { worker, calls, broadcasts, invoke } = createInvocationWorker({ buttonVisibility });
+        if (trigger === 'pageLoad') {
+          const responses = await collectWorkerResponses(worker, [{ type: 'GET_INLINE_STARTUP_INSTRUCTIONS' }]);
+          assert.deepEqual(responses, [{ ok: true, instructions: buttonVisibility === 'allPages'
+            ? ['mountFloatingTranslateButton'] : [] }]);
+          assert.deepEqual(calls, [['settings']]);
+        } else {
+          await invoke(trigger);
+          const messages = [
+            { type: 'GET_INLINE_TRANSLATION_STATE' },
+            { type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' },
+          ];
+          if (buttonVisibility !== 'never') messages.push({
+            type: 'RUN_INLINE_INSTRUCTION', instruction: 'mountFloatingTranslateButton',
           });
-          assert.equal(steps.includes('startSidePanelTranslation'), false);
-          for (const step of steps) {
-            assert.ok(
-              workerSteps.includes(step) || understood.includes(step),
-              `${step} is neither the worker's own step nor one the page can carry out`
-            );
-          }
+          if (trigger === 'command') messages.push({
+            type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation',
+          });
+          assert.deepEqual(calls, [
+            ...(trigger === 'command' ? [['query', { active: true, currentWindow: true }]] : []),
+            ['open', { tabId: 4201 }], ['settings'],
+            ['options', { tabId: 4201, path: 'sidepanel.html', enabled: true }],
+            ['inject', { target: { tabId: 4201 }, files: helpers.getInlineContentScriptFiles() }],
+            ...messages.map((message) => ['message', 4201, message]),
+          ]);
         }
+        assert.deepEqual(broadcasts, []);
+      },
+    }))
+  ),
+  {
+    name: 'page-load instructions honor migrated Button Visibility without invoking translation',
+    async fn() {
+      for (const inlineAutoShow of [false, true]) {
+        const { worker, calls } = createInvocationWorker({ inlineAutoShow });
+        assert.deepEqual(await collectWorkerResponses(worker, [
+          { type: 'GET_INLINE_STARTUP_INSTRUCTIONS' },
+        ]), [{ ok: true, instructions: inlineAutoShow ? ['mountFloatingTranslateButton'] : [] }]);
+        assert.deepEqual(calls, [['settings']]);
       }
     },
   },
   {
-    name: 'opens the side panel before reading the settings the rest of the plan needs',
+    name: 'ignores unrelated shortcuts and an active-tab query without a tab',
     async fn() {
-      // ADR-0001: the panel opens only from inside the click's own task, and Button
-      // Visibility can only be read asynchronously. Reading it first would forfeit the
-      // gesture — silently, since Chrome simply refuses to open the panel.
-      const calls = [];
-      let releaseSettings = null;
-
-      const chrome = {
-        storage: {
-          local: {
-            get() {
-              calls.push('readSettings');
-              return new Promise((resolve) => {
-                releaseSettings = () =>
-                  resolve({ settings: { buttonVisibility: 'onInvocation' } });
-              });
-            },
-          },
-        },
-      };
-      const worker = helpers.createBackgroundWorker({ chrome });
-
-      const running = worker.runInvocation('action', 9, {
-        openSidePanel: async (tabId) => calls.push(`openSidePanel:${tabId}`),
-        injectContentScripts: async () => calls.push('injectContentScripts'),
-        grantInlineTranslationAuthorization: async () =>
-          calls.push('grantInlineTranslationAuthorization'),
-        mountFloatingTranslateButton: async () =>
-          calls.push('mountFloatingTranslateButton'),
-      });
-
-      assert.deepEqual(calls, ['openSidePanel:9', 'readSettings']);
-      releaseSettings();
-      await running;
-      assert.deepEqual(calls, [
-        'openSidePanel:9',
-        'readSettings',
-        'injectContentScripts',
-        'grantInlineTranslationAuthorization',
-        'mountFloatingTranslateButton',
-      ]);
-    },
-  },
-  {
-    name: 'opens the side panel exactly once per invocation',
-    async fn() {
-      // The step is started before the plan runs, so the plan must adopt what is already
-      // running rather than open a second panel.
-      const calls = [];
-
-      const chrome = {
-        storage: {
-          local: {
-            async get() {
-              return { settings: { buttonVisibility: 'never' } };
-            },
-          },
-        },
-      };
-      const worker = helpers.createBackgroundWorker({ chrome });
-
-      await worker.runInvocation('action', 2, {
-        openSidePanel: async () => calls.push('openSidePanel'),
-        injectContentScripts: async () => calls.push('injectContentScripts'),
-        grantInlineTranslationAuthorization: async () =>
-          calls.push('grantInlineTranslationAuthorization'),
-      });
-
-      assert.deepEqual(calls, [
-        'openSidePanel',
-        'injectContentScripts',
-        'grantInlineTranslationAuthorization',
-      ]);
-    },
-  },
-  {
-    name: 'runs plan steps in order and reports which ran',
-    async fn() {
-      const calls = [];
-      const handlers = {
-        openSidePanel: async (tabId) => calls.push(`openSidePanel:${tabId}`),
-        injectContentScripts: async (tabId) => calls.push(`injectContentScripts:${tabId}`),
-        grantInlineTranslationAuthorization: async (tabId) =>
-          calls.push(`grantInlineTranslationAuthorization:${tabId}`),
-        mountFloatingTranslateButton: async (tabId) =>
-          calls.push(`mountFloatingTranslateButton:${tabId}`),
-        startInlineTranslation: async (tabId) => calls.push(`startInlineTranslation:${tabId}`),
-      };
-
-      const settings = { buttonVisibility: 'onInvocation' };
-      const worker = helpers.createBackgroundWorker();
-      await worker.runInvocationPlan(
-        helpers.planInvocation({ trigger: 'command', settings }),
-        7,
-        handlers
-      );
-      assert.deepEqual(calls, [
-        'openSidePanel:7',
-        'injectContentScripts:7',
-        'grantInlineTranslationAuthorization:7',
-        'mountFloatingTranslateButton:7',
-        'startInlineTranslation:7',
-      ]);
-
-      calls.length = 0;
-      await worker.runInvocationPlan(
-        helpers.planInvocation({ trigger: 'action', settings }),
-        7,
-        handlers
-      );
-      assert.deepEqual(calls, [
-        'openSidePanel:7',
-        'injectContentScripts:7',
-        'grantInlineTranslationAuthorization:7',
-        'mountFloatingTranslateButton:7',
-      ]);
-    },
-  },
-  {
-    name: 'only instructs the content script in steps the content script can carry out',
-    fn() {
-      // The instruction the worker sends is the plan step's own name, so the two sides
-      // share one vocabulary and nothing links them. A rename on either side would fail
-      // silently: the content script rejects the instruction, the worker never reads the
-      // response, and the plan runner swallows what is left.
-      const understood = Object.keys(
-        contentHelpers.getDefaultInlineInstructionHandlers({})
-      );
-      for (const trigger of ['action', 'command', 'pageLoad']) {
-        const instructions = helpers.getInlineInstructions(
-          helpers.planInvocation({ trigger, settings: { buttonVisibility: 'allPages' } })
-        );
-        for (const instruction of instructions) {
-          assert.ok(
-            understood.includes(instruction),
-            `content script cannot run ${instruction}`
-          );
-        }
-      }
-      assert.deepEqual(
-        helpers.getInlineInstructions(
-          helpers.planInvocation({
-            trigger: 'action',
-            settings: { buttonVisibility: 'onInvocation' },
-          })
-        ),
-        ['grantInlineTranslationAuthorization', 'mountFloatingTranslateButton']
-      );
-      assert.deepEqual(
-        helpers.getInlineInstructions(
-          helpers.planInvocation({
-            trigger: 'command',
-            settings: { buttonVisibility: 'never' },
-          })
-        ),
-        ['grantInlineTranslationAuthorization', 'startInlineTranslation']
-      );
+      const { worker, chrome, calls } = createInvocationWorker();
+      await worker.handlers.onCommand('translate-current-tab');
+      assert.deepEqual(calls, []);
+      chrome.tabs.query = async () => [];
+      await worker.handlers.onCommand('translate-inline');
+      worker.handlers.onActionClicked({});
+      assert.deepEqual(calls, []);
     },
   },
   {
@@ -3612,230 +3390,99 @@ exports.tests = [
     },
   },
   {
-    name: 'injects and authorizes without mounting when the plan leaves the button out',
+    name: 'shortcut continues ordinary preparation failures and reports only its refused start',
     async fn() {
-      // The three concerns are separate steps precisely so a plan can carry the first two
-      // alone. Nothing in the extension yet produces such a plan for an invocation, but the
-      // runner must honour one when Button Visibility starts suppressing the button.
-      const calls = [];
-      const worker = helpers.createBackgroundWorker();
-      await worker.runInvocationPlan(
-        { steps: ['injectContentScripts', 'grantInlineTranslationAuthorization'] },
-        4,
-        {
-          injectContentScripts: async () => calls.push('injectContentScripts'),
-          grantInlineTranslationAuthorization: async () =>
-            calls.push('grantInlineTranslationAuthorization'),
-          mountFloatingTranslateButton: async () => calls.push('mountFloatingTranslateButton'),
-        }
-      );
-      assert.deepEqual(calls, [
-        'injectContentScripts',
-        'grantInlineTranslationAuthorization',
+      const { worker, chrome, calls, broadcasts, invoke } = createInvocationWorker({ buttonVisibility: 'onInvocation' });
+      chrome.scripting.executeScript = async (options) => {
+        calls.push(['inject', options]);
+        throw new Error('Cannot access contents of the page');
+      };
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        calls.push(['message', tabId, message]);
+        throw new Error('Could not establish connection. Receiving end does not exist.');
+      };
+      await invoke('command');
+      assert.deepEqual(calls.filter(([kind]) => kind === 'message'), [
+        ['message', 4201, { type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' }],
+        ['message', 4201, { type: 'RUN_INLINE_INSTRUCTION', instruction: 'mountFloatingTranslateButton' }],
+        ['message', 4201, { type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation' }],
       ]);
-    },
-  },
-  {
-    name: 'keeps running later steps when injecting the content scripts fails',
-    async fn() {
-      // Injection legitimately fails on pages extensions cannot touch, and one refused
-      // step must not cost an invocation the rest of them — the plan's steps are
-      // independent. On such a page every step that speaks to the content script fails
-      // with it, the shortcut's own start step included; the start step is reported to
-      // the reader as well, which the tests below cover, but no step's failure — nor the
-      // report of it — may stop the steps after it.
-      const attempted = [];
-      // The start step's failure is reported, and the report has somewhere to go here.
-      // What it says is the next check's business; what matters to this one is that no
-      // step's failure stopped the step after it, report included.
-      const worker = helpers.createBackgroundWorker({
-        chrome: createStateBroadcastChrome([]),
-      });
-      await worker.runInvocationPlan(
-        helpers.planInvocation({
-          trigger: 'command',
-          settings: { buttonVisibility: 'onInvocation' },
-        }),
-        3,
-        {
-          openSidePanel: async () => attempted.push('openSidePanel'),
-          injectContentScripts: async () => {
-            attempted.push('injectContentScripts');
-            throw new Error('Cannot access contents of the page');
-          },
-          grantInlineTranslationAuthorization: async () => {
-            attempted.push('grantInlineTranslationAuthorization');
-            throw new Error('Could not establish connection');
-          },
-          mountFloatingTranslateButton: async () => {
-            attempted.push('mountFloatingTranslateButton');
-            throw new Error('Could not establish connection');
-          },
-          startInlineTranslation: async () => {
-            attempted.push('startInlineTranslation');
-            throw new Error('Could not establish connection');
-          },
-        }
-      );
-      assert.deepEqual(attempted, [
-        'openSidePanel',
-        'injectContentScripts',
-        'grantInlineTranslationAuthorization',
-        'mountFloatingTranslateButton',
-        'startInlineTranslation',
-      ]);
-    },
-  },
-  {
-    name: 'tells the reader when the shortcut could not start a run, and stays silent otherwise',
-    async fn() {
-      // The start step is the one the reader pressed for: on a tab out of reach its
-      // silence is indistinguishable from a translation about to appear. The steps that
-      // prepare the page are not what they pressed, so those stay silent.
-      const broadcasts = [];
-      const worker = helpers.createBackgroundWorker({
-        chrome: createStateBroadcastChrome(broadcasts),
-      });
-
-      await worker.runInvocationPlan(
-        helpers.planInvocation({
-          trigger: 'command',
-          settings: { buttonVisibility: 'onInvocation' },
-        }),
-        4201,
-        {
-          openSidePanel: async () => {},
-          injectContentScripts: async () => {
-            throw new Error('Cannot access contents of the page');
-          },
-          grantInlineTranslationAuthorization: async () => {
-            throw new Error('Could not establish connection');
-          },
-          mountFloatingTranslateButton: async () => {
-            throw new Error('Could not establish connection');
-          },
-          startInlineTranslation: async () => {
-            throw new Error(
-              'Could not establish connection. Receiving end does not exist.'
-            );
-          },
-        }
-      );
-
       assert.equal(broadcasts.length, 1);
-      const [update] = broadcasts;
-      assert.equal(update.type, 'STATE_UPDATED');
-      assert.equal(update.tabId, 4201);
-      assert.match(
-        update.state.inlineTranslationError.message,
-        /Click the extension icon on this tab/
-      );
-      // Side Panel Translation's error area is not where this belongs.
-      assert.equal(update.state.error, undefined);
+      assert.match(broadcasts[0].state.inlineTranslationError.message, /Click the extension icon on this tab/);
+      assert.equal(broadcasts[0].state.error, undefined);
+      assert.deepEqual((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]))[0].state,
+        broadcasts[0].state);
+      broadcasts.length = 0;
+      await invoke('action');
+      assert.deepEqual(broadcasts, []);
     },
   },
-  {
-    name: 'clears a reported start failure once a later run on the tab starts',
+  ...['grantInlineTranslationAuthorization', 'mountFloatingTranslateButton'].map((refusedInstruction) => ({
+    name: `shortcut still starts after the page refuses ${refusedInstruction}`,
     async fn() {
-      const broadcasts = [];
-      const worker = helpers.createBackgroundWorker({
-        chrome: createStateBroadcastChrome(broadcasts),
-      });
-
-      const plan = { steps: ['startInlineTranslation'] };
-      const refusing = {
-        startInlineTranslation: async () => {
-          throw new Error('Could not establish connection.');
-        },
+      const { chrome, calls, broadcasts, invoke } = createInvocationWorker({ buttonVisibility: 'allPages' });
+      const answer = chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        const response = await answer(tabId, message);
+        return message.instruction === refusedInstruction ? { ok: false } : response;
       };
-      const accepting = { startInlineTranslation: async () => {} };
-
-      await worker.runInvocationPlan(plan, 4201, refusing);
-      assert.equal(broadcasts.length, 1);
-
-      await worker.runInvocationPlan(plan, 4201, accepting);
-      assert.equal(broadcasts.length, 2);
-      assert.equal(broadcasts[1].state.inlineTranslationError, null);
-
-      // Nothing left to clear, so a run that starts on a tab carrying no failure says
-      // nothing at all.
-      await worker.runInvocationPlan(plan, 4201, accepting);
-      assert.equal(broadcasts.length, 2);
+      await invoke('command');
+      assert.deepEqual(calls.at(-1), ['message', 4201,
+        { type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation' }]);
+      assert.deepEqual(broadcasts, []);
     },
-  },
-  {
-    name: 'withdraws a reported start failure once the tab answers an invocation again',
+  })),
+  ...['start', 'action', 'control'].map((recovery) => ({
+    name: `${recovery} clears a reported shortcut failure only after the page answers`,
     async fn() {
-      // The message asks for a click on the extension icon. That click is an invocation,
-      // and its injection step succeeding is the tab answering it — so the message is
-      // withdrawn without waiting for a run the reader has not started yet. On a page no
-      // click can grant, injection fails too and the message stands.
-      const broadcasts = [];
-      const worker = helpers.createBackgroundWorker({
-        chrome: createStateBroadcastChrome(broadcasts),
-      });
-
-      const grantedByClick = {
-        openSidePanel: async () => {},
-        injectContentScripts: async () => {},
-        grantInlineTranslationAuthorization: async () => {},
+      const { worker, chrome, broadcasts, invoke } = createInvocationWorker();
+      const answer = chrome.tabs.sendMessage;
+      let refuseStart = true;
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        const response = await answer(tabId, message);
+        return message.instruction === 'startInlineTranslation' && refuseStart
+          ? { ok: false, error: { message: 'Could not establish connection.' } } : response;
       };
-      const clickOnAPageChromeKeepsToItself = {
-        ...grantedByClick,
-        injectContentScripts: async () => {
-          throw new Error('Cannot access contents of the page');
-        },
-      };
-      const actionInvocation = helpers.planInvocation({
-        trigger: 'action',
-        settings: { buttonVisibility: 'never' },
-      });
-      const refusedStart = {
-        startInlineTranslation: async () => {
-          throw new Error('Could not establish connection.');
-        },
-      };
-
-      await worker.runInvocationPlan(
-        { steps: ['startInlineTranslation'] },
-        4201,
-        refusedStart
-      );
+      await invoke('command');
       assert.equal(broadcasts.length, 1);
-
-      await worker.runInvocationPlan(
-        actionInvocation,
-        4201,
-        clickOnAPageChromeKeepsToItself
-      );
+      const inject = chrome.scripting.executeScript;
+      chrome.scripting.executeScript = async () => { throw new Error('Cannot access contents of the page'); };
+      await invoke('action');
       assert.equal(broadcasts.length, 1);
-
-      await worker.runInvocationPlan(actionInvocation, 4201, grantedByClick);
-      assert.equal(broadcasts.length, 2);
-      assert.equal(broadcasts[1].state.inlineTranslationError, null);
+      if (recovery !== 'start') chrome.scripting.executeScript = inject;
+      refuseStart = false;
+      if (recovery === 'control') {
+        assert.deepEqual(await collectWorkerResponses(worker, [
+          { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 4201, control: 'start' },
+        ]), [{ ok: true }]);
+      } else await invoke(recovery === 'start' ? 'command' : 'action');
+      assert.equal(broadcasts.at(-1).state.inlineTranslationError, null);
+      const count = broadcasts.length;
+      await invoke('action');
+      assert.equal(broadcasts.length, count);
     },
-  },
+  })),
   {
-    name: 'clears a reported start failure when a control the reader pressed runs',
+    name: 'shortcut still starts when panel opening or tab-state reporting fails',
     async fn() {
-      // The field says Inline Translation could not be reached on this tab. A control the
-      // tab has just carried out disproves that, whichever of the three it was, and the
-      // reader has one more home for these controls than the shortcut.
-      const broadcasts = [];
-      const worker = helpers.createBackgroundWorker({
-        chrome: createStateBroadcastChrome(broadcasts),
-      });
-
-      await worker.runInvocationPlan({ steps: ['startInlineTranslation'] }, 4201, {
-        startInlineTranslation: async () => {
-          throw new Error('Could not establish connection.');
-        },
-      });
-      assert.equal(broadcasts.length, 1);
-
-      await worker.runInlineTranslationControl(4201, 'start', async () => {});
-      assert.equal(broadcasts.length, 2);
-      assert.equal(broadcasts[1].state.inlineTranslationError, null);
+      const { worker, chrome, calls, invoke } = createInvocationWorker();
+      chrome.sidePanel.open = async () => { throw new Error('Panel unavailable'); };
+      chrome.sidePanel.setOptions = async () => { throw new Error('Panel unavailable'); };
+      chrome.runtime.sendMessage = () => { throw new Error('Cannot broadcast'); };
+      const answer = chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        const response = await answer(tabId, message);
+        return message.instruction === 'startInlineTranslation' ? { ok: false } : response;
+      };
+      await invoke('command');
+      assert.deepEqual(calls.at(-1), ['message', 4201,
+        { type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation' }]);
+      chrome.tabs.sendMessage = answer;
+      await invoke('command');
+      assert.deepEqual(calls.at(-1), ['message', 4201,
+        { type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation' }]);
+      assert.equal((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]))[0]
+        .state.inlineTranslationError, null);
     },
   },
   {

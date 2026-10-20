@@ -25,6 +25,10 @@ exports.tests = [
       loadClassicScript(workerScope, 'background.js');
       const chrome = { storage: { local: { async get() { return {}; } } } };
       const worker = workerScope.createBackgroundWorker({ chrome });
+      const startup = await new Promise((resolve) => worker.handlers.onMessage(
+        { type: 'GET_INLINE_STARTUP_INSTRUCTIONS' }, {}, resolve
+      ));
+      assert.equal(JSON.stringify(startup), '{"ok":true,"instructions":[]}');
       assert.equal((await worker.translateVisibleBlockBatch([])).length, 0);
       const execution = workerScope.ChromeAiTranslatorSidePanelTranslationExecution;
       assert.equal(JSON.stringify(Object.keys(execution)), '["execute"]');
@@ -473,6 +477,7 @@ exports.tests = [
       const inWorker = (file) => backgroundJs.indexOf(`importScripts('${file}')`);
       const inPage = (file) => filesMatch[1].indexOf(`'${file}'`);
       const dependencies = [
+        ['button-visibility.js', 'worker-invocation.js', ['worker']],
         ['placeholder-tokens.js', 'inline-block.js', ['worker', 'page']],
         ['placeholder-tokens.js', 'markdown-rehydration.js', ['worker']],
         ['markdown-entries.js', 'markdown-rehydration.js', ['worker']],

@@ -68,6 +68,9 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorInlineTranslationControls) {
     importScripts('inline-translation-controls.js');
   }
+  if (!globalThis.ChromeAiTranslatorWorkerInvocation) {
+    importScripts('worker-invocation.js');
+  }
   if (!globalThis.ChromeAiTranslatorPageAccess) {
     importScripts('page-access.js');
   }
@@ -107,6 +110,9 @@ const inlineDiagnosticsController =
   globalThis.ChromeAiTranslatorInlineDiagnosticsController || require('./inline-diagnostics-controller.js');
 const { DEFAULT_MODEL } =
   globalThis.ChromeAiTranslatorDefaultModel || require('./default-model.js');
+
+const workerInvocation = globalThis.ChromeAiTranslatorWorkerInvocation ||
+  require('./worker-invocation.js');
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
@@ -385,32 +391,10 @@ function classifyContentScriptFailure(failure, url = '') {
   };
 }
 
-// Steps the content script carries out. The background worker decides; the content script
-// executes, so the step name is also the instruction sent over the wire.
-const INLINE_INSTRUCTION_MESSAGE = 'RUN_INLINE_INSTRUCTION';
-
-const INVOCATION_STEPS = Object.freeze({
-  OPEN_SIDE_PANEL: 'openSidePanel',
-  INJECT_CONTENT_SCRIPTS: 'injectContentScripts',
-  GRANT_INLINE_TRANSLATION_AUTHORIZATION: 'grantInlineTranslationAuthorization',
-  MOUNT_FLOATING_TRANSLATE_BUTTON: 'mountFloatingTranslateButton',
-  START_INLINE_TRANSLATION: 'startInlineTranslation',
-});
-
-const INLINE_INVOCATION_STEPS = Object.freeze([
-  INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION,
-  INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON,
-  INVOCATION_STEPS.START_INLINE_TRANSLATION,
-]);
-
 // The command key in `manifest.json`, which the worker recognizes by name. Chrome offers
 // the reader whatever shortcut the manifest declares, so a key that drifts from this name
 // leaves them one the worker quietly ignores.
 const INLINE_TRANSLATION_SHORTCUT_COMMAND = 'translate-inline';
-
-function isInvocationTrigger(trigger) {
-  return trigger === 'action' || trigger === 'command';
-}
 
 // Every control in the Inline Translation Section grants Inline Translation Authorization
 // before it runs. The section is extension-owned UI a page cannot forge, and the
@@ -419,7 +403,7 @@ function isInvocationTrigger(trigger) {
 function planInlineTranslationControl(control) {
   const step = getInlineTranslationControlStep(control);
   const steps = step
-    ? [INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION, step]
+    ? ['grantInlineTranslationAuthorization', step]
     : [];
   return Object.freeze({ control, steps: Object.freeze(steps) });
 }
@@ -435,74 +419,6 @@ function describeInlineTranslationControlFailure(failure) {
     return CONTENT_SCRIPT_FAILURE_MESSAGES.missing_access;
   }
   return message || 'Inline translation could not be reached on this tab.';
-}
-
-// Whether the Floating Translate Button should be on the page. This is the background
-// worker's call, not the content script's: injecting the content scripts and granting
-// Inline Translation Authorization are separate steps that must be able to happen without
-// the button appearing — which is exactly what the never choice asks for.
-//
-// The reader's Button Visibility choice decides it: never keeps the button off an invoked
-// page too, on invocation mounts it only where the reader invoked the extension, and all
-// pages mounts it on a plain page load as well.
-function shouldMountFloatingTranslateButton(context = {}) {
-  const visibility = readButtonVisibility(context.settings);
-  if (visibility === BUTTON_VISIBILITY.NEVER) return false;
-  if (isInvocationTrigger(context.trigger)) return true;
-  return (
-    context.trigger === 'pageLoad' && visibility === BUTTON_VISIBILITY.ALL_PAGES
-  );
-}
-
-// What one invocation of the extension should do, decided without touching any browser
-// API so the rules are testable. Two rules live here: the side panel is opened first
-// (ADR-0001), and reaching the panel does not itself spend tokens — only the Inline
-// Translation Shortcut starts a translation, which is why the toolbar icon and the
-// shortcut deliberately differ.
-//
-// What the shortcut starts is Inline Translation (ADR-0004), the feature the steps above
-// it have just finished preparing the page for. Side Panel Translation is started from the
-// side panel's own Translate button, which sends TRANSLATE_TAB straight to the worker and
-// so needs no step here. The start step sits outside the Button Visibility rule on
-// purpose: that choice governs when the Floating Translate Button may appear, not whether
-// the feature runs, and the panel the shortcut opens carries the same controls.
-function planInvocation(context = {}) {
-  const trigger = context?.trigger;
-  const steps = [];
-  if (isInvocationTrigger(trigger)) {
-    steps.push(
-      INVOCATION_STEPS.OPEN_SIDE_PANEL,
-      INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS,
-      INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION
-    );
-  }
-  if (shouldMountFloatingTranslateButton(context)) {
-    steps.push(INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON);
-  }
-  if (trigger === 'command') {
-    steps.push(INVOCATION_STEPS.START_INLINE_TRANSLATION);
-  }
-  return Object.freeze({ trigger, steps: Object.freeze(steps) });
-}
-
-// The steps of an invocation plan that the content script, rather than this worker,
-// carries out — the boundary of what an invocation may send over the wire. The Inline
-// Translation Section's controls travel the same wire, but they are the reader's own
-// gestures rather than steps of an invocation, so they are planned separately. The
-// page-load path hands these over in one answer, having no invocation to push them from.
-function getInlineInstructions(plan) {
-  return (plan?.steps || []).filter((step) =>
-    INLINE_INVOCATION_STEPS.includes(step)
-  );
-}
-
-function startSidePanelStep(handlers, tabId) {
-  const handler = handlers?.[INVOCATION_STEPS.OPEN_SIDE_PANEL];
-  const started = (async () => handler?.(tabId))();
-  // The plan observes the failure a moment later, when it reaches the step. Marking the
-  // promise handled now keeps that gap from being reported as an unhandled rejection.
-  started.catch(() => {});
-  return started;
 }
 
 const INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
@@ -757,25 +673,6 @@ function createBackgroundWorker(platform = {}) {
     } catch {}
   }
 
-  async function ensureSidePanel(tabId) {
-    const chrome = getChrome();
-    // ADR-0001: open() has to come before any other await. Chrome only honours it while
-    // the user gesture that started this invocation is still live, and awaiting anything
-    // first forfeits it. setOptions merely reasserts the manifest default, so it can wait.
-    // Both calls fail silently on older versions or where the panel is unsupported.
-    try {
-      await chrome.sidePanel.open({ tabId });
-    } catch {}
-
-    try {
-      await chrome.sidePanel.setOptions({
-        tabId,
-        path: 'sidepanel.html',
-        enabled: true,
-      });
-    } catch {}
-  }
-
   async function getTabUrl(tabId) {
     const chrome = getChrome();
     try {
@@ -786,46 +683,18 @@ function createBackgroundWorker(platform = {}) {
     }
   }
 
-  async function ensureContentScript(tabId) {
-    const chrome = getChrome();
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: getInlineContentScriptFiles(),
-    });
-    let response;
-    try {
-      response = await chrome.tabs.sendMessage(tabId, {
-        type: 'GET_INLINE_TRANSLATION_STATE',
-      });
-    } catch {}
-    const snapshot = response?.snapshot;
-    if (response?.ok !== true ||
-        !['original', 'active', 'translated', 'stopped'].includes(snapshot?.status) ||
-        typeof snapshot.progress !== 'string' || typeof snapshot.error !== 'string') {
-      throw Object.assign(new Error(
-        'The extension could not initialize on this page. Reload the extension on chrome://extensions, then reload this page and try again.'
-      ), { code: 'content_script_not_ready' });
-    }
-    if (stateByTab.get(tabId)?.inlineTranslationError?.code === 'content_script_not_ready') {
-      clearInlineTranslationError(tabId);
-    }
-  }
-
-  // The content script answers whether it carried the instruction out, and an instruction it
-  // refused is as much a failure as one that never arrived — a caller told otherwise would
-  // report a gesture that did nothing as done.
-  async function sendInlineInstruction(tabId, instruction) {
-    const chrome = getChrome();
-    const response = await chrome.tabs.sendMessage(tabId, {
-      type: INLINE_INSTRUCTION_MESSAGE,
-      instruction,
-    });
-    if (!response?.ok) {
-      throw new Error(
-        response?.error?.message || `The page could not carry out ${instruction}`
-      );
-    }
-  }
+  const invocation = workerInvocation.createWorkerInvocation({
+    getChrome,
+    getSettings,
+    contentScriptFiles: getInlineContentScriptFiles(),
+    inlineErrors: {
+      get: (tabId) => stateByTab.get(tabId)?.inlineTranslationError,
+      set: (tabId, error) => setTabState(tabId, { inlineTranslationError: error }),
+    },
+    describeFailure: describeInlineTranslationControlFailure,
+  });
+  const sendInlineInstruction = invocation.sendInstruction;
+  const clearInlineTranslationError = invocation.clearError;
 
   // Unlike an invocation, whose steps are independent, a control is a single gesture: a
   // refused step stops the rest, because carrying on would run the control unauthorized and
@@ -853,104 +722,6 @@ function createBackgroundWorker(platform = {}) {
     } finally {
       if (inlineControlsByTab.get(tabId) === requestedControl) inlineControlsByTab.delete(tabId);
     }
-  }
-
-  function getDefaultInvocationHandlers() {
-    return {
-      [INVOCATION_STEPS.OPEN_SIDE_PANEL]: ensureSidePanel,
-      [INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS]: ensureContentScript,
-      [INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION]: (tabId) =>
-        sendInlineInstruction(
-          tabId,
-          INVOCATION_STEPS.GRANT_INLINE_TRANSLATION_AUTHORIZATION
-        ),
-      [INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON]: (tabId) =>
-        sendInlineInstruction(
-          tabId,
-          INVOCATION_STEPS.MOUNT_FLOATING_TRANSLATE_BUTTON
-        ),
-      [INVOCATION_STEPS.START_INLINE_TRANSLATION]: (tabId) =>
-        sendInlineInstruction(tabId, INVOCATION_STEPS.START_INLINE_TRANSLATION),
-    };
-  }
-
-  function recordInvocationStepOutcome(tabId, step, failure) {
-    if (step === INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS) {
-      if (failure?.code === 'content_script_not_ready') {
-        setTabState(tabId, { inlineTranslationError: safeError(failure) });
-      } else if (!failure) clearInlineTranslationError(tabId);
-      return;
-    }
-    if (step !== INVOCATION_STEPS.START_INLINE_TRANSLATION) return;
-    if (failure) {
-      setTabState(tabId, {
-        inlineTranslationError: {
-          message: describeInlineTranslationControlFailure(failure),
-        },
-      });
-      return;
-    }
-    clearInlineTranslationError(tabId);
-  }
-
-  // A run that started leaves nothing for an earlier failure to still be true of. The guard
-  // keeps a tab that was never told anything from being sent an update saying so.
-  function clearInlineTranslationError(tabId) {
-    if (!stateByTab.get(tabId)?.inlineTranslationError) return;
-    setTabState(tabId, { inlineTranslationError: null });
-  }
-
-  // Two properties matter here and both are covered by tests.
-  //
-  // The first step must run before this function awaits anything, because ADR-0001's
-  // gesture window is spent by the first await on the path from the listener to
-  // chrome.sidePanel.open(). Adding an await above the loop is the regression to fear.
-  // `runInvocation` below now starts that step itself, and holds the same line; keeping the
-  // property here as well costs nothing and keeps a plan run on its own honest.
-  //
-  // Steps are otherwise independent: content script injection legitimately fails on pages
-  // extensions cannot touch, and that must not stop a command invocation from translating.
-  async function runInvocationPlan(
-    plan,
-    tabId,
-    handlers = getDefaultInvocationHandlers()
-  ) {
-    for (const step of plan?.steps || []) {
-      const handler = handlers?.[step];
-      if (!handler) continue;
-      let failure = null;
-      try {
-        await handler(tabId);
-      } catch (error) {
-        failure = error || new Error('Unknown error');
-      }
-      // Independence covers the report as well: a worker that cannot record the outcome
-      // must not cost the invocation the steps that were still to come.
-      try {
-        recordInvocationStepOutcome(tabId, step, failure);
-      } catch {}
-      if (failure?.code === 'content_script_not_ready') break;
-    }
-  }
-
-  // An invocation's plan needs the reader's Button Visibility choice, which only storage can
-  // answer and only asynchronously — yet ADR-0001's gesture is spent by the first await ahead
-  // of chrome.sidePanel.open(). So the panel-opening step is started here, in the event's own
-  // task, and the plan that follows adopts it instead of opening a second panel.
-  //
-  // Only the two invocation triggers belong here, because the panel opens before the plan is
-  // known. A page load has no gesture to spend and asks the worker for its instructions.
-  async function runInvocation(
-    trigger,
-    tabId,
-    handlers = getDefaultInvocationHandlers()
-  ) {
-    const openedSidePanel = startSidePanelStep(handlers, tabId);
-    const settings = await getSettings();
-    return runInvocationPlan(planInvocation({ trigger, settings }), tabId, {
-      ...handlers,
-      [INVOCATION_STEPS.OPEN_SIDE_PANEL]: () => openedSidePanel,
-    });
   }
 
   async function extractArticle(tabId) {
@@ -1193,10 +964,8 @@ function createBackgroundWorker(platform = {}) {
         translated: null,
         progress: null,
       });
-      await ensureSidePanel(tabId);
-
       try {
-        await ensureContentScript(tabId);
+        await invocation.preparePage(tabId);
       } catch (e) {
         const failure = classifyContentScriptFailure(e, await getTabUrl(tabId));
         setTabState(tabId, {
@@ -1277,7 +1046,7 @@ function createBackgroundWorker(platform = {}) {
   // (ADR-0001).
   function onActionClicked(tab) {
     if (!tab?.id) return;
-    runInvocation('action', tab.id);
+    invocation.invoke('action', tab.id);
   }
 
   // The Inline Translation Shortcut, registered on chrome.commands.onCommand.addListener.
@@ -1289,7 +1058,7 @@ function createBackgroundWorker(platform = {}) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tabId = tabs?.[0]?.id;
     if (!tabId) return;
-    await runInvocation('command', tabId);
+    await invocation.invoke('command', tabId);
   }
 
   // chrome.runtime.onMessage.
@@ -1398,12 +1167,9 @@ function createBackgroundWorker(platform = {}) {
           // A content script that loaded on its own asks what it should do. The answer is
           // decided here so the content script never reads settings to decide whether its
           // own UI belongs on the page.
-          const settings = await getSettings();
           sendResponse({
             ok: true,
-            instructions: getInlineInstructions(
-              planInvocation({ trigger: 'pageLoad', settings })
-            ),
+            instructions: await invocation.startupInstructions(),
           });
           return;
         }
@@ -1448,11 +1214,8 @@ function createBackgroundWorker(platform = {}) {
     },
     // Everything below is what this file already exported, backed by this instance so that an
     // export and the worker the browser is running are the same thing.
-    ensureSidePanel,
     openaiTranslateChunk,
     runInlineTranslationControl,
-    runInvocation,
-    runInvocationPlan,
     sendInlineInstruction,
     syncButtonVisibilityRegistration,
     syncButtonVisibilityRegistrationSafely,
@@ -1496,10 +1259,8 @@ if (typeof module !== 'undefined' && module.exports) {
     getInlineContentScriptFiles,
     classifyContentScriptFailure,
     INLINE_TRANSLATION_SHORTCUT_COMMAND,
-    planInvocation,
     planInlineTranslationControl,
     describeInlineTranslationControlFailure,
-    getInlineInstructions,
     normalizeVisibleBlockBatchRecords,
     normalizeMaxOutputTokens,
   };
