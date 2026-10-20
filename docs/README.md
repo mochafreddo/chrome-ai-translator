@@ -53,6 +53,7 @@ These descriptive records retain their original paths so existing references con
 | [Validation and diagnostics plan](superpowers/plans/2026-07-11-inline-translation-validation-diagnostics.md) | Implementation plan for that schema-2 design |
 | [Local extension QA](qa/qa-report-local-extension-2026-06-15.md) | Static UI rendering and follow-up QA dated 2026-06-15 |
 | [Issue #70 Session verification](qa/issue-70-session-checks.md) | Interface checks based on commit `2730fb4`, with mutation evidence |
+| [Content-script initialization investigation](qa/content-script-readiness-2026-10-20.md) | Reconstructed loader mismatch and readiness verification boundaries, dated 2026-10-20 |
 
 ## Maintenance boundaries
 

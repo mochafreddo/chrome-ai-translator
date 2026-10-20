@@ -151,6 +151,7 @@ function getInlineTranslationPanelViewModel({
   snapshot = null,
   controlError = '',
   invocationError = '',
+  invocationErrorCode = '',
   hasPageAccess = true,
 } = {}) {
   const status = snapshot?.status || 'original';
@@ -166,6 +167,17 @@ function getInlineTranslationPanelViewModel({
   // is a separate axis, and holding it on one tab grants nothing on another. So the
   // section dims all three and asks for the one thing that does help, rather than taking a
   // click and reporting the failure afterwards.
+  if (invocationErrorCode === 'content_script_not_ready') {
+    return {
+      startText,
+      startDisabled: true,
+      stopDisabled: true,
+      restoreDisabled: true,
+      statusText: '',
+      errorText: invocationError,
+    };
+  }
+
   if (hasPageAccess === null) {
     return {
       startText,
@@ -240,7 +252,8 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   function paint() {
     render({
       tabId, state, panelError,
-      inline: { snapshot, controlError, invocationError, hasPageAccess },
+      inline: { snapshot, controlError, invocationError, hasPageAccess,
+        invocationErrorCode: state.inlineTranslationError?.code || '' },
     });
   }
   function forgetControlError() {

@@ -6,6 +6,7 @@
     "check:docs:history": "node scripts/check-docs.js --history",
     "test": "node tests/run.js",
     "test:integration": "node tests/integration/action-click.test.mjs",
+    "test:integration:content-readiness": "node tests/integration/content-readiness.test.mjs",
     "test:integration:disclosure-summary": "node tests/integration/disclosure-summary.test.mjs",
     "test:integration:ai-hero-disclosure": "node tests/integration/ai-hero-disclosure.smoke.test.mjs",
     "test:integration:ai-hero-grill-with-docs": "node tests/integration/ai-hero-grill-with-docs.test.mjs",

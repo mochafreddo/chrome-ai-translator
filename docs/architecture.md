@@ -89,6 +89,8 @@ The toolbar action opens the side panel and prepares page access without transla
 
 The Floating Translate Button and Inline Translation Section share start, stop, and restore availability rules. Only the section displays progress and errors. Button Visibility controls where the floating button appears, rather than whether Inline Translation is available. Its every-page setting requests optional site permissions and enables dynamic injection; the other settings revoke that broad access. Automatic button appearance does not itself send a model request.
 
+Programmatic injection confirms a valid `GET_INLINE_TRANSLATION_STATE` response after loading the ordered scripts. An unanswered or malformed response is an initialization failure, separate from Chrome refusing page access. Toolbar and shortcut invocations report it in the Inline Translation Section and stop the remaining page instructions; Side Panel Translation reports it through its own error area before extraction or model requests. A later successful preparation clears the Inline initialization failure. The panel keeps the initial side-panel opening ahead of asynchronous preparation. Automatic injection uses the registered file list and is verified separately; the programmatic check does not repair an old registration or replace code in an already-running worker.
+
 Inline Translation Authorization is separate from Chrome page access and checked before a new start; its lifetime is owned by Operation. An already-active Operation remains authorized after the initial grant expires, and an active Start only rescans. Side Panel Translation does not require that additional Inline authorization. Neither flow can use page access on restricted browser pages.
 
 ## Limits and accounting

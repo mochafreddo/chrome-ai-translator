@@ -73,6 +73,32 @@ exports.tests = [
     },
   },
   {
+    name: 'characterizes incomplete classic-script injection as unready until complete reinjection',
+    async fn() {
+      const { createOperationFixture, flushMicrotasks } = require('./inline-translation-operation.test');
+      const { createContentPage } = require('./content-harness');
+      const { getInlineContentScriptFiles } = require('../extension/background');
+      const page = createContentPage(createOperationFixture());
+      let injectionFailed = false;
+      try {
+        page.inject(getInlineContentScriptFiles().filter(file => file !== 'inline-translation-operation.js'));
+      } catch {
+        injectionFailed = true;
+      }
+      assert.equal(injectionFailed, true);
+      assert.equal(page.message({ type: 'GET_INLINE_TRANSLATION_STATE' }), undefined);
+      assert.equal(page.listenerCount(), 0);
+
+      page.inject();
+      await flushMicrotasks();
+
+      assert.deepEqual(page.message({ type: 'GET_INLINE_TRANSLATION_STATE' }), {
+        ok: true, snapshot: { status: 'original', progress: '', error: '' },
+      });
+      assert.equal(page.listenerCount(), 1);
+    },
+  },
+  {
     name: 'reinjection preserves admitted work, cache and the page visit budget',
     async fn() {
       const { createOperationFixture, flushMicrotasks } = require('./inline-translation-operation.test');

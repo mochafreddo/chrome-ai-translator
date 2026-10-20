@@ -238,12 +238,10 @@ function sanitizePublicTabState(state) {
       'code',
     ]);
   }
-  // The message is the whole of it: what the reader is told has already been chosen by the
-  // time it is recorded, so the failure's own name would add nothing to read.
   if (publicState.inlineTranslationError != null) {
     publicState.inlineTranslationError = copyAllowedFields(
       publicState.inlineTranslationError,
-      ['message']
+      ['message', 'code']
     );
   }
   if (publicState.extracted != null) {
@@ -790,15 +788,26 @@ function createBackgroundWorker(platform = {}) {
 
   async function ensureContentScript(tabId) {
     const chrome = getChrome();
-    // Programmatic injection: requires "scripting" + "activeTab" (or host permissions)
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: getInlineContentScriptFiles(),
+    });
+    let response;
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        files: getInlineContentScriptFiles(),
+      response = await chrome.tabs.sendMessage(tabId, {
+        type: 'GET_INLINE_TRANSLATION_STATE',
       });
-    } catch (e) {
-      // If already injected, executeScript can still succeed; on some pages it may fail (e.g., chrome://)
-      throw e;
+    } catch {}
+    const snapshot = response?.snapshot;
+    if (response?.ok !== true ||
+        !['original', 'active', 'translated', 'stopped'].includes(snapshot?.status) ||
+        typeof snapshot.progress !== 'string' || typeof snapshot.error !== 'string') {
+      throw Object.assign(new Error(
+        'The extension could not initialize on this page. Reload the extension on chrome://extensions, then reload this page and try again.'
+      ), { code: 'content_script_not_ready' });
+    }
+    if (stateByTab.get(tabId)?.inlineTranslationError?.code === 'content_script_not_ready') {
+      clearInlineTranslationError(tabId);
     }
   }
 
@@ -865,24 +874,11 @@ function createBackgroundWorker(platform = {}) {
     };
   }
 
-  // What an invocation tells the reader, which is one step's outcome and no other's.
-  //
-  // The steps ahead of it prepare the page, and the reader is not waiting on any of them: a
-  // Floating Translate Button that failed to mount is not what the Inline Translation
-  // Shortcut was pressed for, and saying so would bury what was. Starting Inline Translation
-  // is what they pressed for, and on a chrome:// tab, a PDF, or a page the extension cannot
-  // reach, its silence is indistinguishable from a translation about to appear.
-  //
-  // The failure travels in Inline Translation's own field of the tab state, which reaches
-  // the Inline Translation Section over the STATE_UPDATED broadcast every change already
-  // sends. It is not `state.error`: that one is Side Panel Translation's.
   function recordInvocationStepOutcome(tabId, step, failure) {
-    // What a recorded failure asks the reader for is a click on the extension icon, and this
-    // is the step that click makes succeed. So its success speaks, by withdrawing a message
-    // whose reason has been put right; its failure stays silent like every other step's,
-    // which is what keeps the message standing on a page no click can grant.
     if (step === INVOCATION_STEPS.INJECT_CONTENT_SCRIPTS) {
-      if (!failure) clearInlineTranslationError(tabId);
+      if (failure?.code === 'content_script_not_ready') {
+        setTabState(tabId, { inlineTranslationError: safeError(failure) });
+      } else if (!failure) clearInlineTranslationError(tabId);
       return;
     }
     if (step !== INVOCATION_STEPS.START_INLINE_TRANSLATION) return;
@@ -933,6 +929,7 @@ function createBackgroundWorker(platform = {}) {
       try {
         recordInvocationStepOutcome(tabId, step, failure);
       } catch {}
+      if (failure?.code === 'content_script_not_ready') break;
     }
   }
 

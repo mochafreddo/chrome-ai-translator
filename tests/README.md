@@ -12,6 +12,7 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | `npm run check:docs:history -- --base <full-commit-sha>` | Compare historical tracked Markdown with a fixed baseline | Node and Git; explicit full 40-character SHA-1 commit required |
 | `npm run check:commits -- <base> <head>` | Commit subject/body format | Node and Git; no browser or model |
 | `npm run test:integration` | Toolbar-action Chrome check only | `agent-browser` on `PATH` and network; no API key or model |
+| `npm run test:integration:content-readiness` | Content readiness after toolbar injection and reinjection, plus all-pages automatic injection | `agent-browser` on `PATH`; may prompt for all-sites access in its disposable browser session; no API key or model |
 | `npm run test:integration:<name>` | One dedicated unbilled Chrome check listed below | `agent-browser` and network; no API key or model |
 | `npm run verify:live:inline` | Real Inline Translation, Stop, and Restore | Browser prerequisites plus an OpenAI key; billed |
 | `npm run verify:live:sidepanel` | Real Side Panel Translation and protected-span preservation | Browser prerequisites plus an OpenAI key; billed |
@@ -67,6 +68,8 @@ Probe Session Budget behavior through admission of real paragraphs and subsequen
 Use [integration/harness.mjs](integration/harness.mjs) for CDP/browser wiring. Read its header before diagnosing driver failures or adding a browser check. Page-based collector checks use [viewport-harness.js](viewport-harness.js) without draining batches or requesting a model.
 
 The toolbar check [action-click.test.mjs](integration/action-click.test.mjs) opens a real Chrome with the unpacked extension. It chooses on-invocation Button Visibility through Options and waits for panel/button readiness after the toolbar action. It guards [ADR-0001](../docs/adr/0001-open-side-panel-from-action-click-handler.md), rather than translation quality. Its bounded failure output reports numeric version, target counts, readiness, CDP codes, timeout count, and exception presence; unavailable observations use `null`. Page content, target URLs, exception descriptions, and full logs are excluded.
+
+The [content-readiness check](integration/content-readiness.test.mjs) uses a local page to verify that the content script answers after the first toolbar injection and a repeated action, then saves the all-pages choice through Options and checks readiness and button mounting on a newly opened page. It observes Chrome DevTools Protocol network events and fails if any request reaches the OpenAI API. Approve the all-sites permission prompt if Chrome displays it in the disposable browser session; the check does not use an API key.
 
 Other checks run only through their dedicated scripts:
 

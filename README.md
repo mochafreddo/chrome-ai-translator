@@ -19,6 +19,14 @@ Button Visibility defaults to **Never**. You can also show the button after invo
 
 The saved key is not shown again in the Options input. Leave the field blank to keep it, or choose **Clear key** to remove both the saved key and the legacy `openai_api_key` value.
 
+### Update the unpacked extension
+
+After updating this repository, open `chrome://extensions` and click **Reload** on **Chrome AI Translator (Personal)**. Then reload each page where you use the extension. Reload both even when the version number has not changed: an already-running worker or page can still hold code from before the update.
+
+Reloading the page ends its Inline Translation Session, including its cache and Session Budget. Finish any work you want to keep before reloading. The extension does not reload itself automatically.
+
+If the panel says the extension could not initialize, reload the extension and the page in that order, then invoke it again. Clicking the toolbar icon opens the controls without sending a translation request.
+
 ## Open the controls
 
 Click the toolbar icon to open the side panel without starting a translation. Use the extension shortcut to open the panel and start Inline Translation:

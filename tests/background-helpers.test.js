@@ -278,6 +278,9 @@ function createTabTranslationChrome({
     },
     tabs: {
       async sendMessage(tabId, message) {
+        if (message.type === 'GET_INLINE_TRANSLATION_STATE') {
+          return { ok: true, snapshot: { status: 'original', progress: '', error: '' } };
+        }
         if (message.type === 'EXTRACT_ARTICLE') {
           return { ok: true, data: extract(tabId) };
         }
@@ -344,6 +347,132 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'toolbar reports unsuccessful content initialization after script injection',
+    async fn() {
+      const broadcasts = [];
+      const pageMessages = [];
+      const chrome = createTabTranslationChrome({
+        settings: { buttonVisibility: 'never' },
+        onStateMessage: (message) => broadcasts.push(message),
+      });
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        pageMessages.push({ tabId, ...message });
+        return undefined;
+      };
+      const worker = helpers.createBackgroundWorker({ chrome });
+
+      worker.handlers.onActionClicked({ id: 4201 });
+      await require('./inline-translation-operation.test').flushMicrotasks();
+
+      assert.equal(broadcasts.at(-1)?.state.inlineTranslationError?.code,
+        'content_script_not_ready');
+      assert.match(broadcasts.at(-1).state.inlineTranslationError.message,
+        /Reload the extension.*reload this page/);
+      assert.equal(broadcasts.at(-1).state.error, undefined);
+      assert.deepEqual(pageMessages, [{ tabId: 4201, type: 'GET_INLINE_TRANSLATION_STATE' }]);
+    },
+  },
+  {
+    name: 'shortcut waits for valid content readiness and clears the failure on a later invocation',
+    async fn() {
+      const broadcasts = [];
+      const pageMessages = [];
+      const chrome = createTabTranslationChrome({
+        settings: { buttonVisibility: 'never' },
+        onStateMessage: (message) => broadcasts.push(message),
+      });
+      chrome.tabs.query = async () => [{ id: 4201 }];
+      let readiness;
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        pageMessages.push({ tabId, ...message });
+        return message.type === 'GET_INLINE_TRANSLATION_STATE' ? readiness : { ok: true };
+      };
+      const worker = helpers.createBackgroundWorker({ chrome });
+      const invalid = [undefined, { ok: false }, { ok: true },
+        { ok: false, snapshot: { status: 'original', progress: '', error: '' } },
+        { ok: true, snapshot: { status: 'active' } },
+        { ok: true, snapshot: { status: 'unknown', progress: '', error: '' } },
+        { ok: true, snapshot: { status: 'original', progress: 0, error: '' } },
+        { ok: true, snapshot: { status: 'original', progress: '', error: null } }];
+      for (readiness of invalid) {
+        pageMessages.length = 0;
+        await worker.handlers.onCommand('translate-inline');
+        assert.equal(broadcasts.at(-1)?.state.inlineTranslationError?.code,
+          'content_script_not_ready');
+        assert.deepEqual(pageMessages, [{ tabId: 4201, type: 'GET_INLINE_TRANSLATION_STATE' }]);
+      }
+
+      readiness = { ok: true, snapshot: { status: 'original', progress: '', error: '' } };
+      pageMessages.length = 0;
+      await worker.handlers.onCommand('translate-inline');
+
+      assert.equal(broadcasts.at(-1).state.inlineTranslationError, null);
+      assert.deepEqual(pageMessages, [
+        { tabId: 4201, type: 'GET_INLINE_TRANSLATION_STATE' },
+        { tabId: 4201, type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' },
+        { tabId: 4201, type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation' },
+      ]);
+    },
+  },
+  {
+    name: 'Side Panel Translation stops before extraction or model calls when content initialization fails',
+    async fn() {
+      const broadcasts = [];
+      const pageMessages = [];
+      const chrome = createTabTranslationChrome({
+        settings: { apiKey: 'synthetic-test-key' },
+        onStateMessage: (message) => broadcasts.push(message),
+      });
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        pageMessages.push({ tabId, ...message });
+        throw new Error('Could not establish connection. Receiving end does not exist.');
+      };
+      let modelCalls = 0;
+      const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => {
+        modelCalls += 1;
+        throw new Error('Unexpected model call');
+      } });
+
+      const responses = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 4201 }]);
+
+      assert.deepEqual(responses, [{ ok: true, skipped: true, reason: 'content_script_unavailable' }]);
+      assert.equal(modelCalls, 0);
+      assert.deepEqual(pageMessages, [{ tabId: 4201, type: 'GET_INLINE_TRANSLATION_STATE' }]);
+      assert.equal(broadcasts.at(-1).state.status, 'error');
+      assert.match(broadcasts.at(-1).state.error.message, /Reload the extension.*reload this page/);
+    },
+  },
+  {
+    name: 'successful Side Panel preparation clears an earlier Inline initialization failure',
+    async fn() {
+      const broadcasts = [];
+      const chrome = createTabTranslationChrome({
+        settings: { apiKey: 'synthetic-test-key', buttonVisibility: 'never' },
+        extract: () => ({ title: 'Empty article', url: 'https://example.test/',
+          langHint: 'en', contentMarkdown: '',
+          translationDocument: { namespace: 'EMPTY', entries: [], blocks: [] } }),
+        onStateMessage: (message) => broadcasts.push(message),
+      });
+      const answer = chrome.tabs.sendMessage;
+      let initialized = false;
+      chrome.tabs.sendMessage = async (tabId, message) =>
+        !initialized && message.type === 'GET_INLINE_TRANSLATION_STATE'
+          ? undefined : answer(tabId, message);
+      const worker = helpers.createBackgroundWorker({ chrome });
+      worker.handlers.onActionClicked({ id: 4201 });
+      await require('./inline-translation-operation.test').flushMicrotasks();
+      assert.equal(broadcasts.at(-1)?.state.inlineTranslationError?.code,
+        'content_script_not_ready');
+
+      initialized = true;
+      const responses = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 4201 }]);
+
+      assert.deepEqual(responses, [{ ok: true }]);
+      assert.equal(broadcasts.at(-1).state.status, 'done');
+      assert.equal(broadcasts.at(-1).state.inlineTranslationError, null);
+    },
+  },
   {
     name: 'publishes extracted metadata and completes an empty document without model requests',
     async fn() {

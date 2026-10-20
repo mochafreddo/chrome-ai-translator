@@ -58,6 +58,35 @@ function domPanel() {
 }
 exports.name = 'sidepanel tab state';
 exports.tests = [
+  {
+    name: 'actual panel shows initialization recovery instead of asking for page access',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      const message = 'Initialization failed. Reload the extension and this page.';
+      panel.setSend((request) => request.type === 'GET_STATE'
+        ? { ok: true, state: { status: 'idle', inlineTranslationError: {
+          code: 'content_script_not_ready', message,
+        } } }
+        : { ok: false, snapshot: null });
+
+      panel.poll();
+      await settle();
+
+      assert.equal(panel.element('inlineError').textContent, message);
+      assert.equal(panel.element('inlineStatus').textContent, '');
+      assert.equal(panel.element('btnInlineTranslate').disabled, true);
+      assert.equal(panel.element('errorBox').textContent, '');
+
+      panel.setSend((request) => request.type === 'GET_STATE'
+        ? { ok: true, state: { status: 'idle', inlineTranslationError: null } }
+        : { ok: true, snapshot: { status: 'original', progress: '', error: '' } });
+      panel.poll();
+      await settle();
+      assert.equal(panel.element('inlineError').textContent, '');
+      assert.equal(panel.element('btnInlineTranslate').disabled, false);
+    },
+  },
   ...['GET_STATE', 'GET_INLINE_TRANSLATION_STATE'].map((type) => ({
     name: `actual panel rejects delayed ${type} from the previous tab`,
     async fn() {

@@ -50,8 +50,8 @@ function createContentPage(fixture) {
       },
     } },
   });
-  function inject() {
-    for (const file of getInlineContentScriptFiles()) vm.runInContext(
+  function inject(files = getInlineContentScriptFiles()) {
+    for (const file of files) vm.runInContext(
       fs.readFileSync(path.join(__dirname, '..', 'extension', file), 'utf8'), page,
       { filename: file }
     );
