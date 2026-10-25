@@ -436,17 +436,80 @@ exports.tests = [
     },
   },
   {
-    name: 'OpenRouter worker refuses Inline batches before a model request',
+    name: 'OpenRouter Inline worker sends strict structured output to its selected service',
     async fn() {
+      const requests = [];
       const worker = helpers.createBackgroundWorker({ chrome: createBlockBatchChrome({ settings: {
         ...BLOCK_BATCH_SETTINGS, service: 'openrouter', openrouterApiKey: 'sk-or-synthetic',
-      } }), fetch: () => assert.fail('OpenRouter Inline must make no model request') });
+      } }), fetch: async (url, options) => {
+        requests.push({ url, authorization: options.headers.Authorization, body: JSON.parse(options.body) });
+        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+          translations: [{ id: 'b1', template: '번역입니다.' }],
+        })); } };
+      } });
       const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
         records: [createTestPlainBlockRecord()], settingsSnapshot: { service: 'openrouter' },
       }]);
-      assert.equal(response.ok, false);
-      assert.match(response.error.message, /OpenRouter.*not yet available/);
+      assert.equal(response.ok, true);
+      assert.equal(response.results[0].disposition, 'apply');
+      assert.equal(response.results[0].template, '번역입니다.');
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].url, 'https://openrouter.ai/api/v1/responses');
+      assert.equal(requests[0].authorization, 'Bearer sk-or-synthetic');
+      const body = requests[0].body;
+      assert.equal(body.model, 'deepseek/deepseek-v4.1-flash-1017');
+      assert.deepEqual(body.reasoning, { effort: 'none' });
+      assert.deepEqual(body.provider, { require_parameters: true, data_collection: 'deny', zdr: true });
+      assert.equal(body.text.format.type, 'json_schema');
+      assert.equal(body.text.format.strict, true);
+      assert.equal(body.max_output_tokens, 4096);
+      assert.equal(body.store, false);
       assert.doesNotMatch(JSON.stringify(response), /sk-or-synthetic|sk-test/);
+    },
+  },
+  ...[
+    [401, 'openrouter.authentication'], [402, 'openrouter.credits'],
+    [429, 'openrouter.rate_limit'], [503, 'openrouter.unavailable'],
+    ['network', 'openrouter.transport'], [null, 'response.not_completed'],
+    [createCompletedResponse(''), 'response.output_missing'],
+    [createIncompleteResponse(), 'response.incomplete.max_output_tokens'],
+    [createCompletedResponse('malformed synthetic payload'), 'protocol.invalid_json'],
+  ].map(([answer, code]) => ({
+    name: `OpenRouter Inline ${code} fails safely without fallback or another request`,
+    async fn() {
+      const requests = [];
+      const stored = {};
+      const worker = helpers.createBackgroundWorker({ chrome: createBlockBatchChrome({ stored, settings: {
+        ...BLOCK_BATCH_SETTINGS, service: 'openrouter', openrouterApiKey: 'sk-or-synthetic',
+      } }), fetch: async (url, options) => {
+        requests.push({ url, authorization: options.headers.Authorization });
+        if (answer === 'network') throw new Error('sk-or-synthetic private source payload');
+        return { ok: typeof answer !== 'number', status: answer,
+          async json() { return typeof answer === 'number'
+            ? { error: { message: 'sk-or-synthetic private source payload' } } : answer; } };
+      } });
+      const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        operationId: 'openrouter-failure', records: [createTestPlainBlockRecord()],
+      }]);
+      assert.equal(response.ok, false);
+      assert.equal(response.error.code, code);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].url, 'https://openrouter.ai/api/v1/responses');
+      assert.equal(requests[0].authorization, 'Bearer sk-or-synthetic');
+      assert.doesNotMatch(JSON.stringify([response, stored]), /sk-or-synthetic|sk-test|private source payload|malformed synthetic payload/);
+    },
+  })),
+  {
+    name: 'OpenRouter Inline missing key never uses the saved OpenAI key',
+    async fn() {
+      const worker = helpers.createBackgroundWorker({ chrome: createBlockBatchChrome({ settings: {
+        ...BLOCK_BATCH_SETTINGS, service: 'openrouter',
+      } }), fetch: () => assert.fail('missing selected key cannot send HTTP') });
+      const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        records: [createTestPlainBlockRecord()],
+      }]);
+      assert.equal(response.ok, false);
+      assert.match(response.error.message, /OpenRouter.*key/);
     },
   },
   {
@@ -3899,5 +3962,37 @@ exports.tests.push({
       { tabId: 8, instruction: 'stopInlineTranslation' },
       { tabId: 9, instruction: 'startInlineTranslation' },
     ]);
+  },
+});
+
+exports.tests.push({
+  name: 'OpenRouter Inline preserves safe siblings and repairs an unsafe block only once',
+  async fn() {
+    const requests = [];
+    const worker = helpers.createBackgroundWorker({ chrome: createBlockBatchChrome({ settings: {
+      ...BLOCK_BATCH_SETTINGS, service: 'openrouter', openrouterApiKey: 'sk-or-synthetic',
+    } }), fetch: async (url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push({ url, authorization: options.headers.Authorization, body });
+      return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+        translations: requests.length === 1
+          ? [{ id: 'b1', template: '토큰이 빠진 번역입니다.' }, { id: 'b2', template: '안전한 번역입니다.' }]
+          : [{ id: 'b1', template: '여전히 토큰이 빠졌습니다.' }],
+      })); } };
+    } });
+    const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+      records: [createBlockApiRecord('b1'), createTestPlainBlockRecord('b2')],
+    }]);
+    assert.equal(response.ok, true);
+    assert.equal(requests.length, 2);
+    assert.equal(response.results[0].disposition, 'reject');
+    assert.equal(response.results[0].attemptCount, 2);
+    assert.equal(response.results[1].disposition, 'apply');
+    assert.equal(response.results[1].attemptCount, 1);
+    assert.ok(requests.every(request => request.url === 'https://openrouter.ai/api/v1/responses' &&
+      request.authorization === 'Bearer sk-or-synthetic' && request.body.reasoning.effort === 'none' &&
+      request.body.provider.zdr === true));
+    const repair = JSON.parse(requests[1].body.input);
+    assert.deepEqual(repair.records.map(record => record.id), ['b1']);
   },
 });

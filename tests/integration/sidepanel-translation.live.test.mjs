@@ -55,6 +55,7 @@ import {
   wait,
 } from './harness.mjs';
 import { withApiKey } from './live-key.mjs';
+import { observeModelRequests } from './model-request-evidence.mjs';
 import {
   describeSurvivalFailures,
   findSurvivalFailures,
@@ -95,9 +96,6 @@ const ATTEMPTS = 3;
 const ATTEMPT_TIMEOUT_MS = 240000;
 
 const { check, failures, finish } = createChecks('side panel translation live');
-const requestEvidence = [];
-const reasoningEvidence = [];
-const pendingEvidence = new Set();
 
 const countKind = (spans, kind) => spans.filter((span) => span.kind === kind).length;
 
@@ -117,42 +115,13 @@ async function main() {
     const page = ctx.page;
     if (!check('page execution context is reachable', (await page.evaluate('1 + 1')) === 2)) return;
 
+    let evidence = null;
     if (SERVICE === 'openrouter') {
       const target = await ctx.findTarget(candidate => candidate.type === 'service_worker' &&
         candidate.url.startsWith(`chrome-extension://${ctx.extension.id}/`));
       if (!check('OpenRouter worker evidence observer is available', Boolean(target))) return;
       const worker = await ctx.attach(target.id, 'service_worker');
-      const requestIds = new Set();
-      const responseIds = new Set();
-      ctx.cdp.on('Network.requestWillBeSent', (event, sessionId) => {
-        if (sessionId !== worker.sessionId || event.request?.method !== 'POST' ||
-            !event.request?.url?.startsWith('https://openrouter.ai/')) return;
-        requestIds.add(event.requestId);
-        try {
-          const body = JSON.parse(event.request.postData || '{}');
-          requestEvidence.push({ model: body.model, reasoning: body.reasoning, provider: body.provider,
-            maxOutputTokens: body.max_output_tokens, store: body.store });
-        } catch { requestEvidence.push({ malformed: true }); }
-      });
-      ctx.cdp.on('Network.responseReceived', (event, sessionId) => {
-        if (sessionId === worker.sessionId && requestIds.has(event.requestId)) {
-          responseIds.add(event.requestId);
-        }
-      });
-      ctx.cdp.on('Network.loadingFinished', (event, sessionId) => {
-        if (sessionId !== worker.sessionId || !responseIds.has(event.requestId)) return;
-        const pending = ctx.cdp.send('Network.getResponseBody', { requestId: event.requestId }, sessionId)
-          .then(result => {
-            try {
-              const data = JSON.parse(result.base64Encoded ? Buffer.from(result.body, 'base64').toString('utf8') : result.body);
-              const tokens = data.usage?.output_tokens_details?.reasoning_tokens;
-              reasoningEvidence.push(Number.isInteger(tokens) ? tokens : null);
-            } catch { reasoningEvidence.push(null); }
-          }).finally(() => pendingEvidence.delete(pending));
-        pendingEvidence.add(pending);
-      });
-      const observed = await ctx.cdp.send('Network.enable', {}, worker.sessionId);
-      if (!check('OpenRouter network evidence observer is enabled', !observed.__error && !observed.__timeout)) return;
+      evidence = await observeModelRequests(ctx.cdp, worker.sessionId, { reasoningUsage: true });
     }
 
     const spans = readProtectedSpans(readFileSync(FIXTURE, 'utf8'));
@@ -365,7 +334,8 @@ async function main() {
       console.log('\nwhat the run saw:');
       for (const line of ledger) console.log(`  ${line}`);
       if (SERVICE === 'openrouter') {
-        await Promise.all([...pendingEvidence]);
+        await evidence.settle();
+        const { requests: requestEvidence, reasoningTokens: reasoningEvidence } = evidence;
         check('OpenRouter requests retain the pinned model and strict data policy', requestEvidence.length > 0 &&
           requestEvidence.every(evidence => evidence.model === 'deepseek/deepseek-v4.1-flash-1017' &&
             evidence.reasoning?.effort === 'none' && evidence.provider?.require_parameters === true &&

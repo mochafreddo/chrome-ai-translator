@@ -108,7 +108,7 @@ const inlineDiagnosticsProtocol =
   globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol || require('./inline-diagnostics-protocol.js');
 const inlineDiagnosticsController =
   globalThis.ChromeAiTranslatorInlineDiagnosticsController || require('./inline-diagnostics-controller.js');
-const { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings } =
+const { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings, getOpenRouterFailureMessage } =
   globalThis.ChromeAiTranslatorDefaultModel || require('./default-model.js');
 
 const workerInvocation = globalThis.ChromeAiTranslatorWorkerInvocation ||
@@ -784,22 +784,18 @@ function createBackgroundWorker(platform = {}) {
       });
     } catch (error) {
       if (!openrouter) throw error;
-      throw Object.assign(new Error('OpenRouter request could not reach the service.'), { code: 'openrouter.transport' });
+      throw Object.assign(new Error(getOpenRouterFailureMessage('openrouter.transport')), { code: 'openrouter.transport' });
     }
 
     const json = await res.json().catch(() => null);
     if (!res.ok) {
       if (openrouter) {
         const failures = {
-          401: ['authentication', 'OpenRouter authentication failed. Check its API key in Options.'],
-          402: ['credits', 'OpenRouter has insufficient credits. Check your OpenRouter account.'],
-          403: ['access', 'OpenRouter refused access to this request.'],
-          404: ['model', 'OpenRouter could not serve the pinned model.'],
-          429: ['rate_limit', 'OpenRouter rate limit reached. Try again later.'],
-          503: ['unavailable', 'OpenRouter has no available endpoint meeting the required model and data policy.'],
+          401: 'authentication', 402: 'credits', 403: 'access', 404: 'model',
+          429: 'rate_limit', 503: 'unavailable',
         };
-        const [code, message] = failures[res.status] || ['request', `OpenRouter request failed (HTTP ${Number(res.status) || 0}).`];
-        throw Object.assign(new Error(message), { code: `openrouter.${code}` });
+        const code = `openrouter.${failures[res.status] || 'request'}`;
+        throw Object.assign(new Error(getOpenRouterFailureMessage(code)), { code });
       }
       const msg = json?.error?.message || `OpenAI API error (${res.status})`;
       throw new Error(msg);
@@ -833,12 +829,10 @@ function createBackgroundWorker(platform = {}) {
         await getSettings(),
         settingsSnapshot
       );
-      if (settings.service === 'openrouter') {
-        throw new Error('OpenRouter Inline Translation is not yet available. Use Side Panel Translation or select OpenAI in Options.');
-      }
       run.describe({ model: settings.model });
-      if (!settings.apiKey) {
-        throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+      const apiKey = settings.service === 'openrouter' ? settings.openrouterApiKey : settings.apiKey;
+      if (!apiKey) {
+        throw new Error(`${settings.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`);
       }
       run.describe({ targetLanguageCode: getTargetLanguageCode(settings.targetLanguage) });
       await run.preflight();
@@ -850,7 +844,7 @@ function createBackgroundWorker(platform = {}) {
         tone: settings.tone,
       }, (request) => {
         run.modelAttempt();
-        return openaiTranslateChunk({ ...request, apiKey: settings.apiKey });
+        return openaiTranslateChunk({ ...request, service: settings.service, apiKey });
       });
       return await run.complete(results);
     } catch (error) {

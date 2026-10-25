@@ -20,7 +20,26 @@
       reasoningEffort: service === 'openrouter' ? 'none' : String(settings.reasoningEffort || 'none'),
     };
   }
-  const api = { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings };
+  const OPENROUTER_FAILURE_MESSAGES = Object.freeze({
+    'openrouter.authentication': 'OpenRouter authentication failed. Check its API key in Options.',
+    'openrouter.credits': 'OpenRouter has insufficient credits. Check your OpenRouter account.',
+    'openrouter.access': 'OpenRouter refused access to this request.',
+    'openrouter.model': 'OpenRouter could not serve the pinned model.',
+    'openrouter.rate_limit': 'OpenRouter rate limit reached. Try again later.',
+    'openrouter.unavailable': 'OpenRouter has no available endpoint meeting the required model and data policy.',
+    'openrouter.transport': 'OpenRouter request could not reach the service.',
+    'openrouter.request': 'OpenRouter request failed. Try again later.',
+  });
+
+  function getOpenRouterFailureMessage(code) {
+    if (Object.prototype.hasOwnProperty.call(OPENROUTER_FAILURE_MESSAGES, code)) {
+      return OPENROUTER_FAILURE_MESSAGES[code];
+    }
+    return /^(?:response|protocol)\./.test(String(code || ''))
+      ? 'OpenRouter returned an invalid or incomplete translation response.' : '';
+  }
+
+  const api = { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings, getOpenRouterFailureMessage };
   globalScope.ChromeAiTranslatorDefaultModel = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);
