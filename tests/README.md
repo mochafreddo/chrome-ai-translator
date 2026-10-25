@@ -16,6 +16,7 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | `npm run test:integration:<name>` | One dedicated unbilled Chrome check listed below | `agent-browser` and network; no API key or model |
 | `npm run verify:live:inline` | Real Inline Translation, Stop, and Restore | Browser prerequisites plus an OpenAI key; billed |
 | `npm run verify:live:sidepanel` | Real Side Panel Translation and protected-span preservation | Browser prerequisites plus an OpenAI key; billed |
+| `npm run verify:live:openrouter:inline` | Real OpenRouter Inline Translation, structured output, Stop, restoration, request policy, and provider-reported reasoning usage | Browser prerequisites plus a named OpenRouter key; billed |
 | `npm run verify:live:openrouter:sidepanel` | Real OpenRouter Side Panel Translation, request policy, provider-reported reasoning usage, and protected-span preservation | Browser prerequisites plus a named OpenRouter key; billed |
 | `npm run verify:live` | Both billed checks, sequentially | Same prerequisites; attempts the second even if the first fails |
 
@@ -89,7 +90,8 @@ Other checks run only through their dedicated scripts:
 | `ai-hero-responsive-labels` | Desktop/mobile skill navigation: hidden alternatives as text-free Inert Page Nodes, deterministic apply, exact DOM restore, zero model requests |
 | `heading-permalink` | Local and reported advisor headings: edge controls, node identity, focus/click behavior, deterministic apply, exact restore |
 | `data-as-paragraph` | Local and advisor `span[data-as="p"]` paragraphs: repeated collection, preserved inline elements, exact restoration, and ownership changes |
-| `openrouter-sidepanel` | Options service/key persistence and independent clear, fixed-host permissions, pinned-model Side Panel entry and multi-chunk deterministic rendered output, strict request routing/policy, and interim Inline refusal; synthetic keys and worker-wide request interception, no real model calls |
+| `openrouter-inline` | Options service switching, selected credential/configuration, structured Inline output, same-service cache, cross-service cache separation, delayed uncached Stop, exact HTML and page-node restoration; synthetic keys and worker-wide interception, no real model calls |
+| `openrouter-sidepanel` | Options service/key persistence and independent clear, fixed-host permissions, pinned-model Side Panel entry and multi-chunk deterministic rendered output, strict request routing/policy; synthetic keys and worker-wide request interception, no real model calls |
 
 Reported-page checks navigate public pages read-only and use deterministic output where application is tested. They establish the local DOM paths stated above, not model quality or complete extension startup. Live-page block counts are observations rather than permanent assertions. Generic DIV/SPAN paragraph inference and other `data-as` values remain unsupported; headings with controls embedded within prose remain outside the edge-control contract.
 
@@ -99,13 +101,13 @@ Both live checks launch their own Chrome session, save a key through Options, an
 
 Provide an OpenAI key in the gitignored `.env.local`. [integration/live-key.mjs](integration/live-key.mjs) accepts the named entries `OPENAI_API_KEY`, `OPENAI_KEY`, or `OPENAI_SECRET_KEY`, in that order when nonempty. A missing or unattributable key fails rather than silently skipping. Add a newly approved provider-specific name to that helper instead of guessing from an `sk-` value, which can also identify another provider. The helper hands the key to the local CDP session without returning it to its caller or printing it.
 
-For `verify:live:openrouter:sidepanel`, provide `OPENROUTER_API_KEY` in that same file. The helper selects the requested service through Options, saves only its named credential, and selects that service again before clearing it through the real UI in `finally`. OpenAI keys are never substituted for a missing OpenRouter key. Run this command only after separate approval for credential access and billed execution; adding the command grants neither.
+For `verify:live:openrouter:inline` and `verify:live:openrouter:sidepanel`, provide `OPENROUTER_API_KEY` in that same file. The helper selects the requested service through Options, saves only its named credential, and selects that service again before clearing it through the real UI in `finally`. OpenAI keys are never substituted for a missing OpenRouter key. Run this command only after separate approval for credential access and billed execution; adding the command grants neither.
 
 ### Inline Translation
 
 [inline-translation.live.test.mjs](integration/inline-translation.live.test.mjs) translates a [local fixture](integration/fixtures/inline-translation.html) and asserts target-language output, exact restoration, and control transitions rather than a model's wording.
 
-The first run translates three visible blocks. The second reveals a fourth short block that is absent from the cache, then waits for a pending request before pressing Stop and checks that its late answer is never applied. Restored cache hits alone would offer Stop without proving cancellation of an in-flight request. Expect the initial three blocks plus one new block and request overhead; output/repair behavior can change the actual bill.
+The first run translates three visible blocks. The second reveals a fourth short block that is absent from the cache, then observes an actual pending model request before pressing Stop. It waits for that request to complete and checks that its late answer is never applied. Restored cache hits alone would offer Stop without proving cancellation of an in-flight request. Expect the initial three blocks plus one new block and request overhead; output/repair behavior can change the actual bill.
 
 ### Side Panel Translation
 
@@ -115,7 +117,7 @@ The fixture has twelve links and twelve inline code spans in roughly 5,000 Markd
 
 [integration/protected-spans.mjs](integration/protected-spans.mjs) owns span counting; its unit suite checks the helper and fixture density. Separate live commands let you authorize one translation flow without paying for both.
 
-The OpenRouter variant uses the same fixture and attempts. It observes only allowlisted request configuration and provider-reported reasoning-token counts for reporting, excluding credentials and translation bodies. A missing reasoning-usage field fails the evidence check rather than proving disablement. Zero reported reasoning tokens is limited provider evidence, not visibility into provider internals. These live checks have not established that the pinned model currently has a compliant route or the structured-output contract needed for OpenRouter Inline Translation. Missing authorization, credentials, credits, eligible endpoints, or sufficient response evidence remains a blocker.
+The OpenRouter variant uses the same fixture and attempts. It observes only allowlisted request configuration and provider-reported reasoning-token counts for reporting, excluding credentials and translation bodies. A missing reasoning-usage field fails the evidence check rather than proving disablement. Zero reported reasoning tokens is limited provider evidence, not visibility into provider internals. The OpenRouter Inline variant additionally observes strict JSON schema configuration and the existing output bounds. These live checks have not established that the pinned model currently has a compliant route or a working structured-output contract. Missing authorization, credentials, credits, eligible endpoints, or sufficient response evidence remains a blocker.
 
 ## Historical verification evidence
 

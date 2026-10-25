@@ -290,3 +290,43 @@ exports.tests = [
     },
   },
 ];
+
+exports.tests.push({
+  name: 'model request evidence pairs worker responses and retains only policy and usage metadata',
+  async fn() {
+    const { observeModelRequests } = await import('./integration/model-request-evidence.mjs');
+    const listeners = new Map();
+    const calls = [];
+    const cdp = {
+      on(type, callback) { listeners.set(type, callback); return () => listeners.delete(type); },
+      async send(method, args, sessionId) {
+        calls.push({ method, args, sessionId });
+        return method === 'Network.getResponseBody' ? { base64Encoded: true,
+          body: Buffer.from(JSON.stringify({ usage: { output_tokens_details: { reasoning_tokens: 0 } },
+            output: 'private translated payload' })).toString('base64') } : {};
+      },
+    };
+    const evidence = await observeModelRequests(cdp, 'worker', { reasoningUsage: true });
+    const request = { requestId: 'one', request: { method: 'POST', url: 'https://openrouter.ai/api/v1/responses',
+      headers: { Authorization: 'private-key' }, postData: JSON.stringify({ model: 'pinned', reasoning: { effort: 'none', extra: 'private reasoning field' },
+        provider: { require_parameters: true, data_collection: 'deny', zdr: true, extra: 'private provider field' }, input: 'private source payload', max_output_tokens: 4096, store: false,
+        text: { format: { type: 'json_schema', strict: true, schema: 'private schema' } } }) } };
+    listeners.get('Network.requestWillBeSent')(request, 'other-worker');
+    listeners.get('Network.loadingFinished')({ requestId: 'unknown' }, 'worker');
+    assert.equal(evidence.requests.length, 0);
+    listeners.get('Network.requestWillBeSent')(request, 'worker');
+    listeners.get('Network.responseReceived')({ requestId: 'one' }, 'worker');
+    listeners.get('Network.loadingFinished')({ requestId: 'one' }, 'worker');
+    listeners.get('Network.loadingFinished')({ requestId: 'one' }, 'worker');
+    await evidence.settle();
+    assert.deepEqual(evidence.requests, [{ service: 'openrouter', model: 'pinned', reasoning: { effort: 'none' },
+      provider: { require_parameters: true, data_collection: 'deny', zdr: true }, format: 'json_schema', strict: true, maxOutputTokens: 4096, store: false }]);
+    assert.deepEqual([...evidence.completedRequests], ['one']);
+    assert.deepEqual(evidence.reasoningTokens, [0]);
+    assert.deepEqual(calls, [{ method: 'Network.enable', args: {}, sessionId: 'worker' },
+      { method: 'Network.getResponseBody', args: { requestId: 'one' }, sessionId: 'worker' }]);
+    assert.doesNotMatch(JSON.stringify(evidence), /private-key|private source payload|private translated payload|private schema|private reasoning field|private provider field/);
+    evidence.close();
+    assert.equal(listeners.size, 0);
+  },
+});

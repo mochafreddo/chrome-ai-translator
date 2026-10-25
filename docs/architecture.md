@@ -12,7 +12,7 @@ This reference describes the current implementation. Domain terms are defined in
 | Failure boundary | An unrecovered chunk failure ends the whole translation | A failed block leaves its original content and siblings can continue |
 | Reuse | A new translation sends the document again | Matching translations are cached within the page visit |
 
-The two flows share settings, Responses API transport, and the [Placeholder Token validator](../extension/placeholder-tokens.js). Their admission rules, result lifetimes, and failure behavior remain separate. Side Panel Translation supports OpenAI and OpenRouter. Inline Translation currently supports OpenAI; its shared Start preparation refuses OpenRouter before scanning or sending a batch, and the worker also refuses OpenRouter batches.
+The two flows share settings, Responses API transport, and the [Placeholder Token validator](../extension/placeholder-tokens.js). Their admission rules, result lifetimes, and failure behavior remain separate. Both translation experiences support OpenAI and OpenRouter through the same selected-service transport.
 
 ### Side Panel Translation
 
@@ -36,7 +36,7 @@ Inline controls reach the page through the worker's instruction messages. [conte
 1. Operation checks authorization and obtains a settings snapshot. Session begins an Operation or an already-active Start asks for a rescan.
 2. Viewport discovers visible Semantic Blocks within the article root. Session admits supported blocks through the codec, applies eligible cache hits, and queues the rest.
 3. Session assembles bounded batches and charges initial record cost. Operation sends them to the worker as `TRANSLATE_VISIBLE_BLOCK_BATCH`.
-4. The worker validates request records and delegates to [inline-model-execution.js](../extension/inline-model-execution.js). Model execution builds structured JSON requests, validates protocol and structure, assesses translation quality, and permits at most one model-output repair per block.
+4. The worker validates request records, resolves the snapshot's service and effective settings with that service's current credential, and delegates to [inline-model-execution.js](../extension/inline-model-execution.js). Model execution builds structured JSON requests, validates protocol and structure, assesses translation quality, and permits at most one model-output repair per block.
 5. Session settles results, charges reported repairs, verifies current ownership, and applies safe translated templates through [inline-block.js](../extension/inline-block.js). Operation relays runtime outcomes and releases correlation tokens through its browser adapter.
 
 A structurally unsafe result is refused. Structurally safe output that still contains material source-language prose after repair is applied as Partial Translation. Failed blocks and unresolved page changes remain separate progress categories.
@@ -74,7 +74,7 @@ Late responses still settle against their originating Session. Reported repairs 
 
 ### Cache and page changes
 
-Session cache buckets distinguish service, target language, tone, effective model, and reasoning effort. Existing settings without a service select OpenAI. An active OpenAI Operation retains that service in its batch snapshot when Options later switches services. Entries also require compatible codec, serialized template, and protected context; cache application still checks the current DOM. Cached repair metadata is retained as result history, not charged again. Cache hits send no request and spend no Session Budget.
+Session cache buckets distinguish service, target language, tone, effective model, and reasoning effort. Existing settings without a service select OpenAI. An active Operation retains its starting service and effective settings in its batch snapshot when Options later changes. OpenRouter derives its pinned model and disabled reasoning before cache identity is computed, so stored OpenAI model and reasoning edits do not split that cache. Keys are excluded from cache identity. Entries also require compatible codec, serialized template, and protected context; cache application still checks the current DOM. Cached repair metadata is retained as result history, not charged again. Cache hits send no request and spend no Session Budget.
 
 If the page changes a queued block's text or replaces owned nodes, a returned translation cannot overwrite it. One page-change retry can reserialize eligible current content; the earlier record is excluded from unresolved Changed counts while its retry is pending. Viewport resets preserve a queued retry. Stop discards queued or in-flight retry ownership and exposes the unresolved change again. Page-change retry and model-output repair have separate limits; the original [retry design](design/inline-changed-text-retry-design.md) records the rationale, while Session owns today's transitions.
 

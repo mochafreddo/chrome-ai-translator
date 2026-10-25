@@ -1,6 +1,6 @@
 # Chrome AI Translator
 
-A personal Chrome extension that translates article pages through OpenAI or OpenRouter. Use **Side Panel Translation** to read translated Markdown beside the page. With OpenAI, you can also use **Inline Translation** to translate visible article text in place. OpenRouter Inline Translation is not yet available.
+A personal Chrome extension that translates article pages through OpenAI or OpenRouter. Use **Side Panel Translation** to read translated Markdown beside the page. Use **Inline Translation** to translate visible article text in place with either service.
 
 ## Requirements
 
@@ -50,13 +50,13 @@ You can change target language and tone for the current translation, and choose 
 
 Use the side panel's **Inline translation** section, the floating button, or the shortcut:
 
-Select OpenAI in Options first. With OpenRouter selected, every Inline Translation start reports that it is not yet available and sends no model request. Side Panel Translation remains available.
-
 1. Choose **Translate visible text** to start. Newly visible article blocks translate as you scroll.
 2. Choose **Scan visible text** while active to rescan the current viewport.
 3. Choose **Stop** to stop new work and keep existing translations.
 4. Choose **Original text** to restore original text and inline-node order where the page still permits safe restoration.
 5. Start again on the same page to reuse matching cached translations without another model request for those blocks.
+
+An active Operation keeps its starting service and effective settings, including when you rescan. A later Start after Stop or Original text reads Options again. Changing the service, effective model or reasoning effort, target language, or tone separates cached translations and restores safely owned prior translations before new work. Changing only a key preserves the matching cache.
 
 The floating menu offers the same start, stop, and restore actions; its start label reflects the target language. Progress and errors appear in the side panel's Inline Translation section regardless of where translation starts.
 
@@ -74,7 +74,7 @@ Stop and **Original text** keep the page visit's cache and Session Budget. Reloa
 
 ## Data and diagnostics
 
-Translation sends page content to your selected service's fixed endpoint. Responses requests use `store: false`. Side Panel Translation sends article Markdown with link destinations and code contents replaced by placeholders; those values stay within the extension for restoration. OpenAI Inline Translation sends serialized block records containing prose, structural metadata, and permitted visible labels; it does not send DOM attributes, event state, or hidden alternative-label text.
+Translation sends page content to your selected service's fixed endpoint. Responses requests use `store: false`. Side Panel Translation sends article Markdown with link destinations and code contents replaced by placeholders; those values stay within the extension for restoration. Inline Translation sends serialized block records containing prose, structural metadata, and permitted visible labels; it does not send DOM attributes, event state, or hidden alternative-label text.
 
 OpenRouter routes only the pinned model, requires support for mandatory request parameters, denies provider data collection, and requires Zero Data Retention (ZDR). Eligible providers of that model may serve requests. If no compliant endpoint is available, translation fails without weakening the policy or switching to another model or OpenAI. ZDR does not erase local extension settings or diagnostics, and does not mean that all request metadata disappears. Resolve key, credit, access, or rate-limit errors with the service named in the error.
 
@@ -82,6 +82,6 @@ Options lets you view recent Inline Translation diagnostics and copy or save dia
 
 ## Development and documentation
 
-Run `npm test` for the browser-free unit suite and `npm run check:syntax` for extension script parsing. Browser checks have separate commands and prerequisites in the [test guide](tests/README.md). `npm run test:integration` runs only the toolbar-action check. `npm run verify:live` runs both OpenAI real-model checks and incurs API charges; `npm run verify:live:openrouter:sidepanel` separately bills OpenRouter. Deterministic tests do not establish current model compatibility or availability under the required policy. Live OpenRouter verification, including structured output for future Inline support, remains a separate requirement.
+Run `npm test` for the browser-free unit suite and `npm run check:syntax` for extension script parsing. Browser checks have separate commands and prerequisites in the [test guide](tests/README.md). `npm run test:integration` runs only the toolbar-action check. `npm run verify:live` runs both OpenAI real-model checks and incurs API charges; `npm run verify:live:openrouter:inline` and `npm run verify:live:openrouter:sidepanel` separately bill OpenRouter. Deterministic tests do not establish current model compatibility or availability under the required policy. Live OpenRouter verification, including structured output, Stop, restoration, and provider-reported reasoning usage, remains a separate requirement.
 
 Start with the [documentation index](docs/README.md) for the current architecture, glossary, decisions, agent procedures, and historical design and QA records. Load `extension/` directly; the repository has no build step.
