@@ -530,8 +530,8 @@ exports.tests = [
       );
     },
   },
-  {
-    name: 'keeps save feedback and fields independent from translation state',
+  ...['openai', 'openrouter'].map(service => ({
+    name: `${service} keeps save feedback and fields independent from translation state`,
     async fn() {
       const previousChrome = global.chrome;
       const previousDocument = global.document;
@@ -610,6 +610,7 @@ exports.tests = [
               return {
                 ok: true,
                 settings: {
+                  service,
                   targetLanguage: 'Korean',
                   tone: 'technical',
                   model: 'gpt-5.4-mini',
@@ -646,6 +647,9 @@ exports.tests = [
           await Promise.resolve();
         }
         assert.equal(typeof refreshInterval, 'function');
+        assert.equal(getElement('model').disabled, service === 'openrouter');
+        assert.equal(getElement('model').value, service === 'openrouter' ?
+          'deepseek/deepseek-v4.1-flash-1017' : 'gpt-5.4-mini');
 
         getElement('targetLanguage').value = 'Private target';
         getElement('tone').value = 'natural';
@@ -717,7 +721,7 @@ exports.tests = [
           settings: {
             targetLanguage: 'Private target',
             tone: 'natural',
-            model: 'private-model-name',
+            ...(service === 'openai' ? { model: 'private-model-name' } : {}),
             viewMode: 'bilingual',
           },
         });
@@ -752,7 +756,7 @@ exports.tests = [
         if (originalModule) require.cache[modulePath] = originalModule;
       }
     },
-  },
+  })),
   {
     name: 'drives Inline Translation from the panel without the Floating Translate Button',
     async fn() {

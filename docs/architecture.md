@@ -12,11 +12,13 @@ This reference describes the current implementation. Domain terms are defined in
 | Failure boundary | An unrecovered chunk failure ends the whole translation | A failed block leaves its original content and siblings can continue |
 | Reuse | A new translation sends the document again | Matching translations are cached within the page visit |
 
-The two flows share settings, Responses API transport, and the [Placeholder Token validator](../extension/placeholder-tokens.js). Their admission rules, result lifetimes, and failure behavior remain separate.
+The two flows share settings, Responses API transport, and the [Placeholder Token validator](../extension/placeholder-tokens.js). Their admission rules, result lifetimes, and failure behavior remain separate. Side Panel Translation supports OpenAI and OpenRouter. Inline Translation currently supports OpenAI; its shared Start preparation refuses OpenRouter before scanning or sending a batch, and the worker also refuses OpenRouter batches.
 
 ### Side Panel Translation
 
 The side panel sends `TRANSLATE_TAB` to the worker. The worker obtains article extraction from the page's content script, snapshots translation settings, manages per-tab execution and state broadcasts, and delegates document execution to [sidepanel-translation-execution.js](../extension/sidepanel-translation-execution.js).
+
+The settings snapshot includes the selected service and its credential before extraction. OpenAI retains the stored model and reasoning effort. OpenRouter derives the pinned `deepseek/deepseek-v4.1-flash-1017` model and `none` reasoning effort without overwriting stored OpenAI choices. The worker sends only the selected credential to that service's fixed Responses endpoint. OpenRouter requests include `provider: { require_parameters: true, data_collection: 'deny', zdr: true }`; no fallback model or service is configured. Response completion parsing and chunk recovery are shared. OpenRouter HTTP and transport errors use fixed service-attributed messages rather than reflecting provider bodies or thrown network text.
 
 The document path has four responsibilities:
 
@@ -72,7 +74,7 @@ Late responses still settle against their originating Session. Reported repairs 
 
 ### Cache and page changes
 
-Session cache buckets distinguish target language, tone, model, and reasoning effort. Entries also require compatible codec, serialized template, and protected context; cache application still checks the current DOM. Cached repair metadata is retained as result history, not charged again. Cache hits send no request and spend no Session Budget.
+Session cache buckets distinguish service, target language, tone, effective model, and reasoning effort. Existing settings without a service select OpenAI. An active OpenAI Operation retains that service in its batch snapshot when Options later switches services. Entries also require compatible codec, serialized template, and protected context; cache application still checks the current DOM. Cached repair metadata is retained as result history, not charged again. Cache hits send no request and spend no Session Budget.
 
 If the page changes a queued block's text or replaces owned nodes, a returned translation cannot overwrite it. One page-change retry can reserialize eligible current content; the earlier record is excluded from unresolved Changed counts while its retry is pending. Viewport resets preserve a queued retry. Stop discards queued or in-flight retry ownership and exposes the unresolved change again. Page-change retry and model-output repair have separate limits; the original [retry design](design/inline-changed-text-retry-design.md) records the rationale, while Session owns today's transitions.
 
@@ -125,7 +127,7 @@ Model validation metadata originates in model execution; worker orchestration su
 
 The retention policy exposes twenty unique runs across v2 and v3 namespaces, with at most one hundred problem blocks per run. Stored/exported fields are allowlisted, with numeric quality evidence and installation-scoped HMAC fingerprints. Source text, translations, matched words, protected labels, URLs, selectors, DOM attributes, request/response bodies, and API keys are excluded. Writes can over-retain after interrupted cleanup rather than erase history before the retained write succeeds. Legacy projection, cross-version idempotency, and the unchanged HMAC-secret key are specified in [ADR-0009](adr/0009-model-local-rejections-in-diagnostics-v3.md).
 
-Translation requests still transmit permitted page content to OpenAI, and the worker sets `store: false`. Diagnostic redaction does not change the model-input boundary. Options stores the API key in local extension settings, preserves it on a blank edit, and clears both current and legacy storage through its clear action.
+Translation requests transmit permitted page content to the selected service, and the worker sets `store: false`. Diagnostic redaction does not change the model-input boundary. Options stores independent OpenAI and OpenRouter keys in local extension settings, preserves the selected key on a blank edit, and clears only the selected service's credential. The OpenAI clear action also removes legacy storage. Public settings expose only key-presence masks, and the UI never populates saved values. OpenRouter's no-data-collection and ZDR routing conditions do not erase these local records or imply absence of all request metadata.
 
 ## Verification boundary
 

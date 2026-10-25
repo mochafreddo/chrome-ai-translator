@@ -134,6 +134,9 @@
       const response = await sendMessage({ type: 'GET_SETTINGS' });
       if (preparation !== requested) return;
       if (!response?.ok) throw new Error(response?.error?.message || 'Unable to load extension settings.');
+      if (response.settings?.service === 'openrouter') {
+        throw new Error('OpenRouter Inline Translation is not yet available. Use Side Panel Translation or select OpenAI in Options.');
+      }
       if (!response.settings?.apiKey) {
         error = 'Open Options and paste your OpenAI API key.';
         onChange();

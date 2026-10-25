@@ -35,6 +35,8 @@ async function withOptionsScreen(check, { granted = true, confirmed = true, resp
     diagnostics: global.ChromeAiTranslatorDiagnostics, setTimeout: global.setTimeout };
   const elements = new Map();
   const inputs = createChoiceInputs();
+  const services = ['openai', 'openrouter'].map(value => ({ value, checked: false,
+    listeners: {}, addEventListener(name, listener) { this.listeners[name] = listener; } }));
   const messages = [];
   const events = [];
   const element = (id) => {
@@ -42,7 +44,8 @@ async function withOptionsScreen(check, { granted = true, confirmed = true, resp
       listeners: {}, addEventListener(name, listener) { this.listeners[name] = listener; } });
     return elements.get(id);
   };
-  global.document = { getElementById: element, querySelectorAll: () => inputs };
+  global.document = { getElementById: element, querySelectorAll: selector =>
+    selector.includes('service') ? services : inputs };
   global.window = { confirm: () => confirmed };
   global.setTimeout = () => {};
   global.ChromeAiTranslatorDiagnostics = { loadDiagnostics: async () => ({ runs: [] }) };
@@ -59,7 +62,8 @@ async function withOptionsScreen(check, { granted = true, confirmed = true, resp
       messages.push(message);
       events.push(message.type);
       if (message.type === 'GET_SETTINGS') return { ok: true, settings: {
-        apiKey: '***', model: 'current-model', viewMode: 'bilingual', buttonVisibility: 'onInvocation',
+        apiKey: '***', openrouterApiKey: '***', model: 'current-model', reasoningEffort: 'low',
+        viewMode: 'bilingual', buttonVisibility: 'onInvocation',
       } };
       return typeof response === 'function' ? response() : response;
     } },
@@ -69,7 +73,7 @@ async function withOptionsScreen(check, { granted = true, confirmed = true, resp
     delete require.cache[modulePath];
     require('../extension/options.js');
     await flush();
-    await check({ element, inputs, messages, events, flush });
+    await check({ element, inputs, services, messages, events, flush });
   } finally {
     global.document = originals.document;
     global.window = originals.window;
@@ -82,6 +86,40 @@ async function withOptionsScreen(check, { granted = true, confirmed = true, resp
 
 exports.name = 'options helpers';
 exports.tests = [
+  {
+    name: 'Options switches services with independent keys and preserves OpenAI model and reasoning',
+    async fn() {
+      await withOptionsScreen(async ({ element, services, messages, flush }) => {
+        assert.equal(services.find(input => input.checked)?.value, 'openai');
+        assert.equal(element('reasoningEffort').value, 'low');
+        element('model').value = 'custom-openai';
+        element('reasoningEffort').value = 'high';
+        element('apiKey').value = 'do-not-carry-between-services';
+        helpers.checkChoice(services, 'openrouter');
+        services[1].listeners.change();
+        assert.equal(element('apiKey').value, '');
+        assert.equal(element('openaiSettings').hidden, true);
+        assert.equal(element('openrouterSettings').hidden, false);
+        element('apiKey').value = 'sk-or-synthetic';
+        element('btnSave').listeners.click();
+        await flush();
+        assert.deepEqual(messages.at(-1), { type: 'SAVE_SETTINGS', settings: {
+          service: 'openrouter', openrouterApiKey: 'sk-or-synthetic', targetLanguage: 'Korean',
+          tone: 'technical', model: 'custom-openai', reasoningEffort: 'high',
+          chunkMaxChars: 12000, buttonVisibility: 'onInvocation',
+        } });
+        element('btnClear').listeners.click();
+        await flush();
+        assert.deepEqual(messages.at(-1), { type: 'CLEAR_API_KEY', service: 'openrouter' });
+        helpers.checkChoice(services, 'openai');
+        services[0].listeners.change();
+        assert.equal(element('apiKey').value, '');
+        assert.equal(element('model').value, 'custom-openai');
+        assert.equal(element('reasoningEffort').value, 'high');
+        assert.equal(messages.filter(message => !['GET_SETTINGS', 'SAVE_SETTINGS', 'CLEAR_API_KEY'].includes(message.type)).length, 0);
+      });
+    },
+  },
   {
     name: 'Options cancellation leaves the key and storage untouched',
     async fn() {
@@ -130,7 +168,7 @@ exports.tests = [
         element('apiKey').value = 'sk-input-synthetic';
         element('btnClear').listeners.click();
         await flush();
-        assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }, { type: 'CLEAR_API_KEY' }]);
+        assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }, { type: 'CLEAR_API_KEY', service: 'openai' }]);
         assert.equal(events.includes('storage'), false);
         assert.notEqual(element('status').textContent, 'Key cleared.');
         resolveClear({ ok: true });
@@ -208,7 +246,7 @@ exports.tests = [
         assert.deepEqual(messages, [
           { type: 'GET_SETTINGS' },
           { type: 'SAVE_SETTINGS', settings: {
-            targetLanguage: 'Japanese', tone: 'formal', model: 'current-model',
+            service: 'openai', targetLanguage: 'Japanese', tone: 'formal', model: 'current-model', reasoningEffort: 'low',
             chunkMaxChars: 9000, buttonVisibility: 'onInvocation',
           } },
         ]);

@@ -67,7 +67,14 @@ const ROOT = join(HERE, '..', '..');
 const EXTENSION_DIR = join(ROOT, 'extension');
 const ENV_PATH = join(ROOT, '.env.local');
 const FIXTURE = join(HERE, 'fixtures', 'sidepanel-translation.html');
-const SESSION = 'chrome-ai-translator-live-sidepanel';
+const serviceArguments = process.argv.slice(2);
+if (serviceArguments.length && (serviceArguments.length !== 2 || serviceArguments[0] !== '--service' ||
+    !['openai', 'openrouter'].includes(serviceArguments[1]))) {
+  throw new Error('Use --service openai or --service openrouter');
+}
+const SERVICE = serviceArguments[1] || 'openai';
+const KEY_FIELD = SERVICE === 'openrouter' ? 'openrouterApiKey' : 'apiKey';
+const SESSION = `chrome-ai-translator-live-sidepanel-${SERVICE}`;
 const TARGET_LANGUAGE = 'Korean';
 const HANGUL = /[가-힣]/;
 
@@ -88,6 +95,9 @@ const ATTEMPTS = 3;
 const ATTEMPT_TIMEOUT_MS = 240000;
 
 const { check, failures, finish } = createChecks('side panel translation live');
+const requestEvidence = [];
+const reasoningEvidence = [];
+const pendingEvidence = new Set();
 
 const countKind = (spans, kind) => spans.filter((span) => span.kind === kind).length;
 
@@ -107,6 +117,44 @@ async function main() {
     const page = ctx.page;
     if (!check('page execution context is reachable', (await page.evaluate('1 + 1')) === 2)) return;
 
+    if (SERVICE === 'openrouter') {
+      const target = await ctx.findTarget(candidate => candidate.type === 'service_worker' &&
+        candidate.url.startsWith(`chrome-extension://${ctx.extension.id}/`));
+      if (!check('OpenRouter worker evidence observer is available', Boolean(target))) return;
+      const worker = await ctx.attach(target.id, 'service_worker');
+      const requestIds = new Set();
+      const responseIds = new Set();
+      ctx.cdp.on('Network.requestWillBeSent', (event, sessionId) => {
+        if (sessionId !== worker.sessionId || event.request?.method !== 'POST' ||
+            !event.request?.url?.startsWith('https://openrouter.ai/')) return;
+        requestIds.add(event.requestId);
+        try {
+          const body = JSON.parse(event.request.postData || '{}');
+          requestEvidence.push({ model: body.model, reasoning: body.reasoning, provider: body.provider,
+            maxOutputTokens: body.max_output_tokens, store: body.store });
+        } catch { requestEvidence.push({ malformed: true }); }
+      });
+      ctx.cdp.on('Network.responseReceived', (event, sessionId) => {
+        if (sessionId === worker.sessionId && requestIds.has(event.requestId)) {
+          responseIds.add(event.requestId);
+        }
+      });
+      ctx.cdp.on('Network.loadingFinished', (event, sessionId) => {
+        if (sessionId !== worker.sessionId || !responseIds.has(event.requestId)) return;
+        const pending = ctx.cdp.send('Network.getResponseBody', { requestId: event.requestId }, sessionId)
+          .then(result => {
+            try {
+              const data = JSON.parse(result.base64Encoded ? Buffer.from(result.body, 'base64').toString('utf8') : result.body);
+              const tokens = data.usage?.output_tokens_details?.reasoning_tokens;
+              reasoningEvidence.push(Number.isInteger(tokens) ? tokens : null);
+            } catch { reasoningEvidence.push(null); }
+          }).finally(() => pendingEvidence.delete(pending));
+        pendingEvidence.add(pending);
+      });
+      const observed = await ctx.cdp.send('Network.enable', {}, worker.sessionId);
+      if (!check('OpenRouter network evidence observer is enabled', !observed.__error && !observed.__timeout)) return;
+    }
+
     const spans = readProtectedSpans(readFileSync(FIXTURE, 'utf8'));
     console.log(
       `  the fixture holds ${countKind(spans, 'link')} links and ` +
@@ -118,6 +166,7 @@ async function main() {
       extension: ctx.extension,
       envPath: ENV_PATH,
       targetLanguage: TARGET_LANGUAGE,
+      service: SERVICE,
       // In a finally, so it reports even when a check above threw. A run that leaves a real
       // key in the browser profile has failed whatever else it proved.
       onCleared: (cleared) => check('the API key is cleared from the browser profile', cleared),
@@ -144,7 +193,7 @@ async function main() {
         const stored = (await chrome.storage.local.get(['settings'])).settings || {};
         return {
           chunkMaxChars: stored.chunkMaxChars,
-          hasKey: typeof stored.apiKey === 'string' && stored.apiKey.length > 0,
+          hasKey: typeof stored.${KEY_FIELD} === 'string' && stored.${KEY_FIELD}.length > 0,
           error: document.getElementById('errorBox').hidden
             ? '' : document.getElementById('errorBox').textContent,
         };
@@ -315,6 +364,19 @@ async function main() {
 
       console.log('\nwhat the run saw:');
       for (const line of ledger) console.log(`  ${line}`);
+      if (SERVICE === 'openrouter') {
+        await Promise.all([...pendingEvidence]);
+        check('OpenRouter requests retain the pinned model and strict data policy', requestEvidence.length > 0 &&
+          requestEvidence.every(evidence => evidence.model === 'deepseek/deepseek-v4.1-flash-1017' &&
+            evidence.reasoning?.effort === 'none' && evidence.provider?.require_parameters === true &&
+            evidence.provider?.data_collection === 'deny' && evidence.provider?.zdr === true &&
+            Number.isInteger(evidence.maxOutputTokens) && evidence.store === false));
+        check('provider usage reports zero reasoning tokens for every observed response',
+          reasoningEvidence.length === requestEvidence.length && reasoningEvidence.length > 0 &&
+          reasoningEvidence.every(tokens => tokens === 0),
+          `requests=${requestEvidence.length} responses=${reasoningEvidence.length} missing=${reasoningEvidence.filter(tokens => tokens === null).length}`);
+        console.log('  Zero reported reasoning tokens is provider evidence; it does not expose provider internals.');
+      }
     });
 
     ctx.close();

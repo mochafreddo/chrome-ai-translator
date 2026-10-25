@@ -56,7 +56,7 @@ try {
   if (check('the reported rendered Markdown article became ready', ready === true)) {
     let modelRequests = 0;
     stopWatchingRequests = context.cdp.on('Network.requestWillBeSent', (params) => {
-      if (String(params?.request?.url || '').includes('api.openai.com')) modelRequests += 1;
+      if (/^https:\/\/(?:api\.openai\.com|openrouter\.ai)\//.test(String(params?.request?.url || ''))) modelRequests += 1;
     });
     const pageNetwork = await context.cdp.send('Network.enable', {}, context.page.sessionId);
     if (pageNetwork.__error || pageNetwork.__timeout) throw new Error('Page network observation failed');
