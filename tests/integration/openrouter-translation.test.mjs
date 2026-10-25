@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until, wait } from './harness.mjs';
 import { readStopBlockContract } from './fixture-stop-contract.mjs';
+import { inlinePanelControlsReady } from './inline-panel-readiness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const flowArguments = process.argv.slice(2);
@@ -119,6 +120,36 @@ async function main() {
   const panelTarget = await ctx.findTarget(target => target.url === `chrome-extension://${ctx.extension.id}/sidepanel.html`);
   if (!check('side panel is available', Boolean(panelTarget))) return;
   const panel = await ctx.attach(panelTarget.id);
+  if (FLOW === 'inline') {
+    let delayedScript;
+    const stopDelay = ctx.cdp.on('Fetch.requestPaused', (event, sessionId) => {
+      if (sessionId === panel.sessionId) delayedScript = event.requestId;
+    });
+    try {
+      const delayEnabled = await ctx.cdp.send('Fetch.enable', { patterns: [{
+        urlPattern: `chrome-extension://${ctx.extension.id}/sidepanel.js`, requestStage: 'Request',
+      }] }, panel.sessionId);
+      if (!check('side panel script delay is installed', !delayEnabled.__error && !delayEnabled.__timeout)) return;
+      await ctx.cdp.send('Page.reload', { ignoreCache: true }, panel.sessionId);
+      if (!check('side panel script is delayed before initialization',
+        await until(() => Boolean(delayedScript), 5000, 100))) return;
+      const initial = await panel.evaluate(`({
+        enabled: !document.getElementById('btnInlineTranslate').disabled,
+        status: document.getElementById('inlineStatus').textContent,
+        loading: document.readyState !== 'complete',
+      })`);
+      check('initial markup offers Start before its handler is loaded',
+        initial?.enabled && initial.status === '' && initial.loading);
+      check('Inline readiness rejects the initial enabled markup', !(await inlinePanelControlsReady(panel)),
+        'readiness accepted an uninitialized document');
+    } finally {
+      if (delayedScript) await ctx.cdp.send('Fetch.continueRequest', { requestId: delayedScript }, panel.sessionId);
+      await ctx.cdp.send('Fetch.disable', {}, panel.sessionId);
+      stopDelay();
+    }
+    if (!check('Inline controls become ready after the delayed script initializes', await until(
+      () => inlinePanelControlsReady(panel), 10000, 100))) return;
+  }
   const panelReady = await until(() => panel.evaluate(
     "document.getElementById('model').disabled && document.getElementById('model').value === 'deepseek/deepseek-v4.1-flash-1017'"), 5000, 100);
   check('panel displays the pinned model without an editable model choice', panelReady);
