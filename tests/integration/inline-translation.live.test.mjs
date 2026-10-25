@@ -15,6 +15,7 @@ import {
 import { withApiKey } from './live-key.mjs';
 import { observeModelRequests } from './model-request-evidence.mjs';
 import { readStopBlockContract } from './fixture-stop-contract.mjs';
+import { inlinePanelControlsReady } from './inline-panel-readiness.mjs';
 import inlineModelExecution from '../../extension/inline-model-execution.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -124,8 +125,8 @@ async function main() {
       const panelTarget = await ctx.findTarget((target) => target.url === panelUrl);
       if (!check('side panel is open to drive the controls from', Boolean(panelTarget))) return;
       const panel = await ctx.attach(panelTarget.id);
-      if (!check('Inline controls finish initialization', await until(() => panel.evaluate(
-        "!document.getElementById('btnInlineTranslate').disabled"), 10000, 100))) return;
+      if (!check('Inline controls finish initialization', await until(
+        () => inlinePanelControlsReady(panel), 10000, 100))) return;
 
       // The side panel is one of Inline Translation's two homes, and the one whose controls
       // are plain DOM: the Floating Translate Button lives behind a closed shadow root.
@@ -146,8 +147,8 @@ async function main() {
         [...document.querySelectorAll('main h1, main p')].filter(node => !node.hidden)
           .every(node => /[가-힣]/.test(node.textContent))`) && readPending(await controls()) === 0, 120000, 500);
       const afterTranslate = await controls();
-      check('Inline Translation translates the page with a real API key', translated,
-        `status="${afterTranslate?.status}" error="${afterTranslate?.error}"`);
+      if (!check('Inline Translation translates the page with a real API key', translated,
+        `status="${afterTranslate?.status}" error="${afterTranslate?.error}"`)) return;
 
       // Exactly what was there, not merely English again: a restore that dropped a block or
       // kept a boundary space would still read as restored.
