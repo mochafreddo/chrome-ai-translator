@@ -185,10 +185,24 @@ exports.tests = [
       assert.equal(taken.length, 356);
       assert.equal(taken.reduce((sum, record) => sum + record.template.length, 0), 37376);
       assert.equal(taken.reduce((sum, record) => sum + session.getRecordCost(record), 0), 39512);
-      assert.equal(taken.reduce((sum, record) => sum + session.getReservedRecordCost(record), 0), 162824);
+      // Each ASCII template contributes its 23-character JSON property wrapper;
+      // the reconstruction's 303-character maximum stays below both context caps.
+      assert.equal(taken.reduce((sum, record) => sum + session.getReservedRecordCost(record), 0), 208388);
       assert.deepEqual(visit.progress(), { counts: { ...NOTHING, translated: 356 }, reason: '' });
       assert.equal(blocks.every(block => block.textContent === '번역한 문장입니다.'), true);
       assertRemainingBudget(visit, SESSION_BUDGET - 79024);
+    },
+  },
+  {
+    name: 'keeps a previously admissible individual record within the request reservation cap',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      visit.admit(paragraph(5200));
+      const batch = visit.takeBatch();
+      assert.equal(batch.length, 1);
+      assert.equal(session.getReservedRecordCost(batch[0]), 12000);
+      assert.equal(session.getRecordCost(batch[0]) < 12000, true);
     },
   },
   {
@@ -215,7 +229,7 @@ exports.tests = [
   {
     name: 'splits requests on reserved cost while retaining every admitted paragraph',
     async fn() {
-      for (const [length, sizes] of [[4000, [1, 1, 1]], [2500, [2, 1]]]) {
+      for (const [length, sizes] of [[4000, [1, 1, 1]], [2500, [1, 1, 1]]]) {
         const visit = session.createInlineTranslationSession();
         visit.begin(KOREAN);
         const admitted = Array.from({ length: 3 }, () => visit.admit(paragraph(length)).id);
@@ -528,10 +542,14 @@ exports.tests = [
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);
       // A repaired answer: the cache replays its attempt count, but nothing is sent for it now.
-      const { block } = translateBlock(visit, undefined, { attemptCount: 2 });
+      const { block, batch } = sendBlock(visit);
+      const initialCost = session.getRecordCost(batch[0]);
+      const repairCost = initialCost + 31;
+      visit.settle(batch, answer(batch, { attemptCount: 2, repairRecordCost: repairCost }));
+      assert.notEqual(block.textContent, ORIGINAL_TEXT);
       visit.restore();
       assert.equal(block.textContent, ORIGINAL_TEXT);
-      const spent = session.getRecordCost(require('../extension/inline-block.js').serializeBlock(createReasoningFixture().block)) * 2;
+      const spent = initialCost + repairCost;
 
       visit.begin(KOREAN);
 
@@ -606,6 +624,38 @@ exports.tests = [
 
         assertRemainingBudget(visit, SESSION_BUDGET - recordCost * attemptCount);
       }
+    },
+  },
+  {
+    name: 'charges a reported contextual repair cost for current and stale results',
+    fn() {
+      for (const stale of [false, true]) {
+        const visit = session.createInlineTranslationSession();
+        visit.begin(KOREAN);
+        const { batch } = sendBlock(visit);
+        const initialCost = session.getRecordCost(batch[0]);
+        const repairCost = initialCost + 75;
+        assert.equal(repairCost <= 12000, true);
+        if (stale) visit.stop();
+
+        visit.settle(batch, answer(batch, { attemptCount: 2, repairRecordCost: repairCost }));
+
+        assertRemainingBudget(visit, SESSION_BUDGET - initialCost - repairCost);
+      }
+    },
+  },
+  {
+    name: 'charges the repair upper bound when a present reported cost is invalid',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { batch } = sendBlock(visit);
+      const initialCost = session.getRecordCost(batch[0]);
+      visit.settle(batch, answer(batch, {
+        attemptCount: 2,
+        repairRecordCost: initialCost - 1,
+      }));
+      assertRemainingBudget(visit, SESSION_BUDGET - initialCost - 12000);
     },
   },
   ...[

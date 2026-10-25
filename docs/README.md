@@ -49,6 +49,7 @@ These descriptive records retain their original paths so existing references con
 | --- | --- |
 | [Inline restore cache design](design/inline-restore-cache-design.md) | Original page-lifetime cache design; related QA dated 2026-06-15 |
 | [Inline changed text retry design](design/inline-changed-text-retry-design.md) | Design dated 2026-06-25 |
+| [GitHub test-audit Inline Translation design](design/github-test-audit-inline-translation-design.md) | Confirmed 2026-10-25 scope, table-cell rejection reproduction, abbreviation false-positive replay, and diagnostic evidence limits |
 | [Agent environment retrospective design](design/agent-environment-retro-2026-10-20.md) | Four environment improvements and verification scope confirmed in the 2026-10-20 interview; implementation requires a separate request |
 | [Validation and diagnostics design](superpowers/specs/2026-07-11-inline-translation-validation-diagnostics-design.md) | Schema-2 design dated 2026-07-11; schema 3 followed in ADR-0009 |
 | [Validation and diagnostics plan](superpowers/plans/2026-07-11-inline-translation-validation-diagnostics.md) | Implementation plan for that schema-2 design |

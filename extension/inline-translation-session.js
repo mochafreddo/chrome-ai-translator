@@ -396,8 +396,8 @@
     }
   }
 
-  // A repair is a second real request carrying the same record, so it is charged the same
-  // record cost again. The worker says whether one was sent by reporting `attemptCount`, and
+  // A repair with prior-answer context reports its actual record cost; other repairs retain
+  // the source-record approximation in ADR-0007. The worker reports `attemptCount`, and
   // this may only be read where a request actually came back: `attemptCount` is written into
   // the translation cache and replayed out of it, so a cached block presents a 2 for a repair
   // that happened in an earlier session with nothing sent for it now. See ADR-0007.
@@ -409,8 +409,17 @@
     if (!response?.ok || !Array.isArray(response.results)) return;
     const byId = new Map(response.results.map((result) => [result?.id, result]));
     for (const record of records) {
-      if (Number(byId.get(record.id)?.attemptCount) === 2) {
-        session.charge(getRecordCost(record));
+      const result = byId.get(record.id);
+      if (Number(result?.attemptCount) === 2) {
+        const sourceCost = getRecordCost(record);
+        const reportedCost = result.repairRecordCost;
+        const hasReportedCost = Object.prototype.hasOwnProperty.call(result, 'repairRecordCost');
+        const validReportedCost = typeof reportedCost === 'number' &&
+          Number.isFinite(reportedCost) && Number.isInteger(reportedCost) &&
+          reportedCost >= sourceCost && reportedCost <= INLINE_BLOCK_BATCH_MAX_CHARS;
+        session.charge(!hasReportedCost ? sourceCost : validReportedCost
+          ? reportedCost
+          : INLINE_BLOCK_BATCH_MAX_CHARS);
       }
     }
   }

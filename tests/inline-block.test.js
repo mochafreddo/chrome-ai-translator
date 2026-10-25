@@ -230,6 +230,114 @@ function createHeadingControlFixture(trailing = false) {
 exports.name = 'inline block codec';
 exports.tests = [
   {
+    name: 'reserves bounded prior-template context using its escaped JSON size',
+    fn() {
+      const record = { id: 'escape-check', template: 'q"\\\n\t\u0001', atoms: [], repair: null };
+      const baseCost = JSON.stringify({ records: [{ ...record }] }).length +
+        JSON.stringify({ records: [{ ...record, repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) } }] }).length;
+      const escapedContextCost = 38;
+      assert.equal(JSON.stringify({ previousTemplate: record.template }).length, escapedContextCost);
+      assert.equal(codec.getReservedRecordCost(record), baseCost + escapedContextCost);
+
+      const longRecord = { ...record, template: 'x'.repeat(3000) };
+      const longBaseCost = JSON.stringify({ records: [{ ...longRecord }] }).length +
+        JSON.stringify({ records: [{ ...longRecord, repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) } }] }).length;
+      assert.equal(JSON.stringify({ previousTemplate: longRecord.template }).length > 2048, true);
+      assert.equal(codec.getReservedRecordCost(longRecord), longBaseCost + 2048);
+    },
+  },
+  {
+    name: 'translates a whole table-cell DIV without losing its container or original graph',
+    fn() {
+      for (const tag of ['td', 'th']) {
+        const { document, element, text } = createTestDocument();
+        const code = element('code', text('README.md'));
+        const link = element('a', text('the guide'));
+        link.setAttribute('href', '/guide');
+        const wrapper = element('div', text('Read '), code, text(' and '), link, text('.'));
+        wrapper.setAttribute('dir', 'auto');
+        const cell = element(tag, text('\n'), wrapper, text(' '));
+        document.body.appendChild(cell);
+        const graph = [];
+        const capture = (node) => {
+          graph.push({ node, children: [...node.childNodes], value: node.nodeValue });
+          node.childNodes.forEach(capture);
+        };
+        capture(cell);
+        const serialized = codec.serializeBlock(cell);
+        assert.equal(serialized.ok, true, tag);
+        assert.equal(codec.isSemanticBlockElement(wrapper), false);
+        const translated = serialized.template.replace('Read ', '읽으세요: ')
+          .replace(' and ', ' 및 ').replace('the guide', '안내서');
+        const missingContainer = translated.replace(/⟦[^⟧]+:(?:OPEN|CLOSE):W1⟧/g, '');
+        assert.equal(codec.validateTranslatedTemplate(missingContainer, serialized.contract).ok, false);
+        assert.equal(codec.validateTranslatedTemplate(`빠져나온 본문${translated}`, serialized.contract).ok, false);
+        assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
+        assert.equal(cell.childNodes[1], wrapper);
+        assert.equal(wrapper.childNodes.includes(code), true);
+        assert.equal(wrapper.childNodes.includes(link), true);
+        assert.equal(wrapper.getAttribute('dir'), 'auto');
+        assert.equal(link.getAttribute('href'), '/guide');
+        assert.equal(code.textContent, 'README.md');
+        assert.match(wrapper.textContent, /읽으세요: README.md 및 안내서/);
+        assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+        for (const original of graph) {
+          assert.deepEqual(original.node.childNodes, original.children);
+          assert.equal(original.node.nodeValue, original.value);
+        }
+      }
+    },
+  },
+  {
+    name: 'keeps mixed table-cell DIV layouts and unsafe descendants unsupported',
+    fn() {
+      for (const variant of ['before', 'after', 'multiple', 'nested', 'semantic', 'hidden', 'interactive', 'editable']) {
+        const { document, element, text } = createTestDocument();
+        const wrapper = element('div', text('Cell prose.'));
+        const cell = element('td', wrapper);
+        if (variant === 'before') cell.insertBefore(text('Other prose.'), wrapper);
+        if (variant === 'after') cell.appendChild(text('Other prose.'));
+        if (variant === 'multiple') cell.appendChild(element('div', text('Other prose.')));
+        if (variant === 'nested') wrapper.appendChild(element('div', text('Nested prose.')));
+        if (variant === 'semantic') wrapper.appendChild(element('p', text('Separate paragraph.')));
+        if (variant === 'hidden') wrapper.hidden = true;
+        if (variant === 'interactive') wrapper.appendChild(element('input'));
+        if (variant === 'editable') wrapper.setAttribute('contenteditable', 'true');
+        document.body.appendChild(cell);
+        assertReaderFacingUnsupported(codec.serializeBlock(cell));
+      }
+    },
+  },
+  {
+    name: 'translates ordinary dotted abbreviations while protecting real filenames and paths',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const block = element('p', text('Examples, e.g. this one, i.e. a guide in README.md.'));
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const translated = '예를 들면 이것이며, 즉 README.md 안내서입니다.';
+      assert.equal(codec.validateTranslatedTemplate(translated, serialized.contract).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.equal(block.textContent, 'Examples, e.g. this one, i.e. a guide in README.md.');
+      for (const source of ['a.b', 'docs/e.g', './i.e', 'README.md']) {
+        const file = element('p', text(`Read ${source}.`));
+        document.body.appendChild(file);
+        const record = codec.serializeBlock(file);
+        assert.equal(record.ok, true);
+        assert.deepEqual(codec.validateTranslatedTemplate('안내서를 읽으세요.', record.contract),
+          { ok: false, errorCode: 'source_syntax_changed' }, source);
+      }
+      for (const abbreviation of ['e.g.', 'i.e.', 'E.g.', 'I.E.']) {
+        const prose = element('p', text(`An example (${abbreviation} this one).`));
+        document.body.appendChild(prose);
+        const record = codec.serializeBlock(prose);
+        assert.equal(codec.validateTranslatedTemplate('예를 들면 이것입니다.', record.contract).ok, true, abbreviation);
+      }
+    },
+  },
+  {
     name: 'translates the reported bold and inline-code introduction without a token for its nested list',
     fn() {
       const { document, element, text } = createTestDocument();

@@ -397,6 +397,7 @@ exports.tests.push(
     { name: 'current one-attempt response', attemptCount: 1, controls: [] },
     { name: 'current repaired response', attemptCount: 2, controls: [] },
     { name: 'current repair charged exactly once', attemptCount: 2, controls: [], headroom: 3 },
+    { name: 'reported contextual repair cost consumes the remaining budget', attemptCount: 2, controls: [], headroom: 3, repairRecordCost: 12000 },
     { name: 'repair exceeds the submitted budget', attemptCount: 2, controls: [], headroom: 1 },
     { name: 'Original text then one-attempt response', attemptCount: 1, controls: ['restoreInlineOriginal'] },
     { name: 'Original text then repaired response', attemptCount: 2, controls: ['restoreInlineOriginal'] },
@@ -404,7 +405,7 @@ exports.tests.push(
     { name: 'Stop and Start then repaired response', attemptCount: 2, controls: ['stopInlineTranslation', 'startInlineTranslation'] },
     { name: 'Original text and Start then repaired response', attemptCount: 2, controls: ['restoreInlineOriginal', 'startInlineTranslation'] },
     { name: 'repeated replacements then repaired response', attemptCount: 2, controls: ['restoreInlineOriginal', 'startInlineTranslation', 'stopInlineTranslation', 'startInlineTranslation', 'restoreInlineOriginal', 'startInlineTranslation'] },
-  ].map(({ name, attemptCount, controls, headroom = 2 }) => ({
+  ].map(({ name, attemptCount, controls, headroom = 2, repairRecordCost }) => ({
     name: `settles Session Budget through controls: ${name}`,
     async fn() {
       await withInlineRequestLifecycle(async ({ block, strong, link, document, operation, messages, pending, instruct, paragraph, recordCost, rescan }) => {
@@ -421,6 +422,7 @@ exports.tests.push(
           disposition: 'apply',
           template: translatedTemplate(record),
           attemptCount,
+          ...(repairRecordCost === undefined ? {} : { repairRecordCost }),
           correlationToken: 'lifecycle-token',
         }] });
         await flushMicrotasks(32);
@@ -449,7 +451,8 @@ exports.tests.push(
         document.body.appendChild(next);
         rescan(operation);
         await flushMicrotasks(32);
-        if (headroom <= attemptCount) {
+        const reportedSpend = recordCost + (attemptCount === 2 ? repairRecordCost ?? recordCost : 0);
+        if (headroom * recordCost <= reportedSpend) {
           assert.equal(pending.length, 1, 'reported repair must refuse the next request');
           assert.match(operation.getStatus().error, /reached this page visit's limit/);
         } else {

@@ -41,7 +41,7 @@ A stand-in for page-owned structure that translation preserves while reordering 
 _Avoid_: bare token (ambiguous with a model token or a request correlation token), marker, tag, sentinel, protected span
 
 **Source Syntax**:
-Visible page-owned notation whose spelling and delimiters carry meaning, such as an unambiguous repository coordinate, path, or bracketed choice. Inline Translation preserves it unchanged; it is distinct from a Placeholder Token inserted by the extension.
+Visible page-owned notation whose spelling and delimiters carry meaning, such as an unambiguous repository coordinate, path, or bracketed choice, preserved unchanged by Inline Translation. Ordinary linguistic abbreviations remain translatable prose; Source Syntax is distinct from a Placeholder Token inserted by the extension.
 _Avoid_: code, literal token, protected text, technical term
 
 **Inline Translation Session**:

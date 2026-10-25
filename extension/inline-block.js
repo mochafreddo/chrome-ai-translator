@@ -92,9 +92,9 @@
   // whether a candidate text node is worth scanning at all. It lives here because the codec
   // already owns what a protected atom is, and one home is what keeps the two answers equal.
   function hasSourcePathFileExtension(value) {
-    return /\.[\p{L}][\p{L}\p{N}]{0,9}$/u.test(
-      String(value || '')
-    );
+    const text = String(value || '');
+    return !/^(?:e\.g|i\.e)\.?$/i.test(text) &&
+      /\.[\p{L}][\p{L}\p{N}]{0,9}$/u.test(text);
   }
 
   function isCodeLikeInlineText(text) {
@@ -906,7 +906,10 @@
     };
     // Counting each record as its own request intentionally over-reserves the
     // shared wrapper, guaranteeing the real batched JSON is no larger.
-    return serializeModelRequest([record]).length + serializeModelRequest([repairRecord]).length;
+    const baseCost = serializeModelRequest([record]).length + serializeModelRequest([repairRecord]).length;
+    const remainingRequestCapacity = Math.max(0, 12000 - baseCost);
+    const previousTemplateCost = JSON.stringify({ previousTemplate: record?.template }).length;
+    return baseCost + Math.min(2048, previousTemplateCost, remainingRequestCapacity);
   }
 
   function serializeBlock(block) {
@@ -1071,8 +1074,11 @@
       }
 
       const anchoredWrapper = node === anchoredSummary;
+      const wholeCellWrapper = tagName === 'DIV' && parentId === 'ROOT' &&
+        ['TD', 'TH'].includes(getTagName(block)) &&
+        getChildNodes(block).every((child) => child === node || isIgnorableWhitespace(child));
       const pairedWrapper =
-        tagName === 'A' || WRAPPER_TAGS.has(tagName) || anchoredWrapper;
+        tagName === 'A' || WRAPPER_TAGS.has(tagName) || anchoredWrapper || wholeCellWrapper;
       if (!pairedWrapper) {
         failed = describeLocalRejection('unsupported_descendant', node);
         return '';
@@ -1314,6 +1320,13 @@
       { trackParents: true }
     );
     if (!walked.ok) return validationError(walked.reason);
+    if (
+      contract.entries.some((entry) => entry.kind === 'wrapper' &&
+        entry.tagName === 'DIV' && entry.parentId === 'ROOT') &&
+      walked.tree.children.some((child) => child.type === 'text' && child.value.trim())
+    ) {
+      return validationError('token_parent_changed');
+    }
 
     return { ok: true, tree: walked.tree, template, droppedWrappers };
   }

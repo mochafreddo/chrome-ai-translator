@@ -86,7 +86,7 @@ Other checks run only through their dedicated scripts:
 | `disclosure-summary` | Local standard and renderer-wrapped disclosures: collection, apply, placement, disclosure behavior, exact restore |
 | `ai-hero-disclosure` | Reported AI Hero disclosure: deterministic apply and restore |
 | `ai-hero-grill-with-docs` | Reported skill page: visible-block preflight and repository-coordinate Source Syntax |
-| `github-skill-page` | Rendered GitHub skill article: scrolling collector, local rejection reporting, and zero model requests |
+| `github-skill-page` | Local table-cell fixture and both reported GitHub skill articles: viewport collection through nested scroll areas, metadata-cell admission, deterministic apply and exact restoration, and zero model requests |
 | `ai-hero-responsive-labels` | Desktop/mobile skill navigation: hidden alternatives as text-free Inert Page Nodes, deterministic apply, exact DOM restore, zero model requests |
 | `heading-permalink` | Local and reported advisor headings: edge controls, node identity, focus/click behavior, deterministic apply, exact restore |
 | `data-as-paragraph` | Local and advisor `span[data-as="p"]` paragraphs: repeated collection, preserved inline elements, exact restoration, and ownership changes |

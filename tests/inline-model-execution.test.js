@@ -22,6 +22,106 @@ function translatedReasoning(record) {
 exports.name = 'inline model execution';
 exports.tests = [
   {
+    name: 'gives English-residue repairs explicit guidance for quoted references and prose beside atoms',
+    async fn() {
+      for (const [source, initial, corrected, phrases] of [
+        ['Read the "Setup guide" section.', '"Setup guide" 절을 읽으세요.', '설정 안내 절을 읽으세요.', ['Setup guide']],
+        ['Use the Spawned session block.', 'Spawned session 블록을 사용하세요.', '생성된 세션 블록을 사용하세요.', ['Spawned session']],
+      ]) {
+        const record = plainRecord('reference', source);
+        const requests = [];
+        const [result] = await execute([record], SETTINGS, async (request) => {
+          requests.push(request);
+          const input = JSON.parse(request.input).records[0];
+          if (requests.length === 2) {
+            assert.match(request.instructions, /quality\.english_residue/);
+            assert.notEqual(request.instructions, requests[0].instructions);
+            assert.deepEqual(input, { id: record.id, template: source, atoms: [],
+              repair: { attempt: 1, previousErrorCode: 'quality.english_residue', previousTemplate: initial, untranslatedPhrases: phrases } });
+          }
+          return response([{ id: record.id, template: requests.length === 1 ? initial : corrected }]);
+        });
+        assert.equal(requests.length, 2);
+        assert.equal(result.disposition, 'apply');
+        assert.equal(result.template, corrected);
+        assert.equal(result.diagnostic.quality.status, 'complete');
+        assert.equal(Number.isSafeInteger(result.repairRecordCost), true);
+        assert.ok(result.repairRecordCost > codec.getRecordCost(record));
+        assert.equal(JSON.stringify(result.diagnostic).includes(source), false);
+        assert.equal(JSON.stringify(result.diagnostic).includes(initial), false);
+      }
+    },
+  },
+  {
+    name: 'keeps a worker-admitted multi-record repair within the serialized request cap',
+    async fn() {
+      const { normalizeVisibleBlockBatchRecords } = require('../extension/background.js');
+      const { document, element, text } = createTestDocument();
+      const records = [];
+      for (let index = 0; index < 3; index += 1) {
+        const block = element('p', text('Read this guide carefully. '.repeat(140)));
+        document.body.appendChild(block);
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, true);
+        records.push({ id: `large-${index}`, template: serialized.template, atoms: serialized.atoms,
+          contract: serialized.contract, repair: null });
+      }
+      const admitted = normalizeVisibleBlockBatchRecords(records);
+      const requests = [];
+      const results = await execute(admitted, SETTINGS, async (request) => {
+        requests.push(request);
+        return response(admitted.map(({ id }) => ({ id, template: requests.length === 1
+          ? 'Read this guide carefully. ' + '번역 '.repeat(350)
+          : '안내서를 주의 깊게 읽으세요.' })));
+      });
+      assert.equal(requests.length, 2);
+      assert.ok(requests[0].input.length <= 12000);
+      assert.ok(requests[1].input.length <= 12000);
+      assert.equal(JSON.parse(requests[1].input).records.length, 3);
+      assert.equal(results.every((result) => result.disposition === 'apply' && result.attemptCount === 2), true);
+    },
+  },
+  {
+    name: 'omits an oversized previous translation rather than truncating repair context',
+    async fn() {
+      for (const [source, initial] of [
+        ['Use a short guide.', 'short guide ' + '\\'.repeat(4000) + ' 안내서를 읽으세요.'],
+        ['Read the short guide. ' + '\\'.repeat(800), 'short guide ' + '\\'.repeat(1000) + ' 안내서를 읽으세요.'],
+      ]) {
+        const record = plainRecord('bounded', source);
+        let calls = 0;
+        const [result] = await execute([record], SETTINGS, async (request) => {
+          calls += 1;
+          if (calls === 2) {
+            const input = JSON.parse(request.input).records[0];
+            assert.equal(input.template, record.template);
+            assert.deepEqual(input.repair, { attempt: 1, previousErrorCode: 'quality.english_residue' });
+            assert.ok(codec.serializeModelRequest([record]).length + request.input.length <= codec.getReservedRecordCost(record));
+          }
+          return response([{ id: record.id, template: calls === 1 ? initial : '짧은 안내서를 사용하세요.' }]);
+        });
+        assert.equal(calls, 2);
+        assert.equal(result.disposition, 'apply');
+        assert.equal('repairRecordCost' in result, false);
+      }
+    },
+  },
+  {
+    name: 'still warns about untranslated quoted headings after a contextual repair',
+    async fn() {
+      const record = plainRecord('strict', 'Read the "QUICK START GUIDE" section.');
+      const draft = '"QUICK START GUIDE" 절을 읽으세요.';
+      let calls = 0;
+      const [result] = await execute([record], SETTINGS, async () => {
+        calls += 1;
+        return response([{ id: record.id, template: draft }]);
+      });
+      assert.equal(calls, 2);
+      assert.equal(result.disposition, 'apply_with_warning');
+      assert.equal(result.terminalCode, 'quality.english_residue');
+    },
+  },
+  {
     name: 'preserves Korean text, JSON escaping and record field order in the actual request',
     async fn() {
       const records = [plainRecord('한글', '한국어 "인용" \\ 경로\n다음\t줄'), plainRecord('second')];
@@ -293,11 +393,17 @@ exports.tests = [
       const serialized = codec.serializeBlock(block);
       assert.equal(serialized.ok, true);
       const repository = { id: 'repository', template: serialized.template, atoms: serialized.atoms, contract: serialized.contract, repair: null };
+      const example = element('p', text('Read the guide, e.g. README.md, i.e. the introduction.'));
+      document.body.appendChild(example);
+      const exampleRecord = codec.serializeBlock(example);
+      assert.equal(exampleRecord.ok, true);
+      const abbreviation = { id: 'abbreviation', template: exampleRecord.template, atoms: exampleRecord.atoms, contract: exampleRecord.contract, repair: null };
       const tokenized = reasoningRecord('tokenized');
       const cases = [
         [plainRecord('technical', 'GPT API'), 'GPT API'],
         [plainRecord('docs', 'Claude Code reads CLAUDE.md, not AGENTS.md.'), 'Claude Code는 CLAUDE.md를 읽으며 AGENTS.md는 읽지 않습니다.'],
         [repository, repository.template],
+        [abbreviation, '안내서를 읽으세요. 예를 들면 README.md이며, 즉 소개 문서입니다.'],
         [tokenized, translatedReasoning(tokenized)],
       ];
       for (const [record, template] of cases) {
