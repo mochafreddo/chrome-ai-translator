@@ -14,6 +14,7 @@ import {
 } from './harness.mjs';
 import { withApiKey } from './live-key.mjs';
 import { observeModelRequests } from './model-request-evidence.mjs';
+import { readStopBlockContract } from './fixture-stop-contract.mjs';
 import inlineModelExecution from '../../extension/inline-model-execution.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -174,11 +175,7 @@ async function main() {
         `document.getElementById(${JSON.stringify(STOPPED_RUN_BLOCK_ID)}).innerText.trim()`);
       const originalWithRevealed = await pageText();
 
-      stopRecord = await page.evaluate(`(() => {
-        const serialized = ChromeAiTranslatorInlineBlock.serializeBlock(
-          document.getElementById(${JSON.stringify(STOPPED_RUN_BLOCK_ID)}));
-        return serialized.ok ? { template: serialized.template, atoms: serialized.atoms, contract: serialized.contract } : null;
-      })()`);
+      stopRecord = await readStopBlockContract(page);
       if (!check('the uncached Stop block has a valid translation contract', Boolean(stopRecord))) return;
       const beforeStopRequests = new Set(requestIds);
       await click('btnInlineTranslate');
