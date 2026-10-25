@@ -105,6 +105,7 @@ async function main() {
     session: SESSION,
     url: launchUrl,
     extensionDir: EXTENSION_DIR,
+    headless: false,
   });
 
   check('CDP Extensions domain responds', ctx.extensionsDomainResponded);
