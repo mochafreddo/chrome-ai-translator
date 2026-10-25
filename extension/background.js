@@ -108,14 +108,16 @@ const inlineDiagnosticsProtocol =
   globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol || require('./inline-diagnostics-protocol.js');
 const inlineDiagnosticsController =
   globalThis.ChromeAiTranslatorInlineDiagnosticsController || require('./inline-diagnostics-controller.js');
-const { DEFAULT_MODEL } =
+const { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings, getOpenRouterFailureMessage } =
   globalThis.ChromeAiTranslatorDefaultModel || require('./default-model.js');
 
 const workerInvocation = globalThis.ChromeAiTranslatorWorkerInvocation ||
   require('./worker-invocation.js');
 
 const DEFAULT_SETTINGS = {
+  service: 'openai',
   apiKey: '',
+  openrouterApiKey: '',
   model: DEFAULT_MODEL,
   reasoningEffort: 'none',
   targetLanguage: 'Korean',
@@ -128,6 +130,7 @@ const DEFAULT_SETTINGS = {
 };
 const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULT_SETTINGS));
 const PUBLIC_SETTINGS_USED_KEYS = Object.freeze([
+  'service',
   'model',
   'reasoningEffort',
   'targetLanguage',
@@ -193,6 +196,7 @@ function mergeSettings(partial) {
     }
   }
   merged.chunkMaxChars = normalizeChunkMaxChars(merged.chunkMaxChars);
+  merged.service = getEffectiveModelSettings(merged).service;
   // Reading settings is the one place the older `inlineAutoShow` boolean can still arrive
   // from storage, so it is the place it stops being visible: nothing downstream, and
   // nothing written back, knows about it.
@@ -209,20 +213,21 @@ function mergeSettingsWithExisting(existing, partial) {
 
 function mergeVisibleBatchSettingsSnapshot(currentSettings, settingsSnapshot = null) {
   const merged = mergeSettings(currentSettings || {});
-  if (!settingsSnapshot || typeof settingsSnapshot !== 'object') return merged;
+  const snapshot = settingsSnapshot && typeof settingsSnapshot === 'object' ? settingsSnapshot : {};
 
   for (const key of [
+    'service',
     'targetLanguage',
     'tone',
     'model',
     'reasoningEffort',
   ]) {
-    if (Object.prototype.hasOwnProperty.call(settingsSnapshot, key)) {
-      merged[key] = String(settingsSnapshot[key] || DEFAULT_SETTINGS[key]);
+    if (Object.prototype.hasOwnProperty.call(snapshot, key)) {
+      merged[key] = key === 'service' ? snapshot[key] : String(snapshot[key] || DEFAULT_SETTINGS[key]);
     }
   }
 
-  return merged;
+  return { ...merged, ...getEffectiveModelSettings(merged) };
 }
 
 function copyAllowedFields(value, keys) {
@@ -632,7 +637,8 @@ function createBackgroundWorker(platform = {}) {
     return mergeSettings({ ...settings, apiKey });
   }
 
-  function changeSettings({ settings = {}, clearApiKey = false } = {}) {
+  function changeSettings({ settings = {}, clearApiKey = false, service = 'openai' } = {}) {
+    const keyService = getEffectiveModelSettings({ service }).service;
     const generation = ++settingsChangeGeneration;
     if (readButtonVisibility(settings) === BUTTON_VISIBILITY.ALL_PAGES) {
       allPagesAccessGeneration = generation;
@@ -642,9 +648,9 @@ function createBackgroundWorker(platform = {}) {
     const nextMutation = settingsMutation.catch(() => {}).then(async () => {
       const current = await getSettings();
       const next = mergeSettingsWithExisting(current, settings);
-      if (clearApiKey) delete next.apiKey;
+      if (clearApiKey) delete next[keyService === 'openrouter' ? 'openrouterApiKey' : 'apiKey'];
       await getChrome().storage.local.set({ settings: next });
-      if (clearApiKey) await getChrome().storage.local.remove('openai_api_key');
+      if (clearApiKey && keyService === 'openai') await getChrome().storage.local.remove('openai_api_key');
       await syncButtonVisibilityRegistrationSafely(next, generation);
     });
     settingsMutation = nextMutation;
@@ -735,7 +741,8 @@ function createBackgroundWorker(platform = {}) {
     return resp.data;
   }
 
-  async function openaiTranslateChunk({
+  async function requestTranslation({
+    service = 'openai',
     apiKey,
     model,
     reasoningEffort = DEFAULT_SETTINGS.reasoningEffort,
@@ -758,22 +765,48 @@ function createBackgroundWorker(platform = {}) {
       body.text = { format: textFormat };
     }
 
-    const res = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
+    const openrouter = service === 'openrouter';
+    if (openrouter) {
+      body.model = OPENROUTER_MODEL;
+      body.reasoning = { effort: 'none' };
+      body.provider = { require_parameters: true, data_collection: 'deny', zdr: true };
+    }
+
+    let res;
+    try {
+      res = await fetch(openrouter ? 'https://openrouter.ai/api/v1/responses' : 'https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      if (!openrouter) throw error;
+      throw Object.assign(new Error(getOpenRouterFailureMessage('openrouter.transport')), { code: 'openrouter.transport' });
+    }
 
     const json = await res.json().catch(() => null);
     if (!res.ok) {
+      if (openrouter) {
+        const failures = {
+          401: 'authentication', 402: 'credits', 403: 'access', 404: 'model',
+          429: 'rate_limit', 503: 'unavailable',
+        };
+        const code = `openrouter.${failures[res.status] || 'request'}`;
+        throw Object.assign(new Error(getOpenRouterFailureMessage(code)), { code });
+      }
       const msg = json?.error?.message || `OpenAI API error (${res.status})`;
       throw new Error(msg);
     }
 
-    return openAiResponse.parseCompletedResponse(json);
+    try {
+      return openAiResponse.parseCompletedResponse(json);
+    } catch (error) {
+      if (openrouter) error.message = `OpenRouter: ${error.message}`;
+      throw error;
+    }
   }
 
   async function translateVisibleBlockBatch(
@@ -797,8 +830,9 @@ function createBackgroundWorker(platform = {}) {
         settingsSnapshot
       );
       run.describe({ model: settings.model });
-      if (!settings.apiKey) {
-        throw new Error('OpenAI API key is not set. Open Options and paste your key.');
+      const apiKey = settings.service === 'openrouter' ? settings.openrouterApiKey : settings.apiKey;
+      if (!apiKey) {
+        throw new Error(`${settings.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`);
       }
       run.describe({ targetLanguageCode: getTargetLanguageCode(settings.targetLanguage) });
       await run.preflight();
@@ -810,7 +844,7 @@ function createBackgroundWorker(platform = {}) {
         tone: settings.tone,
       }, (request) => {
         run.modelAttempt();
-        return openaiTranslateChunk({ ...request, apiKey: settings.apiKey });
+        return requestTranslation({ ...request, service: settings.service, apiKey });
       });
       return await run.complete(results);
     } catch (error) {
@@ -942,16 +976,18 @@ function createBackgroundWorker(platform = {}) {
     activeTranslationsByTab.set(tabId, operationToken);
 
     try {
-      const settings = mergeSettings({
+      const saved = mergeSettings({
         ...(await getSettings()),
         ...(overrideSettings || {}),
       });
+      const settings = { ...saved, ...getEffectiveModelSettings(saved) };
 
-      if (!settings.apiKey) {
+      const apiKey = settings.service === 'openrouter' ? settings.openrouterApiKey : settings.apiKey;
+      if (!apiKey) {
         setTabState(tabId, {
           status: 'error',
           error: {
-            message: 'OpenAI API key is not set. Open Options and paste your key.',
+            message: `${settings.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`,
           },
         });
         return { skipped: true, reason: 'missing_api_key' };
@@ -981,7 +1017,7 @@ function createBackgroundWorker(platform = {}) {
         const translated = await sidePanelTranslationExecution.execute(
           extraction,
           createPublicSettingsUsed(settings),
-          (request) => openaiTranslateChunk({ ...request, apiKey: settings.apiKey }),
+          (request) => requestTranslation({ ...request, service: settings.service, apiKey }),
           ({ progress }) => {
             if (!translationStarted) {
               translationStarted = true;
@@ -1176,6 +1212,7 @@ function createBackgroundWorker(platform = {}) {
         if (msg?.type === 'GET_SETTINGS') {
           const settings = await getSettings();
           settings.apiKey = settings.apiKey ? '***' : '';
+          settings.openrouterApiKey = settings.openrouterApiKey ? '***' : '';
           sendResponse({ ok: true, settings });
           return;
         }
@@ -1185,7 +1222,7 @@ function createBackgroundWorker(platform = {}) {
           return;
         }
         if (msg?.type === 'CLEAR_API_KEY') {
-          await changeSettings({ clearApiKey: true });
+          await changeSettings({ clearApiKey: true, service: msg.service });
           sendResponse({ ok: true });
           return;
         }
@@ -1214,7 +1251,7 @@ function createBackgroundWorker(platform = {}) {
     },
     // Everything below is what this file already exported, backed by this instance so that an
     // export and the worker the browser is running are the same thing.
-    openaiTranslateChunk,
+    requestTranslation,
     runInlineTranslationControl,
     sendInlineInstruction,
     syncButtonVisibilityRegistration,

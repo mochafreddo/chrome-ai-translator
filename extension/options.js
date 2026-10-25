@@ -6,6 +6,9 @@ const elTargetLanguage = hasDocument
   : null;
 const elTone = hasDocument ? document.getElementById('tone') : null;
 const elModel = hasDocument ? document.getElementById('model') : null;
+const elReasoningEffort = hasDocument ? document.getElementById('reasoningEffort') : null;
+const elServices = hasDocument
+  ? Array.from(document.querySelectorAll('input[name="service"]')) : [];
 const elChunkMaxChars = hasDocument
   ? document.getElementById('chunkMaxChars')
   : null;
@@ -27,7 +30,7 @@ const { ALL_SITES_ORIGINS, BUTTON_VISIBILITY, readButtonVisibility } =
   (typeof module !== 'undefined' && module.exports
     ? require('./button-visibility.js')
     : {});
-const { DEFAULT_MODEL } =
+const { DEFAULT_MODEL, OPENROUTER_MODEL } =
   globalThis.ChromeAiTranslatorDefaultModel ||
   (typeof module !== 'undefined' && module.exports
     ? require('./default-model.js')
@@ -55,8 +58,20 @@ async function load() {
   elTargetLanguage.value = s.targetLanguage || 'Korean';
   elTone.value = s.tone || 'technical';
   elModel.value = s.model || DEFAULT_MODEL;
+  elReasoningEffort.value = s.reasoningEffort || 'none';
+  checkChoice(elServices, s.service === 'openrouter' ? 'openrouter' : 'openai');
+  updateService();
   elChunkMaxChars.value = s.chunkMaxChars || 12000;
   checkChoice(elButtonVisibility, readButtonVisibility(s));
+}
+
+function updateService() {
+  const openrouter = readCheckedChoice(elServices, 'openai') === 'openrouter';
+  document.getElementById('openaiSettings').hidden = openrouter;
+  document.getElementById('openrouterSettings').hidden = !openrouter;
+  document.getElementById('apiKeyLabel').textContent = openrouter ? 'OpenRouter API key' : 'OpenAI API key';
+  document.getElementById('openrouterModel').textContent = OPENROUTER_MODEL;
+  elApiKey.value = '';
 }
 
 async function getPublicSettings() {
@@ -161,15 +176,17 @@ async function save() {
   }
 
   const next = {
+    service: readCheckedChoice(elServices, 'openai'),
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
     model: elModel.value.trim() || DEFAULT_MODEL,
+    reasoningEffort: elReasoningEffort.value,
     chunkMaxChars: Number(elChunkMaxChars.value) || 12000,
     buttonVisibility,
   };
 
   const key = elApiKey.value.trim();
-  if (key) next.apiKey = key;
+  if (key) next[next.service === 'openrouter' ? 'openrouterApiKey' : 'apiKey'] = key;
 
   const resp = await chrome.runtime.sendMessage({
     type: 'SAVE_SETTINGS',
@@ -186,7 +203,7 @@ async function clearKey() {
   setError(null);
   if (
     !shouldClearStoredApiKey(() =>
-      window.confirm('Clear the stored OpenAI API key? This cannot be undone here.')
+      window.confirm(`Clear the stored ${readCheckedChoice(elServices, 'openai') === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key? This cannot be undone here.`)
     )
   ) {
     setStatus('Key not changed.');
@@ -194,7 +211,7 @@ async function clearKey() {
     return;
   }
   setStatus('Clearing key...');
-  await clearStoredApiKey(chrome);
+  await clearStoredApiKey(chrome, readCheckedChoice(elServices, 'openai'));
   elApiKey.value = '';
   setStatus('Key cleared.');
   setTimeout(() => setStatus(''), 1200);
@@ -204,8 +221,8 @@ function shouldClearStoredApiKey(confirmFn) {
   return Boolean(confirmFn());
 }
 
-async function clearStoredApiKey(chromeApi) {
-  const response = await chromeApi.runtime.sendMessage({ type: 'CLEAR_API_KEY' });
+async function clearStoredApiKey(chromeApi, service = 'openai') {
+  const response = await chromeApi.runtime.sendMessage({ type: 'CLEAR_API_KEY', service });
   if (!response?.ok) throw new Error('Failed to clear stored API key');
 }
 
@@ -236,6 +253,7 @@ if (hasDocument) {
   // The markup names no model of its own: a placeholder still naming the model the
   // extension defaulted to yesterday is the same quiet lie as a stale fallback.
   elModel.placeholder = DEFAULT_MODEL;
+  for (const input of elServices) input.addEventListener('change', updateService);
 
   document.getElementById('btnSave').addEventListener('click', handleSaveClick);
   document.getElementById('btnClear').addEventListener('click', handleClearClick);

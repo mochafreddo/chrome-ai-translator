@@ -14,18 +14,27 @@
 
     <main class="options">
       <p class="muted">
-        ⚠️ This extension stores your OpenAI API key in
+        ⚠️ This extension stores each service's API key in
         <code>chrome.storage.local</code>. Since this is client-side, treat it
         as a risk. Use a dedicated key/project and rotate it if needed.
       </p>
 
+      <fieldset class="choice-group">
+        <legend>Translation service</legend>
+        <label class="choice-label"><input type="radio" name="service" value="openai" />OpenAI</label>
+        <label class="choice-label"><input type="radio" name="service" value="openrouter" />OpenRouter</label>
+      </fieldset>
+
       <label>
-        OpenAI API Key
+        <span id="apiKeyLabel">OpenAI API key</span>
         <input
           id="apiKey"
           type="password"
           placeholder="sk-..."
           autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
         />
       </label>
 
@@ -42,10 +51,27 @@
             <option value="formal">formal</option>
           </select>
         </label>
+        <div id="openaiSettings">
         <label>
           Default model
-          <input id="model" type="text" />
+          <input id="model" type="text" autocorrect="off" autocapitalize="off" spellcheck="false" />
         </label>
+        <label>
+          Reasoning effort
+          <select id="reasoningEffort">
+            <option value="none">none</option>
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+          </select>
+        </label>
+        </div>
+        <div id="openrouterSettings" hidden>
+          <p>Model: <code id="openrouterModel"></code></p>
+          <p>Reasoning is disabled.</p>
+        </div>
         <label>
           Chunk max chars
           <input id="chunkMaxChars" type="number" min="2000" step="500" />
@@ -71,10 +97,10 @@
       <div class="row">
         <button id="btnSave" class="btn primary">Save</button>
         <button id="btnClear" class="btn danger">Clear key</button>
-        <div id="status" class="muted"></div>
+        <div id="status" class="muted" aria-live="polite"></div>
       </div>
 
-      <div id="errorBox" class="error" hidden></div>
+      <div id="errorBox" class="error" role="alert" hidden></div>
 
       <section>
         <h2>Inline diagnostics</h2>

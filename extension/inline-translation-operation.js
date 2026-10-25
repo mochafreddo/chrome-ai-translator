@@ -9,6 +9,8 @@
     (typeof module !== 'undefined' && module.exports ? require('./inline-diagnostics-protocol') : null);
   const transport = globalScope.ChromeAiTranslatorInlineLocalDiagnosticTransport ||
     (typeof module !== 'undefined' && module.exports ? require('./inline-local-diagnostic-transport') : null);
+  const { getOpenRouterFailureMessage } = globalScope.ChromeAiTranslatorDefaultModel ||
+    (typeof module !== 'undefined' && module.exports ? require('./default-model') : {});
   const AUTH_MS = 5 * 60 * 1000;
 
   function formatProgress(counts, status) {
@@ -43,7 +45,7 @@
     function update() {
       const { counts, reason } = session.progress();
       progress = formatProgress(counts, session.status);
-      const feedback = [reason, current?.diagnosticsUnavailable ? 'Diagnostics could not be saved.' : '']
+      const feedback = [reason, current?.serviceError, current?.diagnosticsUnavailable ? 'Diagnostics could not be saved.' : '']
         .filter(Boolean).join('\n');
       if (feedback) error = feedback;
       onChange();
@@ -93,6 +95,9 @@
           })),
         })).catch(() => null).then(response => {
           const settled = session.settle(batch, response);
+          if (isCurrent(store) && store.settings.service === 'openrouter' && response?.ok === false) {
+            store.serviceError = getOpenRouterFailureMessage(response.error?.code);
+          }
           if (settled.diagnosticsUnavailable) store.diagnosticsUnavailable = true;
           fileOutcomes(store, settled);
         }).catch(() => {}) // Filing failures cannot undo already settled Semantic Blocks.
@@ -134,14 +139,15 @@
       const response = await sendMessage({ type: 'GET_SETTINGS' });
       if (preparation !== requested) return;
       if (!response?.ok) throw new Error(response?.error?.message || 'Unable to load extension settings.');
-      if (!response.settings?.apiKey) {
-        error = 'Open Options and paste your OpenAI API key.';
+      const settings = sessions.createSettingsSnapshot(response.settings);
+      const openrouter = settings.service === 'openrouter';
+      if (!(openrouter ? response.settings?.openrouterApiKey : response.settings?.apiKey)) {
+        error = `Open Options and paste your ${openrouter ? 'OpenRouter' : 'OpenAI'} API key.`;
         onChange();
         return;
       }
       const root = pickArticleRoot();
       if (!root) throw new Error('No article content found.');
-      const settings = sessions.createSettingsSnapshot(response.settings);
       const store = begin(settings);
       // Display settings have their own lifetime; content receives a separate snapshot.
       onSettings({ ...settings });

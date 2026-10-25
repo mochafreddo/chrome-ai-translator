@@ -55,6 +55,7 @@ import {
   wait,
 } from './harness.mjs';
 import { withApiKey } from './live-key.mjs';
+import { observeModelRequests } from './model-request-evidence.mjs';
 import {
   describeSurvivalFailures,
   findSurvivalFailures,
@@ -67,7 +68,14 @@ const ROOT = join(HERE, '..', '..');
 const EXTENSION_DIR = join(ROOT, 'extension');
 const ENV_PATH = join(ROOT, '.env.local');
 const FIXTURE = join(HERE, 'fixtures', 'sidepanel-translation.html');
-const SESSION = 'chrome-ai-translator-live-sidepanel';
+const serviceArguments = process.argv.slice(2);
+if (serviceArguments.length && (serviceArguments.length !== 2 || serviceArguments[0] !== '--service' ||
+    !['openai', 'openrouter'].includes(serviceArguments[1]))) {
+  throw new Error('Use --service openai or --service openrouter');
+}
+const SERVICE = serviceArguments[1] || 'openai';
+const KEY_FIELD = SERVICE === 'openrouter' ? 'openrouterApiKey' : 'apiKey';
+const SESSION = `chrome-ai-translator-live-sidepanel-${SERVICE}`;
 const TARGET_LANGUAGE = 'Korean';
 const HANGUL = /[가-힣]/;
 
@@ -107,6 +115,15 @@ async function main() {
     const page = ctx.page;
     if (!check('page execution context is reachable', (await page.evaluate('1 + 1')) === 2)) return;
 
+    let evidence = null;
+    if (SERVICE === 'openrouter') {
+      const target = await ctx.findTarget(candidate => candidate.type === 'service_worker' &&
+        candidate.url.startsWith(`chrome-extension://${ctx.extension.id}/`));
+      if (!check('OpenRouter worker evidence observer is available', Boolean(target))) return;
+      const worker = await ctx.attach(target.id, 'service_worker');
+      evidence = await observeModelRequests(ctx.cdp, worker.sessionId, { reasoningUsage: true });
+    }
+
     const spans = readProtectedSpans(readFileSync(FIXTURE, 'utf8'));
     console.log(
       `  the fixture holds ${countKind(spans, 'link')} links and ` +
@@ -118,6 +135,7 @@ async function main() {
       extension: ctx.extension,
       envPath: ENV_PATH,
       targetLanguage: TARGET_LANGUAGE,
+      service: SERVICE,
       // In a finally, so it reports even when a check above threw. A run that leaves a real
       // key in the browser profile has failed whatever else it proved.
       onCleared: (cleared) => check('the API key is cleared from the browser profile', cleared),
@@ -125,7 +143,7 @@ async function main() {
       if (!check('options page saves a real API key and the target language',
         saved.hasKey === true && saved.targetLanguage === TARGET_LANGUAGE,
         JSON.stringify({ ...saved, hasKey: Boolean(saved.hasKey) }))) return;
-      console.log(`  model in effect: ${saved.model || '(the shared fallback)'}`);
+      console.log(`  selected service: ${SERVICE}`);
 
       // The chunk limit is this check's own business, not the key module's, so it is saved
       // here -- through the same options page, with the key field left empty, which is what
@@ -144,7 +162,7 @@ async function main() {
         const stored = (await chrome.storage.local.get(['settings'])).settings || {};
         return {
           chunkMaxChars: stored.chunkMaxChars,
-          hasKey: typeof stored.apiKey === 'string' && stored.apiKey.length > 0,
+          hasKey: typeof stored.${KEY_FIELD} === 'string' && stored.${KEY_FIELD}.length > 0,
           error: document.getElementById('errorBox').hidden
             ? '' : document.getElementById('errorBox').textContent,
         };
@@ -315,6 +333,21 @@ async function main() {
 
       console.log('\nwhat the run saw:');
       for (const line of ledger) console.log(`  ${line}`);
+      if (SERVICE === 'openrouter') {
+        await evidence.settle();
+        const { requests: requestEvidence, reasoningTokens: reasoningEvidence } = evidence;
+        console.log(`  observed request models: ${JSON.stringify([...new Set(requestEvidence.map(request => request.model))])}`);
+        check('OpenRouter requests retain the pinned model and strict data policy', requestEvidence.length > 0 &&
+          requestEvidence.every(evidence => evidence.model === 'deepseek/deepseek-v4.1-flash-1017' &&
+            evidence.reasoning?.effort === 'none' && evidence.provider?.require_parameters === true &&
+            evidence.provider?.data_collection === 'deny' && evidence.provider?.zdr === true &&
+            Number.isInteger(evidence.maxOutputTokens) && evidence.store === false));
+        check('provider usage reports zero reasoning tokens for every observed response',
+          reasoningEvidence.length === requestEvidence.length && reasoningEvidence.length > 0 &&
+          reasoningEvidence.every(tokens => tokens === 0),
+          `requests=${requestEvidence.length} responses=${reasoningEvidence.length} missing=${reasoningEvidence.filter(tokens => tokens === null).length}`);
+        console.log('  Zero reported reasoning tokens is provider evidence; it does not expose provider internals.');
+      }
     });
 
     ctx.close();

@@ -119,6 +119,34 @@ function createOperationFixture(options = {}) {
 
 exports.name = 'inline translation operation';
 exports.tests = [{
+  name: 'an OpenAI Operation carries its service in the worker request snapshot',
+  async fn() {
+    const f = createOperationFixture({ settings: { service: 'openai', apiKey: '***' } });
+    f.operation.authorize();
+    await f.control('start');
+    assert.equal(f.pending[0].message.settingsSnapshot.service, 'openai');
+  },
+}, {
+  name: 'OpenRouter Inline Start applies and restores page nodes through its service snapshot',
+  async fn() {
+    const f = createOperationFixture({ settings: { service: 'openrouter', apiKey: '', openrouterApiKey: '***', model: 'custom-openai', reasoningEffort: 'high' } });
+    const original = f.block.textContent;
+    const nodes = [...f.block.childNodes];
+    f.operation.authorize();
+    await f.control('start');
+    assert.equal(f.operation.getStatus().status, 'active');
+    assert.deepEqual(f.pending[0].message.settingsSnapshot, { service: 'openrouter', model: 'deepseek/deepseek-v4.1-flash-1017', reasoningEffort: 'none', targetLanguage: 'Korean', tone: 'technical' });
+    await f.settle();
+    assert.match(f.block.textContent, /추론 모델/);
+    assert.match(f.operation.getStatus().progress, /Translated 1/);
+    await f.control('restore');
+    assert.equal(f.block.textContent, original);
+    assert.deepEqual([...f.block.childNodes], nodes);
+    await f.control('start');
+    assert.equal(f.pending.length, 1);
+    assert.match(f.block.textContent, /추론 모델/);
+  },
+}, {
   name: 'Stop invalidates a pending Start without waiting for settings',
   async fn() {
     const f = createOperationFixture();
@@ -742,5 +770,77 @@ exports.tests.push({
     assert.deepEqual(f.operation.getStatus(), original);
     assert.deepEqual(original, { status: 'original', progress: '', error: '' });
     assert.equal(f.pending.length, 0);
+  },
+});
+
+exports.tests.push({
+  name: 'service switches preserve active snapshots and Stop excludes an obsolete OpenRouter result',
+  async fn() {
+    const f = createOperationFixture({ settings: { service: 'openrouter', apiKey: '', openrouterApiKey: '***' } });
+    const original = f.block.textContent;
+    const nodes = [...f.block.childNodes];
+    f.operation.authorize();
+    await f.control('start');
+    f.setSettings({ service: 'openai', apiKey: '***', model: 'custom-openai', reasoningEffort: 'high' });
+    await f.rescan();
+    assert.equal(f.messages.filter(message => message.type === 'GET_SETTINGS').length, 1);
+    assert.equal(f.pending[0].message.settingsSnapshot.service, 'openrouter');
+    await f.control('stop');
+    await f.control('start');
+    assert.equal(f.pending[1].message.settingsSnapshot.service, 'openai');
+    assert.equal(f.pending[1].message.settingsSnapshot.model, 'custom-openai');
+    await f.settle(0, { attemptCount: 2 });
+    assert.equal(f.block.textContent, original);
+    assert.match(f.operation.getStatus().progress, /Pending 1/);
+    await f.settle(1);
+    await f.control('stop');
+    f.setSettings({ service: 'openrouter', apiKey: '', openrouterApiKey: '***' });
+    await f.control('start');
+    assert.equal(f.block.textContent, original);
+    assert.equal(f.pending.length, 3);
+    await f.settle(2);
+    await f.control('restore');
+    assert.equal(f.block.textContent, original);
+    assert.deepEqual([...f.block.childNodes], nodes);
+    await f.control('start');
+    assert.equal(f.pending.length, 3);
+    assert.match(f.block.textContent, /추론 모델/);
+    f.operation.stop();
+  },
+}, {
+  name: 'OpenRouter Start requires its own key even when OpenAI is configured',
+  async fn() {
+    const f = createOperationFixture({ settings: { service: 'openrouter', apiKey: '***', openrouterApiKey: '' } });
+    f.operation.authorize();
+    await f.control('start');
+    assert.match(f.operation.getStatus().error, /OpenRouter API key/);
+    assert.equal(f.pending.length, 0);
+    assert.equal(f.operation.getStatus().status, 'original');
+  },
+});
+
+exports.tests.push({
+  name: 'OpenRouter failures show fixed service advice while stale failures cannot own feedback',
+  async fn() {
+    const f = createOperationFixture({ settings: { service: 'openrouter', openrouterApiKey: '***' } });
+    f.operation.authorize();
+    await f.control('start');
+    f.pending[0].resolve({ ok: false, error: { code: 'openrouter.credits', message: 'secret-key private source translation' } });
+    await flushMicrotasks();
+    assert.match(f.operation.getStatus().error, /OpenRouter has insufficient credits/);
+    assert.doesNotMatch(f.operation.getStatus().error, /secret-key|private source translation/);
+    await f.control('restore');
+    await f.control('start');
+    await f.control('stop');
+    const stopped = f.operation.getStatus();
+    f.pending[1].resolve({ ok: false, error: { code: 'openrouter.authentication', message: 'secret-key' } });
+    await flushMicrotasks();
+    assert.deepEqual(f.operation.getStatus(), stopped);
+    await f.control('stop');
+    assert.deepEqual(f.operation.getStatus(), stopped);
+    await f.control('start');
+    await f.settle(2);
+    assert.equal(f.operation.getStatus().error, '');
+    f.operation.stop();
   },
 });

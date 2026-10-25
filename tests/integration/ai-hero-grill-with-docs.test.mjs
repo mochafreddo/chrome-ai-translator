@@ -39,7 +39,7 @@ async function attachReportedPage(context) {
 }
 
 async function injectInlineTranslation(evaluate) {
-  for (const file of background.getInlineContentScriptFiles()) {
+  for (const file of [...background.getInlineContentScriptFiles(), 'translation-settings.js', 'inline-model-execution.js']) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
 }
@@ -68,13 +68,17 @@ async function main() {
     }
 
     await injectInlineTranslation(page.evaluate);
+    if (!check('shipped model-execution API and settings are ready', await page.evaluate(`
+      typeof globalThis.ChromeAiTranslatorInlineModelExecution?.execute === 'function' &&
+      typeof globalThis.ChromeAiTranslatorTranslationSettings?.getToneInstruction === 'function' &&
+      typeof globalThis.ChromeAiTranslatorTranslationSettings?.getTargetLanguageCode === 'function'`))) return;
     const result = await page.evaluate(`(async () => {
       const createViewportProbe = ${viewportHarness.createViewportProbe.toString()};
       const originalFetch = window.fetch;
       let modelRequests = 0;
       window.fetch = function patchedFetch(input) {
         const url = typeof input === 'string' ? input : input?.url || '';
-        if (String(url).includes('api.openai.com')) modelRequests += 1;
+        if (String(url).startsWith('https://api.openai.com/') || String(url).startsWith('https://openrouter.ai/')) modelRequests += 1;
         return originalFetch.apply(this, arguments);
       };
       try {

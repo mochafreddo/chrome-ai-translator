@@ -852,6 +852,7 @@ exports.tests = [
         {
           targetLanguage: 'Japanese',
           tone: 'natural',
+          service: 'openai',
           model: 'gpt-5.4',
           reasoningEffort: 'low',
         }
@@ -859,9 +860,34 @@ exports.tests = [
       assert.deepEqual(session.createSettingsSnapshot({}), {
         targetLanguage: 'Korean',
         tone: 'technical',
+        service: 'openai',
         model: DEFAULT_MODEL,
         reasoningEffort: 'none',
       });
     },
   },
 ];
+
+exports.tests.push({
+  name: 'OpenRouter cache follows effective settings while service and OpenAI reasoning remain separate',
+  fn() {
+    const visit = session.createInlineTranslationSession();
+    visit.begin({ ...KOREAN, service: 'openrouter', model: 'ignored-openai-one', reasoningEffort: 'high' });
+    const { block } = translateBlock(visit);
+    visit.stop();
+    visit.begin({ ...KOREAN, service: 'openrouter', model: 'ignored-openai-two', reasoningEffort: 'low', openrouterApiKey: 'changed-secret' });
+    visit.admit(block);
+    assert.equal(visit.takeBatch().length, 0);
+    assert.equal(block.textContent, TRANSLATED_TEXT);
+    visit.stop();
+    visit.begin({ ...KOREAN, service: 'openai', model: 'deepseek/deepseek-v4.1-flash-1017' });
+    assert.equal(block.textContent, ORIGINAL_TEXT);
+    visit.admit(block);
+    assert.equal(visit.takeBatch().length, 1);
+    visit.restore();
+    visit.begin({ ...KOREAN, service: 'openrouter' });
+    assert.equal(visit.admit(block), null);
+    assert.equal(visit.takeBatch().length, 0);
+    assert.equal(block.textContent, TRANSLATED_TEXT);
+  },
+});

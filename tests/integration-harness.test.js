@@ -62,7 +62,7 @@ if (process.env.HARNESS_SCENARIO === 'open-error' && args.includes('open')) proc
       const { check, finish } = createChecks('launch fixture');
       try {
         const ctx = await launchExtensionBrowser({ session: 'fixture-session', url,
-          extensionDir: ${JSON.stringify(dir)} });
+          extensionDir: ${JSON.stringify(dir)}, ...(scenario === 'headed-permission' ? { headless: false } : {}) });
         check('page remains usable', await ctx.page?.evaluate('1 + 1') === 2);
         if (scenario === 'worker-attachment') {
           const worker = await ctx.attach('worker-1', 'service_worker');
@@ -132,6 +132,35 @@ exports.tests = [
         assert.ok(diagnostic, scenario);
         assert.equal(JSON.parse(diagnostic.slice('DIAGNOSTIC browser launch - '.length)).stage, stage, scenario);
       }
+    },
+  },
+  {
+    name: 'launches Chrome headless with the required extension debugging flag',
+    fn() {
+      const result = launchFixture('ready');
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const args = result.effects.find(argv => argv.includes('open'));
+      assert.ok(args);
+      assert.ok(args.includes('--headed'));
+      assert.ok(args.includes('--args'));
+      assert.equal(args[args.indexOf('--headed') + 1], 'false');
+      const nativeArgs = args[args.indexOf('--args') + 1].split(',');
+      assert.ok(nativeArgs.includes('--headless=new'));
+      assert.ok(nativeArgs.includes('--enable-unsafe-extension-debugging'));
+    },
+  },
+  {
+    name: 'opens an explicitly headed Chrome for permission UI without dropping extension debugging',
+    fn() {
+      const result = launchFixture('headed-permission');
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const args = result.effects.find(argv => argv.includes('open'));
+      assert.ok(args?.includes('--headed'));
+      assert.ok(args.includes('--args'));
+      assert.equal(args[args.indexOf('--headed') + 1], 'true');
+      const nativeArgs = args[args.indexOf('--args') + 1].split(',');
+      assert.ok(nativeArgs.includes('--enable-unsafe-extension-debugging'));
+      assert.equal(nativeArgs.includes('--headless=new'), false);
     },
   },
   {
@@ -290,3 +319,99 @@ exports.tests = [
     },
   },
 ];
+
+exports.tests.push({
+  name: 'model request evidence pairs worker responses and retains only policy and usage metadata',
+  async fn() {
+    const { observeModelRequests } = await import('./integration/model-request-evidence.mjs');
+    const listeners = new Map();
+    const calls = [];
+    const cdp = {
+      on(type, callback) { listeners.set(type, callback); return () => listeners.delete(type); },
+      async send(method, args, sessionId) {
+        calls.push({ method, args, sessionId });
+        return method === 'Network.getResponseBody' ? { base64Encoded: true,
+          body: Buffer.from(JSON.stringify({ usage: { output_tokens_details: { reasoning_tokens: 0 } },
+            output: 'private translated payload' })).toString('base64') } : {};
+      },
+    };
+    const evidence = await observeModelRequests(cdp, 'worker', { reasoningUsage: true });
+    const request = { requestId: 'one', request: { method: 'POST', url: 'https://openrouter.ai/api/v1/responses',
+      headers: { Authorization: 'private-key' }, postData: JSON.stringify({ model: 'pinned', reasoning: { effort: 'none', extra: 'private reasoning field' },
+        provider: { require_parameters: true, data_collection: 'deny', zdr: true, extra: 'private provider field' }, input: 'private source payload', max_output_tokens: 4096, store: false,
+        text: { format: { type: 'json_schema', strict: true, schema: 'private schema' } } }) } };
+    listeners.get('Network.requestWillBeSent')(request, 'other-worker');
+    listeners.get('Network.loadingFinished')({ requestId: 'unknown' }, 'worker');
+    assert.equal(evidence.requests.length, 0);
+    listeners.get('Network.requestWillBeSent')(request, 'worker');
+    listeners.get('Network.responseReceived')({ requestId: 'one' }, 'worker');
+    listeners.get('Network.loadingFinished')({ requestId: 'one' }, 'worker');
+    listeners.get('Network.loadingFinished')({ requestId: 'one' }, 'worker');
+    await evidence.settle();
+    assert.deepEqual(evidence.requests, [{ service: 'openrouter', model: 'pinned', reasoning: { effort: 'none' },
+      provider: { require_parameters: true, data_collection: 'deny', zdr: true }, format: 'json_schema', strict: true, maxOutputTokens: 4096, store: false }]);
+    assert.deepEqual([...evidence.completedRequests], ['one']);
+    assert.deepEqual(evidence.reasoningTokens, [0]);
+    assert.deepEqual(calls, [{ method: 'Network.enable', args: {}, sessionId: 'worker' },
+      { method: 'Network.getResponseBody', args: { requestId: 'one' }, sessionId: 'worker' }]);
+    assert.doesNotMatch(JSON.stringify(evidence), /private-key|private source payload|private translated payload|private schema|private reasoning field|private provider field/);
+    evidence.close();
+    assert.equal(listeners.size, 0);
+  },
+});
+
+exports.tests.push({
+  name: 'Stop evidence requires the exact pending request to finish successfully after its checkpoint',
+  async fn() {
+    const { observeModelRequests } = await import('./integration/model-request-evidence.mjs');
+    const { execute } = require('../extension/inline-model-execution');
+    const { serialized } = require('./inline-block.test').createReasoningFixture();
+    const record = { id: 'stop-block', template: serialized.template, atoms: serialized.atoms, contract: serialized.contract };
+    const wrapper = record.contract.entries.find(entry => entry.kind === 'wrapper');
+    const atom = record.contract.entries.find(entry => entry.kind === 'atom');
+    const translated = `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
+    const output = template => JSON.stringify({ status: 'completed', output: [{ type: 'message',
+      content: [{ type: 'output_text', text: JSON.stringify({ translations: [{ id: record.id, template }] }) }] }] });
+    for (const scenario of ['before-stop', 'unrelated-only', 'http-error', 'http-low', 'response-error', 'invalid-json', 'invalid-protocol', 'invalid-contract', 'pending-success']) {
+      const listeners = new Map();
+      const cdp = {
+        on(type, callback) { listeners.set(type, callback); return () => listeners.delete(type); },
+        async send(method) {
+          return method === 'Network.getResponseBody' ? { body:
+            scenario === 'response-error' ? output(translated).replace('completed', 'failed') :
+            scenario === 'invalid-json' ? 'invalid' : scenario === 'invalid-protocol' ? JSON.stringify({ status: 'completed',
+              output: [{ type: 'message', content: [{ type: 'output_text', text: 'invalid translation JSON' }] }] }) : output(scenario === 'invalid-contract' ? '토큰이 빠진 번역입니다.' : translated) } : {};
+        },
+      };
+      const evidence = await observeModelRequests(cdp, 'worker', { validateOutput: async (text, input) => {
+        const body = JSON.parse(input);
+        let calls = 0;
+        const results = await execute(body.records.map(item => ({ ...item, contract: record.contract })),
+          { targetLanguage: 'Korean', tone: 'technical' }, async () => {
+            if (calls++) throw new Error('An unobserved repair cannot validate this response.');
+            return text;
+          });
+        return results.every(result => result.disposition === 'apply' && result.attemptCount === 1);
+      } });
+      const emit = (name, event) => listeners.get(name)(event, 'worker');
+      const request = requestId => ({ requestId, request: { method: 'POST', url: 'https://openrouter.ai/api/v1/responses',
+        postData: JSON.stringify({ input: JSON.stringify({ records: [{ id: record.id, template: record.template, atoms: record.atoms }] }) }) } });
+      emit('Network.requestWillBeSent', request('exact-request'));
+      emit('Network.responseReceived', { requestId: 'exact-request', response: { status: scenario === 'http-error' ? 401 : scenario === 'http-low' ? 199 : 200 } });
+      if (scenario === 'before-stop') emit('Network.loadingFinished', { requestId: 'exact-request' });
+      const checkpoint = evidence.checkpointPending(['exact-request']);
+      assert.equal(checkpoint.pending, scenario !== 'before-stop', scenario);
+      assert.equal(evidence.completedSuccessfully(checkpoint), false, scenario);
+      emit('Network.requestWillBeSent', request('unrelated-request'));
+      emit('Network.responseReceived', { requestId: 'unrelated-request', response: { status: 200 } });
+      emit('Network.loadingFinished', { requestId: 'unrelated-request' });
+      if (!['before-stop', 'unrelated-only'].includes(scenario)) emit('Network.loadingFinished', { requestId: 'exact-request' });
+      await evidence.settle();
+      assert.equal(evidence.completedSuccessfully(checkpoint), scenario === 'pending-success', scenario);
+      assert.equal(evidence.checkpointPending([]).pending, false);
+      assert.equal(evidence.checkpointPending(['unobserved-request']).pending, false);
+      assert.doesNotMatch(JSON.stringify([...evidence.responses.values()]), /추론|번역|Reasoning|GPT|template/);
+      evidence.close();
+    }
+  },
+});

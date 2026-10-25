@@ -8,7 +8,7 @@ const { MISSING_PAGE_ACCESS_MESSAGES } =
   (typeof module !== 'undefined' && module.exports
     ? require('./page-access.js')
     : {});
-const { DEFAULT_MODEL } =
+const { DEFAULT_MODEL, getEffectiveModelSettings } =
   globalThis.ChromeAiTranslatorDefaultModel ||
   (typeof module !== 'undefined' && module.exports
     ? require('./default-model.js')
@@ -424,7 +424,8 @@ async function loadSettings() {
 
   elTargetLanguage.value = s.targetLanguage || 'Korean';
   elTone.value = s.tone || 'technical';
-  elModel.value = s.model || DEFAULT_MODEL;
+  elModel.value = getEffectiveModelSettings(s).model;
+  elModel.disabled = s.service === 'openrouter';
   elViewMode.value = s.viewMode || 'translation';
 }
 
@@ -473,7 +474,7 @@ function readSettings() {
   return {
     targetLanguage: elTargetLanguage.value.trim() || 'Korean',
     tone: elTone.value,
-    model: elModel.value.trim() || DEFAULT_MODEL,
+    ...(!elModel.disabled ? { model: elModel.value.trim() || DEFAULT_MODEL } : {}),
     viewMode: elViewMode.value,
   };
 }

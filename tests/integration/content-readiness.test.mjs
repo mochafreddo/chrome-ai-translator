@@ -42,7 +42,7 @@ async function watchModelRequests() {
     if (isWorker && !response.__timeout && !response.__error) watchedWorkerCount += 1;
   };
   ctx.cdp.on('Network.requestWillBeSent', (event) => {
-    if (event.request?.url?.startsWith('https://api.openai.com/')) modelRequestCount += 1;
+    if (/^https:\/\/(?:api\.openai\.com|openrouter\.ai)\//.test(event.request?.url || '')) modelRequestCount += 1;
   });
   ctx.cdp.on('Target.attachedToTarget', (event) => {
     if (event.targetInfo?.type === 'service_worker' &&
@@ -105,6 +105,7 @@ async function main() {
     session: SESSION,
     url: launchUrl,
     extensionDir: EXTENSION_DIR,
+    headless: false,
   });
 
   check('CDP Extensions domain responds', ctx.extensionsDomainResponded);
@@ -203,7 +204,7 @@ try {
   failures.push('harness');
   console.error(`FAIL content readiness - harness failed: ${error.message}`);
 } finally {
-  check('no OpenAI model requests were made', modelRequestCount === 0,
+  check('no model service requests were made', modelRequestCount === 0,
     `${modelRequestCount} request(s)`);
   ctx?.close();
   await browser(['close', '--session', SESSION], 30000).catch(() => {});
