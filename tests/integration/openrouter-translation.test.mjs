@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until, wait } from './harness.mjs';
+import { readStopBlockContract } from './fixture-stop-contract.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const flowArguments = process.argv.slice(2);
@@ -148,6 +149,9 @@ async function main() {
   } else {
     const pageTarget = await ctx.findTarget(target => target.type === 'page' && target.url === fixture.url);
     const page = await ctx.attach(pageTarget.id);
+    const stopContract = await readStopBlockContract(page);
+    check('the uncached Stop fixture contract is readable in the fixture realm', Boolean(stopContract?.template) &&
+      stopContract.atoms?.length === 0 && stopContract.contract?.entries?.length === 0);
     await page.evaluate(`(() => {
       const p = document.querySelector('main p');
       p.innerHTML = 'Read <a href="https://example.test/">this guide</a> and use <code>sample()</code> safely.';
