@@ -741,7 +741,7 @@ function createBackgroundWorker(platform = {}) {
     return resp.data;
   }
 
-  async function openaiTranslateChunk({
+  async function requestTranslation({
     service = 'openai',
     apiKey,
     model,
@@ -844,7 +844,7 @@ function createBackgroundWorker(platform = {}) {
         tone: settings.tone,
       }, (request) => {
         run.modelAttempt();
-        return openaiTranslateChunk({ ...request, service: settings.service, apiKey });
+        return requestTranslation({ ...request, service: settings.service, apiKey });
       });
       return await run.complete(results);
     } catch (error) {
@@ -1017,7 +1017,7 @@ function createBackgroundWorker(platform = {}) {
         const translated = await sidePanelTranslationExecution.execute(
           extraction,
           createPublicSettingsUsed(settings),
-          (request) => openaiTranslateChunk({ ...request, service: settings.service, apiKey }),
+          (request) => requestTranslation({ ...request, service: settings.service, apiKey }),
           ({ progress }) => {
             if (!translationStarted) {
               translationStarted = true;
@@ -1251,7 +1251,7 @@ function createBackgroundWorker(platform = {}) {
     },
     // Everything below is what this file already exported, backed by this instance so that an
     // export and the worker the browser is running are the same thing.
-    openaiTranslateChunk,
+    requestTranslation,
     runInlineTranslationControl,
     sendInlineInstruction,
     syncButtonVisibilityRegistration,

@@ -58,7 +58,7 @@ async function runTranslationRequest(request) {
     },
   });
 
-  const output = await worker.openaiTranslateChunk(request);
+  const output = await worker.requestTranslation(request);
   return { requestBody, output };
 }
 
@@ -1307,7 +1307,7 @@ exports.tests = [
       const worker = helpers.createBackgroundWorker();
 
       await assert.rejects(
-        () => worker.openaiTranslateChunk({
+        () => worker.requestTranslation({
           apiKey: 'sk-test',
           model: 'gpt-5.4-mini',
           instructions: 'Translate.',

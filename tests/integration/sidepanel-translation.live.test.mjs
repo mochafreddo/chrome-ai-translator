@@ -143,7 +143,7 @@ async function main() {
       if (!check('options page saves a real API key and the target language',
         saved.hasKey === true && saved.targetLanguage === TARGET_LANGUAGE,
         JSON.stringify({ ...saved, hasKey: Boolean(saved.hasKey) }))) return;
-      console.log(`  model in effect: ${saved.model || '(the shared fallback)'}`);
+      console.log(`  selected service: ${SERVICE}`);
 
       // The chunk limit is this check's own business, not the key module's, so it is saved
       // here -- through the same options page, with the key field left empty, which is what
@@ -336,6 +336,7 @@ async function main() {
       if (SERVICE === 'openrouter') {
         await evidence.settle();
         const { requests: requestEvidence, reasoningTokens: reasoningEvidence } = evidence;
+        console.log(`  observed request models: ${JSON.stringify([...new Set(requestEvidence.map(request => request.model))])}`);
         check('OpenRouter requests retain the pinned model and strict data policy', requestEvidence.length > 0 &&
           requestEvidence.every(evidence => evidence.model === 'deepseek/deepseek-v4.1-flash-1017' &&
             evidence.reasoning?.effort === 'none' && evidence.provider?.require_parameters === true &&

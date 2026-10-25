@@ -14,6 +14,7 @@ import {
 } from './harness.mjs';
 import { withApiKey } from './live-key.mjs';
 import { observeModelRequests } from './model-request-evidence.mjs';
+import inlineModelExecution from '../../extension/inline-model-execution.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
@@ -67,7 +68,23 @@ async function main() {
       candidate.url.startsWith(`chrome-extension://${ctx.extension.id}/`));
     if (!check('worker network observer is available', Boolean(target))) return;
     const worker = await ctx.attach(target.id, 'service_worker');
-    const evidence = await observeModelRequests(ctx.cdp, worker.sessionId, { reasoningUsage: SERVICE === 'openrouter' });
+    let stopRecord = null;
+    const evidence = await observeModelRequests(ctx.cdp, worker.sessionId, {
+      reasoningUsage: SERVICE === 'openrouter',
+      validateOutput: async (text, input) => {
+        const body = JSON.parse(input);
+        if (!stopRecord || body.records?.length !== 1 || body.records[0].template !== stopRecord.template ||
+            JSON.stringify(body.records[0].atoms) !== JSON.stringify(stopRecord.atoms)) return false;
+        let calls = 0;
+        const results = await inlineModelExecution.execute(
+          [{ ...body.records[0], contract: stopRecord.contract }],
+          { targetLanguage: TARGET_LANGUAGE, tone: 'technical' }, async () => {
+            if (calls++) throw new Error('An unobserved repair cannot validate this response.');
+            return text;
+          });
+        return results.length === 1 && results[0].disposition === 'apply' && results[0].attemptCount === 1;
+      },
+    });
     const { requests: requestEvidence, requestIds, completedRequests, reasoningTokens: reasoningEvidence } = evidence;
 
     await withApiKey({
@@ -83,7 +100,7 @@ async function main() {
       if (!check('options page saves a real API key and the target language',
         saved.hasKey === true && saved.targetLanguage === TARGET_LANGUAGE,
         JSON.stringify({ ...saved, hasKey: Boolean(saved.hasKey) }))) return;
-      console.log(`  model in effect: ${saved.model || '(the shared fallback)'}`);
+      console.log(`  selected service: ${SERVICE}`);
 
       await page.navigate(fixture.url);
       const originalText = await page.evaluate(`(() => {
@@ -157,14 +174,19 @@ async function main() {
         `document.getElementById(${JSON.stringify(STOPPED_RUN_BLOCK_ID)}).innerText.trim()`);
       const originalWithRevealed = await pageText();
 
-      const beforeStopRequests = requestIds.size;
-      const beforeStopCompleted = new Set(completedRequests);
+      stopRecord = await page.evaluate(`(() => {
+        const serialized = ChromeAiTranslatorInlineBlock.serializeBlock(
+          document.getElementById(${JSON.stringify(STOPPED_RUN_BLOCK_ID)}));
+        return serialized.ok ? { template: serialized.template, atoms: serialized.atoms, contract: serialized.contract } : null;
+      })()`);
+      if (!check('the uncached Stop block has a valid translation contract', Boolean(stopRecord))) return;
+      const beforeStopRequests = new Set(requestIds);
       await click('btnInlineTranslate');
       // Pending is what says a request is out. Waiting on stopDisabled alone would settle
       // the moment the status turned active, which happens before the page is even scanned.
       const running = await until(async () => {
         const now = await controls();
-        return now?.stopDisabled === false && readPending(now) > 0 && requestIds.size > beforeStopRequests;
+        return now?.stopDisabled === false && readPending(now) > 0 && [...requestIds].some(id => !beforeStopRequests.has(id) && !completedRequests.has(id));
       }, 60000, 250);
       // The panel is read a second behind the page, so the answer can arrive between the
       // count this saw and the click below. That leaves nothing in flight to stop, which is
@@ -174,6 +196,7 @@ async function main() {
       const arrivedFirst = HANGUL.test(String(await revealedText()));
       check('Stop is offered while a run is in flight', running && !arrivedFirst,
         `status="${atStop?.status}"${arrivedFirst ? ' (the answer landed before Stop was clicked)' : ''}`);
+      const stopRequestIds = [...requestIds].filter(id => !beforeStopRequests.has(id) && !completedRequests.has(id));
       await click('btnInlineStop');
       // Stopped, not merely finished: a run that ended on its own also dims Stop, and it
       // says so on the line above the counts.
@@ -181,6 +204,8 @@ async function main() {
         const now = await controls();
         return now?.stopDisabled === true && String(now?.status || '').startsWith(STOPPED_STATUS);
       }, 20000, 500);
+      const stopCheckpoint = evidence.checkpointPending(stopRequestIds);
+      check('the exact request remains incomplete at confirmed Stop', settled && stopCheckpoint.pending);
       const afterStop = await controls();
       check('Stop ends the run', settled, `status="${afterStop?.status}"`);
       check('Stop leaves the page restorable', afterStop?.restoreDisabled === false,
@@ -188,9 +213,10 @@ async function main() {
       // A cancelled run reporting an error is the state 1e2a84a removed.
       check('a stopped run reports no error', !afterStop?.error, String(afterStop?.error || ''));
 
-      const lateAnswerCompleted = await until(() => [...completedRequests].some(id =>
-        !beforeStopCompleted.has(id)), 120000, 500);
-      check('the uncached request completes after Stop', lateAnswerCompleted);
+      const lateAnswerCompleted = stopCheckpoint.pending && await until(() => stopCheckpoint.requestIds.every(id =>
+        evidence.responses.has(id)), 120000, 500);
+      check('the exact uncached request succeeds after Stop',
+        lateAnswerCompleted && evidence.completedSuccessfully(stopCheckpoint));
       await wait(1000);
       check('a stopped run never applies the batch it had in flight',
         !HANGUL.test(String(await revealedText())));
@@ -202,6 +228,7 @@ async function main() {
         globalThis.originalInlineNodes.every((node, index) => document.querySelectorAll('main *')[index] === node)`));
       check('all model requests use the selected service', requestEvidence.length > 0 &&
         requestEvidence.every(evidence => evidence.service === SERVICE));
+      console.log(`  observed request models: ${JSON.stringify([...new Set(requestEvidence.map(request => request.model))])}`);
       if (SERVICE === 'openrouter') {
         await evidence.settle();
         check('OpenRouter retains structured output and required model/data policy', requestEvidence.length > 0 &&
