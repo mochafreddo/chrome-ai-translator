@@ -19,7 +19,7 @@
     (typeof module !== 'undefined' && module.exports
       ? require('./inline-diagnostics-protocol.js')
       : null);
-  const { DEFAULT_MODEL } =
+  const { DEFAULT_MODEL, getEffectiveModelSettings } =
     globalScope.ChromeAiTranslatorDefaultModel ||
     (typeof module !== 'undefined' && module.exports
       ? require('./default-model.js')
@@ -46,8 +46,7 @@
     return {
       targetLanguage: String(safe.targetLanguage || SETTINGS_DEFAULTS.targetLanguage),
       tone: String(safe.tone || SETTINGS_DEFAULTS.tone),
-      model: String(safe.model || SETTINGS_DEFAULTS.model),
-      reasoningEffort: String(safe.reasoningEffort || SETTINGS_DEFAULTS.reasoningEffort),
+      ...getEffectiveModelSettings(safe),
     };
   }
 

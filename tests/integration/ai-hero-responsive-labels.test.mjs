@@ -166,7 +166,7 @@ async function main() {
     stopWatchingRequests = context.cdp.on(
       'Network.requestWillBeSent',
       (params) => {
-        if (String(params?.request?.url || '').includes('api.openai.com')) {
+        if (/^https:\/\/(?:api\.openai\.com|openrouter\.ai)\//.test(String(params?.request?.url || ''))) {
           modelRequests.push(params.request.url);
         }
       }

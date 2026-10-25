@@ -25,6 +25,7 @@ const liveKey = () => import('./integration/live-key.mjs');
 // foreign-key checks: it satisfies any test on the value that `sk-` would.
 const OPENAI_SHAPED = 'sk-notarealkey000';
 const ANTHROPIC_SHAPED = 'sk-ant-notarealkey000';
+const OPENROUTER_SHAPED = 'sk-or-notarealkey000';
 
 function withEnvFile(contents, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-ai-translator-live-key-'));
@@ -41,7 +42,7 @@ function withEnvFile(contents, fn) {
 // module typed into the options page is checkable from the page's side rather than from the
 // module's; and lets the save fail on demand, so the clearing can be checked on the path
 // where nothing after the save ran.
-function fakePage({ failSave = false } = {}) {
+function fakePage({ failSave = false, service = 'openai' } = {}) {
   const driven = [];
   const evaluated = [];
   let stored = {};
@@ -61,10 +62,16 @@ function fakePage({ failSave = false } = {}) {
       if (source.includes('btnSave')) {
         driven.push('save');
         if (failSave) throw new Error('the options page never answered');
-        stored = { apiKey: OPENAI_SHAPED, targetLanguage: 'Korean', model: '', buttonVisibility: 'onInvocation' };
+        if (service === 'openrouter') {
+          assert.match(source, /input\[name="service"\]\[value="openrouter"\]/);
+          assert.match(source, /openrouterApiKey/);
+        }
+        stored = { [service === 'openrouter' ? 'openrouterApiKey' : 'apiKey']: service === 'openrouter' ? OPENROUTER_SHAPED : OPENAI_SHAPED,
+          targetLanguage: 'Korean', model: '', buttonVisibility: 'onInvocation' };
         return { error: '', hasKey: true, targetLanguage: 'Korean', model: '', buttonVisibility: 'onInvocation' };
       }
       if (source.includes('btnClear')) {
+        if (service === 'openrouter') assert.match(source, /input\[name="service"\]\[value="openrouter"\]/);
         driven.push('clear');
         stored = {};
         return true;
@@ -89,6 +96,28 @@ const withApiKeyArgs = (page, envPath, extra = {}) => ({
 
 exports.name = 'live check key handling';
 exports.tests = [
+  {
+    name: 'OpenRouter live key uses its named source and selected service UI cleanup',
+    async fn() {
+      const { apiKeyName, withApiKey } = await liveKey();
+      await withEnvFile(`OPENAI_API_KEY=${OPENAI_SHAPED}\nOPENROUTER_API_KEY=${OPENROUTER_SHAPED}\n`, async envPath => {
+        assert.equal(apiKeyName(envPath, 'openrouter'), 'OPENROUTER_API_KEY');
+        const page = fakePage({ service: 'openrouter' });
+        const cleared = [];
+        await withApiKey(withApiKeyArgs(page, envPath, { service: 'openrouter',
+          onCleared: ok => cleared.push(ok) }), async saved => {
+          assert.equal(saved.hasKey, true);
+          assert.equal(JSON.stringify(saved).includes('notarealkey'), false);
+        });
+        assert.deepEqual(page.typed(), [OPENROUTER_SHAPED]);
+        assert.deepEqual(cleared, [true]);
+        assert.deepEqual(page.stored(), {});
+      });
+      withEnvFile(`OPENAI_API_KEY=${OPENAI_SHAPED}\n`, envPath => {
+        assert.throws(() => apiKeyName(envPath, 'openrouter'), /OPENROUTER_API_KEY/);
+      });
+    },
+  },
   {
     name: 'takes the key from a name that identifies the provider',
     async fn() {

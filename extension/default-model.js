@@ -8,7 +8,19 @@
 (function initDefaultModel(globalScope) {
   const DEFAULT_MODEL = 'gpt-5.6-luna';
 
-  const api = { DEFAULT_MODEL };
+  const OPENROUTER_MODEL = 'deepseek/deepseek-v4.1-flash-1017';
+  function getEffectiveModelSettings(settings = {}) {
+    if (settings.service !== undefined && !['openai', 'openrouter'].includes(settings.service)) {
+      throw Object.assign(new Error('Unsupported translation service.'), { code: 'settings.service_unsupported' });
+    }
+    const service = settings.service === 'openrouter' ? 'openrouter' : 'openai';
+    return {
+      service,
+      model: service === 'openrouter' ? OPENROUTER_MODEL : String(settings.model || DEFAULT_MODEL),
+      reasoningEffort: service === 'openrouter' ? 'none' : String(settings.reasoningEffort || 'none'),
+    };
+  }
+  const api = { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings };
   globalScope.ChromeAiTranslatorDefaultModel = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

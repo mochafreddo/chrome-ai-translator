@@ -330,14 +330,17 @@ function createInvocationWorker(settings = {}) {
 async function runTabTranslation(
   tabId,
   answers,
-  documentModel = THREE_CHUNK_DOCUMENT
+  documentModel = THREE_CHUNK_DOCUMENT,
+  settings = {}
 ) {
   const queue = [...answers];
   const states = [];
   const requestInputs = [];
+  const requestUrls = [];
 
   const worker = helpers.createBackgroundWorker({
-    fetch: async (_url, options) => {
+    fetch: async (url, options) => {
+      requestUrls.push(url);
       requestInputs.push(JSON.parse(options.body).input);
       if (!queue.length) {
         throw new Error(`Unexpected full-page request #${requestInputs.length}`);
@@ -355,7 +358,7 @@ async function runTabTranslation(
       return { ok: true, async json() { return answer; } };
     },
     chrome: createTabTranslationChrome({
-      settings: { apiKey: 'sk-test', chunkMaxChars: 2000 },
+      settings: { apiKey: 'sk-test', chunkMaxChars: 2000, ...settings },
       extract: () => ({
         title: 'Article',
         url: 'https://example.test',
@@ -370,11 +373,208 @@ async function runTabTranslation(
   const responses = await collectWorkerResponses(worker, [
     { type: 'TRANSLATE_TAB', tabId },
   ]);
-  return { responses, states, requestInputs };
+  return { responses, states, requestInputs, requestUrls };
 }
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'an unsupported explicit service refuses settings and translation before HTTP',
+    async fn() {
+      const { send, snapshot } = createSettingsWorker({ settings: { apiKey: 'sk-openai-synthetic' } });
+      const saved = await send({ type: 'SAVE_SETTINGS', settings: { service: 'unsupported-synthetic' } });
+      assert.equal(saved.ok, false);
+      assert.equal(snapshot().settings.service, undefined);
+      assert.equal(JSON.stringify(saved).includes('unsupported-synthetic'), false);
+      assert.equal((await send({ type: 'CLEAR_API_KEY', service: 'unsupported-synthetic' })).ok, false);
+      assert.equal(snapshot().settings.apiKey, 'sk-openai-synthetic');
+      const worker = helpers.createBackgroundWorker({ chrome: createTabTranslationChrome({
+        settings: { apiKey: 'sk-openai-synthetic' }, extract: () => assert.fail('unsupported service cannot extract'),
+      }), fetch: () => assert.fail('unsupported service cannot send HTTP') });
+      const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 99,
+        settingsOverride: { service: 'unsupported-synthetic' },
+      }]);
+      assert.equal(response.ok, false);
+      assert.equal(response.error.code, 'settings.service_unsupported');
+      assert.equal(JSON.stringify(response).includes('unsupported-synthetic'), false);
+    },
+  },
+  ...[
+    [null, 'response.not_completed'], [createCompletedResponse(''), 'response.output_missing'],
+    [{ status: 'failed', output: [] }, 'response.failed'],
+    [{ status: 'incomplete', incomplete_details: { reason: 'other' }, output: [] }, 'response.incomplete.other'],
+  ].map(([answer, code]) => ({
+    name: `OpenRouter ${code} output refuses the whole Side Panel result without another request`,
+    async fn() {
+      const result = await runTabTranslation(99, [answer], createPlainTranslationDocument('Original'),
+        { service: 'openrouter', openrouterApiKey: 'sk-or-synthetic' });
+      assert.equal(result.states.at(-1).status, 'error');
+      assert.equal(result.states.at(-1).translated, null);
+      assert.equal(result.states.at(-1).error.code, code);
+      assert.match(result.states.at(-1).error.message, /OpenRouter/);
+      assert.deepEqual(result.requestUrls, ['https://openrouter.ai/api/v1/responses']);
+    },
+  })),
+  {
+    name: 'OpenRouter protected Markdown repairs once and rehydrates links and code',
+    async fn() {
+      const { chunk, link, code } = createProtectedFullPageChunk();
+      const document = { namespace: chunk.contract.namespace, entries: chunk.contract.entries, blocks: chunk.blocks };
+      const result = await runTabTranslation(99, [createCompletedResponse('번역'), createCompletedResponse(chunk.template)],
+        document, { service: 'openrouter', openrouterApiKey: 'sk-or-synthetic' });
+      assert.equal(result.states.at(-1).status, 'done');
+      assert.ok(result.states.at(-1).translated.includes(link.destination));
+      assert.ok(result.states.at(-1).translated.includes(code.value));
+      assert.equal(result.requestInputs.length, 2);
+      assert.ok(result.requestUrls.every(url => url === 'https://openrouter.ai/api/v1/responses'));
+      const refused = await runTabTranslation(99, [createCompletedResponse('번역'), createCompletedResponse('번역')],
+        document, { service: 'openrouter', openrouterApiKey: 'sk-or-synthetic' });
+      assert.equal(refused.requestInputs.length, 2);
+      assert.equal(refused.states.at(-1).status, 'error');
+      assert.equal(refused.states.at(-1).translated, null);
+      assert.equal(refused.states.at(-1).error.code, 'markdown.token_missing');
+    },
+  },
+  {
+    name: 'OpenRouter worker refuses Inline batches before a model request',
+    async fn() {
+      const worker = helpers.createBackgroundWorker({ chrome: createBlockBatchChrome({ settings: {
+        ...BLOCK_BATCH_SETTINGS, service: 'openrouter', openrouterApiKey: 'sk-or-synthetic',
+      } }), fetch: () => assert.fail('OpenRouter Inline must make no model request') });
+      const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        records: [createTestPlainBlockRecord()], settingsSnapshot: { service: 'openrouter' },
+      }]);
+      assert.equal(response.ok, false);
+      assert.match(response.error.message, /OpenRouter.*not yet available/);
+      assert.doesNotMatch(JSON.stringify(response), /sk-or-synthetic|sk-test/);
+    },
+  },
+  {
+    name: 'an active OpenAI Inline settings snapshot survives a saved service switch',
+    async fn() {
+      const requests = [];
+      const worker = helpers.createBackgroundWorker({ chrome: createBlockBatchChrome({ settings: {
+        ...BLOCK_BATCH_SETTINGS, service: 'openrouter', openrouterApiKey: 'sk-or-synthetic',
+      } }), fetch: async (url, options) => {
+        requests.push({ url, authorization: options.headers.Authorization });
+        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({
+          blocks: [{ id: 'b1', text: '번역', sourceLanguage: 'en', targetLanguage: 'ko' }],
+        })); } };
+      } });
+      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        settingsSnapshot: { service: 'openai', model: 'custom-openai', targetLanguage: 'Korean' },
+        records: [createTestPlainBlockRecord()],
+      }]);
+      assert.ok(requests.length > 0);
+      assert.ok(requests.every(request => request.url === 'https://api.openai.com/v1/responses' &&
+        request.authorization === 'Bearer sk-test'));
+    },
+  },
+  ...[
+    [401, 'authentication'], [402, 'credits'], [403, 'access'], [404, 'model'],
+    [429, 'rate_limit'], [503, 'unavailable'], [400, 'request'], ['network', 'transport'],
+  ].map(([status, code]) => ({
+    name: `OpenRouter ${code} failure is attributed and redacted without fallback`,
+    async fn() {
+      const states = [];
+      const requests = [];
+      const chrome = createTabTranslationChrome({ settings: {
+        service: 'openrouter', apiKey: 'sk-openai-synthetic', openrouterApiKey: 'sk-or-synthetic',
+      }, extract: () => ({ title: 'Article', url: 'https://example.test', langHint: 'en',
+        contentMarkdown: 'Original', translationDocument: createPlainTranslationDocument('source-private-payload'),
+      }), onStateMessage: message => states.push(message.state) });
+      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (url) => {
+        requests.push(url);
+        if (status === 'network') throw new Error('sk-or-synthetic source-private-payload response-private-payload');
+        return { ok: false, status, async json() { return {
+          error: { message: 'sk-or-synthetic source-private-payload response-private-payload' },
+        }; } };
+      } });
+      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 99 }]);
+      const failure = states.at(-1);
+      assert.equal(failure.status, 'error');
+      assert.equal(failure.translated, null);
+      assert.equal(failure.error.code, `openrouter.${code}`);
+      assert.match(failure.error.message, /OpenRouter/);
+      assert.doesNotMatch(JSON.stringify(failure.error), /synthetic|private-payload/);
+      assert.deepEqual(requests, ['https://openrouter.ai/api/v1/responses']);
+    },
+  })),
+  {
+    name: 'OpenRouter missing credential refuses Side Panel before extraction or network',
+    async fn() {
+      const states = [];
+      const chrome = createTabTranslationChrome({ settings: { service: 'openrouter', apiKey: 'sk-openai-synthetic' },
+        extract: () => assert.fail('missing selected key must prevent extraction'),
+        onStateMessage: message => states.push(message.state) });
+      const worker = helpers.createBackgroundWorker({ chrome, fetch: () => assert.fail('missing selected key must prevent network') });
+      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 99 }]);
+      assert.equal(states.at(-1).status, 'error');
+      assert.match(states.at(-1).error.message, /OpenRouter.*key/);
+    },
+  },
+  {
+    name: 'OpenRouter Side Panel snapshots service credentials and policy across chunks',
+    async fn() {
+      const settings = { service: 'openrouter', apiKey: 'sk-openai-synthetic',
+        openrouterApiKey: 'sk-or-synthetic', model: 'custom-openai', reasoningEffort: 'high', chunkMaxChars: 2000 };
+      const requests = [];
+      const states = [];
+      const chrome = createTabTranslationChrome({ settings, extract: () => ({
+        title: 'Article', url: 'https://example.test', langHint: 'en', contentMarkdown: 'Original',
+        translationDocument: THREE_CHUNK_DOCUMENT,
+      }), onStateMessage: message => states.push(message.state) });
+      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (url, options) => {
+        const body = JSON.parse(options.body);
+        requests.push({ url, authorization: options.headers.Authorization, body });
+        settings.service = 'openai';
+        settings.openrouterApiKey = 'changed-after-start';
+        return { ok: true, async json() { return createCompletedResponse('번역 결과'); } };
+      } });
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 99 }]), [{ ok: true }]);
+      assert.equal(requests.length, 3);
+      for (const request of requests) {
+        assert.equal(request.url, 'https://openrouter.ai/api/v1/responses');
+        assert.equal(request.authorization, 'Bearer sk-or-synthetic');
+        assert.equal(request.body.model, 'deepseek/deepseek-v4.1-flash-1017');
+        assert.deepEqual(request.body.reasoning, { effort: 'none' });
+        assert.deepEqual(request.body.provider, { require_parameters: true, data_collection: 'deny', zdr: true });
+        assert.equal(request.body.max_output_tokens, 8192);
+        assert.equal(request.body.store, false);
+      }
+      assert.equal(states.at(-1).status, 'done');
+      assert.equal(states.at(-1).settingsUsed.service, 'openrouter');
+      assert.equal(states.at(-1).settingsUsed.model, 'deepseek/deepseek-v4.1-flash-1017');
+      assert.equal(JSON.stringify(states).includes('sk-'), false);
+    },
+  },
+  {
+    name: 'service settings preserve and clear independent credentials without exposing them',
+    async fn() {
+      const { send, snapshot } = createSettingsWorker({
+        legacyKey: 'sk-legacy-synthetic', settings: { model: 'custom-openai' },
+      });
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.service, 'openai');
+      await send({ type: 'SAVE_SETTINGS', settings: {
+        service: 'openrouter', openrouterApiKey: 'sk-or-synthetic',
+      } });
+      await send({ type: 'SAVE_SETTINGS', settings: { tone: 'formal' } });
+      const publicSettings = (await send({ type: 'GET_SETTINGS' })).settings;
+      assert.equal(publicSettings.apiKey, '***');
+      assert.equal(publicSettings.openrouterApiKey, '***');
+      assert.equal(publicSettings.model, 'custom-openai');
+      assert.equal(JSON.stringify(publicSettings).includes('synthetic'), false);
+      await send({ type: 'CLEAR_API_KEY', service: 'openrouter' });
+      assert.equal(snapshot().settings.apiKey, 'sk-legacy-synthetic');
+      assert.equal(snapshot().settings.openrouterApiKey, undefined);
+      assert.equal(snapshot().openai_api_key, 'sk-legacy-synthetic');
+      await send({ type: 'SAVE_SETTINGS', settings: { openrouterApiKey: 'sk-or-new-synthetic' } });
+      await send({ type: 'CLEAR_API_KEY', service: 'openai' });
+      assert.equal(snapshot().settings.openrouterApiKey, 'sk-or-new-synthetic');
+      assert.equal(snapshot().settings.apiKey, undefined);
+      assert.equal(snapshot().openai_api_key, undefined);
+    },
+  },
   {
     name: 'toolbar opens once before settings resolve and prepares the page without translating',
     async fn() {
@@ -1146,6 +1346,7 @@ exports.tests = [
         'updatedAt',
       ]);
       const settingsUsedKeys = [
+        'service',
         'model',
         'reasoningEffort',
         'targetLanguage',

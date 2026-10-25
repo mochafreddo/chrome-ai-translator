@@ -119,6 +119,26 @@ function createOperationFixture(options = {}) {
 
 exports.name = 'inline translation operation';
 exports.tests = [{
+  name: 'an OpenAI Operation carries its service in the worker request snapshot',
+  async fn() {
+    const f = createOperationFixture({ settings: { service: 'openai', apiKey: '***' } });
+    f.operation.authorize();
+    await f.control('start');
+    assert.equal(f.pending[0].message.settingsSnapshot.service, 'openai');
+  },
+}, {
+  name: 'OpenRouter Inline Start remains original and sends no translation request',
+  async fn() {
+    const f = createOperationFixture({ settings: { service: 'openrouter', openrouterApiKey: '***' } });
+    f.operation.authorize();
+    await f.control('start');
+    assert.equal(f.operation.getStatus().status, 'original');
+    assert.match(f.operation.getStatus().error, /OpenRouter.*not yet available/);
+    assert.equal(f.pending.length, 0);
+    assert.deepEqual(f.messages.map(message => message.type), ['GET_SETTINGS']);
+    assert.equal(f.block.textContent, createReasoningFixture().block.textContent);
+  },
+}, {
   name: 'Stop invalidates a pending Start without waiting for settings',
   async fn() {
     const f = createOperationFixture();

@@ -74,7 +74,7 @@ async function main() {
       let modelRequests = 0;
       window.fetch = function patchedFetch(input) {
         const url = typeof input === 'string' ? input : input?.url || '';
-        if (String(url).includes('api.openai.com')) modelRequests += 1;
+        if (/^https:\/\/(?:api\.openai\.com|openrouter\.ai)\//.test(String(url))) modelRequests += 1;
         return originalFetch.apply(this, arguments);
       };
       try {

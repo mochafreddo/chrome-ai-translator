@@ -16,6 +16,7 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | `npm run test:integration:<name>` | One dedicated unbilled Chrome check listed below | `agent-browser` and network; no API key or model |
 | `npm run verify:live:inline` | Real Inline Translation, Stop, and Restore | Browser prerequisites plus an OpenAI key; billed |
 | `npm run verify:live:sidepanel` | Real Side Panel Translation and protected-span preservation | Browser prerequisites plus an OpenAI key; billed |
+| `npm run verify:live:openrouter:sidepanel` | Real OpenRouter Side Panel Translation, request policy, provider-reported reasoning usage, and protected-span preservation | Browser prerequisites plus a named OpenRouter key; billed |
 | `npm run verify:live` | Both billed checks, sequentially | Same prerequisites; attempts the second even if the first fails |
 
 Run the unit suite and syntax checks for ordinary implementation changes. Choose browser checks for the path being changed rather than treating `test:integration` as an aggregate. Keep billed checks separate and run them only within authorized scope.
@@ -75,7 +76,7 @@ Before running a browser check, confirm `agent-browser` is available and identif
 
 The toolbar check [action-click.test.mjs](integration/action-click.test.mjs) opens a real Chrome with the unpacked extension. It chooses on-invocation Button Visibility through Options and waits for panel/button readiness after the toolbar action. It guards [ADR-0001](../docs/adr/0001-open-side-panel-from-action-click-handler.md), rather than translation quality. Its bounded failure output reports numeric version, target counts, readiness, CDP codes, timeout count, and exception presence; unavailable observations use `null`. Page content, target URLs, exception descriptions, and full logs are excluded.
 
-The [content-readiness check](integration/content-readiness.test.mjs) uses a local page to verify that the content script answers after the first toolbar injection and a repeated action, then saves the all-pages choice through Options and checks readiness and button mounting on a newly opened page. It observes Chrome DevTools Protocol network events and fails if any request reaches the OpenAI API. Approve the all-sites permission prompt if Chrome displays it in the disposable browser session; the check does not use an API key.
+The [content-readiness check](integration/content-readiness.test.mjs) uses a local page to verify that the content script answers after the first toolbar injection and a repeated action, then saves the all-pages choice through Options and checks readiness and button mounting on a newly opened page. It observes Chrome DevTools Protocol network events and fails if any request reaches either model service. Approve the all-sites permission prompt if Chrome displays it in the disposable browser session; the check does not use an API key.
 
 Other checks run only through their dedicated scripts:
 
@@ -88,6 +89,7 @@ Other checks run only through their dedicated scripts:
 | `ai-hero-responsive-labels` | Desktop/mobile skill navigation: hidden alternatives as text-free Inert Page Nodes, deterministic apply, exact DOM restore, zero model requests |
 | `heading-permalink` | Local and reported advisor headings: edge controls, node identity, focus/click behavior, deterministic apply, exact restore |
 | `data-as-paragraph` | Local and advisor `span[data-as="p"]` paragraphs: repeated collection, preserved inline elements, exact restoration, and ownership changes |
+| `openrouter-sidepanel` | Options service/key persistence and independent clear, fixed-host permissions, pinned-model Side Panel entry and multi-chunk deterministic rendered output, strict request routing/policy, and interim Inline refusal; synthetic keys and worker-wide request interception, no real model calls |
 
 Reported-page checks navigate public pages read-only and use deterministic output where application is tested. They establish the local DOM paths stated above, not model quality or complete extension startup. Live-page block counts are observations rather than permanent assertions. Generic DIV/SPAN paragraph inference and other `data-as` values remain unsupported; headings with controls embedded within prose remain outside the edge-control contract.
 
@@ -96,6 +98,8 @@ Reported-page checks navigate public pages read-only and use deterministic outpu
 Both live checks launch their own Chrome session, save a key through Options, and clear it through the real **Clear key** control in `finally`. Run them sequentially: the harness's `closeAllBrowsers()` can close other driver sessions.
 
 Provide an OpenAI key in the gitignored `.env.local`. [integration/live-key.mjs](integration/live-key.mjs) accepts the named entries `OPENAI_API_KEY`, `OPENAI_KEY`, or `OPENAI_SECRET_KEY`, in that order when nonempty. A missing or unattributable key fails rather than silently skipping. Add a newly approved provider-specific name to that helper instead of guessing from an `sk-` value, which can also identify another provider. The helper hands the key to the local CDP session without returning it to its caller or printing it.
+
+For `verify:live:openrouter:sidepanel`, provide `OPENROUTER_API_KEY` in that same file. The helper selects the requested service through Options, saves only its named credential, and selects that service again before clearing it through the real UI in `finally`. OpenAI keys are never substituted for a missing OpenRouter key. Run this command only after separate approval for credential access and billed execution; adding the command grants neither.
 
 ### Inline Translation
 
@@ -110,6 +114,8 @@ The first run translates three visible blocks. The second reveals a fourth short
 The fixture has twelve links and twelve inline code spans in roughly 5,000 Markdown-template characters, close to 2,000 of them placeholder characters. The check saves a 2,000-character chunk target through Options to produce three Translation Chunks and uses `ATTEMPTS = 3`: nine initial requests on a clean run. Recovery can add requests and cost. Read the fixture and constants in the check before changing that expectation.
 
 [integration/protected-spans.mjs](integration/protected-spans.mjs) owns span counting; its unit suite checks the helper and fixture density. Separate live commands let you authorize one translation flow without paying for both.
+
+The OpenRouter variant uses the same fixture and attempts. It observes only allowlisted request configuration and provider-reported reasoning-token counts for reporting, excluding credentials and translation bodies. A missing reasoning-usage field fails the evidence check rather than proving disablement. Zero reported reasoning tokens is limited provider evidence, not visibility into provider internals. These live checks have not established that the pinned model currently has a compliant route or the structured-output contract needed for OpenRouter Inline Translation. Missing authorization, credentials, credits, eligible endpoints, or sufficient response evidence remains a blocker.
 
 ## Historical verification evidence
 

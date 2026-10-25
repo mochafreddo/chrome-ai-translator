@@ -852,6 +852,7 @@ exports.tests = [
         {
           targetLanguage: 'Japanese',
           tone: 'natural',
+          service: 'openai',
           model: 'gpt-5.4',
           reasoningEffort: 'low',
         }
@@ -859,6 +860,7 @@ exports.tests = [
       assert.deepEqual(session.createSettingsSnapshot({}), {
         targetLanguage: 'Korean',
         tone: 'technical',
+        service: 'openai',
         model: DEFAULT_MODEL,
         reasoningEffort: 'none',
       });

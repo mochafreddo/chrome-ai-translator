@@ -1,23 +1,23 @@
 # Chrome AI Translator
 
-A personal Chrome extension that translates article pages with the OpenAI Responses API. Use **Side Panel Translation** to read translated Markdown beside the page, or **Inline Translation** to translate visible article text in place.
+A personal Chrome extension that translates article pages through OpenAI or OpenRouter. Use **Side Panel Translation** to read translated Markdown beside the page. With OpenAI, you can also use **Inline Translation** to translate visible article text in place. OpenRouter Inline Translation is not yet available.
 
 ## Requirements
 
 - Chrome 116 or newer.
-- An OpenAI API key. Use a dedicated key and project because the extension stores the key client-side in Chrome extension storage.
+- An API key for your selected service. Use a dedicated key because the extension stores credentials client-side in Chrome extension storage.
 
 ## Load and configure
 
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Choose **Load unpacked** and select this repository's `extension/` directory.
-3. Open the extension's **Options** and enter your **OpenAI API Key**.
-4. Choose your default target language, tone, model, and chunk size.
+3. Open the extension's **Options**, select **OpenAI** or **OpenRouter**, and enter that service's API key.
+4. Choose your default target language, tone, and chunk size. OpenAI keeps a custom model input and reasoning effort selection. OpenRouter uses only `deepseek/deepseek-v4.1-flash-1017`, with reasoning disabled.
 5. Choose **When the floating translate button may appear**.
 
 Button Visibility defaults to **Never**. You can also show the button after invoking the extension on a page, or on every ordinary web page. The every-page choice requests access to `http://` and `https://` sites; the other choices revoke that broad access. **Never** hides the floating button while leaving Inline Translation available from the side panel and shortcut.
 
-The saved key is not shown again in the Options input. Leave the field blank to keep it, or choose **Clear key** to remove both the saved key and the legacy `openai_api_key` value.
+OpenAI remains the default for existing installations. Each service has its own saved credential. The saved key is not shown again in the Options input. Leave the field blank to keep that service's key, or choose **Clear key** to remove the selected service's credential. Clearing OpenAI also removes its legacy `openai_api_key` value. Switching services keeps the other credential and your OpenAI model and reasoning choices. Selecting or saving settings sends no translation request.
 
 ### Update the unpacked extension
 
@@ -44,11 +44,13 @@ The extension cannot translate restricted pages such as `chrome://` pages. If In
 2. Watch the chunk progress. The translated result appears after every chunk succeeds; a terminal failure leaves no translated result, including earlier chunks that may already have been billed.
 3. Choose a translation-only or bilingual **View**, or open the **Original** tab to inspect the extracted Markdown.
 
-You can change target language, tone, and model for the current translation. Choose **Save as default** to keep the visible settings for later translations. Links and code are preserved in the output.
+You can change target language and tone for the current translation, and choose a custom model with OpenAI. Choose **Save as default** to keep the visible settings for later translations. Links and code are preserved in the output. Each translation keeps the service and effective settings it started with, even if you edit Options while it runs.
 
 ## Translate on the page
 
 Use the side panel's **Inline translation** section, the floating button, or the shortcut:
+
+Select OpenAI in Options first. With OpenRouter selected, every Inline Translation start reports that it is not yet available and sends no model request. Side Panel Translation remains available.
 
 1. Choose **Translate visible text** to start. Newly visible article blocks translate as you scroll.
 2. Choose **Scan visible text** while active to rescan the current viewport.
@@ -72,12 +74,14 @@ Stop and **Original text** keep the page visit's cache and Session Budget. Reloa
 
 ## Data and diagnostics
 
-Translation sends page content to OpenAI. Responses requests use `store: false`. Side Panel Translation sends article Markdown with link destinations and code contents replaced by placeholders; those values stay within the extension for restoration. Inline Translation sends serialized block records containing prose, structural metadata, and permitted visible labels; it does not send DOM attributes, event state, or hidden alternative-label text.
+Translation sends page content to your selected service's fixed endpoint. Responses requests use `store: false`. Side Panel Translation sends article Markdown with link destinations and code contents replaced by placeholders; those values stay within the extension for restoration. OpenAI Inline Translation sends serialized block records containing prose, structural metadata, and permitted visible labels; it does not send DOM attributes, event state, or hidden alternative-label text.
+
+OpenRouter routes only the pinned model, requires support for mandatory request parameters, denies provider data collection, and requires Zero Data Retention (ZDR). Eligible providers of that model may serve requests. If no compliant endpoint is available, translation fails without weakening the policy or switching to another model or OpenAI. ZDR does not erase local extension settings or diagnostics, and does not mean that all request metadata disappears. Resolve key, credit, access, or rate-limit errors with the service named in the error.
 
 Options lets you view recent Inline Translation diagnostics and copy or save diagnostic JSON. Diagnostics contain bounded validation metadata and installation-scoped HMAC fingerprints, rather than source text, translations, protected labels, URLs, request or response bodies, or API keys. See [diagnostics and privacy](docs/architecture.md#diagnostics-and-privacy) for the current schema and retention rules.
 
 ## Development and documentation
 
-Run `npm test` for the browser-free unit suite and `npm run check:syntax` for extension script parsing. Browser checks have separate commands and prerequisites in the [test guide](tests/README.md). `npm run test:integration` runs only the toolbar-action check. `npm run verify:live` runs both real-model checks and incurs API charges.
+Run `npm test` for the browser-free unit suite and `npm run check:syntax` for extension script parsing. Browser checks have separate commands and prerequisites in the [test guide](tests/README.md). `npm run test:integration` runs only the toolbar-action check. `npm run verify:live` runs both OpenAI real-model checks and incurs API charges; `npm run verify:live:openrouter:sidepanel` separately bills OpenRouter. Deterministic tests do not establish current model compatibility or availability under the required policy. Live OpenRouter verification, including structured output for future Inline support, remains a separate requirement.
 
 Start with the [documentation index](docs/README.md) for the current architecture, glossary, decisions, agent procedures, and historical design and QA records. Load `extension/` directly; the repository has no build step.

@@ -2,11 +2,11 @@
   "manifest_version": 3,
   "name": "Chrome AI Translator (Personal)",
   "version": "0.3.0.0",
-  "description": "Personal article translator using OpenAI Responses API.",
+  "description": "Personal article translator using OpenAI or OpenRouter.",
   "minimum_chrome_version": "116",
 
   "permissions": ["storage", "activeTab", "scripting", "sidePanel"],
-  "host_permissions": ["https://api.openai.com/*"],
+  "host_permissions": ["https://api.openai.com/*", "https://openrouter.ai/*"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
 
   "background": {
