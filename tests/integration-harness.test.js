@@ -62,7 +62,7 @@ if (process.env.HARNESS_SCENARIO === 'open-error' && args.includes('open')) proc
       const { check, finish } = createChecks('launch fixture');
       try {
         const ctx = await launchExtensionBrowser({ session: 'fixture-session', url,
-          extensionDir: ${JSON.stringify(dir)} });
+          extensionDir: ${JSON.stringify(dir)}, ...(scenario === 'headed-permission' ? { headless: false } : {}) });
         check('page remains usable', await ctx.page?.evaluate('1 + 1') === 2);
         if (scenario === 'worker-attachment') {
           const worker = await ctx.attach('worker-1', 'service_worker');
@@ -132,6 +132,35 @@ exports.tests = [
         assert.ok(diagnostic, scenario);
         assert.equal(JSON.parse(diagnostic.slice('DIAGNOSTIC browser launch - '.length)).stage, stage, scenario);
       }
+    },
+  },
+  {
+    name: 'launches Chrome headless with the required extension debugging flag',
+    fn() {
+      const result = launchFixture('ready');
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const args = result.effects.find(argv => argv.includes('open'));
+      assert.ok(args);
+      assert.ok(args.includes('--headed'));
+      assert.ok(args.includes('--args'));
+      assert.equal(args[args.indexOf('--headed') + 1], 'false');
+      const nativeArgs = args[args.indexOf('--args') + 1].split(',');
+      assert.ok(nativeArgs.includes('--headless=new'));
+      assert.ok(nativeArgs.includes('--enable-unsafe-extension-debugging'));
+    },
+  },
+  {
+    name: 'opens an explicitly headed Chrome for permission UI without dropping extension debugging',
+    fn() {
+      const result = launchFixture('headed-permission');
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const args = result.effects.find(argv => argv.includes('open'));
+      assert.ok(args?.includes('--headed'));
+      assert.ok(args.includes('--args'));
+      assert.equal(args[args.indexOf('--headed') + 1], 'true');
+      const nativeArgs = args[args.indexOf('--args') + 1].split(',');
+      assert.ok(nativeArgs.includes('--enable-unsafe-extension-debugging'));
+      assert.equal(nativeArgs.includes('--headless=new'), false);
     },
   },
   {

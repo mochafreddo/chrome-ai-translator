@@ -188,12 +188,13 @@ function extensionManifest(extensionDir) {
 
 // Launches a Chrome with the unpacked extension and attaches to the page the driver opened.
 // Missing launch prerequisites fail here so a caller cannot silently skip its checks.
-export async function launchExtensionBrowser({ session, url, extensionDir }) {
+export async function launchExtensionBrowser({ session, url, extensionDir, headless = true }) {
   let cdp;
   let browserVersion = null;
   let stage = 'browser open';
   try {
-    await browser(['--extension', extensionDir, '--args', '--enable-unsafe-extension-debugging',
+    await browser(['--extension', extensionDir, '--headed', String(!headless),
+      '--args', '--enable-unsafe-extension-debugging' + (headless ? ',--headless=new' : ''),
       '--session', session, 'open', url]);
 
     stage = 'CDP discovery';
