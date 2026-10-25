@@ -107,7 +107,7 @@ For `verify:live:openrouter:inline` and `verify:live:openrouter:sidepanel`, prov
 
 [inline-translation.live.test.mjs](integration/inline-translation.live.test.mjs) translates a [local fixture](integration/fixtures/inline-translation.html) and asserts target-language output, exact restoration, and control transitions rather than a model's wording.
 
-The first run translates three visible blocks. The second reveals a fourth short block that is absent from the cache, then observes an actual pending model request before pressing Stop. It waits for that request to complete and checks that its late answer is never applied. Restored cache hits alone would offer Stop without proving cancellation of an in-flight request. Expect the initial three blocks plus one new block and request overhead; output/repair behavior can change the actual bill.
+The first run translates three visible blocks. The second reveals a fourth short block that is absent from the cache, then observes an actual pending model request before pressing Stop. At confirmed Stop, it requires those exact new request IDs to remain unfinished. It then requires their successful HTTP completion and validates the captured answer through the production completion parser and Inline model execution with the original block contract; an unobserved repair cannot qualify. Finally, it checks that the late answer is never applied. Restored cache hits alone would offer Stop without proving cancellation of an in-flight request. Expect the initial three blocks plus one new block and request overhead; output/repair behavior can change the actual bill.
 
 ### Side Panel Translation
 

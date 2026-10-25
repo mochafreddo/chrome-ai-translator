@@ -330,3 +330,59 @@ exports.tests.push({
     assert.equal(listeners.size, 0);
   },
 });
+
+exports.tests.push({
+  name: 'Stop evidence requires the exact pending request to finish successfully after its checkpoint',
+  async fn() {
+    const { observeModelRequests } = await import('./integration/model-request-evidence.mjs');
+    const { execute } = require('../extension/inline-model-execution');
+    const { serialized } = require('./inline-block.test').createReasoningFixture();
+    const record = { id: 'stop-block', template: serialized.template, atoms: serialized.atoms, contract: serialized.contract };
+    const wrapper = record.contract.entries.find(entry => entry.kind === 'wrapper');
+    const atom = record.contract.entries.find(entry => entry.kind === 'atom');
+    const translated = `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
+    const output = template => JSON.stringify({ status: 'completed', output: [{ type: 'message',
+      content: [{ type: 'output_text', text: JSON.stringify({ translations: [{ id: record.id, template }] }) }] }] });
+    for (const scenario of ['before-stop', 'unrelated-only', 'http-error', 'http-low', 'response-error', 'invalid-json', 'invalid-protocol', 'invalid-contract', 'pending-success']) {
+      const listeners = new Map();
+      const cdp = {
+        on(type, callback) { listeners.set(type, callback); return () => listeners.delete(type); },
+        async send(method) {
+          return method === 'Network.getResponseBody' ? { body:
+            scenario === 'response-error' ? output(translated).replace('completed', 'failed') :
+            scenario === 'invalid-json' ? 'invalid' : scenario === 'invalid-protocol' ? JSON.stringify({ status: 'completed',
+              output: [{ type: 'message', content: [{ type: 'output_text', text: 'invalid translation JSON' }] }] }) : output(scenario === 'invalid-contract' ? '토큰이 빠진 번역입니다.' : translated) } : {};
+        },
+      };
+      const evidence = await observeModelRequests(cdp, 'worker', { validateOutput: async (text, input) => {
+        const body = JSON.parse(input);
+        let calls = 0;
+        const results = await execute(body.records.map(item => ({ ...item, contract: record.contract })),
+          { targetLanguage: 'Korean', tone: 'technical' }, async () => {
+            if (calls++) throw new Error('An unobserved repair cannot validate this response.');
+            return text;
+          });
+        return results.every(result => result.disposition === 'apply' && result.attemptCount === 1);
+      } });
+      const emit = (name, event) => listeners.get(name)(event, 'worker');
+      const request = requestId => ({ requestId, request: { method: 'POST', url: 'https://openrouter.ai/api/v1/responses',
+        postData: JSON.stringify({ input: JSON.stringify({ records: [{ id: record.id, template: record.template, atoms: record.atoms }] }) }) } });
+      emit('Network.requestWillBeSent', request('exact-request'));
+      emit('Network.responseReceived', { requestId: 'exact-request', response: { status: scenario === 'http-error' ? 401 : scenario === 'http-low' ? 199 : 200 } });
+      if (scenario === 'before-stop') emit('Network.loadingFinished', { requestId: 'exact-request' });
+      const checkpoint = evidence.checkpointPending(['exact-request']);
+      assert.equal(checkpoint.pending, scenario !== 'before-stop', scenario);
+      assert.equal(evidence.completedSuccessfully(checkpoint), false, scenario);
+      emit('Network.requestWillBeSent', request('unrelated-request'));
+      emit('Network.responseReceived', { requestId: 'unrelated-request', response: { status: 200 } });
+      emit('Network.loadingFinished', { requestId: 'unrelated-request' });
+      if (!['before-stop', 'unrelated-only'].includes(scenario)) emit('Network.loadingFinished', { requestId: 'exact-request' });
+      await evidence.settle();
+      assert.equal(evidence.completedSuccessfully(checkpoint), scenario === 'pending-success', scenario);
+      assert.equal(evidence.checkpointPending([]).pending, false);
+      assert.equal(evidence.checkpointPending(['unobserved-request']).pending, false);
+      assert.doesNotMatch(JSON.stringify([...evidence.responses.values()]), /추론|번역|Reasoning|GPT|template/);
+      evidence.close();
+    }
+  },
+});
