@@ -33,7 +33,7 @@ A module both runtimes reach is in two of those lists at once and has to be orde
 
 ## Version
 
-When changing the version, update `VERSION`, `version` in `package.json`, and `version` in `extension/manifest.json` together, then verify that all three values match.
+For personal unpacked use, keep the extension version only in `extension/manifest.json` and identify development revisions by Git commit SHA. Leave the manifest version unchanged for routine edits; revisit version increments when distributing releases.
 
 ## Git
 

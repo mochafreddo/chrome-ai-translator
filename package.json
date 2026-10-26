@@ -27,6 +27,5 @@
     "verify:live:openrouter:inline": "node tests/integration/inline-translation.live.test.mjs --service openrouter",
     "verify:live:openrouter:sidepanel": "node tests/integration/sidepanel-translation.live.test.mjs --service openrouter",
     "check:syntax": "node scripts/check-syntax.js"
-  },
-  "version": "0.3.0.0"
+  }
 }
