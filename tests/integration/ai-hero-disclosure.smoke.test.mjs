@@ -15,11 +15,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  closeAllBrowsers,
+  browser,
   createChecks,
   launchExtensionBrowser,
   until,
-  wait,
 } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -33,20 +32,6 @@ const { check, failures, finish } = createChecks('ai hero disclosure');
 async function injectCodec(evaluate) {
   for (const file of ['placeholder-tokens.js', 'inline-block.js']) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
-  }
-}
-
-async function attachReportedPage(ctx) {
-  if (ctx.page) return ctx.page;
-  const deadline = Date.now() + 15000;
-  for (;;) {
-    const pages = await ctx.listPages();
-    const found = pages.find((target) =>
-      target.type === 'page' && String(target.url || '').includes('a-complete-guide-to-agents-md')
-    );
-    if (found) return ctx.attach(found.id);
-    if (Date.now() >= deadline) return null;
-    await wait(500);
   }
 }
 
@@ -65,7 +50,7 @@ async function main() {
       `saw ${JSON.stringify(ctx.extensionsSeen)}`
     )) return;
 
-    const page = await attachReportedPage(ctx);
+    const page = ctx.page;
     if (!check(
       'driver opened the reported page',
       Boolean(page)
@@ -280,7 +265,7 @@ try {
   failures.push('harness');
   console.error(`FAIL ai hero disclosure - harness threw: ${error?.message || error}`);
 } finally {
-  await closeAllBrowsers();
+  await browser(['--session', SESSION, 'close']).catch(() => {});
 }
 
 finish();

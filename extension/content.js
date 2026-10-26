@@ -201,8 +201,11 @@ function authorizeInlineTranslationFromUiEvent(event, state = inlineState) {
 }
 
 function pickArticleRoot() {
+  const article = document.querySelector('article');
+  if (article && (article.innerText || '').trim().length > 400) return article;
+
   const candidates = [
-    document.querySelector('article'),
+    article,
     document.querySelector('main'),
     document.querySelector('[role="main"]'),
     document.body,
@@ -218,10 +221,6 @@ function pickArticleRoot() {
       bestLen = len;
     }
   }
-
-  // If article exists and isn't tiny, use it even if not maximal.
-  const article = document.querySelector('article');
-  if (article && (article.innerText || '').trim().length > 400) return article;
 
   return best;
 }

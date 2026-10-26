@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const helpers = require('../extension/sidepanel.js');
+const { createTestDocument } = require('./inline-block.test');
 
 function deferred() {
   let resolve;
@@ -22,6 +23,7 @@ function response(type, label) {
     : { ok: true, snapshot: { status: 'active', progress: `inline ${label}`, error: '' } };
 }
 function domPanel() {
+  const { document } = createTestDocument();
   const elements = new Map();
   const sent = [];
   let active = 1;
@@ -31,11 +33,11 @@ function domPanel() {
   let focused;
   let send = (message) => response(message.type, String(message.tabId));
   function element(id) {
-    if (!elements.has(id)) elements.set(id, { value: '', textContent: '', hidden: false,
+    if (!elements.has(id)) elements.set(id, Object.assign(document.createElement('div'), { value: '', hidden: false,
       disabled: false, listeners: {}, attributes: {},
       setAttribute(name, value) { this.attributes[name] = value; },
       focus() { focused = id; },
-      addEventListener(type, listener) { this.listeners[type] = listener; } });
+      addEventListener(type, listener) { this.listeners[type] = listener; } }));
     return elements.get(id);
   }
   const chrome = {
@@ -54,7 +56,8 @@ function domPanel() {
     tab.dataset = { tab: name };
     return tab;
   });
-  const context = vm.createContext({ chrome, document: { getElementById: element, querySelectorAll: () => tabs },
+  const context = vm.createContext({ chrome, document: { getElementById: element, querySelectorAll: () => tabs,
+    createElement: tag => document.createElement(tag) },
     setInterval(callback, delay) { assert.equal(delay, 1000); poll = callback; },
     ChromeAiTranslatorInlineTranslationControls: require('../extension/inline-translation-controls.js'),
     ChromeAiTranslatorPageAccess: require('../extension/page-access.js'),
@@ -86,6 +89,113 @@ exports.tests = [
       panel.activate(2);
       assert.equal(panel.element('original').lang, 'en');
       assert.equal(panel.element('translated').lang, 'en');
+    },
+  },
+  {
+    name: 'polling preserves unchanged panel text while updating independent controls',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      const writes = [];
+      for (const id of ['original', 'translated']) {
+        const output = panel.element(id);
+        let text = output.textContent;
+        Object.defineProperty(output, 'textContent', {
+          get: () => text,
+          set(value) { writes.push(id); text = value; },
+        });
+      }
+      panel.setSend(message => message.type === 'GET_STATE'
+        ? { ok: true, state: { ...state('1'), progress: { current: 3, total: 3 } } }
+        : { ok: true, snapshot: { status: 'stopped', progress: 'inline stopped', error: '' } });
+      panel.poll();
+      await settle();
+      assert.deepEqual(writes, []);
+      assert.equal(panel.element('progress').textContent, 'Chunk 3/3');
+      assert.equal(panel.element('inlineStatus').textContent, 'inline stopped');
+    },
+  },
+  {
+    name: 'polling preserves unchanged bilingual nodes and restores externally changed text',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      panel.element('viewMode').value = 'bilingual';
+      panel.poll();
+      await settle();
+      const output = panel.element('translated');
+      const children = [...output.childNodes];
+      assert.equal(children.length, 4);
+      panel.poll();
+      await settle();
+      children.forEach((node, index) => assert.equal(output.childNodes[index], node));
+      output.textContent = 'externally changed';
+      panel.poll();
+      await settle();
+      assert.equal(output.textContent, 'Original\n\noriginal 1\n\nTranslation\n\ntranslated 1');
+      assert.equal(output.childNodes.length, 4);
+      output.textContent = output.textContent;
+      panel.poll();
+      await settle();
+      assert.equal(output.childNodes.length, 4);
+      output.lang = 'en';
+      output.childNodes[3].lang = 'ja';
+      panel.poll();
+      await settle();
+      assert.equal(output.lang, '');
+      assert.equal(output.childNodes[3].lang, '');
+    },
+  },
+  {
+    name: 'characterizes panel language view and placeholder changes with identical source text',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      let current = { status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
+        translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } };
+      panel.setSend(message => message.type === 'GET_STATE'
+        ? { ok: true, state: current } : response(message.type, '1'));
+      const original = panel.element('original');
+      const output = panel.element('translated');
+      panel.poll();
+      await settle();
+      const originalText = original.childNodes[0];
+      const translatedText = output.childNodes[0];
+      current = { ...current, extracted: { ...current.extracted, langHint: 'de' },
+        settingsUsed: { targetLanguage: 'en' } };
+      panel.poll();
+      await settle();
+      assert.equal(original.lang, 'de');
+      assert.equal(output.lang, 'en');
+      assert.equal(original.childNodes[0], originalText);
+      assert.equal(output.childNodes[0], translatedText);
+      panel.element('viewMode').value = 'bilingual';
+      panel.poll();
+      await settle();
+      assert.equal(output.lang, '');
+      assert.deepEqual(output.childNodes.map(node => [node.textContent, node.lang]), [
+        ['Original\n\n', 'en'], ['Bonjour.', 'de'], ['\n\nTranslation\n\n', 'en'], ['안녕하세요.', 'en'],
+      ]);
+      current = { ...current, settingsUsed: { targetLanguage: 'Korean' } };
+      panel.poll();
+      await settle();
+      assert.equal(output.childNodes[3].lang, 'ko');
+      panel.element('viewMode').value = 'translation';
+      panel.poll();
+      await settle();
+      assert.equal(output.childNodes.length, 1);
+      assert.equal(output.childNodes[0].nodeType, 3);
+      assert.equal(output.textContent, '안녕하세요.');
+      assert.equal(output.lang, 'ko');
+      panel.activate(2);
+      assert.equal(output.textContent, 'No translation yet.\n\nUse Translate current tab to translate the active article.');
+      await settle();
+      assert.equal(output.textContent, '안녕하세요.');
+      current = { status: 'extracting' };
+      panel.poll();
+      await settle();
+      assert.equal(original.textContent, 'Extracting article text...');
+      assert.equal(output.textContent, 'Translating current tab...\n\nThe translation appears here when the last chunk is back. A failure before then leaves nothing here.');
     },
   },
   {

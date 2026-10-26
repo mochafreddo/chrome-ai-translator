@@ -525,6 +525,12 @@ const settingsSaveController = hasDocument
     })
   : null;
 
+function setPanelText(element, text) {
+  if (element.childNodes.length !== 1 || element.childNodes[0].nodeType !== 3 || element.textContent !== text) {
+    element.textContent = text;
+  }
+}
+
 function renderState(state, panelErrorMessage) {
   const viewMode = elViewMode.value || state?.settingsUsed?.viewMode || 'translation';
   const displayState = getSidepanelDisplayState(
@@ -541,19 +547,28 @@ function renderState(state, panelErrorMessage) {
 
   setProgress(displayState.progressText);
 
-  elOriginal.textContent = displayState.originalText;
-  elOriginal.lang = displayState.originalLanguage;
-  elTranslated.lang = displayState.translatedLanguage;
+  setPanelText(elOriginal, displayState.originalText);
+  if (elOriginal.lang !== displayState.originalLanguage) elOriginal.lang = displayState.originalLanguage;
+  const translatedLanguage = displayState.translatedParts.length > 1 ? '' : displayState.translatedLanguage;
+  if (elTranslated.lang !== translatedLanguage) elTranslated.lang = translatedLanguage;
   if (displayState.translatedParts.length > 1) {
-    elTranslated.lang = '';
-    elTranslated.replaceChildren(...displayState.translatedParts.map(([text, language]) => {
-      const span = document.createElement('span');
-      span.lang = language;
-      span.textContent = text;
-      return span;
-    }));
+    const children = elTranslated.childNodes;
+    const unchanged = children.length === displayState.translatedParts.length &&
+      displayState.translatedParts.every(([text, language], index) => {
+        const child = children[index];
+        return child.nodeType === 1 && child.tagName === 'SPAN' && child.lang === language &&
+          child.childNodes.length === 1 && child.childNodes[0].nodeType === 3 && child.textContent === text;
+      });
+    if (!unchanged) {
+      elTranslated.replaceChildren(...displayState.translatedParts.map(([text, language]) => {
+        const span = document.createElement('span');
+        span.lang = language;
+        span.textContent = text;
+        return span;
+      }));
+    }
   } else {
-    elTranslated.textContent = displayState.translatedText;
+    setPanelText(elTranslated, displayState.translatedText);
   }
 }
 

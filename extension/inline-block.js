@@ -944,9 +944,7 @@
     let failed = null;
 
     function rememberContainer(node) {
-      if (!originalContainers.some((item) => item.node === node)) {
-        originalContainers.push({ node, children: getChildNodes(node) });
-      }
+      originalContainers.push({ node, children: getChildNodes(node) });
     }
 
     function rememberLiteralTokens(value) {

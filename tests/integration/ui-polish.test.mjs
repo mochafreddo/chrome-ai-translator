@@ -112,8 +112,9 @@ async function main() {
       extracted: { contentMarkdown: '<b>Bonjour.</b>', langHint: 'fr' },
       translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } };
     const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+    globalThis.uiStateReads = 0;
     chrome.runtime.sendMessage = message => message.type === 'GET_STATE'
-      ? Promise.resolve({ ok: true, state: globalThis.uiTestState }) : send(message);
+      ? (globalThis.uiStateReads += 1, Promise.resolve({ ok: true, state: globalThis.uiTestState })) : send(message);
     document.getElementById('targetLanguage').value = 'Japanese';
   })()`);
   assert.ok(await until(() => ctx.page.evaluate(`document.getElementById('translated').textContent === '안녕하세요.'`), 10000));
@@ -137,6 +138,26 @@ async function main() {
   })()`), { text: 'Original\n\n<b>Bonjour.</b>\n\nTranslation\n\n안녕하세요.',
     source: '<b>Bonjour.</b>', translation: '안녕하세요.', labels: ['Original\n\n', '\n\nTranslation\n\n'], safe: true });
   console.log('PASS UI polish - content language boundaries and safe bilingual text');
+  await ctx.page.evaluate(`(() => {
+    const output = document.getElementById('translated');
+    globalThis.uiSelectedNode = output.lastChild.firstChild;
+    globalThis.uiOriginalNode = document.getElementById('original').firstChild;
+    const range = document.createRange();
+    range.setStart(globalThis.uiSelectedNode, 0);
+    range.setEnd(globalThis.uiSelectedNode, 2);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    globalThis.uiReadTarget = globalThis.uiStateReads + 2;
+  })()`);
+  assert.ok(await until(() => ctx.page.evaluate(`globalThis.uiStateReads >= globalThis.uiReadTarget`), 10000, 100));
+  assert.deepEqual(await ctx.page.evaluate(`({
+    original: document.getElementById('original').firstChild === globalThis.uiOriginalNode,
+    translated: document.getElementById('translated').lastChild.firstChild === globalThis.uiSelectedNode,
+    selected: getSelection().toString(),
+    anchor: getSelection().anchorNode === globalThis.uiSelectedNode,
+    focus: getSelection().focusNode === globalThis.uiSelectedNode,
+  })`), { original: true, translated: true, selected: '안녕', anchor: true, focus: true });
+  console.log('PASS UI polish - repeated panel polling preserves text nodes and selection');
   for (const width of [240, 320, 460, 768]) {
     await resize(width);
     assert.equal(await ctx.page.evaluate(`(() => {

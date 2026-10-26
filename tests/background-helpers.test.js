@@ -2062,6 +2062,27 @@ exports.tests = [
     },
   },
   {
+    name: 'rejects duplicate block ids with different sources before any model request',
+    async fn() {
+      let requests = 0;
+      const worker = helpers.createBackgroundWorker({
+        chrome: createBlockBatchChrome(),
+        fetch: async () => {
+          requests += 1;
+          return { ok: true, async json() {
+            return createCompletedResponse(JSON.stringify({ translations: [{ id: 'duplicate', template: '번역문입니다.' }] }));
+          } };
+        },
+      });
+      const records = [
+        { ...createTestPlainBlockRecord('duplicate'), template: 'The first source sentence.' },
+        { ...createTestPlainBlockRecord('duplicate'), template: 'The second source sentence.' },
+      ];
+      await assert.rejects(worker.translateVisibleBlockBatch(records), /Duplicate inline block record id: duplicate/);
+      assert.equal(requests, 0);
+    },
+  },
+  {
     name: 'normalizes block records without allowing DOM attributes',
     fn() {
       const record = createBlockApiRecord();

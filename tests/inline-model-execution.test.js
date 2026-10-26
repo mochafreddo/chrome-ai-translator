@@ -142,19 +142,23 @@ exports.tests = [
   {
     name: 'repairs only failed Semantic Blocks and preserves input order and first successes',
     async fn() {
-      const records = [plainRecord('first'), plainRecord('second'), plainRecord('third')];
+      const records = [plainRecord('first', 'The first source sentence.'),
+        plainRecord('second', 'The second source sentence.'), plainRecord('third', 'The third source sentence.')];
       const requests = [];
       const results = await execute(records, SETTINGS, async (request) => {
         requests.push(request);
         if (requests.length === 1) return response([
           { id: 'third', template: '세 번째 번역입니다.' },
-          { id: 'second', template: 'This is source prose.' },
+          { id: 'second', template: 'The second source sentence.' },
           { id: 'first', template: '첫 번째 번역입니다.' },
         ]);
         assert.deepEqual(JSON.parse(request.input).records.map((record) => record.id), ['second']);
         return response([{ id: 'second', template: '두 번째 번역입니다.' }]);
       });
       assert.equal(requests.length, 2);
+      assert.deepEqual(JSON.parse(requests[1].input).records.map(({ id, template }) => ({ id, template })), [
+        { id: 'second', template: 'The second source sentence.' },
+      ]);
       assert.deepEqual(results.map(({ id, template, disposition, attemptCount }) => ({ id, template, disposition, attemptCount })), [
         { id: 'first', template: '첫 번째 번역입니다.', disposition: 'apply', attemptCount: 1 },
         { id: 'second', template: '두 번째 번역입니다.', disposition: 'apply', attemptCount: 2 },

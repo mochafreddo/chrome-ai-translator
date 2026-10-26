@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const helpers = require('../extension/sidepanel.js');
 const background = require('../extension/background.js');
+const { createTestDocument } = require('./inline-block.test');
 
 // The one thing the reader has to do to put a tab within reach, in the words both the panel
 // and a failed injection are expected to use.
@@ -575,6 +576,7 @@ exports.tests = [
       const previousSetInterval = global.setInterval;
       const modulePath = require.resolve('../extension/sidepanel.js');
       const originalModule = require.cache[modulePath];
+      const { document: fixtureDocument } = createTestDocument();
       const elements = new Map();
       const savedMessages = [];
       let resolveFirstSave;
@@ -586,7 +588,7 @@ exports.tests = [
 
       function getElement(id) {
         if (!elements.has(id)) {
-          elements.set(id, {
+          elements.set(id, Object.assign(fixtureDocument.createElement('div'), {
             id,
             value: '',
             textContent: '',
@@ -600,7 +602,7 @@ exports.tests = [
             setAttribute(name, value) {
               this[name] = value;
             },
-          });
+          }));
         }
         return elements.get(id);
       }
@@ -610,6 +612,7 @@ exports.tests = [
         return 0;
       };
       global.document = {
+        createElement: tag => fixtureDocument.createElement(tag),
         getElementById: getElement,
         querySelectorAll(selector) {
           if (selector !== '.tab') return [];
@@ -805,6 +808,7 @@ exports.tests = [
       const previousSetInterval = global.setInterval;
       const modulePath = require.resolve('../extension/sidepanel.js');
       const originalModule = require.cache[modulePath];
+      const { document: fixtureDocument } = createTestDocument();
       const elements = new Map();
       const controls = [];
       let refreshInterval;
@@ -815,7 +819,7 @@ exports.tests = [
 
       function getElement(id) {
         if (!elements.has(id)) {
-          elements.set(id, {
+          elements.set(id, Object.assign(fixtureDocument.createElement('div'), {
             id,
             value: '',
             textContent: '',
@@ -829,7 +833,7 @@ exports.tests = [
             setAttribute(name, value) {
               this[name] = value;
             },
-          });
+          }));
         }
         return elements.get(id);
       }
@@ -845,6 +849,7 @@ exports.tests = [
         return 0;
       };
       global.document = {
+        createElement: tag => fixtureDocument.createElement(tag),
         getElementById: getElement,
         querySelectorAll: () => [],
       };

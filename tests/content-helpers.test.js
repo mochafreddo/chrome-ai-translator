@@ -12,6 +12,131 @@ function makeState(overrides = {}) {
 exports.name = 'content helpers';
 exports.tests = [
   {
+    name: 'extracts a preferred article without reading unrelated candidate text',
+    fn() {
+      const f = createOperationFixture();
+      const article = f.document.createElement('article');
+      article.textContent = 'A'.repeat(401);
+      Object.defineProperty(article, 'innerText', { get: () => article.textContent });
+      const main = f.document.createElement('main');
+      main.textContent = 'M'.repeat(600);
+      const reads = { main: 0, body: 0 };
+      for (const [name, node] of [['main', main], ['body', f.document.body]]) {
+        Object.defineProperty(node, 'innerText', { get() {
+          reads[name] += 1;
+          return node.textContent;
+        } });
+      }
+      f.document.body.replaceChildren(article, main);
+      const page = createContentPage(f, { article, main });
+      page.inject();
+
+      const response = page.message({ type: 'EXTRACT_ARTICLE' });
+
+      assert.equal(response.ok, true);
+      assert.equal(response.data.contentMarkdown, 'A'.repeat(401));
+      assert.deepEqual(reads, { main: 0, body: 0 });
+    },
+  },
+  {
+    name: 'preserves article length boundaries and candidate ordering through extraction messages',
+    fn() {
+      const cases = [
+        { article: `  ${'A'.repeat(400)}  `, main: 'M'.repeat(600), body: 'B'.repeat(800), expected: 'B'.repeat(800) },
+        { article: `  ${'A'.repeat(401)}  `, main: 'M'.repeat(600), body: 'B'.repeat(800), expected: 'A'.repeat(401) },
+        { article: `${'A'.repeat(200)} ${'A'.repeat(200)}`, body: 'B'.repeat(800), expected: `${'A'.repeat(200)} ${'A'.repeat(200)}` },
+        { main: 'M'.repeat(500), roleMain: 'R'.repeat(600), body: 'B'.repeat(550), expected: 'R'.repeat(600) },
+        { main: 'M'.repeat(500), roleMain: 'R'.repeat(600), body: 'B'.repeat(700), expected: 'B'.repeat(700) },
+        { article: 'A'.repeat(400), main: 'M'.repeat(400), roleMain: 'R'.repeat(400), body: 'B'.repeat(400), expected: 'A'.repeat(400) },
+        { main: 'M'.repeat(500), roleMain: 'R'.repeat(500), body: 'B'.repeat(500), expected: 'M'.repeat(500) },
+        { roleMain: 'R'.repeat(500), body: 'B'.repeat(500), expected: 'R'.repeat(500) },
+        { body: 'B'.repeat(500), expected: 'B'.repeat(500) },
+        { article: 'A'.repeat(400), body: 'B'.repeat(500), sameSelectors: true, expected: 'B'.repeat(500) },
+      ];
+      for (const [index, value] of cases.entries()) {
+        const f = createOperationFixture();
+        f.document.body.textContent = value.body;
+        f.document.body.innerText = value.body;
+        const selectors = {};
+        for (const [key, selector, tag] of [
+          ['article', 'article', 'article'],
+          ['main', 'main', 'main'],
+          ['roleMain', '[role="main"]', 'section'],
+        ]) {
+          if (value[key] == null) continue;
+          const node = f.document.createElement(tag);
+          node.textContent = value[key];
+          node.innerText = value[key];
+          selectors[selector] = node;
+        }
+        if (value.sameSelectors) {
+          selectors.main = selectors.article;
+          selectors['[role="main"]'] = selectors.article;
+        }
+        const page = createContentPage(f, selectors);
+        page.inject();
+
+        const response = page.message({ type: 'EXTRACT_ARTICLE' });
+
+        assert.equal(response.ok, true, `case ${index}`);
+        assert.equal(response.data.contentMarkdown, value.expected, `case ${index}`);
+      }
+    },
+  },
+  {
+    name: 'falls back to body only below 300 extracted Markdown characters',
+    fn() {
+      for (const length of [299, 300]) {
+        const f = createOperationFixture();
+        const article = f.document.createElement('article');
+        const navigation = f.document.createElement('nav');
+        navigation.textContent = 'N'.repeat(401);
+        const articleProse = f.document.createElement('p');
+        articleProse.textContent = 'A'.repeat(length);
+        article.appendChild(navigation);
+        article.appendChild(articleProse);
+        article.innerText = article.textContent;
+        const bodyProse = f.document.createElement('p');
+        bodyProse.textContent = 'B'.repeat(500);
+        f.document.body.replaceChildren(article, bodyProse);
+        const page = createContentPage(f, { article });
+        page.inject();
+
+        const response = page.message({ type: 'EXTRACT_ARTICLE' });
+
+        assert.equal(response.ok, true);
+        assert.equal(response.data.contentMarkdown, length === 299
+          ? `${'A'.repeat(299)}\n\n${'B'.repeat(500)}`
+          : 'A'.repeat(300));
+      }
+    },
+  },
+  {
+    name: 'Inline Start selects the same preferred article through content instructions',
+    async fn() {
+      const f = createOperationFixture();
+      const article = f.document.createElement('article');
+      const prose = f.document.createElement('p');
+      prose.textContent = 'Article source sentence. '.repeat(20).trim();
+      article.appendChild(prose);
+      Object.defineProperty(article, 'innerText', { get: () => article.textContent });
+      const outside = f.document.createElement('p');
+      outside.textContent = 'Outside article sentence. '.repeat(40);
+      f.document.body.replaceChildren(article, outside);
+      Object.defineProperty(f.document.body, 'innerText', { get: () => f.document.body.textContent });
+      const page = createContentPage(f, { article });
+      page.inject();
+      page.instruct('grantInlineTranslationAuthorization');
+      page.instruct('startInlineTranslation');
+      await flushMicrotasks();
+
+      assert.equal(f.pending.length, 1);
+      assert.equal(f.pending[0].message.records.length, 1);
+      assert.equal(f.pending[0].message.records[0].template, prose.textContent);
+      page.instruct('stopInlineTranslation');
+    },
+  },
+  {
     name: 'detects code-like text conservatively',
     fn() {
       // The predicate has one home, in the codec that already owns what a protected atom is.

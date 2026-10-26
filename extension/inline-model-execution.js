@@ -365,10 +365,10 @@
     const initialById = new Map(initial.map((result) => [result.id, result]));
     const repairs = [];
     const repairCosts = new Map();
-    for (const result of initial) {
+    for (const [index, result] of initial.entries()) {
       const decision = decideBlockDisposition(result, 1);
       if (decision.disposition === 'retry') {
-        const source = records.find((record) => record.id === result.id);
+        const source = records[index];
         const repairRecord = {
           ...source,
           repair: { attempt: 1, previousErrorCode: decision.terminalCode },

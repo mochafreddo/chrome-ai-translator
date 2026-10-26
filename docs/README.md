@@ -47,6 +47,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [Codebase simplification design](design/codebase-simplification-2026-10-26.md) | Five local simplifications, deferred documentation-anchor caching, scope and verification confirmed; implementation authorized on 2026-10-26 |
 | [UI polish accessibility design](design/ui-accessibility-polish-findings.md) | Language boundaries and keyboard access decisions; implementation authorized on 2026-10-26 |
 | [OpenRouter routing pilot results](qa/openrouter-routing-pilot-2026-10-25.md) | 36 live page translations, budget control, routing-blind quality review and interpretation limits, dated 2026-10-25 |
 | [Model quality preparation](qa/model-quality-preparation-2026-10-25.md) | 144 intercepted mock page executions, source coverage checks and request-sized cost scenarios, dated 2026-10-25 |

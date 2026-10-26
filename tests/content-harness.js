@@ -5,7 +5,7 @@ const { getInlineContentScriptFiles } = require('../extension/background');
 
 // A page adapter loads the shipped classic scripts and reaches only DOM controls and
 // runtime messages. It shares the operation tests' controlled browser services.
-function createContentPage(fixture) {
+function createContentPage(fixture, selectors = null) {
   const { document } = fixture;
   const runtimeListeners = [];
   let startupRequests = 0;
@@ -35,9 +35,10 @@ function createContentPage(fixture) {
     return node;
   };
   document.getElementById = id => document.body.childNodes.find(node => node.id === id) || null;
-  document.querySelector = () => document.body;
+  document.querySelector = selector => selectors ? selectors[selector] || null : document.body;
   const page = vm.createContext({
     ...fixture.platform,
+    location: { href: 'https://page.test/article' },
     crypto: globalThis.crypto,
     chrome: { runtime: {
       onMessage: { addListener: callback => runtimeListeners.push(callback) },

@@ -13,7 +13,6 @@ import {
   createChecks,
   launchExtensionBrowser,
   until,
-  wait,
 } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -22,21 +21,6 @@ const EXTENSION_DIR = join(ROOT, 'extension');
 const SESSION = 'chrome-ai-translator-ai-hero-grill-with-docs';
 const PAGE_URL = 'https://www.aihero.dev/skills-grill-with-docs';
 const { check, failures, finish } = createChecks('ai hero grill-with-docs');
-
-async function attachReportedPage(context) {
-  if (context.page) return context.page;
-  const deadline = Date.now() + 15000;
-  for (;;) {
-    const pages = await context.listPages();
-    const found = pages.find((target) =>
-      target.type === 'page' &&
-      String(target.url || '').includes('/skills-grill-with-docs')
-    );
-    if (found) return context.attach(found.id);
-    if (Date.now() >= deadline) return null;
-    await wait(250);
-  }
-}
 
 async function injectInlineTranslation(evaluate) {
   for (const file of [...background.getInlineContentScriptFiles(), 'translation-settings.js', 'inline-model-execution.js']) {
@@ -54,7 +38,7 @@ async function main() {
     });
     if (!check('extension is loaded', Boolean(context.extension))) return;
 
-    const page = await attachReportedPage(context);
+    const page = context.page;
     if (!check('driver opened the reported page', Boolean(page))) return;
     const articleReady = await until(
       () => page.evaluate(
