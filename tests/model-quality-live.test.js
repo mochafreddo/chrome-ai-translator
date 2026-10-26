@@ -126,8 +126,7 @@ exports.tests = [{
 }, {
   name: 'only profiles with exactly two successful, accounted, contract-safe flows qualify',
   async fn() {
-    const { PROFILES } = await quality();
-    const { compatibleProfiles } = await live();
+    const { PROFILES, compatibleProfiles } = await quality();
     const all = PROFILES.flatMap(profile => [
       compatibilityRun(profile.key, 'inline'),
       compatibilityRun(profile.key, 'sidepanel'),

@@ -30,6 +30,7 @@ const suiteFiles = [
   'live-key',
   'routing-pilot',
   'routing-budget',
+  'evaluation-execution',
   'model-quality',
   'model-quality-preparation',
   'model-quality-live',

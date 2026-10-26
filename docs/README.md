@@ -47,6 +47,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [Evaluation execution deepening design](design/evaluation-execution-deepening-2026-10-26.md) | Routing and model-quality execution responsibilities, preserved contracts and unbilled verification scope confirmed; implementation authorized on 2026-10-26 |
 | [Codebase simplification design](design/codebase-simplification-2026-10-26.md) | Five local simplifications, deferred documentation-anchor caching, scope and verification confirmed; implementation authorized on 2026-10-26 |
 | [UI polish accessibility design](design/ui-accessibility-polish-findings.md) | Language boundaries and keyboard access decisions; implementation authorized on 2026-10-26 |
 | [OpenRouter routing pilot results](qa/openrouter-routing-pilot-2026-10-25.md) | 36 live page translations, budget control, routing-blind quality review and interpretation limits, dated 2026-10-25 |

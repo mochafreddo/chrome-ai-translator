@@ -1,6 +1,10 @@
 import { resolve } from 'node:path';
-import { runPilot } from './routing-pilot-browser.mjs';
-import { MODEL } from './routing-pilot.mjs';
+import { createBrowserAdapter } from './routing-pilot-browser.mjs';
+import { runEvaluation } from './evaluation-execution.mjs';
+import { createLiveTransport } from './evaluation-transport.mjs';
+import { createBudget } from './routing-budget.mjs';
+import { MODEL, createRoutingExperiment } from './routing-pilot.mjs';
+import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2);
 if (args.length !== 4 || args[0] !== '--output' || args[2] !== '--budget-usd' || Number(args[3]) !== 2) {
@@ -13,6 +17,7 @@ if (!Array.isArray(endpoints) || !endpoints.length || endpoints.some(endpoint =>
   !Number.isSafeInteger(endpoint.context_length) || endpoint.context_length < 1 || endpoint.context_length > 1048576)) {
   throw new Error('Model context bound cannot be established.');
 }
-const result = await runPilot({ output: resolve(args[1]), live: true, budgetUsd: 2,
-  inputTokenLimit: Math.max(...endpoints.map(endpoint => endpoint.context_length)) });
+const result = await runEvaluation({ output: resolve(args[1]), experiment: createRoutingExperiment(),
+  adapter: createBrowserAdapter({ transport: createLiveTransport({ envPath: fileURLToPath(new URL('../../.env.local', import.meta.url)) }) }),
+  budget: createBudget({ limitUsd: 2, inputTokenLimit: Math.max(...endpoints.map(endpoint => endpoint.context_length)) }) });
 if (!result.completePlan) process.exitCode = 1;

@@ -2,19 +2,12 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROFILES } from './model-quality.mjs';
+import { PROFILES, createQualityExperiment, compatibleProfiles } from './model-quality.mjs';
 import { loadQualityCorpus, loadCompatibilityCorpus } from './model-quality-corpus.mjs';
 import { createBudget, PRICE_CAP } from './routing-budget.mjs';
-import { runPilot } from './routing-pilot-browser.mjs';
-
-export function compatibleProfiles(records) {
-  return PROFILES.filter(profile => {
-    const runs = records.filter(run => run.profileKey === profile.key);
-    return runs.length === 2 && ['inline', 'sidepanel'].every(flow => runs.some(run => run.flow === flow)) &&
-      runs.every(run => run.success && run.requests.length > 0 && run.requests.every(request =>
-        request.accounted && Number.isFinite(request.cost) && request.reasoningAccepted === true && request.contractAccepted !== false));
-  }).map(profile => profile.key);
-}
+import { createBrowserAdapter } from './routing-pilot-browser.mjs';
+import { runEvaluation } from './evaluation-execution.mjs';
+import { createLiveTransport } from './evaluation-transport.mjs';
 
 export async function preflightProfiles(fetchImpl = globalThis.fetch) {
   const read = async path => {
@@ -72,14 +65,16 @@ export async function main(args = process.argv.slice(2)) {
   let probes;
   let comparison;
   try {
-    probes = await runPilot({ output: resolve(output, 'compatibility'), qualityCorpus: loadCompatibilityCorpus(),
-      profileKeys: preflight.profiles, live: true, qualityLive: true, sharedBudget: budget, budgetUsd: 5 });
+    probes = await runEvaluation({ output: resolve(output, 'compatibility'),
+      experiment: createQualityExperiment({ corpus: loadCompatibilityCorpus(), profileKeys: preflight.profiles }),
+      adapter: createBrowserAdapter({ transport: createLiveTransport({ envPath: fileURLToPath(new URL('../../.env.local', import.meta.url)) }) }), budget });
     const qualified = compatibleProfiles(probes.records);
     save('compatibility-result.json', { completePlan: probes.completePlan, qualified,
       excluded: PROFILES.filter(profile => !qualified.includes(profile.key)).map(profile => profile.key), budget: budget.snapshot() });
     if (!probes.completePlan || budget.snapshot().frozen || !qualified.length) throw new Error('Compatibility did not establish a safe qualified comparison.');
-    comparison = await runPilot({ output: resolve(output, 'quality'), qualityCorpus: corpus, profileKeys: qualified,
-      live: true, qualityLive: true, sharedBudget: budget, budgetUsd: 5 });
+    comparison = await runEvaluation({ output: resolve(output, 'quality'),
+      experiment: createQualityExperiment({ corpus, profileKeys: qualified }),
+      adapter: createBrowserAdapter({ transport: createLiveTransport({ envPath: fileURLToPath(new URL('../../.env.local', import.meta.url)) }) }), budget });
     save('result.json', { completePlan: comparison.completePlan, qualified, budget: budget.snapshot(),
       semanticReview: 'pending blinded source-based review', comparisonRuns: comparison.records.length });
     if (!comparison.completePlan) process.exitCode = 1;

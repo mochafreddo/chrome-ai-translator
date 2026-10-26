@@ -1,7 +1,65 @@
 import { createRequire } from 'node:module';
+import { inlineQualityCompleted, summarizeQuality } from './model-quality-observation.mjs';
 
 const require = createRequire(import.meta.url);
 const codec = require('../../extension/inline-block.js');
+const { parseCompletedResponse } = require('../../extension/openai-response.js');
+
+export function compatibleProfiles(records) {
+  return PROFILES.filter(profile => {
+    const runs = records.filter(run => run.profileKey === profile.key);
+    return runs.length === 2 && ['inline', 'sidepanel'].every(flow => runs.some(run => run.flow === flow)) &&
+      runs.every(run => run.success && run.requests.length > 0 && run.requests.every(request =>
+        request.accounted && Number.isFinite(request.cost) && request.reasoningAccepted === true && request.contractAccepted !== false));
+  }).map(profile => profile.key);
+}
+
+export function createQualityExperiment({ corpus, profileKeys, planIds } = {}) {
+  return {
+    kind: 'model-quality', corpus, census: true,
+    plan: buildQualityPlan(corpus.pages.map(page => page.id), profileKeys, planIds),
+    workerAdapter: `body = (${adaptQualityRequest.toString()})(body, globalThis.modelQualityProfile);`,
+    entrySettings: entry => `globalThis.modelQualityProfile = ${JSON.stringify(entry.profile)}`,
+    validateRequest(body, run, record) {
+      validateQualityRequest(body, run.profileKey);
+      record.input = body.input;
+      if (run.flow === 'inline') {
+        record.blockKeys = JSON.parse(body.input).records.map(input => {
+          if (!run.expected.blocks.some(block => block.template === input.template &&
+              JSON.stringify(block.atoms) === JSON.stringify(input.atoms))) throw new Error('Uncensused source before transport.');
+          return JSON.stringify({ template: input.template, atoms: input.atoms });
+        });
+      }
+    },
+    validateResponse(data, body, run, record, { live }) {
+      if (run.flow !== 'inline') return;
+      const validate = () => validateQualityOutput(parseCompletedResponse(data), JSON.parse(body.input).records.map(input => {
+        const source = run.expected.blocks.find(block => block.template === input.template &&
+          JSON.stringify(block.atoms) === JSON.stringify(input.atoms));
+        if (!source) throw new Error('Uncensused source record.');
+        return { ...input, contract: source.contract };
+      }), { structure: !live });
+      if (live) {
+        try { validate(); record.contractAccepted = true; }
+        catch { record.contractAccepted = false; }
+      } else validate();
+    },
+    reasoningAccepted: record => Number.isInteger(record.reasoningTokens) && record.reasoningTokens >= 0 &&
+      !((record.reasoning.effort === 'none' || record.reasoning.enabled === false) && record.reasoningTokens !== 0),
+    haltOnReasoningFailure: false,
+    qualify(record, { live }) {
+      if (!record.coverage.matched || !record.protectedContent || !live && !record.displayedProse) record.success = false;
+      if (live && record.requests.some(request => request.reasoningAccepted !== true || request.contractAccepted === false)) record.success = false;
+      if (record.flow === 'inline' && !inlineQualityCompleted(record.outcomes, record.coverage.expectedBlocks, record.appliedAllBlocks)) record.success = false;
+      if (record.flow === 'sidepanel') record.outcomes.documentDisplayed = record.success;
+      if (live && !record.targetLanguagePresent) record.success = false;
+    },
+    summarize(records, observer, { live, completePlan }) {
+      const summary = summarizeQuality(records, observer, { live });
+      return { ...summary, comparisonEligible: completePlan && summary.initialInputsMatched !== false };
+    },
+  };
+}
 
 function freezeProfile(profile) {
   Object.freeze(profile.reasoning);

@@ -4,7 +4,10 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { createHash } = require('node:crypto');
 const { loadQualityCorpus } = require('./integration/model-quality-corpus.mjs');
-const { coverageMatches, summarizeQuality, runPilot, inlineQualityCompleted, inlineQualityTerminal, protectedMarkdownMatches, mockDisplayedProseMatches } = require('./integration/routing-pilot-browser.mjs');
+const { coverageMatches, summarizeQuality, inlineQualityCompleted, inlineQualityTerminal, protectedMarkdownMatches, mockDisplayedProseMatches } = require('./integration/model-quality-observation.mjs');
+const { runEvaluation } = require('./integration/evaluation-execution.mjs');
+const { createQualityExperiment } = require('./integration/model-quality.mjs');
+const { createBudget } = require('./integration/routing-budget.mjs');
 
 const WMT_SOURCE_SHA256 = '33b14dc670e28225ce742290718c513c1545c2c500d33667a4d01d776ca58dbc';
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -238,8 +241,18 @@ exports.tests = [{
     assert.equal(protectedMarkdownMatches(extraction, 'Use ```method(self, args)```.'), false);
   },
 }, {
-  name: 'rejects quality live mode before preparing browser or credential state',
+  name: 'rejects quality live without the approved shared USD 5 ledger before preparing output or credentials',
   async fn() {
-    await assert.rejects(runPilot({ qualityCorpus: {}, live: true }), /no live mode/);
+    const root = mkdtempSync(join(tmpdir(), 'quality-ledger-'));
+    const output = join(root, 'must-not-exist');
+    let transportOpened = false;
+    try {
+      await assert.rejects(runEvaluation({ output,
+        experiment: createQualityExperiment({ corpus: { pages: [{ id: 'compatibility' }] }, profileKeys: ['deepseek'] }),
+        adapter: { live: true, withTransport() { transportOpened = true; } },
+        budget: createBudget({ inputTokenLimit: 1048576 }) }), /approved shared USD 5 ledger/);
+      assert.equal(transportOpened, false);
+      assert.equal(existsSync(output), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   },
 }];

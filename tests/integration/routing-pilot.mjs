@@ -1,10 +1,46 @@
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { PRICE_CAP } from './routing-budget.mjs';
 
 const require = createRequire(import.meta.url);
 const { OPENROUTER_MODEL } = require('../../extension/default-model.js');
 
 export const MODEL = OPENROUTER_MODEL;
+
+export function createRoutingExperiment() {
+  const directory = new URL('./fixtures/routing-pilot/', import.meta.url);
+  const corpus = JSON.parse(readFileSync(new URL('corpus.json', directory)));
+  return {
+    kind: 'routing', corpus, plan: buildPlan(), census: false,
+    workerAdapter: `body.provider.max_price = ${JSON.stringify(PRICE_CAP)};
+      if (globalThis.routingPilotPolicy === 'throughput') body.provider.sort = 'throughput';`,
+    entrySettings: entry => `globalThis.routingPilotPolicy = ${JSON.stringify(entry.policy)}`,
+    validateRequest(body, run) {
+      const baseline = { ...body, provider: { ...body.provider } };
+      if (run.policy === 'throughput') delete baseline.provider.sort;
+      if (JSON.stringify(routeRequest(baseline, run.policy)) !== JSON.stringify(body) || !body.provider.max_price ||
+          body.tools || body.plugins || typeof body.input !== 'string') throw new Error('Live request invariants failed.');
+    },
+    validateResponse() {},
+    reasoningAccepted: record => record.reasoningTokens === 0,
+    haltOnReasoningFailure: true,
+    qualify(record, { live }) {
+      if (live && record.flow === 'inline' &&
+          (record.outcomes.failed || record.outcomes.changed || record.outcomes.pending)) record.success = false;
+    },
+    summarize(records, observer, { completePlan }) {
+      let summary;
+      let comparisonEligible = completePlan;
+      try { summary = completePlan ? summarize(records) : { groups: [], incomplete: true }; }
+      catch {
+        comparisonEligible = false;
+        try { summary = summarize(records, { allowFailedCoverage: true }); }
+        catch { summary = { groups: [], incomplete: true }; }
+      }
+      return { ...summary, comparisonEligible };
+    },
+  };
+}
 
 const PAGES = Object.freeze(['technical', 'github', 'article']);
 const FLOWS = Object.freeze(['inline', 'sidepanel']);

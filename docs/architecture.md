@@ -132,3 +132,9 @@ Translation requests transmit permitted page content to the selected service, an
 ## Verification boundary
 
 Unit tests exercise deterministic adapters and local DOM fixtures; source and unit evidence establish implementation contracts, not current live-model quality. Browser checks exercise their stated Chrome/DOM paths, and billed checks exercise real translation. Commands, prerequisites, suite registration, historical negative controls, and each check's limits are in the [test guide](../tests/README.md). Historical plans and QA reports are evidence for their recorded baseline, not instructions to rerun old helpers against the current tree.
+
+### Comparison execution
+
+The comparison tools run outside the extension. [evaluation-execution.mjs](../tests/integration/evaluation-execution.mjs) owns the shared execution lifetime: request admission, reservation evidence, transport, settlement, output records and cleanup. [Routing](../tests/integration/routing-pilot.mjs) and [model-quality](../tests/integration/model-quality.mjs) modules own their experiment plans, request rules and result qualification. The [browser adapter](../tests/integration/routing-pilot-browser.mjs) observes and drives the disposable extension through the existing harness; deterministic adapters exercise the same execution interface without a browser or billed request.
+
+The evaluation budget remains separate from the product's Session Budget. Actual credentials stay inside the existing fixed-host Node transport callback until execution cleanup completes. The browser receives a synthetic credential. Mock completion and structural qualification remain distinct from provider compatibility, measured billing and semantic quality acceptance.
