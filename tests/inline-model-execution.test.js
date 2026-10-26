@@ -1,3 +1,4 @@
+const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const { execute } = require('../extension/inline-model-execution.js');
 const codec = require('../extension/inline-block.js');
@@ -21,6 +22,24 @@ function translatedReasoning(record) {
 
 exports.name = 'inline model execution';
 exports.tests = [
+  {
+    name: 'reserves bounded prior-template context using its escaped JSON size',
+    fn() {
+      const record = { id: 'escape-check', template: 'q"\\\n\t\u0001', atoms: [], repair: null };
+      const baseCost = JSON.stringify({ records: [{ ...record }] }).length +
+        JSON.stringify({ records: [{ ...record, repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) } }] }).length;
+      const escapedContextCost = 38;
+      assert.equal(JSON.stringify({ previousTemplate: record.template }).length, escapedContextCost);
+      assert.equal(requestPreparation.measureRecord(record).reservedCost, baseCost + escapedContextCost);
+
+      const longRecord = { ...record, template: 'x'.repeat(3000) };
+      const longBaseCost = JSON.stringify({ records: [{ ...longRecord }] }).length +
+        JSON.stringify({ records: [{ ...longRecord, repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) } }] }).length;
+      assert.equal(JSON.stringify({ previousTemplate: longRecord.template }).length > 2048, true);
+      assert.equal(requestPreparation.measureRecord(longRecord).reservedCost, longBaseCost + 2048);
+    },
+  },
+
   {
     name: 'gives English-residue repairs explicit guidance for quoted references and prose beside atoms',
     async fn() {
@@ -46,7 +65,7 @@ exports.tests = [
         assert.equal(result.template, corrected);
         assert.equal(result.diagnostic.quality.status, 'complete');
         assert.equal(Number.isSafeInteger(result.repairRecordCost), true);
-        assert.ok(result.repairRecordCost > codec.getRecordCost(record));
+        assert.ok(result.repairRecordCost > requestPreparation.measureRecord(record).actualCost);
         assert.equal(JSON.stringify(result.diagnostic).includes(source), false);
         assert.equal(JSON.stringify(result.diagnostic).includes(initial), false);
       }
@@ -55,7 +74,6 @@ exports.tests = [
   {
     name: 'keeps a worker-admitted multi-record repair within the serialized request cap',
     async fn() {
-      const { normalizeVisibleBlockBatchRecords } = require('../extension/background.js');
       const { document, element, text } = createTestDocument();
       const records = [];
       for (let index = 0; index < 3; index += 1) {
@@ -66,7 +84,7 @@ exports.tests = [
         records.push({ id: `large-${index}`, template: serialized.template, atoms: serialized.atoms,
           contract: serialized.contract, repair: null });
       }
-      const admitted = normalizeVisibleBlockBatchRecords(records);
+      const admitted = requestPreparation.normalizeSourceBatch(records);
       const requests = [];
       const results = await execute(admitted, SETTINGS, async (request) => {
         requests.push(request);
@@ -96,7 +114,7 @@ exports.tests = [
             const input = JSON.parse(request.input).records[0];
             assert.equal(input.template, record.template);
             assert.deepEqual(input.repair, { attempt: 1, previousErrorCode: 'quality.english_residue' });
-            assert.ok(codec.serializeModelRequest([record]).length + request.input.length <= codec.getReservedRecordCost(record));
+            assert.ok(requestPreparation.prepareInitialBatch([record]).input.length + request.input.length <= requestPreparation.measureRecord(record).reservedCost);
           }
           return response([{ id: record.id, template: calls === 1 ? initial : '짧은 안내서를 사용하세요.' }]);
         });

@@ -1,3 +1,4 @@
+const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -119,9 +120,8 @@ exports.tests = [
     async fn() {
       const { createOperationFixture, flushMicrotasks } = require('./inline-translation-operation.test');
       const { createContentPage } = require('./content-harness');
-      const { getRecordCost } = require('../extension/inline-translation-session');
       const f = createOperationFixture();
-      const cost = getRecordCost(f.serialized);
+      const cost = requestPreparation.measureRecord(f.serialized).actualCost;
       f.document.body.replaceChildren();
       let remaining = 150000 - 2 * cost;
       while (remaining > 0) {
@@ -495,7 +495,9 @@ exports.tests = [
         ['markdown-entries.js', 'markdown-rehydration.js', ['worker']],
         ['markdown-entries.js', 'translation-chunks.js', ['worker']],
         ['markdown-entries.js', 'markdown-document.js', ['page']],
-        ['inline-block.js', 'inline-translation-session.js', ['page']],
+        ['inline-block.js', 'inline-request.js', ['worker', 'page']],
+        ['inline-request.js', 'inline-translation-session.js', ['page']],
+        ['inline-request.js', 'inline-model-execution.js', ['worker']],
         ['inline-diagnostics-protocol.js', 'inline-translation-session.js', ['page']],
         ['inline-translation-session.js', 'inline-translation-operation.js', ['page']],
         ['inline-viewport.js', 'inline-translation-operation.js', ['page']],

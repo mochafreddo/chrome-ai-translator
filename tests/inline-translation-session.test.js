@@ -1,3 +1,4 @@
+const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const session = require('../extension/inline-translation-session.js');
 const { execute } = require('../extension/inline-model-execution.js');
@@ -167,7 +168,7 @@ exports.tests = [
       for (let index = 0; index < 500; index++) visit.admit(paragraph(40));
       const taken = drain(visit);
       assert.equal(taken.length, 500);
-      assert.equal(taken.reduce((sum, record) => sum + session.getReservedRecordCost(record), 0) > SESSION_BUDGET, true);
+      assert.equal(taken.reduce((sum, record) => sum + requestPreparation.measureRecord(record).reservedCost, 0) > SESSION_BUDGET, true);
       assert.deepEqual(visit.progress(), { counts: { ...NOTHING, translated: 500 }, reason: '' });
       assertRemainingBudget(visit, SESSION_BUDGET - 23000);
     },
@@ -184,10 +185,10 @@ exports.tests = [
       const taken = drain(visit, 2);
       assert.equal(taken.length, 356);
       assert.equal(taken.reduce((sum, record) => sum + record.template.length, 0), 37376);
-      assert.equal(taken.reduce((sum, record) => sum + session.getRecordCost(record), 0), 39512);
+      assert.equal(taken.reduce((sum, record) => sum + requestPreparation.measureRecord(record).actualCost, 0), 39512);
       // Each ASCII template contributes its 23-character JSON property wrapper;
       // the reconstruction's 303-character maximum stays below both context caps.
-      assert.equal(taken.reduce((sum, record) => sum + session.getReservedRecordCost(record), 0), 208388);
+      assert.equal(taken.reduce((sum, record) => sum + requestPreparation.measureRecord(record).reservedCost, 0), 208388);
       assert.deepEqual(visit.progress(), { counts: { ...NOTHING, translated: 356 }, reason: '' });
       assert.equal(blocks.every(block => block.textContent === '번역한 문장입니다.'), true);
       assertRemainingBudget(visit, SESSION_BUDGET - 79024);
@@ -201,8 +202,8 @@ exports.tests = [
       visit.admit(paragraph(5200));
       const batch = visit.takeBatch();
       assert.equal(batch.length, 1);
-      assert.equal(session.getReservedRecordCost(batch[0]), 12000);
-      assert.equal(session.getRecordCost(batch[0]) < 12000, true);
+      assert.equal(requestPreparation.measureRecord(batch[0]).reservedCost, 12000);
+      assert.equal(requestPreparation.measureRecord(batch[0]).actualCost < 12000, true);
     },
   },
   {
@@ -543,7 +544,7 @@ exports.tests = [
       visit.begin(KOREAN);
       // A repaired answer: the cache replays its attempt count, but nothing is sent for it now.
       const { block, batch } = sendBlock(visit);
-      const initialCost = session.getRecordCost(batch[0]);
+      const initialCost = requestPreparation.measureRecord(batch[0]).actualCost;
       const repairCost = initialCost + 31;
       visit.settle(batch, answer(batch, { attemptCount: 2, repairRecordCost: repairCost }));
       assert.notEqual(block.textContent, ORIGINAL_TEXT);
@@ -617,7 +618,7 @@ exports.tests = [
         visit.begin(KOREAN);
         const { batch } = sendBlock(visit);
         // A fresh visit has been charged for exactly this one record so far.
-        const recordCost = session.getRecordCost(batch[0]);
+        const recordCost = requestPreparation.measureRecord(batch[0]).actualCost;
         assert.equal(recordCost > 0, true);
 
         visit.settle(batch, answer(batch, { attemptCount }));
@@ -633,7 +634,7 @@ exports.tests = [
         const visit = session.createInlineTranslationSession();
         visit.begin(KOREAN);
         const { batch } = sendBlock(visit);
-        const initialCost = session.getRecordCost(batch[0]);
+        const initialCost = requestPreparation.measureRecord(batch[0]).actualCost;
         const repairCost = initialCost + 75;
         assert.equal(repairCost <= 12000, true);
         if (stale) visit.stop();
@@ -650,7 +651,7 @@ exports.tests = [
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);
       const { batch } = sendBlock(visit);
-      const initialCost = session.getRecordCost(batch[0]);
+      const initialCost = requestPreparation.measureRecord(batch[0]).actualCost;
       visit.settle(batch, answer(batch, {
         attemptCount: 2,
         repairRecordCost: initialCost - 1,
@@ -669,7 +670,7 @@ exports.tests = [
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);
       const { block, batch } = sendBlock(visit);
-      const recordCost = session.getRecordCost(batch[0]);
+      const recordCost = requestPreparation.measureRecord(batch[0]).actualCost;
       end(visit);
       const progress = visit.progress();
 
@@ -697,7 +698,7 @@ exports.tests = [
         const visit = session.createInlineTranslationSession();
         visit.begin(KOREAN);
         const { block, batch } = sendBlock(visit);
-        const spent = session.getRecordCost(batch[0]);
+        const spent = requestPreparation.measureRecord(batch[0]).actualCost;
 
         const settled = visit.settle(batch, response);
 

@@ -16,11 +16,12 @@ if (
 ) {
   importScripts('inline-block.js');
 }
-const inlineBlockCodec =
-  globalThis.ChromeAiTranslatorInlineBlock ||
-  (typeof module !== 'undefined' && module.exports
-    ? require('./inline-block.js')
-    : null);
+if (typeof importScripts === 'function' && !globalThis.ChromeAiTranslatorInlineRequest) {
+  importScripts('inline-request.js');
+}
+const inlineRequest =
+  globalThis.ChromeAiTranslatorInlineRequest ||
+  (typeof module !== 'undefined' && module.exports ? require('./inline-request.js') : null);
 if (
   typeof importScripts === 'function' &&
   !globalThis.ChromeAiTranslatorOpenAiResponse
@@ -158,9 +159,6 @@ const MAX_CHUNK_MAX_CHARS = 60000;
 // Named after the setting that used to govern it. Chrome keeps a registration under this id
 // across restarts, so renaming it would strand the old one on installs that already have it.
 const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
-const INLINE_MAX_RECORDS = 500;
-const INLINE_BLOCK_MAX_RECORD_COST = 12000;
-const INLINE_BLOCK_MAX_BATCH_COST = 12000;
 // There is deliberately no session cap here: the Semantic Block session is the content
 // script's, and only it knows when one starts, resets, or resumes. See ADR-0003.
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
@@ -300,6 +298,7 @@ function getInlineContentScriptFiles() {
     'default-model.js',
     'placeholder-tokens.js',
     'inline-block.js',
+    'inline-request.js',
     'inline-diagnostics-protocol.js',
     'inline-translation-session.js',
     'inline-viewport.js',
@@ -424,140 +423,6 @@ function describeInlineTranslationControlFailure(failure) {
     return CONTENT_SCRIPT_FAILURE_MESSAGES.missing_access;
   }
   return message || 'Inline translation could not be reached on this tab.';
-}
-
-const INLINE_BLOCK_REPAIRABLE_ERROR_CODES = new Set([
-  'token_missing',
-  'token_duplicate',
-  'token_unknown',
-  'token_nesting_invalid',
-  'token_parent_changed',
-  'output_too_long',
-  'output_parse_failed',
-]);
-const INLINE_BLOCK_ATOM_FIELDS = new Set([
-  'token',
-  'kind',
-  'label',
-  'preserveText',
-]);
-
-function normalizeBlockAtom(atom, recordId, atomIndex) {
-  if (!atom || typeof atom !== 'object' || Array.isArray(atom)) {
-    throw new Error(`Invalid atom ${atomIndex} for block ${recordId}`);
-  }
-  for (const key of Object.keys(atom)) {
-    if (!INLINE_BLOCK_ATOM_FIELDS.has(key)) {
-      throw new Error(`Unexpected atom field '${key}' for block ${recordId}`);
-    }
-  }
-  if (typeof atom.token !== 'string' || !atom.token) {
-    throw new Error(`Invalid atom token for block ${recordId}`);
-  }
-  if (typeof atom.kind !== 'string' || !atom.kind) {
-    throw new Error(`Invalid atom kind for block ${recordId}`);
-  }
-  if (typeof atom.preserveText !== 'boolean') {
-    throw new Error(`Invalid atom preserveText for block ${recordId}`);
-  }
-  const normalized = {
-    token: atom.token,
-    kind: atom.kind,
-    preserveText: atom.preserveText,
-  };
-  if ('label' in atom) {
-    if (typeof atom.label !== 'string') {
-      throw new Error(`Invalid atom label for block ${recordId}`);
-    }
-    normalized.label = atom.label;
-  }
-  return normalized;
-}
-
-function normalizeBlockRepair(repair, recordId) {
-  if (repair == null) return null;
-  if (!repair || typeof repair !== 'object' || Array.isArray(repair)) {
-    throw new Error(`Invalid repair metadata for block ${recordId}`);
-  }
-  if (repair.attempt !== 1) {
-    throw new Error(`Invalid repair attempt for block ${recordId}`);
-  }
-  if (!INLINE_BLOCK_REPAIRABLE_ERROR_CODES.has(repair.previousErrorCode)) {
-    throw new Error(`Invalid repair error code for block ${recordId}`);
-  }
-  return {
-    attempt: 1,
-    previousErrorCode: repair.previousErrorCode,
-  };
-}
-
-const getBlockRecordCost = inlineBlockCodec.getRecordCost;
-
-function normalizeVisibleBlockBatchRecords(records) {
-  if (!Array.isArray(records)) {
-    throw new Error('Inline block translation records must be an array');
-  }
-  if (records.length > INLINE_MAX_RECORDS) {
-    throw new Error(
-      `Too many semantic blocks for inline translation (${records.length}/${INLINE_MAX_RECORDS})`
-    );
-  }
-  const seen = new Set();
-  const normalized = records.map((record, index) => {
-    const id = record?.id;
-    if (typeof id !== 'string' || !id) {
-      throw new Error(`Invalid inline block record id at index ${index}`);
-    }
-    if (seen.has(id)) throw new Error(`Duplicate inline block record id: ${id}`);
-    seen.add(id);
-    if (typeof record.template !== 'string' || !record.template.trim()) {
-      throw new Error(`Invalid inline block template for id: ${id}`);
-    }
-    if (!record.contract || typeof record.contract !== 'object') {
-      throw new Error(`Missing inline block token contract for id: ${id}`);
-    }
-    const atoms = Array.isArray(record.atoms)
-      ? record.atoms.map((atom, atomIndex) =>
-          normalizeBlockAtom(atom, id, atomIndex)
-        )
-      : (() => {
-          throw new Error(`Invalid inline block atoms for id: ${id}`);
-        })();
-    const normalizedRecord = {
-      id,
-      template: record.template,
-      atoms,
-      contract: record.contract,
-      repair: normalizeBlockRepair(record.repair, id),
-    };
-    const validation = inlineBlockCodec?.validateTranslatedTemplate(
-      normalizedRecord.template,
-      normalizedRecord.contract
-    );
-    // A source template carries every token it lists; ADR-0010's allowance is for answers.
-    if (!validation?.ok || validation.droppedWrappers.length) {
-      throw new Error(
-        `Invalid source token contract for block ${id}: ${validation?.errorCode || 'output_parse_failed'}`
-      );
-    }
-    const cost = getBlockRecordCost(normalizedRecord);
-    if (cost > INLINE_BLOCK_MAX_RECORD_COST) {
-      throw new Error(
-        `Inline block record is too large (${cost}/${INLINE_BLOCK_MAX_RECORD_COST} characters)`
-      );
-    }
-    return normalizedRecord;
-  });
-  const totalCost = normalized.reduce(
-    (sum, record) => sum + getBlockRecordCost(record),
-    0
-  );
-  if (totalCost > INLINE_BLOCK_MAX_BATCH_COST) {
-    throw new Error(
-      `Visible inline block batch is too large (${totalCost}/${INLINE_BLOCK_MAX_BATCH_COST} characters)`
-    );
-  }
-  return normalized;
 }
 
 function getAllPagesContentScript() {
@@ -818,7 +683,7 @@ function createBackgroundWorker(platform = {}) {
     const run = inlineDiagnostics.beginTranslation(options.correlationContext);
 
     try {
-      const normalized = normalizeVisibleBlockBatchRecords(records);
+      const normalized = inlineRequest.normalizeSourceBatch(records);
       run.describe({ records: normalized });
 
       if (!normalized.length) {
@@ -1292,13 +1157,11 @@ if (typeof module !== 'undefined' && module.exports) {
     sanitizePublicTabState,
     mergeVisibleBatchSettingsSnapshot,
     normalizeChunkMaxChars,
-    getBlockRecordCost,
     getInlineContentScriptFiles,
     classifyContentScriptFailure,
     INLINE_TRANSLATION_SHORTCUT_COMMAND,
     planInlineTranslationControl,
     describeInlineTranslationControlFailure,
-    normalizeVisibleBlockBatchRecords,
     normalizeMaxOutputTokens,
   };
 }

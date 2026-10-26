@@ -1,3 +1,4 @@
+const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
@@ -1336,13 +1337,11 @@ exports.tests = [
         'classifyContentScriptFailure',
         'createBackgroundWorker',
         'describeInlineTranslationControlFailure',
-        'getBlockRecordCost',
         'getInlineContentScriptFiles',
         'mergeSettingsWithExisting',
         'mergeVisibleBatchSettingsSnapshot',
         'normalizeChunkMaxChars',
         'normalizeMaxOutputTokens',
-        'normalizeVisibleBlockBatchRecords',
         'planInlineTranslationControl',
         'safeError',
         'sanitizePublicTabState',
@@ -1957,7 +1956,7 @@ exports.tests = [
     // 3. The validator mis-codes another protocol failure as missing_id — falsified
     //    by the protocol-shape table in inline-model-execution.test.js.
     // 4. Duplicate request ids shrink the expected set — never reaches validation;
-    //    normalizeVisibleBlockBatchRecords refuses them first.
+    //    normalizeSourceBatch refuses them first.
     // 5. The structured-output schema does not name the batch length, so a
     //    completed response may legally omit ids — confirmed: minItems and
     //    maxItems now equal the batch size. A mock fetch still bypasses that
@@ -2086,7 +2085,7 @@ exports.tests = [
     name: 'normalizes block records without allowing DOM attributes',
     fn() {
       const record = createBlockApiRecord();
-      const normalized = helpers.normalizeVisibleBlockBatchRecords([record]);
+      const normalized = requestPreparation.normalizeSourceBatch([record]);
 
       assert.equal(normalized.length, 1);
       assert.equal(normalized[0].id, 'b1');
@@ -2095,7 +2094,7 @@ exports.tests = [
       assert.deepEqual(normalized[0].contract, record.contract);
       assert.equal(normalized[0].repair, null);
       assert.equal(
-        helpers.getBlockRecordCost(normalized[0]),
+        requestPreparation.measureRecord(normalized[0]).actualCost,
         record.template.length +
           JSON.stringify(record.atoms).length +
           JSON.stringify(null).length
@@ -2103,7 +2102,7 @@ exports.tests = [
 
       assert.throws(
         () =>
-          helpers.normalizeVisibleBlockBatchRecords([
+          requestPreparation.normalizeSourceBatch([
             {
               ...record,
               atoms: [{ ...record.atoms[0], href: 'https://example.com' }],
@@ -2113,7 +2112,7 @@ exports.tests = [
       );
       assert.throws(
         () =>
-          helpers.normalizeVisibleBlockBatchRecords([
+          requestPreparation.normalizeSourceBatch([
             {
               ...record,
               repair: { attempt: 2, previousErrorCode: 'token_missing' },
@@ -2134,13 +2133,13 @@ exports.tests = [
       };
 
       assert.throws(
-        () => helpers.normalizeVisibleBlockBatchRecords([oversized]),
+        () => requestPreparation.normalizeSourceBatch([oversized]),
         /block record is too large/i
       );
       const plainFixture = createTestPlainBlockRecord();
       assert.throws(
         () =>
-          helpers.normalizeVisibleBlockBatchRecords(
+          requestPreparation.normalizeSourceBatch(
             Array.from({ length: 501 }, (_item, index) => ({
               ...plainFixture,
               id: `b${index + 1}`,
@@ -2205,7 +2204,7 @@ exports.tests = [
 
       let spent = 0;
       for (let batch = 1; batch <= 6; batch += 1) {
-        spent += helpers.getBlockRecordCost(record);
+        spent += requestPreparation.measureRecord(record).actualCost;
 
         const [result] = await worker.translateVisibleBlockBatch([record]);
 
@@ -2283,6 +2282,7 @@ exports.tests = [
         'default-model.js',
         'placeholder-tokens.js',
         'inline-block.js',
+        'inline-request.js',
         'inline-diagnostics-protocol.js',
         'inline-translation-session.js',
         'inline-viewport.js',
@@ -2394,6 +2394,7 @@ exports.tests = [
             'default-model.js',
             'placeholder-tokens.js',
             'inline-block.js',
+            'inline-request.js',
             'inline-diagnostics-protocol.js',
             'inline-translation-session.js',
             'inline-viewport.js',
@@ -2467,6 +2468,7 @@ exports.tests = [
             'default-model.js',
             'placeholder-tokens.js',
             'inline-block.js',
+            'inline-request.js',
             'inline-diagnostics-protocol.js',
             'inline-translation-session.js',
             'inline-viewport.js',

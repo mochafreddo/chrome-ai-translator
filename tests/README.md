@@ -62,6 +62,7 @@ Use deterministic request adapters, fake Chrome interfaces, and local DOM fixtur
 | `evaluation-execution` | Shared comparison execution through deterministic adapters and the real budget: reservation evidence before transport, settlement, frozen-budget admission, interruption, and cleanup |
 | `inline-translation-session` | Admission, batches, settlement, accounting, cache, stop/restore, progress, and diagnostic outbox |
 | `inline-translation-operation` | Start/Stop/Original text wiring, transport, late settlement, feedback, and subsequent admission |
+| `inline-request-flow` | Session admission through worker messages and fake fetch: wire fields, quoted-prose repair, source validation, distinct admission costs, application, restoration, and cache reuse |
 | `inline-viewport` | Discovery, bounded continuation, rescan, and watcher cleanup through start/rescan/stop |
 | `inline-local-diagnostic-transport` | Batching, deferred flush, one retry, and final Stop-time sending |
 | `inline-diagnostics-controller` | Run lifecycle, local/runtime outcomes, persistence failures, retention, and finalization |

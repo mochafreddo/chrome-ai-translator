@@ -1,7 +1,7 @@
+const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const { PROFILES, adaptQualityRequest, buildQualityPlan, validateQualityOutput, validateQualityRequest } =
   require('./integration/model-quality.mjs');
-const codec = require('../extension/inline-block.js');
 const { execute } = require('../extension/inline-model-execution.js');
 const { createReasoningFixture } = require('./inline-block.test.js');
 
@@ -34,7 +34,7 @@ function originalBody(records = [plainRecord()]) {
     provider: { require_parameters: true, data_collection: 'deny', zdr: true },
     store: false,
     instructions: 'Translate each input record into Korean.',
-    input: codec.serializeModelRequest(records),
+    input: requestPreparation.prepareInitialBatch(records).input,
     max_output_tokens: 4096,
     text: { format: {
       type: 'json_schema',

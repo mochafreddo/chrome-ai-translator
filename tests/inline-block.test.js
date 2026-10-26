@@ -230,23 +230,6 @@ function createHeadingControlFixture(trailing = false) {
 exports.name = 'inline block codec';
 exports.tests = [
   {
-    name: 'reserves bounded prior-template context using its escaped JSON size',
-    fn() {
-      const record = { id: 'escape-check', template: 'q"\\\n\t\u0001', atoms: [], repair: null };
-      const baseCost = JSON.stringify({ records: [{ ...record }] }).length +
-        JSON.stringify({ records: [{ ...record, repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) } }] }).length;
-      const escapedContextCost = 38;
-      assert.equal(JSON.stringify({ previousTemplate: record.template }).length, escapedContextCost);
-      assert.equal(codec.getReservedRecordCost(record), baseCost + escapedContextCost);
-
-      const longRecord = { ...record, template: 'x'.repeat(3000) };
-      const longBaseCost = JSON.stringify({ records: [{ ...longRecord }] }).length +
-        JSON.stringify({ records: [{ ...longRecord, repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) } }] }).length;
-      assert.equal(JSON.stringify({ previousTemplate: longRecord.template }).length > 2048, true);
-      assert.equal(codec.getReservedRecordCost(longRecord), longBaseCost + 2048);
-    },
-  },
-  {
     name: 'translates a whole table-cell DIV without losing its container or original graph',
     fn() {
       for (const tag of ['td', 'th']) {

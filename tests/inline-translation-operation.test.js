@@ -1,3 +1,4 @@
+const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const { createReasoningFixture } = require('./inline-block.test');
 const sessionModule = require('../extension/inline-translation-session');
@@ -87,7 +88,7 @@ function createOperationFixture(options = {}) {
   }
   function paragraph(cost) {
     const node = document.createElement('p');
-    const length = cost - sessionModule.getRecordCost({ template: '', atoms: [] });
+    const length = cost - requestPreparation.measureRecord({ template: '', atoms: [] }).actualCost;
     node.textContent = 'An article sentence with ordinary prose. '.repeat(
       Math.ceil(length / 40)
     ).slice(0, length - 1) + '.';
@@ -203,7 +204,7 @@ exports.tests.push({
 async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
   const f = createOperationFixture();
   const operation = f.operation;
-  const recordCost = sessionModule.getRecordCost(f.serialized);
+  const recordCost = requestPreparation.measureRecord(f.serialized).actualCost;
   async function instruct(instruction, target = operation) {
     const control = {
       grantInlineTranslationAuthorization: 'authorize', startInlineTranslation: 'start',

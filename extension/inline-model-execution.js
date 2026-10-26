@@ -4,9 +4,10 @@
   const { getToneInstruction, getTargetLanguageCode } =
     globalScope.ChromeAiTranslatorTranslationSettings ||
     (typeof module !== 'undefined' && module.exports ? require('./translation-settings.js') : {});
+  const requestPreparation = globalScope.ChromeAiTranslatorInlineRequest ||
+    (typeof module !== 'undefined' && module.exports ? require('./inline-request.js') : null);
   const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
   const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
-  const INLINE_BLOCK_MAX_REQUEST_CHARS = 12000;
 
   function buildBlockInstructions({ targetLanguage, tone }, records) {
     const instructions = [
@@ -344,15 +345,16 @@
   }
 
   async function execute(records, settings, request) {
-    async function requestAndValidate(batch) {
+    async function requestAndValidate(prepared) {
+      const batch = prepared.records;
       const output = await request({
         model: settings.model,
         reasoningEffort: settings.reasoningEffort,
         instructions: buildBlockInstructions(settings, batch),
-        input: codec.serializeModelRequest(batch),
+        input: prepared.input,
         textFormat: buildBlockResponseFormat(batch.length),
         maxOutputTokens: getBlockBatchMaxOutputTokens(
-          batch.reduce((sum, record) => sum + codec.getRecordCost(record), 0)
+          prepared.actualCost
         ),
       });
       return validateBlockResponse(output, batch, {
@@ -360,36 +362,26 @@
       }).records;
     }
 
-    const initial = await requestAndValidate(records);
+    const initial = await requestAndValidate(requestPreparation.prepareInitialBatch(records));
     const terminalById = new Map();
     const initialById = new Map(initial.map((result) => [result.id, result]));
     const repairs = [];
-    const repairCosts = new Map();
+    let repairCosts = new Map();
     for (const [index, result] of initial.entries()) {
       const decision = decideBlockDisposition(result, 1);
       if (decision.disposition === 'retry') {
         const source = records[index];
-        const repairRecord = {
-          ...source,
-          repair: { attempt: 1, previousErrorCode: decision.terminalCode },
-        };
+        const repairDetails = { id: source.id, previousErrorCode: decision.terminalCode };
         if (decision.terminalCode === 'quality.english_residue' && result.structure.status === 'safe') {
           const residue = sharedEnglishEvidence(
             removeContractTokens(source.template, source.contract),
             removeContractTokens(result.template, source.contract),
             source.contract
           );
-          const contextualRepair = {
-            ...repairRecord,
-            repair: { ...repairRecord.repair, previousTemplate: result.template, untranslatedPhrases: residue.phrases },
-          };
-          if (codec.serializeModelRequest([source]).length + codec.serializeModelRequest([contextualRepair]).length <=
-              codec.getReservedRecordCost(source)) {
-            repairRecord.repair = contextualRepair.repair;
-            repairCosts.set(source.id, codec.getRecordCost(repairRecord));
-          }
+          repairDetails.previousTemplate = result.template;
+          repairDetails.untranslatedPhrases = residue.phrases;
         }
-        repairs.push(repairRecord);
+        repairs.push(repairDetails);
       } else {
         terminalById.set(result.id, {
           result,
@@ -404,17 +396,10 @@
       }
     }
     if (repairs.length) {
-      let repairRequestCost = codec.serializeModelRequest(repairs).length;
-      for (const repair of repairs) {
-        if (repairRequestCost <= INLINE_BLOCK_MAX_REQUEST_CHARS) break;
-        if (!repairCosts.has(repair.id)) continue;
-        const contextualCost = repairCosts.get(repair.id);
-        repair.repair = { attempt: 1, previousErrorCode: repair.repair.previousErrorCode };
-        repairRequestCost -= contextualCost - codec.getRecordCost(repair);
-        repairCosts.delete(repair.id);
-      }
+      const prepared = requestPreparation.prepareRepairBatch(records, repairs);
+      repairCosts = prepared.repairRecordCosts;
       try {
-        const repaired = await requestAndValidate(repairs);
+        const repaired = await requestAndValidate(prepared);
         for (const result of repaired) {
           const initialResult = initialById.get(result.id);
           const initialDecision = decideBlockDisposition(initialResult, 1);

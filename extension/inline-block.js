@@ -882,36 +882,6 @@
     return result;
   }
 
-  function getRecordCost(record) {
-    return (
-      String(record?.template || '').length +
-      JSON.stringify(record?.atoms || []).length +
-      JSON.stringify(record?.repair ?? null).length
-    );
-  }
-
-  function serializeModelRequest(records) {
-    return JSON.stringify({ records: records.map((record) => ({
-      id: record.id,
-      template: record.template,
-      atoms: record.atoms,
-      repair: record.repair ?? null,
-    })) });
-  }
-
-  function getReservedRecordCost(record) {
-    const repairRecord = {
-      ...record,
-      repair: { attempt: 1, previousErrorCode: 'x'.repeat(80) },
-    };
-    // Counting each record as its own request intentionally over-reserves the
-    // shared wrapper, guaranteeing the real batched JSON is no larger.
-    const baseCost = serializeModelRequest([record]).length + serializeModelRequest([repairRecord]).length;
-    const remainingRequestCapacity = Math.max(0, 12000 - baseCost);
-    const previousTemplateCost = JSON.stringify({ previousTemplate: record?.template }).length;
-    return baseCost + Math.min(2048, previousTemplateCost, remainingRequestCapacity);
-  }
-
   function serializeBlock(block) {
     if (!block || block.nodeType !== 1) {
       return createUnsupportedResult(describeLocalRejection('invalid_root', block));
@@ -1583,9 +1553,6 @@
 
   return {
     CODEC_VERSION,
-    getRecordCost,
-    serializeModelRequest,
-    getReservedRecordCost,
     applyTranslatedTemplate,
     matchesAppliedOwnership,
     matchesOriginalOwnership,

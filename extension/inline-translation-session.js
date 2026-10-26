@@ -58,7 +58,9 @@
     return state === 'translated' || state === 'translated_with_warning';
   }
 
-  const { getRecordCost, getReservedRecordCost } = inlineBlockCodec;
+  const { measureRecord } =
+    globalScope.ChromeAiTranslatorInlineRequest ||
+    (typeof module !== 'undefined' && module.exports ? require('./inline-request.js') : {});
 
   // One Inline Translation Operation's Semantic Blocks: its queue, its records, and the outbox
   // of local diagnostics the content script's send-and-retry loop reads. `session` is the page
@@ -120,7 +122,7 @@
   // and every operation is built for an id that was incremented first. `findRecordById`
   // resolves `retryOf` by scanning `operation.records` for the first match, so a duplicate id
   // there silently resolves a retry to the wrong record. Nothing else reads this format: the
-  // worker's `normalizeVisibleBlockBatchRecords` asks only for a non-empty string unique within
+  // request preparation's `normalizeSourceBatch` asks only for a non-empty string unique within
   // the batch, and the one place an id outlives the page is the `runId/<id>` diagnosticId,
   // which storage checks by its `runId/` prefix alone and never parses back into a block id.
   function createRecord(operation, blockElement, values = {}) {
@@ -244,7 +246,7 @@
     while (operation.queue.length) {
       if (batch.length >= INLINE_MAX_RECORDS) break;
       const record = operation.queue[0];
-      const cost = getRecordCost(record);
+      const { actualCost: cost, reservedCost } = measureRecord(record);
       if (cost > limit) {
         operation.queue.shift();
         record.state = 'failed';
@@ -252,7 +254,6 @@
         queueLocalDiagnostic(operation, record, record.code, { recordCost: cost, limit });
         continue;
       }
-      const reservedCost = getReservedRecordCost(record);
       if (reservedCost > limit) {
         operation.queue.shift();
         record.state = 'failed';
@@ -411,7 +412,7 @@
     for (const record of records) {
       const result = byId.get(record.id);
       if (Number(result?.attemptCount) === 2) {
-        const sourceCost = getRecordCost(record);
+        const { actualCost: sourceCost } = measureRecord(record);
         const reportedCost = result.repairRecordCost;
         const hasReportedCost = Object.prototype.hasOwnProperty.call(result, 'repairRecordCost');
         const validReportedCost = typeof reportedCost === 'number' &&
@@ -777,8 +778,6 @@
     SETTINGS_DEFAULTS,
     createSettingsSnapshot,
     getSettingsSignature,
-    getRecordCost,
-    getReservedRecordCost,
     createInlineTranslationSession,
   };
   globalScope.ChromeAiTranslatorInlineTranslationSession = api;
