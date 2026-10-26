@@ -8,10 +8,6 @@
   const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
   const INLINE_BLOCK_MAX_REQUEST_CHARS = 12000;
 
-  function isKoreanTargetLanguage(targetLanguage) {
-    return getTargetLanguageCode(targetLanguage) === 'ko';
-  }
-
   function buildBlockInstructions({ targetLanguage, tone }, records) {
     const instructions = [
       `Translate each complete semantic block into ${targetLanguage}.`,
@@ -33,7 +29,7 @@
         'repair.untranslatedPhrases identifies English wording that failed validation. Translate the descriptive words in those phrases, including uppercase labels and section references; only actual tool identifiers inside them may retain their spelling.'
       );
     }
-    if (isKoreanTargetLanguage(targetLanguage)) {
+    if (getTargetLanguageCode(targetLanguage) === 'ko') {
       instructions.push(
         'For Korean, translate descriptive labels and short words: “QUICK START GUIDE” → “빠른 시작 안내”, “Hosted session block” → “호스팅된 세션 블록”, “recommended” → “권장”, and the verb “echoed” → “출력됨”. Keep surrounding OPEN/CLOSE tokens and neighboring atom tokens unchanged.',
         'For Korean, place a preserved atom before the translated noun phrase when natural. Example: “Reasoning models like [GPT-5.5] use ...” becomes “[GPT-5.5]와 같은 추론 모델은 ...”; write “모델은”, never “모델는”, choose particles from the visible label, and never emit empty example parenthesis.',
@@ -175,13 +171,6 @@
     return text;
   }
 
-  function isKoreanTarget(targetLanguage) {
-    const value = String(targetLanguage || '').normalize('NFKC').trim();
-    return /^ko(?:[-_][a-z0-9]+)*$/i.test(value) ||
-      /^(?:korean|south korean|north korean)\b/i.test(value) ||
-      /^(?:한국어|한국말|조선어|조선말)(?:\s|$|\()/.test(value);
-  }
-
   function countUnicodeLetters(value) {
     return Array.from(String(value || '').matchAll(/\p{L}/gu)).length;
   }
@@ -191,6 +180,7 @@
   }
 
   function assessTranslationQuality(sourceText, translatedText, targetLanguage, contract = null) {
+    const targetLanguageCode = getTargetLanguageCode(targetLanguage);
     const source = removeContractTokens(sourceText, contract);
     const output = removeContractTokens(translatedText, contract);
     const evidence = {
@@ -213,7 +203,7 @@
       outputHangulCount,
     });
     if (
-      isKoreanTarget(targetLanguage) &&
+      targetLanguageCode === 'ko' &&
       sourceProseWordCount >= 2 &&
       outputLetterCount >= 2 &&
       outputHangulCount === 0
@@ -224,7 +214,7 @@
         evidence,
       };
     }
-    if (!/^en(?:glish)?\b/i.test(String(targetLanguage || '').trim())) {
+    if (targetLanguageCode !== 'en') {
       const shared = sharedEnglishEvidence(source, output, contract);
       evidence.sharedEnglishSequenceLength = shared.longest;
       evidence.sharedEnglishSequenceCount = shared.count;

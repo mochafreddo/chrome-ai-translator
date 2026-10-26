@@ -62,8 +62,9 @@ async function judgeTemplate(record, template, targetLanguage = 'Korean') {
   let calls = 0;
   const [result] = await execute([record], {
     model: 'deterministic-test', reasoningEffort: 'none', targetLanguage, tone: 'natural',
-  }, async () => {
+  }, async (request) => {
     calls += 1;
+    assert.ok(request.instructions.includes(targetLanguage));
     return JSON.stringify({ translations: [{ id: record.id, template }] });
   });
   assert.equal(result.id, record.id);
@@ -289,37 +290,29 @@ exports.tests = [
     },
   },
   {
-    name: 'recognizes only the bare English target name and scopes Korean-only instructions',
+    name: 'recognizes English target aliases without repair and scopes Korean-only instructions',
     async fn() {
       const record = createReasoningRecord();
       await assertApplied(record, record.template, 'English');
 
-      // Gap: the live path decides a target is English with a bare `/^en(glish)?\b/`,
-      // so every other name for the same language falls through to the residue check
-      // and an untouched English answer is refused for staying English. The retired
-      // path routed the same names through `getTargetLanguageCode`, which knows all
-      // five. Nothing here reopens ISSUE-003 — it is the opposite mistake — but
-      // choosing any of these targets buys a repair the reader did not need.
       for (const targetLanguage of [
         'British English',
+        'American English',
         '영어',
         '미국 영어',
         '영국식 영어',
+        'en-US',
+        'en_US',
+        'Ｅｎｇｌｉｓｈ',
+        'British   English',
       ]) {
-        await assertOverguarded(
-          record,
-          record.template,
-          'quality.english_residue',
-          targetLanguage
-        );
+        await assertApplied(record, record.template, targetLanguage);
       }
 
-      await assertRefused(
-        record,
-        record.template,
-        'quality.target_language_missing',
-        'Korean with English technical terms'
-      );
+      for (const targetLanguage of ['Korean with English technical terms', 'South   Korean', '한국말', 'ko_KR']) {
+        await assertRefused(record, record.template, 'quality.target_language_missing', targetLanguage);
+      }
+      await assertOverguarded(record, record.template, 'quality.english_residue', 'Japanese');
 
       for (const targetLanguage of ['한국말', 'Japanese']) {
         await execute([record], { model: 'deterministic-test', reasoningEffort: 'none', targetLanguage, tone: 'natural' }, async (request) => {
