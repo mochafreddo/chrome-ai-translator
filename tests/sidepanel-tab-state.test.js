@@ -28,10 +28,14 @@ function domPanel() {
   let poll;
   let activated;
   let notified;
+  let focused;
   let send = (message) => response(message.type, String(message.tabId));
   function element(id) {
     if (!elements.has(id)) elements.set(id, { value: '', textContent: '', hidden: false,
-      disabled: false, listeners: {}, addEventListener(type, listener) { this.listeners[type] = listener; } });
+      disabled: false, listeners: {}, attributes: {},
+      setAttribute(name, value) { this.attributes[name] = value; },
+      focus() { focused = id; },
+      addEventListener(type, listener) { this.listeners[type] = listener; } });
     return elements.get(id);
   }
   const chrome = {
@@ -45,19 +49,105 @@ function domPanel() {
         return send(message);
       } },
   };
-  const context = vm.createContext({ chrome, document: { getElementById: element, querySelectorAll: () => [] },
+  const tabs = ['translated', 'original'].map((name) => {
+    const tab = element(`tab-${name}`);
+    tab.dataset = { tab: name };
+    return tab;
+  });
+  const context = vm.createContext({ chrome, document: { getElementById: element, querySelectorAll: () => tabs },
     setInterval(callback, delay) { assert.equal(delay, 1000); poll = callback; },
     ChromeAiTranslatorInlineTranslationControls: require('../extension/inline-translation-controls.js'),
     ChromeAiTranslatorPageAccess: require('../extension/page-access.js'),
     ChromeAiTranslatorDefaultModel: require('../extension/default-model.js'),
+    ChromeAiTranslatorTranslationSettings: require('../extension/translation-settings.js'),
     ChromeAiTranslatorSidePanelFailure: require('../extension/sidepanel-failure.js') });
   vm.runInContext(fs.readFileSync(require.resolve('../extension/sidepanel.js'), 'utf8'), context);
-  return { element, sent, setSend(fn) { send = fn; }, poll() { poll(); },
+  return { element, sent, focused: () => focused, setSend(fn) { send = fn; }, poll() { poll(); },
     activate(id, windowId = 10) { active = windowId === 10 ? id : active; activated?.({ tabId: id, windowId }); },
     notify(msg) { notified(msg); } };
 }
 exports.name = 'sidepanel tab state';
 exports.tests = [
+  {
+    name: 'actual panel uses result language snapshots instead of edited settings',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      panel.element('targetLanguage').value = 'Japanese';
+      panel.setSend((message) => message.type === 'GET_STATE' ? { ok: true, state: {
+        status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
+        translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' },
+      } } : response(message.type, '1'));
+      panel.poll();
+      await settle();
+      assert.equal(panel.element('original').lang, 'fr');
+      assert.equal(panel.element('translated').lang, 'ko');
+      assert.equal(panel.element('translated').textContent, '안녕하세요.');
+      panel.activate(2);
+      assert.equal(panel.element('original').lang, 'en');
+      assert.equal(panel.element('translated').lang, 'en');
+    },
+  },
+  {
+    name: 'polling leaves an unchanged announced error untouched',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      const error = panel.element('errorBox');
+      let text = error.textContent;
+      let writes = 0;
+      Object.defineProperty(error, 'textContent', {
+        get() { return text; },
+        set(value) { text = value; writes += 1; },
+      });
+      panel.poll();
+      await settle();
+      assert.equal(text, 'panel 1');
+      assert.equal(writes, 0);
+      panel.setSend((message) => response(message.type, 'updated'));
+      panel.poll();
+      await settle();
+      assert.equal(text, 'panel updated');
+      assert.equal(writes, 1);
+    },
+  },
+  {
+    name: 'actual result tabs keep keyboard focus selection and visible content together',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      const original = panel.element('tab-original');
+      const translated = panel.element('tab-translated');
+      let prevented = 0;
+      const press = (tab, key) => {
+        assert.equal(typeof tab.listeners.keydown, 'function', 'Result tabs support keyboard navigation');
+        tab.listeners.keydown({ key, preventDefault() { prevented += 1; } });
+      };
+      const selected = (name) => {
+        for (const [value, tab] of [['original', original], ['translated', translated]]) {
+          assert.equal(tab.attributes['aria-selected'], String(value === name));
+          assert.equal(tab.tabIndex, value === name ? 0 : -1);
+          assert.equal(panel.element(`panel-${value}`).hidden, value !== name);
+        }
+      };
+      press(translated, 'ArrowRight');
+      selected('original');
+      assert.equal(panel.focused(), 'tab-original');
+      press(original, 'ArrowRight');
+      selected('translated');
+      press(translated, 'ArrowLeft');
+      selected('original');
+      press(original, 'Home');
+      selected('translated');
+      press(translated, 'End');
+      selected('original');
+      press(original, 'Tab');
+      assert.equal(prevented, 5);
+      selected('original');
+      translated.listeners.click();
+      selected('translated');
+    },
+  },
   {
     name: 'actual panel shows initialization recovery instead of asking for page access',
     async fn() {

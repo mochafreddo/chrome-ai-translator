@@ -47,6 +47,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [UI polish accessibility design](design/ui-accessibility-polish-findings.md) | Language boundaries and keyboard access decisions; implementation authorized on 2026-10-26 |
 | [OpenRouter routing pilot results](qa/openrouter-routing-pilot-2026-10-25.md) | 36 live page translations, budget control, routing-blind quality review and interpretation limits, dated 2026-10-25 |
 | [Model quality preparation](qa/model-quality-preparation-2026-10-25.md) | 144 intercepted mock page executions, source coverage checks and request-sized cost scenarios, dated 2026-10-25 |
 | [Model quality pilot results](qa/model-quality-pilot-2026-10-26.md) | Six profiles, 144 attempted comparisons, reconciled costs, blinded review and shared application defects, dated 2026-10-26 |

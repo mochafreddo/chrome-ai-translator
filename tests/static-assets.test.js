@@ -17,6 +17,18 @@ function loadClassicScript(scope, name) {
 exports.name = 'static assets';
 exports.tests = [
   {
+    name: 'provides explicit diagnostic focus and a heading-based region name',
+    fn() {
+      const html = fs.readFileSync(path.join(EXTENSION_DIR, 'options.html'), 'utf8');
+      const region = html.match(/<pre\b[^>]*id="inlineDiagnostics"[^>]*>/)?.[0];
+      assert.ok(region, 'The diagnostics output exists');
+      assert.match(region, /\btabindex="0"/);
+      assert.match(region, /\brole="region"/);
+      const heading = region.match(/\baria-labelledby="([^"]+)"/)?.[1];
+      assert.ok(heading && html.includes(`<h2 id="${heading}">`), 'The diagnostic region names its visible heading');
+    },
+  },
+  {
     name: 'loads worker diagnostics as classic scripts and Options diagnostics independently',
     async fn() {
       const workerScope = vm.createContext({ TextEncoder, Buffer });
@@ -411,7 +423,7 @@ exports.tests = [
       assert.match(css, /\.choice-label\s*\{[^}]*display:\s*flex/s);
       assert.match(
         css,
-        /\.choice-label input\[type="radio"\]\s*\{[^}]*width:\s*44px/s
+        /\.choice-label\s*\{[^}]*min-height:\s*44px/s
       );
     },
   },

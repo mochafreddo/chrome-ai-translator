@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -8,113 +8,124 @@
   </head>
   <body>
     <header class="header">
-      <div class="title">AI Translator</div>
+      <h1 class="title">AI Translator</h1>
       <div id="status" class="status">Idle</div>
     </header>
 
-    <section class="controls">
-      <div class="row">
-        <button id="btnTranslate" class="btn primary">
-          Translate current tab
-        </button>
-        <button id="btnOpenOptions" class="btn">Options</button>
-      </div>
+    <main>
+      <section class="controls">
+        <div class="row">
+          <button id="btnTranslate" class="btn primary">
+            Translate current tab
+          </button>
+          <button id="btnOpenOptions" class="btn">Options</button>
+        </div>
 
-      <div class="grid">
-        <label>
-          Target language
-          <input id="targetLanguage" type="text" placeholder="Korean" />
-        </label>
-        <label>
-          Tone
-          <select id="tone">
-            <option value="technical">technical</option>
-            <option value="natural">natural</option>
-            <option value="formal">formal</option>
-          </select>
-        </label>
-        <label>
-          Model
-          <input id="model" type="text" />
-        </label>
-        <label>
-          View
-          <select id="viewMode">
-            <option value="translation">translation</option>
-            <option value="bilingual">bilingual</option>
-          </select>
-        </label>
-      </div>
+        <div class="grid">
+          <label>
+            Target language
+            <input id="targetLanguage" type="text" placeholder="Korean" />
+          </label>
+          <label>
+            Tone
+            <select id="tone">
+              <option value="technical">technical</option>
+              <option value="natural">natural</option>
+              <option value="formal">formal</option>
+            </select>
+          </label>
+          <label>
+            Model
+            <input id="model" type="text" />
+          </label>
+          <label>
+            View
+            <select id="viewMode">
+              <option value="translation">translation</option>
+              <option value="bilingual">bilingual</option>
+            </select>
+          </label>
+        </div>
 
-      <div class="row">
-        <button
-          id="btnSave"
-          class="btn"
-          aria-describedby="saveStatus saveError"
-        >
-          Save as default
-        </button>
-        <div id="progress" class="muted"></div>
-      </div>
+        <div class="row">
+          <button
+            id="btnSave"
+            class="btn"
+            aria-describedby="saveStatus saveError"
+          >
+            Save as default
+          </button>
+          <div id="progress" class="muted"></div>
+        </div>
 
-      <div
-        id="saveStatus"
-        class="muted"
-        role="status"
-        aria-live="polite"
-      ></div>
-      <div id="saveError" class="error" role="alert" hidden></div>
-      <div id="errorBox" class="error" hidden></div>
-    </section>
-
-    <section id="inlineTranslation" class="controls section">
-      <h2 class="section-title">Inline translation</h2>
-      <p class="muted section-hint">
-        Replaces the page's own text in the tab beside this panel, as you scroll.
-      </p>
-
-      <div class="row">
-        <button
-          id="btnInlineTranslate"
-          class="btn primary"
-          aria-describedby="inlineStatus inlineError"
-        >
-          Translate visible text
-        </button>
-        <button id="btnInlineStop" class="btn">Stop</button>
-        <button id="btnInlineRestore" class="btn">Original text</button>
-      </div>
-
-      <div
-        id="inlineStatus"
-        class="muted"
-        role="status"
-        aria-live="polite"
-      ></div>
-      <div id="inlineError" class="error" role="alert" hidden></div>
-    </section>
-
-    <main class="main">
-      <div class="tabs">
-        <button class="tab" data-tab="translated" aria-selected="true">
-          Translated
-        </button>
-        <button class="tab" data-tab="original">Original</button>
-      </div>
-
-      <section id="panel-translated" class="panel">
-        <pre id="translated" class="pre"></pre>
+        <div
+          id="saveStatus"
+          class="muted"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <div id="saveError" class="error" role="alert" hidden></div>
+        <div id="errorBox" class="error" role="alert" hidden></div>
       </section>
 
-      <section id="panel-original" class="panel" hidden>
-        <pre id="original" class="pre"></pre>
+      <section id="inlineTranslation" class="controls section">
+        <h2 class="section-title">Inline translation</h2>
+        <p class="muted section-hint">
+          Replaces the page's own text in the tab beside this panel, as you scroll.
+        </p>
+
+        <div class="row">
+          <button
+            id="btnInlineTranslate"
+            class="btn primary"
+            aria-describedby="inlineStatus inlineError"
+          >
+            Translate visible text
+          </button>
+          <button id="btnInlineStop" class="btn">Stop</button>
+          <button id="btnInlineRestore" class="btn">Original text</button>
+        </div>
+
+        <div
+          id="inlineStatus"
+          class="muted"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <div id="inlineError" class="error" role="alert" hidden></div>
       </section>
+
+      <div class="main">
+        <div class="tabs" role="tablist" aria-label="Article text">
+          <button
+            id="tab-translated" class="tab" data-tab="translated" role="tab"
+            aria-controls="panel-translated" aria-selected="true"
+          >
+            Translated
+          </button>
+          <button
+            id="tab-original" class="tab" data-tab="original" role="tab"
+            aria-controls="panel-original" aria-selected="false" tabindex="-1"
+          >
+            Original
+          </button>
+        </div>
+
+        <section id="panel-translated" class="panel" role="tabpanel" aria-labelledby="tab-translated" tabindex="0">
+          <pre id="translated" class="pre"></pre>
+        </section>
+
+        <section id="panel-original" class="panel" role="tabpanel" aria-labelledby="tab-original" tabindex="0" hidden>
+          <pre id="original" class="pre"></pre>
+        </section>
+      </div>
     </main>
 
     <script src="default-model.js"></script>
     <script src="inline-translation-controls.js"></script>
     <script src="page-access.js"></script>
     <script src="sidepanel-failure.js"></script>
+    <script src="translation-settings.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

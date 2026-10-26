@@ -18,6 +18,11 @@ const { describeSidePanelFailure } =
   (typeof module !== 'undefined' && module.exports
     ? require('./sidepanel-failure.js')
     : {});
+const { getTargetLanguageCode } =
+  globalThis.ChromeAiTranslatorTranslationSettings ||
+  (typeof module !== 'undefined' && module.exports
+    ? require('./translation-settings.js')
+    : {});
 
 const hasDocument = typeof document !== 'undefined';
 
@@ -66,7 +71,7 @@ function setError(message) {
     return;
   }
   elError.hidden = false;
-  elError.textContent = message;
+  if (elError.textContent !== message) elError.textContent = message;
 }
 
 function setSaveError(message) {
@@ -87,16 +92,26 @@ function trimPanelText(value) {
   return String(value || '').trim();
 }
 
-function formatTranslatedPanelText(state, viewMode = 'translation') {
+function getTranslatedPanelParts(state, viewMode = 'translation') {
   const translated = trimPanelText(state?.translated);
-  if (!translated) return '';
+  if (!translated) return [];
 
   const original = trimPanelText(state?.extracted?.contentMarkdown);
+  const language = getContentLanguage(state?.settingsUsed?.targetLanguage);
   if (viewMode === 'bilingual' && original) {
-    return `Original\n\n${original}\n\nTranslation\n\n${translated}`;
+    return [
+      ['Original\n\n', 'en'],
+      [original, getContentLanguage(state.extracted?.langHint)],
+      ['\n\nTranslation\n\n', 'en'],
+      [translated, language],
+    ];
   }
 
-  return translated;
+  return [[translated, language]];
+}
+
+function formatTranslatedPanelText(state, viewMode = 'translation') {
+  return getTranslatedPanelParts(state, viewMode).map(([text]) => text).join('');
 }
 
 function formatOriginalPanelText(state) {
@@ -108,10 +123,23 @@ function formatStatusText(status) {
   return safe.charAt(0).toUpperCase() + safe.slice(1);
 }
 
+function getContentLanguage(value) {
+  const language = String(value || '').normalize('NFKC').trim();
+  if (/^[a-z]{2,3}(?:-|$)/i.test(language)) {
+    try {
+      return Intl.getCanonicalLocales(language)[0] || '';
+    } catch {
+      return '';
+    }
+  }
+  return getTargetLanguageCode(language);
+}
+
 function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
   const status = state?.status || 'idle';
   const busy = status === 'extracting' || status === 'translating';
-  const translatedText = formatTranslatedPanelText(state, viewMode);
+  const translatedParts = getTranslatedPanelParts(state, viewMode);
+  const translatedText = translatedParts.map(([text]) => text).join('');
   const originalText = formatOriginalPanelText(state);
   const progressText = state?.progress?.total
     ? `Chunk ${state.progress.current}/${state.progress.total}`
@@ -125,6 +153,10 @@ function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
     status === 'error' || Boolean(state?.error?.message || state?.error?.code);
 
   return {
+    translatedParts,
+    originalLanguage: originalText ? getContentLanguage(state.extracted?.langHint) : 'en',
+    translatedLanguage: trimPanelText(state.translated)
+      ? getContentLanguage(state.settingsUsed?.targetLanguage) : 'en',
     statusText: formatStatusText(status),
     translateButtonText: busy ? 'Translating...' : 'Translate current tab',
     translateDisabled: busy,
@@ -494,9 +526,10 @@ const settingsSaveController = hasDocument
   : null;
 
 function renderState(state, panelErrorMessage) {
+  const viewMode = elViewMode.value || state?.settingsUsed?.viewMode || 'translation';
   const displayState = getSidepanelDisplayState(
     state || { status: 'idle' },
-    elViewMode.value || state?.settingsUsed?.viewMode || 'translation'
+    viewMode
   );
   setStatus(displayState.statusText);
   btnTranslate.textContent = displayState.translateButtonText;
@@ -509,7 +542,19 @@ function renderState(state, panelErrorMessage) {
   setProgress(displayState.progressText);
 
   elOriginal.textContent = displayState.originalText;
-  elTranslated.textContent = displayState.translatedText;
+  elOriginal.lang = displayState.originalLanguage;
+  elTranslated.lang = displayState.translatedLanguage;
+  if (displayState.translatedParts.length > 1) {
+    elTranslated.lang = '';
+    elTranslated.replaceChildren(...displayState.translatedParts.map(([text, language]) => {
+      const span = document.createElement('span');
+      span.lang = language;
+      span.textContent = text;
+      return span;
+    }));
+  } else {
+    elTranslated.textContent = displayState.translatedText;
+  }
 }
 
 function setupTabs() {
@@ -523,6 +568,7 @@ function setupTabs() {
     for (const b of buttons) {
       const active = b.dataset.tab === which;
       b.setAttribute('aria-selected', String(active));
+      b.tabIndex = active ? 0 : -1;
     }
     panels.original.hidden = which !== 'original';
     panels.translated.hidden = which !== 'translated';
@@ -530,6 +576,17 @@ function setupTabs() {
 
   buttons.forEach((b) => {
     b.addEventListener('click', () => activate(b.dataset.tab));
+    b.addEventListener('keydown', (event) => {
+      const index = buttons.indexOf(b);
+      const next = event.key === 'ArrowRight' ? (index + 1) % buttons.length
+        : event.key === 'ArrowLeft' ? (index - 1 + buttons.length) % buttons.length
+        : event.key === 'Home' ? 0
+        : event.key === 'End' ? buttons.length - 1 : null;
+      if (next === null) return;
+      event.preventDefault();
+      activate(buttons[next].dataset.tab);
+      buttons[next].focus();
+    });
   });
 }
 

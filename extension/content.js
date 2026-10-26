@@ -272,18 +272,33 @@ function ensureInlineTranslatorUi(state = inlineState) {
     :host {
       all: initial;
     }
+    * {
+      box-sizing: border-box;
+    }
     [data-role="container"] {
       font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: #111827;
     }
     button {
-      border: 1px solid #d1d5db;
+      font: inherit;
+      max-width: 100%;
+      border: 1px solid #818b9b;
       border-radius: 6px;
       background: #fff;
       color: #111827;
       cursor: pointer;
       min-height: 44px;
       padding: 7px 10px;
+    }
+    button:hover:not(:disabled) {
+      border-color: #6b7280;
+      background: #f9fafb;
+    }
+    button:focus-visible {
+      outline: 2px solid #2563eb;
+      outline-offset: 2px;
+    }
+    [data-role="toggle"] {
       box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16);
     }
     button:disabled {
@@ -295,10 +310,16 @@ function ensureInlineTranslatorUi(state = inlineState) {
       gap: 6px;
       margin-bottom: 8px;
       padding: 8px;
-      border: 1px solid #d1d5db;
       border-radius: 8px;
       background: #fff;
       box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+    }
+    [data-role="menu"] button {
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+    [data-role="container"] {
+      max-width: calc(100vw - 36px);
     }
     [hidden] {
       display: none !important;

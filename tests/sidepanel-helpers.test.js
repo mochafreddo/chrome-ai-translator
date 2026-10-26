@@ -12,6 +12,43 @@ const MISSING_ACCESS_VOCABULARY =
 exports.name = 'sidepanel helpers';
 exports.tests = [
   {
+    name: 'assigns content languages from extraction and the translation snapshot',
+    fn() {
+      const display = helpers.getSidepanelDisplayState({
+        status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr-CA' },
+        translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' },
+      });
+      assert.equal(display.originalLanguage, 'fr-CA');
+      assert.equal(display.translatedLanguage, 'ko');
+    },
+  },
+  {
+    name: 'keeps unknown content languages distinct from English UI feedback',
+    fn() {
+      for (const [targetLanguage, expected] of [
+        ['English', 'en'], ['한국어', 'ko'], ['ja', 'ja'], ['EN-us', 'en-US'],
+        ['zh-Hant-TW', 'zh-Hant-TW'], ['Japanese', ''], ['en--US', ''], ['', ''],
+      ]) {
+        const display = helpers.getSidepanelDisplayState({
+          status: 'done', extracted: { contentMarkdown: 'Article.', langHint: targetLanguage },
+          translated: 'Result.', settingsUsed: { targetLanguage },
+        });
+        assert.equal(display.originalLanguage, expected, targetLanguage);
+        assert.equal(display.translatedLanguage, expected, targetLanguage);
+      }
+      const missing = helpers.getSidepanelDisplayState({
+        extracted: { contentMarkdown: 'Article.' }, translated: 'Result.',
+      });
+      assert.equal(missing.originalLanguage, '');
+      assert.equal(missing.translatedLanguage, '');
+      for (const status of ['idle', 'extracting', 'translating', 'error']) {
+        const feedback = helpers.getSidepanelDisplayState({ status, settingsUsed: { targetLanguage: 'Korean' } });
+        assert.equal(feedback.originalLanguage, 'en');
+        assert.equal(feedback.translatedLanguage, 'en');
+      }
+    },
+  },
+  {
     name: 'provides an accessible save-owned feedback boundary',
     fn() {
       const html = fs.readFileSync(

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -8,7 +8,7 @@
   </head>
   <body>
     <header class="header">
-      <div class="title">AI Translator — Options</div>
+      <h1 class="title">AI Translator — Options</h1>
       <div class="muted">Personal use only</div>
     </header>
 
@@ -52,21 +52,21 @@
           </select>
         </label>
         <div id="openaiSettings">
-        <label>
-          Default model
-          <input id="model" type="text" autocorrect="off" autocapitalize="off" spellcheck="false" />
-        </label>
-        <label>
-          Reasoning effort
-          <select id="reasoningEffort">
-            <option value="none">none</option>
-            <option value="minimal">minimal</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="xhigh">xhigh</option>
-          </select>
-        </label>
+          <label>
+            Default model
+            <input id="model" type="text" autocorrect="off" autocapitalize="off" spellcheck="false" />
+          </label>
+          <label>
+            Reasoning effort
+            <select id="reasoningEffort">
+              <option value="none">none</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </label>
         </div>
         <div id="openrouterSettings" hidden>
           <p>Model: <code id="openrouterModel"></code></p>
@@ -103,7 +103,7 @@
       <div id="errorBox" class="error" role="alert" hidden></div>
 
       <section>
-        <h2>Inline diagnostics</h2>
+        <h2 id="inlineDiagnosticsTitle">Inline diagnostics</h2>
         <p class="muted">
           Recent partial translations and failures. Source text, translations,
           URLs, protected labels, and API keys are never stored.
@@ -112,7 +112,7 @@
           <button id="btnCopyDiagnostics" class="btn">Copy diagnostics</button>
           <button id="btnSaveDiagnostics" class="btn">Save diagnostics</button>
         </div>
-        <pre id="inlineDiagnostics" class="muted"></pre>
+        <pre id="inlineDiagnostics" class="muted" role="region" aria-labelledby="inlineDiagnosticsTitle" tabindex="0"></pre>
       </section>
     </main>
 
