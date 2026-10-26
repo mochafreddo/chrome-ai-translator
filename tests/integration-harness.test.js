@@ -415,3 +415,27 @@ exports.tests.push({
     }
   },
 });
+
+exports.tests.push({
+  name: 'reports allowlisted billing metadata and unknown cost on network failure',
+  async fn() {
+    const { getResponseMetadata, observeModelRequests } = await import('./integration/model-request-evidence.mjs');
+    const metadata = getResponseMetadata({ id: 'gen-one', model: 'sample', provider: 'sample-provider',
+      usage: { cost: 0.002, input_tokens: 12, output_tokens: 8, input_tokens_details: { cached_tokens: 4 },
+        output_tokens_details: { reasoning_tokens: 0 } }, output: 'unretained translation', private: 'unretained' }, 'network-one', 200);
+    assert.deepEqual(metadata, { requestId: 'network-one', status: 200, responseId: 'gen-one', model: 'sample',
+      provider: 'sample-provider', cost: 0.002, inputTokens: 12, outputTokens: 8, reasoningTokens: 0, cachedTokens: 4 });
+    const listeners = new Map();
+    const seen = [];
+    const cdp = { on(type, callback) { listeners.set(type, callback); return () => listeners.delete(type); },
+      async send() { return {}; } };
+    const evidence = await observeModelRequests(cdp, 'worker', { onResponse: async item => { seen.push(item); } });
+    listeners.get('Network.requestWillBeSent')({ requestId: 'failed', request: { method: 'POST',
+      url: 'https://openrouter.ai/api/v1/responses', postData: '{}' } }, 'worker');
+    listeners.get('Network.loadingFailed')({ requestId: 'failed' }, 'worker');
+    await evidence.settle();
+    assert.deepEqual(seen, [{ requestId: 'failed', status: 0, responseId: null, cost: null }]);
+    assert.equal(evidence.responses.get('failed').valid, false);
+    evidence.close();
+  },
+});

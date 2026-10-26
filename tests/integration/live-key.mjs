@@ -71,6 +71,27 @@ function readApiKey(envPath, service) {
   );
 }
 
+export async function withOpenRouterTransport({ envPath, fetchImpl = globalThis.fetch }, run) {
+  const { key } = readApiKey(envPath, 'openrouter');
+  let active = true;
+  const transport = async ({ body, generationId } = {}) => {
+    if (!active) throw new Error('OpenRouter transport is closed.');
+    if ((body === undefined) === (generationId === undefined) ||
+        (generationId !== undefined && (typeof generationId !== 'string' || !generationId))) {
+      throw new Error('Unsupported OpenRouter transport request.');
+    }
+    const url = generationId === undefined ? 'https://openrouter.ai/api/v1/responses'
+      : `https://openrouter.ai/api/v1/generation?id=${encodeURIComponent(generationId)}`;
+    try {
+      return await fetchImpl(url, { method: generationId === undefined ? 'POST' : 'GET', redirect: 'error',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(generationId === undefined ? 180000 : 10000) });
+    } catch { throw new Error('OpenRouter transport failed.'); }
+  };
+  try { return await run(transport); }
+  finally { active = false; }
+}
+
 async function storedSettings(page) {
   return page.evaluate('(async () => (await chrome.storage.local.get(["settings"])).settings || {})()');
 }

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>GitHub English excerpt</title></head>
+<body>
+<main>
+<h2>Getting Started<a id="getting-started"></a></h2>
+<p>For more, see the <a href="https://docs.astral.sh/ruff/">documentation</a>.</p>
+<h3>Installation</h3>
+<p>Ruff is available as <a href="https://pypi.org/project/ruff/"><code>ruff</code></a> on PyPI.</p>
+<p>Invoke Ruff directly with <a href="https://docs.astral.sh/uv/"><code>uvx</code></a>:</p>
+<pre><code>uvx ruff@0.17.2 check   # Lint all files in the current directory.
+uvx ruff@0.17.2 format  # Format all files in the current directory.
+</code></pre>
+<p>Or install Ruff with <code>uv</code> (recommended), <code>pip</code>, or <code>pipx</code>:</p>
+<pre><code># With uv.
+uv tool install ruff@latest  # Install Ruff globally.
+uv add --dev ruff            # Or add Ruff to your project.
+
+# With pip.
+pip install ruff
+
+# With pipx.
+pipx install ruff
+</code></pre>
+<p>Starting with version <code>0.5.0</code>, Ruff can be installed with our standalone installers:</p>
+<pre><code># On macOS and Linux.
+curl -LsSf https://astral.sh/ruff/install.sh | sh
+
+# On Windows.
+powershell -c "irm https://astral.sh/ruff/install.ps1 | iex"
+
+# For a specific version.
+curl -LsSf https://astral.sh/ruff/0.17.2/install.sh | sh
+powershell -c "irm https://astral.sh/ruff/0.17.2/install.ps1 | iex"
+</code></pre>
+<p>You can also install Ruff via <a href="https://formulae.brew.sh/formula/ruff">Homebrew</a>, <a href="https://anaconda.org/conda-forge/ruff">Conda</a>,
+and with <a href="https://docs.astral.sh/ruff/installation/">a variety of other package managers</a>.</p>
+<h3>Usage</h3>
+<p>To run Ruff as a linter, try any of the following:</p>
+<pre><code>ruff check                          # Lint all files in the current directory (and any subdirectories).
+ruff check path/to/code/            # Lint all files in `/path/to/code` (and any subdirectories).
+ruff check path/to/code/*.py        # Lint all `.py` files in `/path/to/code`.
+ruff check path/to/code/to/file.py  # Lint `file.py`.
+ruff check @arguments.txt           # Lint using an input file, treating its contents as newline-delimited command-line arguments.
+</code></pre>
+<p>Or, to run Ruff as a formatter:</p>
+<pre><code>ruff format                          # Format all files in the current directory (and any subdirectories).
+ruff format path/to/code/            # Format all files in `/path/to/code` (and any subdirectories).
+ruff format path/to/code/*.py        # Format all `.py` files in `/path/to/code`.
+ruff format path/to/code/to/file.py  # Format `file.py`.
+ruff format @arguments.txt           # Format using an input file, treating its contents as newline-delimited command-line arguments.
+</code></pre>
+<p>Ruff can also be used as a <a href="https://pre-commit.com/">pre-commit</a> hook via <a href="https://github.com/astral-sh/ruff-pre-commit"><code>ruff-pre-commit</code></a>:</p>
+<pre><code>- repo: https://github.com/astral-sh/ruff-pre-commit
+  # Ruff version.
+  rev: v0.17.2
+  hooks:
+    # Run the linter.
+    - id: ruff-check
+      args: [ --fix ]
+    # Run the formatter.
+    - id: ruff-format
+</code></pre>
+<p>Ruff can also be used as a <a href="https://github.com/astral-sh/ruff-vscode">VS Code extension</a> or with <a href="https://docs.astral.sh/ruff/editors/setup">various other editors</a>.</p>
+<p>Ruff can also be used as a <a href="https://github.com/features/actions">GitHub Action</a> via
+<a href="https://github.com/astral-sh/ruff-action"><code>ruff-action</code></a>:</p>
+<pre><code>name: Ruff
+on: [ push, pull_request ]
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+</code></pre>
+<h3>Configuration<a id="configuration"></a></h3>
+<p>Ruff can be configured through a <code>pyproject.toml</code>, <code>ruff.toml</code>, or <code>.ruff.toml</code> file (see:
+<a href="https://docs.astral.sh/ruff/configuration/"><em>Configuration</em></a>, or <a href="https://docs.astral.sh/ruff/settings/"><em>Settings</em></a>
+for a complete list of all configuration options).</p>
+<p>For the complete list of enabled rules, see <a href="https://docs.astral.sh/ruff/default-rules/"><em>Default Rules</em></a>.</p>
+<p>If left unspecified, Ruff's default configuration is equivalent to the following <code>ruff.toml</code> file:</p>
+<pre><code># Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+
+# Same as Black.
+line-length = 88
+indent-width = 4
+
+# Assume Python 3.11
+target-version = "py311"
+
+[lint]
+# select = [...]  # See the Default Rules page for the full listing.
+ignore = []
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[\\p{XID_Continue}]*[\\p{XID_Continue}--_]+?))$"
+
+[format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+</code></pre>
+<p>Note that, in a <code>pyproject.toml</code>, each section header should be prefixed with <code>tool.ruff</code>. For
+example, <code>[lint]</code> should be replaced with <code>[tool.ruff.lint]</code>.</p>
+<p>Some configuration options can be provided via dedicated command-line arguments, such as those
+related to rule enablement and disablement, file discovery, and logging level:</p>
+<pre><code>ruff check --select F401 --select F403 --quiet
+</code></pre>
+<p>The remaining configuration options can be provided through a catch-all <code>--config</code> argument:</p>
+<pre><code>ruff check --config "lint.per-file-ignores = {'some_file.py' = ['F841']}"
+</code></pre>
+<p>To opt in to the latest lint rules, formatter style changes, interface updates, and more, enable
+<a href="https://docs.astral.sh/ruff/preview/">preview mode</a> by setting <code>preview = true</code> in your configuration
+file or passing <code>--preview</code> on the command line. Preview mode enables a collection of unstable
+features that may change prior to stabilization.</p>
+<p>See <code>ruff help</code> for more on Ruff's top-level commands, or <code>ruff help check</code> and <code>ruff help format</code>
+for more on the linting and formatting commands, respectively.</p>
+</main>
+</body>
+</html>

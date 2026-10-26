@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "normalization": {
+    "name": "standalone-semantic-html",
+    "version": "1.0.0",
+    "markdownRenderer": {
+      "name": "marked",
+      "version": "17.0.5"
+    },
+    "rules": [
+      "Extract only the recorded source boundaries.",
+      "Keep semantic headings, paragraphs, lists, tables, links and code.",
+      "Resolve retained href values against each source URL; retain only absolute HTTP(S) links.",
+      "Remove layout wrappers, figures, captions, images, video, audio, embeds, scripts, styles and active or network-loading attributes.",
+      "Keep source prose and code text unchanged apart from HTML entity serialization and surrounding whitespace normalization."
+    ]
+  },
+  "fixtures": [
+    {
+      "id": "technical",
+      "path": "technical.html",
+      "source": {
+        "url": "https://docs.python.org/3.14/tutorial/classes.html",
+        "sha256": "fb485c8082929f2203dc0152fed47479f43e2e211ff67218945212a22c086581",
+        "bytes": 105328,
+        "boundary": "section#instance-objects inclusive through section#multiple-inheritance; stop before section#private-variables",
+        "capturedAt": "2026-10-25T11:30:09Z"
+      },
+      "output": {
+        "sha256": "47b06f79d52919aa87710ac7bd73cde270f3dcb7b884542e272614d78b035a09",
+        "bytes": 15338
+      },
+      "license": "Python Software Foundation License Version 2; code examples additionally under Zero-Clause BSD"
+    },
+    {
+      "id": "github",
+      "path": "github.html",
+      "source": {
+        "url": "https://github.com/astral-sh/ruff/blob/bfa2407e98ee1343caeefd02b4b69043509baa8c/README.md",
+        "sha256": "63dcb147711dd8213c11c8d43a1350a7d76245624fd5b37fbfba41af24e24fb4",
+        "bytes": 19636,
+        "boundary": "README heading ## Getting Started inclusive through Configuration; stop before ## Rules",
+        "commit": "bfa2407e98ee1343caeefd02b4b69043509baa8c",
+        "capturedAt": "2026-10-25T11:30:26Z"
+      },
+      "output": {
+        "sha256": "0d06793e25264d4a6672fae76611caa497bcb71053dd4d16acbb46aad3b47ebe",
+        "bytes": 6866
+      },
+      "license": "MIT; see LICENSES.txt"
+    },
+    {
+      "id": "article",
+      "path": "article.html",
+      "source": {
+        "url": "https://science.nasa.gov/moon/moon-phases/",
+        "sha256": "e0f7afade544484462790bbb01b00f9ff7c5e325e39a360cc0d006de2fcb9ad3",
+        "bytes": 329053,
+        "boundary": "paragraph beginning “In our entire solar system” inclusive through the Overview From Space paragraph ending “synchronous rotation.”",
+        "policySource": {
+          "url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+          "sha256": "ed675c50f7f47c6201d808f6d60c5f483a52d25f35145b2a71c0b67cbd2ad2fa",
+          "bytes": 311803
+        },
+        "capturedAt": "2026-10-25T11:30:09Z"
+      },
+      "output": {
+        "sha256": "cc8bba2ecfaface87e36c32ebc6d25c4408f7f09c961134029e612654dddc405",
+        "bytes": 9890
+      },
+      "license": "NASA attribution and no-endorsement policy summarized in LICENSES.txt"
+    }
+  ],
+  "capturedAt": "2026-10-25T11:30:27Z",
+  "captureWindow": {
+    "start": "2026-10-25T11:30:09Z",
+    "end": "2026-10-25T11:30:27Z"
+  },
+  "licenseSources": {
+    "python": {
+      "url": "https://docs.python.org/3.14/license.html",
+      "sha256": "f7d8faf898c0a3eb0438f23ec618dbb0241be31f760c130bda96038defe64661",
+      "bytes": 90881,
+      "capturedAt": "2026-10-25T11:30:09Z"
+    },
+    "ruff": {
+      "url": "https://github.com/astral-sh/ruff/blob/bfa2407e98ee1343caeefd02b4b69043509baa8c/LICENSE",
+      "sha256": "2597d854122b77ddc71971564ca2350a37608575ce324adc5650a2b2051c8f18",
+      "bytes": 20731,
+      "capturedAt": "2026-10-25T11:30:27Z"
+    },
+    "nasa": {
+      "url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "sha256": "ed675c50f7f47c6201d808f6d60c5f483a52d25f35145b2a71c0b67cbd2ad2fa",
+      "bytes": 311803,
+      "capturedAt": "2026-10-25T11:30:09Z"
+    }
+  }
+}

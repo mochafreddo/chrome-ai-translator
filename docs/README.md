@@ -47,6 +47,10 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [OpenRouter routing pilot results](qa/openrouter-routing-pilot-2026-10-25.md) | 36 live page translations, budget control, routing-blind quality review and interpretation limits, dated 2026-10-25 |
+| [Model quality preparation](qa/model-quality-preparation-2026-10-25.md) | 144 intercepted mock page executions, source coverage checks and request-sized cost scenarios, dated 2026-10-25 |
+| [Model quality pilot results](qa/model-quality-pilot-2026-10-26.md) | Six profiles, 144 attempted comparisons, reconciled costs, blinded review and shared application defects, dated 2026-10-26 |
+| [OpenRouter translation routing evaluation](design/openrouter-translation-routing.md) | 36-run pilot and unbilled preparation confirmed on 2026-10-25; production routing and billed execution remain open |
 | [Inline restore cache design](design/inline-restore-cache-design.md) | Original page-lifetime cache design; related QA dated 2026-06-15 |
 | [Inline changed text retry design](design/inline-changed-text-retry-design.md) | Design dated 2026-06-25 |
 | [GitHub test-audit Inline Translation design](design/github-test-audit-inline-translation-design.md) | Confirmed 2026-10-25 scope, table-cell rejection reproduction, abbreviation false-positive replay, and diagnostic evidence limits |

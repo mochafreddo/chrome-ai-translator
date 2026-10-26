@@ -1,0 +1,33 @@
+{
+  "capturedAt": "2026-10-25T10:16:42Z",
+  "normalization": "Selected source excerpts only; wrappers/classes/images/scripts/styles removed; prose preserved; links resolved to source URLs. No remote assets.",
+  "pages": [
+    {
+      "id": "article",
+      "url": "https://science.nasa.gov/solar-system/planets/what-is-a-planet/",
+      "title": "What is a Planet?",
+      "selection": "<h2 id=\"h-the-definition-of-a-planet\" up to (excluding) <h2 id=\"h-the-new-definition-of-planet\"",
+      "sha256": "85bd6b1bc010c90f9599aca282561e11e4e75963e699bb6d1b385fe1b43a502c",
+      "sourceSha256": "0979fb1dd5f268fd54ffe1b81ddbc58796bb358494829ecfb0d7f88a20054a77",
+      "bytes": 4627
+    },
+    {
+      "id": "github",
+      "url": "https://github.com/garrytan/gstack/blob/main/test-audit/SKILL.md",
+      "title": "gstack test-audit: Boundaries",
+      "selection": "Boundaries section before Step 1; normalized paragraphs with code and emphasis; not a GitHub layout reproduction",
+      "sha256": "be6deab72cc9f30ab766dee3992150ab2ed1c99bacb5ba6471f0b4698a34cea7",
+      "sourceSha256": "9b044153d7bd8d94c061874d3ff89f0bb1a1cfc29c901706e06cc4c0f73759a2",
+      "bytes": 5223
+    },
+    {
+      "id": "technical",
+      "url": "https://docs.python.org/3/tutorial/errors.html",
+      "title": "Errors and Exceptions",
+      "selection": "<section id=\"errors-and-exceptions\"> up to (excluding) <section id=\"handling-exceptions\">",
+      "sha256": "34f2143dd7cdb9c34d7c6b38f0808299da2c21bdae8724be981a394d924386db",
+      "sourceSha256": "b53824f1c7b38dbe23edffffae0cdcea0299e0259e24631fdb9511e4e39fcb57",
+      "bytes": 3925
+    }
+  ]
+}

@@ -263,3 +263,31 @@ exports.tests = [
     },
   },
 ];
+
+exports.tests.push({
+  name: 'keeps the OpenRouter key inside a fixed-host transport and revokes it after the callback',
+  async fn() {
+    const { withOpenRouterTransport } = await liveKey();
+    const calls = [];
+    let retained;
+    await withEnvFile(`OPENROUTER_API_KEY=${OPENROUTER_SHAPED}\nOPENAI_API_KEY=${OPENAI_SHAPED}\n`, envPath =>
+      withOpenRouterTransport({ envPath, fetchImpl: async (url, init) => {
+        calls.push({ url, init }); return { ok: true };
+      } }, async transport => {
+        retained = transport;
+        await transport({ body: { input: 'public sample' } });
+        await transport({ generationId: 'gen/sample?x' });
+        await assert.rejects(() => transport({}), /Unsupported/);
+      }));
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].url, 'https://openrouter.ai/api/v1/responses');
+    assert.equal(calls[0].init.headers.Authorization, `Bearer ${OPENROUTER_SHAPED}`);
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(calls[0].init.redirect, 'error');
+    assert.equal(calls[1].url, 'https://openrouter.ai/api/v1/generation?id=gen%2Fsample%3Fx');
+    assert.equal(calls[1].init.method, 'GET');
+    assert.equal(calls[1].init.redirect, 'error');
+    await assert.rejects(() => retained({ body: {} }), /closed/);
+    assert.equal(calls.length, 2);
+  },
+});

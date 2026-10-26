@@ -28,6 +28,11 @@ const suiteFiles = [
   'static-assets',
   'syntax-check',
   'live-key',
+  'routing-pilot',
+  'routing-budget',
+  'model-quality',
+  'model-quality-preparation',
+  'model-quality-live',
   'protected-spans',
   'qa-issue-003.regression-1',
 ];
