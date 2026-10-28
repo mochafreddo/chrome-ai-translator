@@ -181,6 +181,8 @@ The OpenRouter variant uses the same fixture and attempts. It observes only allo
 
 ## Historical verification evidence
 
+On 2026-10-28, the required UI check reached its panel body, language, view and DOM-repair assertions but failed native ArrowDown scrolling of Options diagnostics on Chrome 149.0.7827.115. The unchanged baseline `6e67502` failed the same assertion. Focus, trusted key delivery, frame timing, macOS native key codes and headed mode did not establish native scrolling; the cause remains unresolved. This observation does not authorize replacing native input with scripted scrolling or weakening the assertion. The performance specification's UI acceptance criterion remains open until the real check passes.
+
 These observations are retained from earlier verification, not rerun by reading or editing this guide:
 
 - The old `qa-issue-003.regression-1` file used `node:test` and was absent from the explicit suite list for two months. It now follows this harness and is registered; confirm both registration and output when adding a suite.
