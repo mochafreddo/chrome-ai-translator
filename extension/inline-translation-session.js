@@ -143,7 +143,7 @@
   }
 
   function createQueuedRecordFromSerialized(operation, blockElement, serialized, options = {}) {
-    return createRecord(operation, blockElement, {
+    return Object.assign(options.record || createRecord(operation, blockElement), {
       template: serialized.template,
       atoms: serialized.atoms,
       contract: serialized.contract,
@@ -206,6 +206,13 @@
     }
     const existing = operation.byBlock.get(blockElement);
     if (existing) {
+      if (existing.state === 'original' && !existing.retryOf &&
+        inlineBlockCodec.matchesOriginalOwnership(existing.snapshot)) {
+        existing.state = 'queued';
+        if (applyCachedTranslation(operation, existing)) return null;
+        operation.queue.push(existing);
+        return existing;
+      }
       if (isTranslatedState(existing.state)) {
         if (inlineBlockCodec.matchesAppliedOwnership(existing.snapshot)) {
           return null;
@@ -227,7 +234,9 @@
       queueLocalDiagnostic(operation, failedRecord, failedRecord.code, {}, serialized.localRejection);
       return failedRecord;
     }
-    const record = createQueuedRecordFromSerialized(operation, blockElement, serialized);
+    const record = createQueuedRecordFromSerialized(operation, blockElement, serialized, {
+      record: existing?.state === 'original' && !existing.retryOf ? existing : null,
+    });
     if (applyCachedTranslation(operation, record)) return null;
     operation.queue.push(record);
     return record;
