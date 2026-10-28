@@ -9,15 +9,31 @@ function createDiagnostics(cryptoApi = globalThis.crypto) {
   return diagnostics.createTranslationDiagnostics(cryptoApi);
 }
 
-function createMemoryChrome(stored = {}) {
+function readStored(stored, keys) {
+  return structuredClone(keys === null ? stored : Object.fromEntries(
+    keys.filter(key => Object.hasOwn(stored, key)).map(key => [key, stored[key]])
+  ));
+}
+
+function createMemoryChrome(stored = {}, supportsGetKeys = true) {
   const ops = [];
+  const reads = [];
+  const returnedCharacters = [];
   return {
     stored,
     ops,
+    reads,
+    returnedCharacters,
     chromeApi: {
       storage: {
         local: {
-          async get() { return { ...stored }; },
+          ...(supportsGetKeys ? { async getKeys() { return Object.keys(stored); } } : {}),
+          async get(keys) {
+            reads.push(keys);
+            const values = readStored(stored, keys);
+            returnedCharacters.push(JSON.stringify(values).length);
+            return values;
+          },
           async set(values) {
             ops.push({ op: 'set', keys: Object.keys(values).sort() });
             Object.assign(stored, values);
@@ -35,6 +51,204 @@ function createMemoryChrome(stored = {}) {
 
 exports.name = 'translation diagnostics';
 exports.tests = [
+  {
+    name: 'reads only indexes and the current run when key enumeration is available',
+    async fn() {
+      for (const method of ['persistRun', 'persistRunIdempotent']) {
+        const memory = createMemoryChrome({
+          'inlineDiagnostics:v3:index': ['old'],
+          'inlineDiagnostics:v2:index': [],
+          'inlineDiagnostics:v3:run:old': { runId: 'old', blocks: 'x'.repeat(10000) },
+          unrelated: 'x'.repeat(10000),
+          'inlineDiagnostics:v3:run:orphan': { runId: 'orphan' },
+          inlineTranslationLogs: ['legacy'],
+          'inlineTranslationLogs:old': ['legacy'],
+        });
+        const result = await createDiagnostics()[method](memory.chromeApi, { runId: 'fresh' });
+        assert.equal(result.persisted, true);
+        assert.deepEqual(memory.reads, [[
+          'inlineDiagnostics:v3:index', 'inlineDiagnostics:v2:index',
+          'inlineDiagnostics:v3:run:fresh', 'inlineDiagnostics:v2:run:fresh',
+        ]]);
+        assert.deepEqual(memory.stored['inlineDiagnostics:v3:index'], ['fresh', 'old']);
+        assert.ok(memory.stored['inlineDiagnostics:v3:run:old']);
+        assert.deepEqual(memory.ops[1], { op: 'remove', keys: [
+          'inlineDiagnostics:v3:run:orphan', 'inlineTranslationLogs', 'inlineTranslationLogs:old',
+        ] });
+      }
+    },
+  },
+  {
+    name: 'keeps full reads without getKeys and reduces returned characters for identical retained data',
+    async fn() {
+      const stored = { 'inlineDiagnostics:v3:index': [], unrelated: 'x'.repeat(100000) };
+      for (let index = 0; index < 20; index += 1) {
+        const runId = `old-${index}`;
+        stored['inlineDiagnostics:v3:index'].push(runId);
+        stored[`inlineDiagnostics:v3:run:${runId}`] = diagnostics.exportDiagnostics([{
+          runId,
+          blocks: Array.from({ length: 100 }, (_, block) => ({
+            diagnosticId: `d${block}`, terminalCode: 'quality.english_residue',
+          })),
+        }]).runs[0];
+      }
+      const memories = [false, true].map(supported => createMemoryChrome(structuredClone(stored), supported));
+      for (const memory of memories) {
+        const writing = createDiagnostics();
+        assert.deepEqual(await writing.persistRun(memory.chromeApi, { runId: 'fresh', outcome: 'interrupted' }), { persisted: true });
+        assert.deepEqual(await writing.persistRun(memory.chromeApi, { runId: 'fresh', outcome: 'done' }), { persisted: true });
+      }
+      const [legacy, supported] = memories;
+      assert.deepEqual(legacy.reads, [null, null]);
+      assert.deepEqual(supported.stored, legacy.stored);
+      const characters = memories.map(memory => memory.returnedCharacters.reduce((sum, count) => sum + count, 0));
+      assert.ok(characters[1] < characters[0] / 10);
+      console.log(`diagnostics returned JSON characters: full=${characters[0]} selective=${characters[1]}`);
+    },
+  },
+  {
+    name: 'fails key enumeration and selective reads without falling back and permits later writes',
+    async fn() {
+      for (const method of ['persistRun', 'persistRunIdempotent']) {
+        for (const failure of ['getKeys', 'get']) {
+          const memory = createMemoryChrome({ 'inlineDiagnostics:v3:index': ['kept'] });
+          const storage = memory.chromeApi.storage.local;
+          const original = storage[failure];
+          const failedCalls = [];
+          storage[failure] = async (...args) => {
+            failedCalls.push(args);
+            throw new Error('storage unavailable');
+          };
+          const writing = createDiagnostics();
+          assert.deepEqual(await writing[method](memory.chromeApi, { runId: 'fresh' }), { persisted: false });
+          assert.deepEqual(memory.reads, []);
+          assert.deepEqual(failedCalls, failure === 'getKeys' ? [[]] : [[[
+            'inlineDiagnostics:v3:index', 'inlineDiagnostics:v2:index',
+            'inlineDiagnostics:v3:run:fresh', 'inlineDiagnostics:v2:run:fresh',
+          ]]]);
+          assert.deepEqual(memory.ops, []);
+          assert.deepEqual(memory.stored['inlineDiagnostics:v3:index'], ['kept']);
+          storage[failure] = original;
+          assert.equal((await writing[method](memory.chromeApi, { runId: 'later' })).persisted, true);
+        }
+      }
+    },
+  },
+  {
+    name: 'characterizes unindexed same-run v2 and v3 conflicts duplicates and corrupt record recovery',
+    async fn() {
+      const fingerprint = `hmac-sha256:${'A'.repeat(43)}`;
+      for (const supported of [false, true]) {
+        for (const version of [2, 3]) {
+          for (const previous of [`hmac-sha256:${'B'.repeat(43)}`, fingerprint, 'corrupt']) {
+            const runKey = `inlineDiagnostics:v${version}:run:same`;
+            const memory = createMemoryChrome({
+              'inlineDiagnostics:v3:index': [], 'inlineDiagnostics:v2:index': [],
+              [runKey]: { runId: 'wrong', idempotencyFingerprint: previous },
+            }, supported);
+            const result = await createDiagnostics().persistRunIdempotent(memory.chromeApi, {
+              runId: 'same', idempotencyFingerprint: fingerprint, outcome: 'failed',
+            });
+            if (previous.endsWith('B'.repeat(43))) {
+              assert.deepEqual(result, { persisted: false, conflict: true });
+              assert.deepEqual(memory.ops, []);
+              assert.equal(memory.stored[runKey].runId, 'wrong');
+            } else {
+              assert.deepEqual(result, { persisted: true, duplicate: previous === fingerprint });
+              assert.deepEqual(memory.stored['inlineDiagnostics:v3:index'], ['same']);
+              assert.equal(memory.stored['inlineDiagnostics:v3:run:same'].runId, 'same');
+              assert.equal(memory.stored['inlineDiagnostics:v3:run:same'].outcome, 'failed');
+            }
+          }
+        }
+      }
+    },
+  },
+  {
+    name: 'characterizes failed writes preserving history and cleanup retry after retained writes',
+    async fn() {
+      for (const supported of [false, true]) {
+        const memory = createMemoryChrome({
+          'inlineDiagnostics:v3:index': Array.from({ length: 20 }, (_, index) => `old-${index}`),
+          'inlineDiagnostics:v3:run:old-19': { runId: 'old-19' },
+          'inlineDiagnostics:v2:run:orphan': { runId: 'orphan' },
+          inlineTranslationLogs: [],
+        }, supported);
+        const storage = memory.chromeApi.storage.local;
+        const set = storage.set;
+        const remove = storage.remove;
+        const writing = createDiagnostics();
+        storage.set = async () => { throw new Error('write unavailable'); };
+        assert.deepEqual(await writing.persistRun(memory.chromeApi, { runId: 'fresh' }), { persisted: false });
+        assert.equal(memory.stored['inlineDiagnostics:v3:run:fresh'], undefined);
+        assert.ok(memory.stored['inlineDiagnostics:v3:run:old-19']);
+        assert.deepEqual(memory.ops, []);
+        storage.set = set;
+        storage.remove = async () => { throw new Error('cleanup unavailable'); };
+        assert.deepEqual(await writing.persistRun(memory.chromeApi, { runId: 'fresh' }), { persisted: false });
+        assert.ok(memory.stored['inlineDiagnostics:v3:run:fresh']);
+        assert.ok(memory.stored['inlineDiagnostics:v3:run:old-19']);
+        assert.equal(memory.stored['inlineDiagnostics:v3:index'].length, 20);
+        storage.remove = remove;
+        assert.deepEqual(await writing.persistRun(memory.chromeApi, { runId: 'fresh' }), { persisted: true });
+        assert.equal(memory.stored['inlineDiagnostics:v3:run:old-19'], undefined);
+        assert.equal(memory.stored['inlineDiagnostics:v2:run:orphan'], undefined);
+        assert.equal(memory.stored.inlineTranslationLogs, undefined);
+      }
+    },
+  },
+  {
+    name: 'serializes key enumeration with later persistence and retains both writes',
+    async fn() {
+      const memory = createMemoryChrome();
+      const storage = memory.chromeApi.storage.local;
+      const getKeys = storage.getKeys;
+      let release;
+      const blocked = new Promise(resolve => { release = resolve; });
+      let enumerations = 0;
+      storage.getKeys = async () => {
+        if (++enumerations === 1) await blocked;
+        return getKeys();
+      };
+      const writing = createDiagnostics();
+      const first = writing.persistRun(memory.chromeApi, { runId: 'first' });
+      const second = writing.persistRun(memory.chromeApi, { runId: 'second' });
+      await Promise.resolve();
+      await Promise.resolve();
+      const whileBlocked = enumerations;
+      release();
+      assert.deepEqual(await first, { persisted: true });
+      assert.deepEqual(await second, { persisted: true });
+      assert.equal(whileBlocked, 1);
+      assert.deepEqual(memory.stored['inlineDiagnostics:v3:index'], ['second', 'first']);
+    },
+  },
+  {
+    name: 'characterizes mixed namespace global retention and v3 precedence on both read paths',
+    async fn() {
+      for (const supported of [false, true]) {
+        const stored = { 'inlineDiagnostics:v3:index': ['shared'], 'inlineDiagnostics:v2:index': [] };
+        stored['inlineDiagnostics:v3:run:shared'] = { runId: 'shared', outcome: 'done' };
+        stored['inlineDiagnostics:v2:run:shared'] = { runId: 'shared', outcome: 'failed' };
+        stored['inlineDiagnostics:v2:index'].push('shared');
+        for (let index = 0; index < 20; index += 1) {
+          const id = `legacy-${index}`;
+          stored['inlineDiagnostics:v2:index'].push(id);
+          stored[`inlineDiagnostics:v2:run:${id}`] = { runId: id, outcome: 'done' };
+        }
+        const memory = createMemoryChrome(stored, supported);
+        assert.deepEqual(await createDiagnostics().persistRun(memory.chromeApi, { runId: 'fresh' }), { persisted: true });
+        const payload = await diagnostics.loadDiagnostics(memory.chromeApi);
+        assert.equal(payload.runs.length, 20);
+        assert.deepEqual(payload.runs.slice(0, 2).map(run => [run.runId, run.outcome]), [
+          ['fresh', 'interrupted'], ['shared', 'done'],
+        ]);
+        assert.equal(payload.runs.at(-1).runId, 'legacy-17');
+        assert.equal(stored['inlineDiagnostics:v2:run:legacy-18'], undefined);
+        assert.equal(stored['inlineDiagnostics:v2:run:legacy-19'], undefined);
+      }
+    },
+  },
   {
     name: 'allowlists problem fields and removes sensitive values',
     fn() {
@@ -113,7 +327,7 @@ exports.tests = [
     async fn() {
       const stored = {};
       const chromeApi = { storage: { local: {
-        async get() { return { ...stored }; },
+        async get(keys) { return readStored(stored, keys); },
         async set(values) { Object.assign(stored, values); },
       } } };
 
@@ -401,7 +615,7 @@ exports.tests = [
         'inlineDiagnostics:v3:run:kept': { outcome: 'done' },
       };
       const chromeApi = { storage: { local: {
-        async get() { return { ...stored }; },
+        async get(keys) { return readStored(stored, keys); },
         async set(values) { Object.assign(stored, values); },
         async remove(key) {
           for (const item of Array.isArray(key) ? key : [key]) delete stored[item];
@@ -470,7 +684,7 @@ exports.tests = [
         },
       };
       const chromeApi = { storage: { local: {
-        async get() { return { ...stored }; },
+        async get(keys) { return readStored(stored, keys); },
         async set(values) { Object.assign(stored, values); },
         async remove(keys) {
           for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
@@ -636,6 +850,7 @@ exports.tests = [
         summary: { attemptedBlocks: 1, translatedBlocks: 1, modelRequestAttempts: 1 },
       });
       assert.equal(memory.ops[0].op, 'set');
+      assert.equal(memory.ops.length, 2);
       assert.deepEqual(memory.ops[0].keys, [
         'inlineDiagnostics:v2:index',
         'inlineDiagnostics:v3:index',
@@ -663,7 +878,7 @@ exports.tests = [
       }
       let removed = false;
       const chromeApi = { storage: { local: {
-        async get() { return { ...stored }; },
+        async get(keys) { return readStored(stored, keys); },
         async set() { throw new Error('quota'); },
         async remove() { removed = true; },
       } } };

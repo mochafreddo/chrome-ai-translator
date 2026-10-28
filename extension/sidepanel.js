@@ -272,6 +272,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   let stateRequest = null;
   let inlineRequest = null;
   let inlineControl = null;
+  let translationRequest = null;
   let windowId = null;
   let state = { status: 'idle' };
   let panelError = '';
@@ -280,6 +281,74 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   let controlErrorTabId = null;
   let invocationError = '';
   let hasPageAccess = null;
+  let hasBody = false;
+  let bodyRecovery = null;
+  let invalidatedBody = null;
+  let minimumStateSequence = 0;
+  let pendingNotification = null;
+  const retiredEpochs = new Set();
+
+  function acceptState(incoming, currentRequest = true) {
+    if (!incoming || typeof incoming.workerEpoch !== 'string' || !incoming.workerEpoch ||
+      !Number.isSafeInteger(incoming.stateSequence) || incoming.stateSequence < 0 ||
+      !Number.isSafeInteger(incoming.bodyVersion) || incoming.bodyVersion < 0 ||
+      retiredEpochs.has(incoming.workerEpoch)) return;
+    if (incoming.workerEpoch !== state.workerEpoch) {
+      if (!currentRequest) return;
+      if (state.workerEpoch) retiredEpochs.add(state.workerEpoch);
+      state = { status: 'idle' };
+      hasBody = false;
+      invalidatedBody = null;
+      minimumStateSequence = 0;
+    }
+    const bodyMatches = incoming.bodyVersion === state.bodyVersion;
+    const fullBody = Object.prototype.hasOwnProperty.call(incoming, 'extracted') &&
+      Object.prototype.hasOwnProperty.call(incoming, 'translated') &&
+      invalidatedBody !== `${incoming.workerEpoch}/${incoming.bodyVersion}`;
+    if ((currentRequest || incoming.stateSequence > (state.stateSequence ?? 0)) &&
+      incoming.stateSequence >= minimumStateSequence &&
+      incoming.stateSequence >= (state.stateSequence ?? 0)) {
+      const body = fullBody ? incoming : bodyMatches && hasBody ? state : null;
+      state = { ...incoming, extracted: body?.extracted ?? null, translated: body?.translated ?? null };
+      hasBody = Boolean(body);
+    } else if (fullBody && bodyMatches && !hasBody) {
+      state = { ...state, extracted: incoming.extracted, translated: incoming.translated };
+      hasBody = true;
+    } else return;
+    invocationError = readInlineTranslationError(state);
+    paint();
+    if (pendingNotification?.workerEpoch === state.workerEpoch) {
+      const notification = pendingNotification;
+      pendingNotification = null;
+      acceptState(notification);
+    }
+  }
+
+  async function refreshState(requestedSelection, requestedControl = null, requireBody = false) {
+    const request = stateRequest = {};
+    const response = await sendMessage({ type: 'GET_STATE', tabId,
+      ...(hasBody && !requireBody ? { knownBody: {
+        workerEpoch: state.workerEpoch, bodyVersion: state.bodyVersion,
+      } } : {}),
+    });
+    if (selection !== requestedSelection ||
+      (requestedControl && inlineControl !== requestedControl) || !response?.ok) return;
+    acceptState(response.state, stateRequest === request);
+  }
+
+  function recoverBody(epoch, version) {
+    if (retiredEpochs.has(epoch)) return;
+    if (bodyRecovery?.epoch === epoch && bodyRecovery.version === version) return;
+    const recovery = bodyRecovery = { epoch, version };
+    const requestedSelection = selection;
+    refreshState(requestedSelection, null, true).catch(() => {}).finally(() => {
+      if (bodyRecovery !== recovery || selection !== requestedSelection) return;
+      bodyRecovery = null;
+      if (!hasBody && state.workerEpoch === epoch && state.bodyVersion !== version) {
+        recoverBody(state.workerEpoch, state.bodyVersion);
+      }
+    });
+  }
 
   function paint() {
     render({
@@ -295,10 +364,19 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   function select(nextTabId) {
     if (tabId === nextTabId) return;
     // A new visit ends pending controls; the initial query may still select its tab.
-    if (tabId !== null) inlineControl = null;
+    if (tabId !== null) {
+      inlineControl = null;
+      translationRequest = null;
+    }
     tabId = nextTabId;
     selection = {};
     state = { status: 'idle' };
+    hasBody = false;
+    bodyRecovery = null;
+    invalidatedBody = null;
+    minimumStateSequence = 0;
+    pendingNotification = null;
+    retiredEpochs.clear();
     panelError = '';
     snapshot = null;
     forgetControlError();
@@ -322,15 +400,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     const requestedSelection = selection;
     await Promise.all([
       (async () => {
-        const request = stateRequest = {};
-        const response = await sendMessage({
-          type: 'GET_STATE', tabId: requestedTab,
-        });
-        if (selection !== requestedSelection || stateRequest !== request ||
-            (requestedControl && inlineControl !== requestedControl) || !response?.ok) return;
-        state = response.state || { status: 'idle' };
-        invocationError = readInlineTranslationError(state);
-        paint();
+        await refreshState(requestedSelection, requestedControl);
       })().catch(() => {}),
       (async () => {
         const request = inlineRequest = {};
@@ -380,20 +450,29 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     }
   }
   async function translate(settingsOverride) {
+    const request = translationRequest = {};
     let requestedSelection = selection;
+    let startingState = null;
     try {
       if (!(await resolveTab())) return;
+      if (translationRequest !== request && tabId !== null) return;
       const requestedTab = tabId;
       requestedSelection = selection;
+      startingState = state;
       panelError = '';
-      state = { status: 'translating' };
+      stateRequest = null;
+      bodyRecovery = null;
+      hasBody = false;
+      invalidatedBody = `${state.workerEpoch}/${state.bodyVersion}`;
+      minimumStateSequence = (state.stateSequence || 0) + 1;
+      state = { ...state, status: 'translating', extracted: null, translated: null };
       paint();
       const response = await sendMessage({
         type: 'TRANSLATE_TAB', tabId: requestedTab, settingsOverride,
       });
       // The worker can answer after translation finishes. Only this visit to the
       // requested tab may display its result; polling does not end that visit.
-      if (selection !== requestedSelection) return;
+      if (selection !== requestedSelection || translationRequest !== request) return;
       if (!response?.ok) {
         const failure = new Error(
           response?.error?.message || 'Failed to start translation'
@@ -401,13 +480,21 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         if (typeof response?.error?.code === 'string') failure.code = response.error.code;
         throw failure;
       }
-      if (response.skipped) await refreshSelected();
+      if (response.skipped) {
+        invalidatedBody = null;
+        minimumStateSequence = 0;
+        await refreshSelected();
+      }
     } catch (error) {
-      if (selection !== requestedSelection) return;
+      if (selection !== requestedSelection || translationRequest !== request ||
+        (startingState && (state.workerEpoch !== startingState.workerEpoch ||
+          state.bodyVersion !== startingState.bodyVersion))) return;
       panelError = describeSidePanelFailure({
         message: error?.message || String(error), code: error?.code,
       });
-      state = { status: 'idle', error: { message: panelError } };
+      invalidatedBody = null;
+      minimumStateSequence = 0;
+      state = { ...state, status: 'idle', error: { message: panelError } };
       paint();
     }
   }
@@ -426,12 +513,19 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     },
     receive(msg) {
       if (msg?.type !== 'STATE_UPDATED' || msg.tabId !== tabId) return;
-      // An accepted notification supersedes state queries already in flight.
+      const incoming = msg.state;
+      if (!incoming || typeof incoming.workerEpoch !== 'string' ||
+        retiredEpochs.has(incoming.workerEpoch)) return;
+      if (incoming.workerEpoch !== state.workerEpoch) {
+        if (pendingNotification?.workerEpoch !== incoming.workerEpoch ||
+          incoming.stateSequence > pendingNotification.stateSequence) pendingNotification = incoming;
+        recoverBody(incoming.workerEpoch, incoming.bodyVersion);
+        return;
+      }
       stateRequest = null;
-      state = msg.state || { status: 'idle' };
-      invocationError = readInlineTranslationError(state);
       if (controlErrorTabId !== tabId) forgetControlError();
-      paint();
+      acceptState(incoming);
+      if (!hasBody) recoverBody(state.workerEpoch, state.bodyVersion);
     },
     runInlineControl,
     translate,

@@ -582,6 +582,7 @@ exports.tests = [
       let resolveFirstSave;
       let refreshInterval;
       let runtimeListener;
+      let stateSequence = 0;
       const firstSave = new Promise((resolve) => {
         resolveFirstSave = resolve;
       });
@@ -659,7 +660,8 @@ exports.tests = [
               };
             }
             if (message.type === 'GET_STATE') {
-              return { ok: true, state: { status: 'idle' } };
+              return { ok: true, state: { status: 'idle', workerEpoch: 'worker-fixture',
+                stateSequence: ++stateSequence, bodyVersion: 0, extracted: null, translated: null } };
             }
             if (message.type === 'TRANSLATE_TAB') {
               return {
@@ -716,7 +718,7 @@ exports.tests = [
         runtimeListener({
           type: 'STATE_UPDATED',
           tabId: 77,
-          state: { status: 'translating' },
+          state: { status: 'translating', workerEpoch: 'worker-fixture', stateSequence: ++stateSequence, bodyVersion: 0 },
         });
         assert.equal(getElement('status').textContent, 'Translating');
         assert.equal(getElement('saveStatus').textContent, 'Saving...');
@@ -869,7 +871,8 @@ exports.tests = [
               return { ok: true, settings: { targetLanguage: 'Korean' } };
             }
             if (message.type === 'GET_STATE') {
-              return { ok: true, state: { status: 'idle' } };
+              return { ok: true, state: { status: 'idle', workerEpoch: 'worker-fixture',
+                stateSequence: 1, bodyVersion: 0, extracted: null, translated: null } };
             }
             if (message.type === 'GET_INLINE_TRANSLATION_STATE') {
               // Nothing answers in a tab the extension has never been invoked on, which is
