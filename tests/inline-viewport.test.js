@@ -36,6 +36,7 @@ function scan(root, { session }) {
 function scannerFixture(root, session = createActiveInlineTranslationState().session) {
   const platform = platformFor(root);
   const targets = new Map();
+  const scrollCaptures = new Map();
   const timers = new Map();
   const observers = [];
   const admissions = [];
@@ -45,11 +46,18 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
   function target(node) {
     const listeners = new Map();
     targets.set(node, listeners);
-    node.addEventListener = (type, fn) => {
+    const captures = new Set();
+    scrollCaptures.set(node, captures);
+    node.addEventListener = (type, fn, options) => {
       if (!listeners.has(type)) listeners.set(type, new Set());
       listeners.get(type).add(fn);
+      if (type === 'scroll' && options?.capture) captures.add(fn);
     };
-    node.removeEventListener = (type, fn) => listeners.get(type)?.delete(fn);
+    node.removeEventListener = (type, fn, options) => {
+      if (type === 'scroll' && captures.has(fn) !== Boolean(options?.capture)) return;
+      listeners.get(type)?.delete(fn);
+      captures.delete(fn);
+    };
     return node;
   }
   target(platform.window);
@@ -64,9 +72,10 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
   };
   platform.clearTimeout = (id) => timers.delete(id);
   platform.MutationObserver = class {
-    constructor(callback) { this.callback = callback; this.disconnected = false; observers.push(this); }
+    constructor(callback) { this.callback = callback; this.disconnected = false; this.records = []; observers.push(this); }
     observe(node, options) { this.node = node; this.options = options; }
     disconnect() { this.disconnected = true; }
+    takeRecords() { return this.records.splice(0); }
   };
   const viewport = createInlineViewport({
     session: {
@@ -84,6 +93,21 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
     get scans() { return scans; },
     get resets() { return resets; },
     event(node, type) { for (const fn of targets.get(node)?.get(type) || []) fn(); },
+    nestedScroll(node) {
+      for (let ancestor = node.parentNode; ancestor; ancestor = ancestor.parentNode) {
+        for (const fn of scrollCaptures.get(ancestor) || []) fn();
+      }
+      for (const fn of scrollCaptures.get(platform.window)) fn();
+    },
+    attribute(node, name, value) {
+      node.setAttribute(name, value);
+      for (const observer of observers) {
+        if (observer.disconnected || !observer.options.attributes) continue;
+        let ancestor = node;
+        while (ancestor && ancestor !== observer.node) ancestor = ancestor.parentNode;
+        if (ancestor) observer.callback([{ type: 'attributes', target: node }]);
+      }
+    },
     advance() {
       assert.equal(timers.size, 1);
       const [id, task] = timers.entries().next().value;
@@ -96,6 +120,292 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
 
 exports.name = 'inline viewport';
 exports.tests = [
+  {
+    name: 'invalidates continuation when an attribute reveals earlier prose',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const revealed = element('p', text('Revealed paragraph.'));
+      revealed.computedStyle = { display: 'none' };
+      const filler = element('p', ...Array.from({ length: 1200 }, () => text('Hi ')));
+      const tail = element('p', text('Final paragraph.'));
+      const root = element('div', revealed, filler, tail);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.equal(f.admissions.includes(revealed), false);
+        revealed.computedStyle = {};
+        f.attribute(revealed, 'class', 'visible');
+        f.advance();
+        assert.equal(f.admissions.includes(revealed), true);
+        f.advance();
+        assert.deepEqual(f.session.takeBatch().map(record => record.template), [
+          'Revealed paragraph.', 'Hi '.repeat(1200), 'Final paragraph.',
+        ]);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'applies the collected cache batch before restarting invalidated traversal',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const paragraphs = ['First paragraph.', 'Second paragraph.', 'Third paragraph.']
+        .map(value => element('p', text(value)));
+      const originals = paragraphs.map(block => [...block.childNodes]);
+      const root = element('div', ...paragraphs);
+      document.body.appendChild(root);
+      const session = createActiveInlineTranslationState().session;
+      const records = paragraphs.map(block => session.admit(block));
+      session.settle(session.takeBatch(), { ok: true, results: records.map(record => ({
+        id: record.id, disposition: 'apply', template: '저장된 문단.',
+      })) });
+      session.restore();
+      session.begin({});
+      const f = scannerFixture(root, session);
+      for (const block of paragraphs) {
+        const replaceChildren = block.replaceChildren.bind(block);
+        block.replaceChildren = (...nodes) => {
+          replaceChildren(...nodes);
+          f.observers[0].records.push({ type: 'childList', target: block });
+        };
+      }
+      try {
+        f.viewport.start(root);
+        assert.equal(session.progress().counts.translated, 3);
+        assert.equal(f.resets, 1);
+        f.advance();
+        assert.equal(f.timers.size, 0);
+        assert.deepEqual(session.takeBatch(), []);
+        session.restore();
+        paragraphs.forEach((block, index) => assert.deepEqual(block.childNodes, originals[index]));
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'rediscovers newly visible prose after a descendant scroll without bubbling',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const paragraph = element('p', text('Newly visible nested prose.'));
+      const scroller = element('div', paragraph);
+      const root = element('div', scroller);
+      paragraph.rect = { top: 1000, bottom: 1024, left: 10, right: 300, width: 290, height: 24 };
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.admissions, []);
+        paragraph.rect = { top: 20, bottom: 44, left: 10, right: 300, width: 290, height: 24 };
+        f.nestedScroll(scroller);
+        f.advance();
+        assert.deepEqual(f.session.takeBatch().map(record => record.template), ['Newly visible nested prose.']);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'stops stale candidate application when an earlier cache hit moves prose outside the root',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const cached = element('p', text('Cached paragraph.'));
+      const moved = element('p', text('Moved paragraph.'));
+      const root = element('div', cached, moved);
+      document.body.appendChild(root);
+      const session = createActiveInlineTranslationState().session;
+      const first = session.admit(cached);
+      const second = session.admit(moved);
+      session.settle(session.takeBatch(), { ok: true, results: [
+        { id: first.id, disposition: 'apply', template: '저장된 문단.' },
+        { id: second.id, disposition: 'apply', template: '이동한 문단.' },
+      ] });
+      session.restore();
+      session.begin({});
+      const f = scannerFixture(root, session);
+      const replaceChildren = cached.replaceChildren.bind(cached);
+      cached.replaceChildren = (...nodes) => {
+        replaceChildren(...nodes);
+        document.body.appendChild(moved);
+        f.observers[0].records.push({ type: 'childList', target: root });
+      };
+      try {
+        f.viewport.start(root);
+        while (f.timers.size) f.advance();
+        assert.equal(cached.textContent, '저장된 문단.');
+        assert.equal(moved.textContent, 'Moved paragraph.');
+        assert.equal(session.progress().counts.translated, 1);
+        assert.deepEqual(session.takeBatch(), []);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'ignores a canceled continuation after nested scroll replaces its debounce timer',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const root = element('p', ...Array.from({ length: 1201 }, () => text('Hi ')));
+      const parent = element('div', root);
+      parent.clientHeight = 100;
+      parent.scrollHeight = 400;
+      parent.computedStyle = { overflowY: 'auto' };
+      document.body.appendChild(parent);
+      const f = scannerFixture(root);
+      f.target(parent);
+      try {
+        f.viewport.start(root);
+        const canceled = [...f.timers.values()][0].callback;
+        f.event(parent, 'scroll');
+        const pending = [...f.timers.entries()];
+        canceled();
+        assert.equal(f.scans, 1);
+        assert.deepEqual([...f.timers.entries()], pending);
+        f.advance();
+        f.advance();
+        assert.equal(f.scans, 3);
+        assert.equal(f.session.progress().counts.pending, 1);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'invalidates continuation when cache application replaces pending DOM',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const cached = element('p', text('Cached paragraph.'));
+      const filler = element('p', ...Array.from({ length: 1200 }, () => text('Hi ')));
+      const oldTail = element('p', text('Removed paragraph.'));
+      const replacement = element('p', text('New paragraph before the continuation.'));
+      const root = element('div', cached, filler, oldTail);
+      document.body.appendChild(root);
+      const original = [...cached.childNodes];
+      const session = createActiveInlineTranslationState().session;
+      const record = session.admit(cached);
+      session.settle(session.takeBatch(), { ok: true,
+        results: [{ id: record.id, disposition: 'apply', template: '저장된 문단.' }] });
+      session.restore();
+      session.begin({});
+      const f = scannerFixture(root, session);
+      const replaceChildren = cached.replaceChildren.bind(cached);
+      let replaced = false;
+      cached.replaceChildren = (...nodes) => {
+        replaceChildren(...nodes);
+        if (replaced) return;
+        replaced = true;
+        root.removeChild(filler);
+        root.removeChild(oldTail);
+        root.insertBefore(replacement, cached);
+        f.observers[0].records.push({ type: 'childList', target: root });
+      };
+      try {
+        f.viewport.start(root);
+        while (f.timers.size) f.advance();
+        assert.deepEqual(session.takeBatch().map(item => item.template), [
+          'New paragraph before the continuation.',
+        ]);
+        assert.equal(session.progress().counts.translated, 1);
+        assert.equal(f.resets, 1);
+        session.restore();
+        assert.deepEqual(cached.childNodes, original);
+        assert.equal(replacement.textContent, 'New paragraph before the continuation.');
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'collects the synchronous viewport before applying cached translations',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const cached = element('p', text('Cached paragraph.'));
+      const fresh = element('p', text('Fresh paragraph.'));
+      const root = element('div', cached, fresh);
+      document.body.appendChild(root);
+      const original = [...cached.childNodes];
+      const session = createActiveInlineTranslationState().session;
+      const record = session.admit(cached);
+      session.settle(session.takeBatch(), { ok: true,
+        results: [{ id: record.id, disposition: 'apply', template: '저장된 문단.' }] });
+      session.restore();
+      session.begin({});
+      const f = scannerFixture(root, session);
+      const seenDuringDiscovery = [];
+      document.createRange = () => {
+        let node;
+        return {
+          selectNodeContents(value) { node = value; },
+          getBoundingClientRect() {
+            if (node === fresh.childNodes[0]) seenDuringDiscovery.push(cached.textContent);
+            return node.parentElement.getBoundingClientRect();
+          },
+          detach() {},
+        };
+      };
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(seenDuringDiscovery, ['Cached paragraph.']);
+        assert.equal(cached.textContent, '저장된 문단.');
+        assert.deepEqual(session.takeBatch().map(item => item.template), ['Fresh paragraph.']);
+        session.restore();
+        assert.deepEqual(cached.childNodes, original);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'shares style reads within one scan and refreshes them when the viewport changes',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const paragraph = element('p', text('Read '), element('em', text('these notes')), text(' carefully.'));
+      const root = element('div', paragraph);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      const reads = new Map();
+      let rectReads = 0;
+      const getRect = paragraph.getBoundingClientRect.bind(paragraph);
+      paragraph.getBoundingClientRect = () => { rectReads += 1; return getRect(); };
+      const getStyle = f.platform.window.getComputedStyle;
+      f.platform.window.getComputedStyle = node => {
+        reads.set(node, (reads.get(node) || 0) + 1);
+        return getStyle(node);
+      };
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.admissions, [paragraph]);
+        assert.equal(reads.get(paragraph), 1, 'one synchronous scan shares its style reads');
+        assert.equal(rectReads, 2, 'one discovery read and one independent Session codec read');
+        reads.clear();
+        paragraph.computedStyle = { display: 'none' };
+        f.event(f.platform.window, 'scroll');
+        f.advance();
+        assert.equal(reads.get(paragraph), 1);
+        assert.deepEqual(f.session.takeBatch(), [], 'a later scan must read current styles');
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'continues a long DOM without re-reading its already visited prefix',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const paragraphs = Array.from({ length: 4800 }, () => element('p', text('Visible prose.')));
+      const root = element('div', ...paragraphs);
+      document.body.appendChild(root);
+      const children = root.childNodes;
+      let expansions = 0;
+      Object.defineProperty(root, 'childNodes', { get() { expansions += 1; return children; } });
+      const f = scannerFixture(root);
+      let styles = 0;
+      let rects = 0;
+      const getStyle = f.platform.window.getComputedStyle;
+      f.platform.window.getComputedStyle = node => { styles += 1; return getStyle(node); };
+      for (const node of [document.body, root, ...paragraphs]) {
+        const getRect = node.getBoundingClientRect.bind(node);
+        node.getBoundingClientRect = () => { rects += 1; return getRect(); };
+      }
+      try {
+        f.viewport.start(root);
+        for (let index = 0; f.timers.size && index < 4; index += 1) f.advance();
+        assert.equal(f.timers.size, 0, 'the long DOM must finish in four scans');
+        console.log('VIEWPORT_WORK ' + JSON.stringify({ fixture: '4800-visible-paragraphs',
+          viewport: [500, 300], scans: f.scans, expansions, styles, rects }));
+        assert.equal(f.admissions.length, paragraphs.length);
+        assert.ok(f.admissions.every((block, index) => block === paragraphs[index]));
+        assert.equal(f.scans, 4);
+        assert.equal(expansions, 1, 'continuation must retain its pending traversal');
+      } finally { f.viewport.stop(); }
+    },
+  },
   {
     name: 'skips CSS-hidden headings and ancestors before admission and discovers revealed prose',
     fn() {
@@ -499,7 +809,7 @@ exports.tests = [
       f.viewport.start(root);
       assert.equal(f.observers.length, 1);
       assert.equal(f.observers[0].node, root);
-      assert.deepEqual(f.observers[0].options, { childList: true, subtree: true, characterData: true });
+      assert.deepEqual(f.observers[0].options, { childList: true, subtree: true, characterData: true, attributes: true });
       for (const node of [f.platform.window, document, document.body, document.documentElement, parent]) {
         assert.equal(f.targets.get(node).get('scroll').size, 1);
       }
