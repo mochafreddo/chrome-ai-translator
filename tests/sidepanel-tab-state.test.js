@@ -333,6 +333,42 @@ function modulePanel() {
 }
 
 exports.tests.push({
+  name: 'Inline control follows the active tab discovered by its own query',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    panel.setQuery(async () => ({ id: 2 }));
+    panel.setSend(msg => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? { ok: false, error: { message: 'new tab control failed' } }
+      : response(msg.type, '2'));
+    await panel.controller.runInlineControl('START');
+    assert.deepEqual(panel.sent.filter(msg => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), [
+      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 2, control: 'START' },
+    ]);
+    assert.equal(panel.display().tabId, 2);
+    assert.equal(panel.display().inline.controlError, 'new tab control failed');
+  },
+});
+
+exports.tests.push({
+  name: 'Translate follows the active tab discovered by its own query',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    panel.setQuery(async () => ({ id: 2 }));
+    panel.setSend(msg => msg.type === 'TRANSLATE_TAB'
+      ? { ok: false, error: { message: 'new tab translation failed' } }
+      : response(msg.type, '2'));
+    await panel.controller.translate({ targetLanguage: 'Korean' });
+    assert.deepEqual(panel.sent.filter(msg => msg.type === 'TRANSLATE_TAB'), [
+      { type: 'TRANSLATE_TAB', tabId: 2, settingsOverride: { targetLanguage: 'Korean' } },
+    ]);
+    assert.equal(panel.display().tabId, 2);
+    assert.equal(panel.display().panelError, 'new tab translation failed');
+  },
+});
+
+exports.tests.push({
   name: 'an accepted same-worker notification renders the panel once',
   async fn() {
     const panel = modulePanel();
