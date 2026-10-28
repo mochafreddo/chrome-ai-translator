@@ -44,7 +44,7 @@
     const operationId = session.operationId;
     let root = null;
     let stopped = false;
-    let scanStartIndex = 0;
+    let scanStack = null;
     let timer = null;
     let observer = null;
     let scrollTargets = [];
@@ -114,12 +114,22 @@
       return null;
     }
 
-    function hasUnclippedPositionedDescendant(el, candidate) {
+    function getInlineStyle(el, reads) {
+      if (!reads.styles.has(el)) reads.styles.set(el, platform.window.getComputedStyle(el));
+      return reads.styles.get(el);
+    }
+
+    function getInlineElementRect(el, reads) {
+      if (!reads.rects.has(el)) reads.rects.set(el, el.getBoundingClientRect?.());
+      return reads.rects.get(el);
+    }
+
+    function hasUnclippedPositionedDescendant(el, candidate, reads) {
       const stack = candidate ? [candidate] : getInlineChildNodes(el);
       while (stack.length) {
         const node = stack.pop();
         if (!node || node === el || !(node instanceof platform.HTMLElement)) continue;
-        const position = platform.window.getComputedStyle(node).position;
+        const position = getInlineStyle(node, reads).position;
         if (position === 'fixed' || position === 'absolute') {
           let container = node.offsetParent;
           while (container && container !== el) container = container.parentElement;
@@ -131,10 +141,10 @@
       return false;
     }
 
-    function isElementHidden(el, candidate = null) {
+    function isElementHidden(el, candidate, reads) {
       if (!el || !(el instanceof platform.HTMLElement)) return false;
-      const style = platform.window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
+      const style = getInlineStyle(el, reads);
+      const rect = getInlineElementRect(el, reads);
       // A boxless ancestor can still have visible descendants. Only prune a
       // tiny box when overflow actually clips its contents in both directions.
       const tinyClippedBox = style.display !== 'contents' &&
@@ -145,7 +155,7 @@
         style.display === 'none' ||
         style.visibility === 'hidden' ||
         style.opacity === '0' ||
-        (tinyClippedBox && !hasUnclippedPositionedDescendant(el, candidate)) ||
+        (tinyClippedBox && !hasUnclippedPositionedDescendant(el, candidate, reads)) ||
         el.hidden ||
         el.getAttribute('aria-hidden') === 'true'
       );
@@ -158,7 +168,7 @@
       };
     }
 
-    function getInlineTextNodeRect(textNode) {
+    function getInlineTextNodeRect(textNode, reads) {
       try {
         const range = platform.document.createRange();
         range.selectNodeContents(textNode);
@@ -166,24 +176,24 @@
         range.detach?.();
         if (rect && (rect.width || rect.height)) return rect;
       } catch {}
-      return textNode.parentElement?.getBoundingClientRect?.() || null;
+      return textNode.parentElement ? getInlineElementRect(textNode.parentElement, reads) : null;
     }
 
-    function isInlineTextNodeInViewport(textNode, viewport = getInlineViewportInfo()) {
+    function isInlineTextNodeInViewport(textNode, viewport, reads) {
       return isInlineRectInViewport(
-        getInlineTextNodeRect(textNode),
+        getInlineTextNodeRect(textNode, reads),
         viewport
       );
     }
 
-    function shouldSkipInlineBlockCandidateTextNode(textNode) {
+    function shouldSkipInlineBlockCandidateTextNode(textNode, reads) {
       const parent = textNode?.parentElement;
       if (!parent) return true;
       if (parent.closest(`#${INLINE_TRANSLATOR_ID}`)) return true;
       if (isInlineEffectivelyEditable(parent)) return true;
       for (let element = parent; element; element = element.parentElement) {
         if (isInlineTranslationExcludedElement(element)) return true;
-        if (isElementHidden(element, parent)) return true;
+        if (isElementHidden(element, parent, reads)) return true;
       }
       const value = String(textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
       if (!/[A-Za-z]/.test(value)) return true;
@@ -194,17 +204,17 @@
       return Boolean(node && node.nodeType === 3);
     }
 
-    function shouldSkipInlineElementSubtree(node, viewport = getInlineViewportInfo()) {
+    function shouldSkipInlineElementSubtree(node, viewport, reads) {
       if (!node || !(node instanceof platform.HTMLElement)) return false;
       if (node.closest?.(`#${INLINE_TRANSLATOR_ID}`)) return true;
       if (
         isInlineTranslationExcludedElement(node) ||
         isInlineEffectivelyEditable(node) ||
-        isElementHidden(node)
+        isElementHidden(node, null, reads)
       ) {
         return true;
       }
-      const rect = node.getBoundingClientRect?.();
+      const rect = getInlineElementRect(node, reads);
       return rect ? !isInlineRectInViewport(rect, viewport) : false;
     }
 
@@ -213,49 +223,42 @@
     }
 
     function collectVisibleBlocks() {
-      const startIndex = scanStartIndex;
       const limit = 1200;
       const viewport = getInlineViewportInfo();
+      const reads = { styles: new Map(), rects: new Map() };
       const queuedBlocks = new Set();
-      const stack = [root];
-      let textIndex = 0;
+      const stack = scanStack || [root];
       let inspected = 0;
-      let truncated = false;
 
       while (stack.length) {
         const node = stack.pop();
         if (isInlineTextNode(node)) {
-          if (textIndex < startIndex) {
-            textIndex += 1;
-            continue;
-          }
           if (inspected >= limit) {
-            truncated = true;
+            stack.push(node);
             break;
           }
-          textIndex += 1;
           inspected += 1;
           if (
-            !shouldSkipInlineBlockCandidateTextNode(node) &&
-            isInlineTextNodeInViewport(node, viewport)
+            !shouldSkipInlineBlockCandidateTextNode(node, reads) &&
+            isInlineTextNodeInViewport(node, viewport, reads)
           ) {
             const block = findInlineSemanticBlock(node, root);
             if (block && !queuedBlocks.has(block)) {
               queuedBlocks.add(block);
-              session.admit(block);
             }
           }
           continue;
         }
 
-        if (shouldSkipInlineElementSubtree(node, viewport)) continue;
+        if (shouldSkipInlineElementSubtree(node, viewport, reads)) continue;
         const children = getInlineChildNodes(node);
         for (let index = children.length - 1; index >= 0; index -= 1) {
           stack.push(children[index]);
         }
       }
 
-      scanStartIndex = truncated ? textIndex : 0;
+      scanStack = stack.length ? stack : null;
+      return queuedBlocks;
     }
 
     function isInlineScrollableElement(el) {
@@ -292,24 +295,34 @@
 
     function scan() {
       if (!root || !isCurrent()) return;
-      collectVisibleBlocks();
-      if (scanStartIndex > 0) rescan();
+      const blocks = collectVisibleBlocks();
+      for (const block of blocks) {
+        if (!isCurrent()) break;
+        let ancestor = block;
+        while (ancestor && ancestor !== root) ancestor = ancestor.parentNode;
+        if (ancestor === root) session.admit(block);
+      }
+      if (!isCurrent()) return;
+      if (observer?.takeRecords?.().length) onViewportChange();
+      if (scanStack) rescan();
       onScan();
     }
 
     function rescan() {
       if (!root || !isCurrent()) return;
       if (timer !== null) platform.clearTimeout(timer);
-      timer = platform.setTimeout(() => {
+      const scheduledTimer = platform.setTimeout(() => {
+        if (timer !== scheduledTimer || !isCurrent()) return;
         timer = null;
         scan();
       }, 250);
+      timer = scheduledTimer;
     }
 
     // Page changes invalidate the queued viewport, while Start and continuation retain it.
     function onViewportChange() {
       if (!isCurrent()) return;
-      scanStartIndex = 0;
+      scanStack = null;
       session.resetQueue();
       rescan();
     }
@@ -319,23 +332,24 @@
       root = articleRoot;
       scrollTargets = getInlineViewportScrollTargets(root);
       for (const target of scrollTargets) {
-        target.addEventListener('scroll', onViewportChange, { passive: true });
+        target.addEventListener('scroll', onViewportChange, { passive: true, capture: true });
       }
       platform.window.addEventListener('resize', onViewportChange);
       observer = new platform.MutationObserver(onViewportChange);
-      observer.observe(root, { childList: true, subtree: true, characterData: true });
+      observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true });
       scan();
     }
 
     function stop() {
       if (stopped) return;
       stopped = true;
+      scanStack = null;
       if (timer !== null) {
         platform.clearTimeout(timer);
         timer = null;
       }
       for (const target of scrollTargets) {
-        target.removeEventListener('scroll', onViewportChange);
+        target.removeEventListener('scroll', onViewportChange, { capture: true });
       }
       if (root) platform.window.removeEventListener('resize', onViewportChange);
       observer?.disconnect();
