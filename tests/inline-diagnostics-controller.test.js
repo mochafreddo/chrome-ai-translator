@@ -9,7 +9,16 @@ function createPlatform(faults = {}) {
   const session = {};
   function storage(values, name) {
     return {
-      async get() { return structuredClone(values); },
+      ...(faults.supportsGetKeys === false ? {} : { async getKeys() {
+        faults.beforeGetKeys?.(name);
+        return Object.keys(values);
+      } }),
+      async get(keys) {
+        faults.beforeGet?.(name, keys);
+        return structuredClone(keys === null ? values : Object.fromEntries(
+          keys.filter(key => Object.hasOwn(values, key)).map(key => [key, values[key]])
+        ));
+      },
       async set(patch) {
         faults.beforeSet?.(name, patch);
         Object.assign(values, structuredClone(patch));
@@ -57,6 +66,48 @@ async function persistLocal(platform, entries) {
 module.exports = {
   name: 'inline diagnostics controller',
   tests: [
+    {
+      name: 'uses selective storage through the model run lifecycle and preserves unsupported full reads',
+      async fn() {
+        for (const supported of [false, true]) {
+          const reads = [];
+          const platform = createPlatform({
+            supportsGetKeys: supported,
+            beforeGet(name, keys) { if (name === 'local') reads.push(keys); },
+          });
+          await platform.chrome.storage.local.set({ unrelated: 'x'.repeat(10000) });
+          const run = await beginModel(controller.createInlineDiagnostics(platform));
+          const [translated] = await run.complete([result]);
+          assert.equal(translated.template, '번역');
+          const diagnosticReads = reads.filter(keys => keys === null || keys.includes('inlineDiagnostics:v3:index'));
+          assert.equal(diagnosticReads.length, 2);
+          if (supported) {
+            assert.ok(diagnosticReads.every(keys => Array.isArray(keys) && keys.length === 4 && !keys.includes('unrelated')));
+          } else {
+            assert.deepEqual(diagnosticReads, [null, null]);
+          }
+          assert.equal((await storageDiagnostics.loadDiagnostics(platform.chrome)).runs[0].outcome, 'done');
+        }
+      },
+    },
+    {
+      name: 'keeps model results when key enumeration fails without full-read fallback',
+      async fn() {
+        const reads = [];
+        let keyAttempts = 0;
+        const platform = createPlatform({
+          beforeGetKeys() { keyAttempts += 1; throw new Error('enumeration unavailable'); },
+          beforeGet(name, keys) { if (name === 'local') reads.push(keys); },
+        });
+        const run = await beginModel(controller.createInlineDiagnostics(platform));
+        const [translated] = await run.complete([result]);
+        assert.equal(translated.template, '번역');
+        assert.equal(translated.disposition, 'apply');
+        assert.equal(translated.diagnosticsUnavailable, true);
+        assert.equal(keyAttempts, 3);
+        assert.equal(reads.includes(null), false);
+      },
+    },
     {
       name: 'records interrupted and completed model work through one run',
       async fn() {

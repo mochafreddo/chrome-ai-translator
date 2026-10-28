@@ -1,6 +1,7 @@
 const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const session = require('../extension/inline-translation-session.js');
+const codec = require('../extension/inline-block.js');
 const { execute } = require('../extension/inline-model-execution.js');
 const { createReasoningFixture, createTestDocument } = require('./inline-block.test');
 const { DEFAULT_MODEL } = require('../extension/default-model.js');
@@ -111,6 +112,67 @@ function drain(visit, attemptCount = 1) {
 exports.name = 'inline translation session';
 exports.tests = [
   {
+    name: 'reuses one unsent Semantic Block admission across 100 viewport resets',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const block = paragraph(40);
+      const serializeBlock = codec.serializeBlock;
+      let serializations = 0;
+      const ids = new Set();
+      codec.serializeBlock = (...args) => {
+        serializations += 1;
+        return serializeBlock(...args);
+      };
+      try {
+        ids.add(visit.admit(block).id);
+        for (let index = 0; index < 100; index += 1) {
+          visit.resetQueue();
+          assert.deepEqual(visit.progress().counts, NOTHING);
+          ids.add(visit.admit(block).id);
+          assert.deepEqual(visit.progress().counts, { ...NOTHING, pending: 1 });
+        }
+      } finally {
+        codec.serializeBlock = serializeBlock;
+      }
+      assert.equal(serializations, 1, `100 resets: ${serializations} serializations, ${ids.size} record ids`);
+      assert.equal(ids.size, 1);
+      assert.equal(visit.takeBatch().length, 1);
+      assert.deepEqual(visit.takeBatch(), []);
+    },
+  },
+  {
+    name: 'refreshes an unsent admission from changed prose and replacement page nodes',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { block, strong, link } = createReasoningFixture();
+      const first = visit.admit(block);
+      visit.resetQueue();
+      strong.childNodes[0].nodeValue = 'Updated reasoning models';
+      assert.equal(visit.admit(block).id, first.id);
+      visit.resetQueue();
+      const replacement = block.ownerDocument.createElement('a');
+      replacement.setAttribute('href', 'https://example.com/new-model');
+      replacement.appendChild(block.ownerDocument.createTextNode('GPT-6'));
+      block.insertBefore(replacement, link);
+      block.removeChild(link);
+      const originalNodes = [...block.childNodes];
+      const refreshed = visit.admit(block);
+      assert.equal(refreshed.id, first.id);
+      const batch = visit.takeBatch();
+      assert.match(batch[0].template, /Updated reasoning models/);
+      assert.equal(batch[0].atoms[0].label, 'GPT-6');
+      visit.settle(batch, answer(batch));
+      assert.deepEqual(visit.progress().counts, { ...NOTHING, translated: 1 });
+      visit.restore();
+      assert.equal(block.textContent, 'Updated reasoning models like GPT-6 use internal reasoning tokens.');
+      assert.deepEqual([...block.childNodes], originalNodes);
+      assert.equal(replacement.parentNode, block);
+      assert.equal(link.parentNode, null);
+    },
+  },
+  {
     name: 'exposes only allowlisted rejection metadata from unsupported page content',
     fn() {
       const visit = session.createInlineTranslationSession();
@@ -144,6 +206,30 @@ exports.tests = [
       assert.equal(JSON.stringify(visit.outbox).includes('private'), false);
     },
   },
+  ...[
+    ['root role', ({ block }) => block.setAttribute('role', 'button'), 'interactive_content', 'P'],
+    ['root visibility', ({ block }) => { block.hidden = true; }, 'hidden_content', 'P'],
+    ['descendant visibility', ({ strong }) => { strong.hidden = true; }, 'hidden_content', 'STRONG'],
+    ['ancestor editing', ({ document }) => document.body.setAttribute('contenteditable', 'true'), 'editable_content', 'P'],
+  ].map(([label, change, reason, tag]) => ({
+    name: `refuses a reusable admission after its ${label} classification changes`,
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const fixture = createReasoningFixture();
+      const first = visit.admit(fixture.block);
+      visit.resetQueue();
+      assert.equal(visit.admit(fixture.block).id, first.id);
+      visit.resetQueue();
+      change(fixture);
+      visit.admit(fixture.block);
+      assert.deepEqual(visit.takeBatch(), []);
+      assert.deepEqual(visit.progress().counts, { ...NOTHING, failed: 1 });
+      assert.deepEqual(visit.outbox, [{
+        code: 'runtime.unsupported_block', evidence: {}, localRejection: { reason, tag },
+      }]);
+    },
+  })),
   {
     name: 'admits a Semantic Block once across repeated scans',
     fn() {
