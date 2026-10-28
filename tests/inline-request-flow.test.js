@@ -105,6 +105,48 @@ exports.tests = [{
 }];
 
 exports.tests.push({
+  name: 'reuses viewport admissions through worker translation, cache, Stop and Original text',
+  async fn() {
+    const visit = createInlineTranslationSession();
+    visit.begin(SETTINGS);
+    const pending = createReasoningFixture();
+    const translated = createReasoningFixture();
+    const originalPending = [...pending.block.childNodes];
+    const originalTranslated = [...translated.block.childNodes];
+    const first = visit.admit(pending.block);
+    visit.resetQueue();
+    const worker = createWorker(records => records.map(record => ({
+      id: record.id,
+      template: record.template.replace('Reasoning models', '추론 모델')
+        .replace(' like ', ' 예: ').replace(' use internal reasoning tokens.', ' 내부 추론 토큰을 사용합니다.'),
+    })));
+    visit.admit(translated.block);
+    await translateBatch(visit, worker);
+    assert.equal(visit.admit(pending.block), null);
+    assert.deepEqual(visit.takeBatch(), []);
+    assert.equal(worker.requests.length, 1);
+    assert.deepEqual(visit.progress().counts, { translated: 2, partial: 0, pending: 0, changed: 0, failed: 0 });
+    visit.stop();
+    visit.begin(SETTINGS);
+    assert.equal(visit.admit(pending.block), null);
+    assert.deepEqual(visit.progress().counts, { translated: 2, partial: 0, pending: 0, changed: 0, failed: 0 });
+    visit.restore();
+    assert.deepEqual([...pending.block.childNodes], originalPending);
+    assert.deepEqual([...translated.block.childNodes], originalTranslated);
+    const uncached = createReasoningFixture();
+    uncached.strong.childNodes[0].nodeValue = 'New reasoning models';
+    visit.begin(SETTINGS);
+    const admitted = visit.admit(uncached.block);
+    visit.resetQueue();
+    assert.equal(visit.admit(uncached.block).id, admitted.id);
+    assert.notEqual(admitted.id, first.id);
+    visit.stop();
+    visit.begin(SETTINGS);
+    const restarted = visit.admit(uncached.block);
+    assert.notEqual(restarted.id, admitted.id);
+    assert.deepEqual(visit.progress().counts, { translated: 0, partial: 0, pending: 1, changed: 0, failed: 0 });
+  },
+}, {
   name: 'characterizes actual-cost worker admission separately from Session reservation',
   async fn() {
     const { document, element, text } = createTestDocument();
