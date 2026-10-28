@@ -16,6 +16,7 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | `npm run test:integration` | Toolbar-action Chrome check only | `agent-browser` on `PATH` and network; no API key or model |
 | `npm run test:integration:content-readiness` | Content readiness after toolbar injection and reinjection, plus all-pages automatic injection | `agent-browser` on `PATH`; opens a headed disposable Chrome for the optional all-sites permission request; no API key or model |
 | `npm run test:integration:<name>` | One dedicated unbilled Chrome check listed below | `agent-browser` and network; no API key or model |
+| `npm run test:integration:performance` | Long-DOM continuation and synchronous layout-read counts in a fixed 1280-by-900 Chrome viewport | `agent-browser`; local fixture, no credential or model request |
 | `npm run verify:live:inline` | Real Inline Translation, Stop, and Restore | Browser prerequisites plus an OpenAI key; billed |
 | `npm run verify:live:sidepanel` | Real Side Panel Translation and protected-span preservation | Browser prerequisites plus an OpenAI key; billed |
 | `npm run verify:live:openrouter:inline` | Real OpenRouter Inline Translation, structured output, Stop, restoration, request policy, and provider-reported reasoning usage | Browser prerequisites plus a named OpenRouter key; billed |
@@ -99,9 +100,11 @@ Other checks run only through their dedicated scripts:
 | `heading-permalink` | Local and reported advisor headings: edge controls, node identity, focus/click behavior, deterministic apply, exact restore |
 | `data-as-paragraph` | Local and advisor `span[data-as="p"]` paragraphs: repeated collection, preserved inline elements, exact restoration, and ownership changes |
 | `openrouter-inline` | Options service switching, selected credential/configuration, structured Inline output, same-service cache, cross-service cache separation, delayed uncached Stop, exact HTML and page-node restoration; synthetic keys and worker-wide interception, no real model calls |
-| `openrouter-sidepanel` | Options service/key persistence and independent clear, fixed-host permissions, pinned-model Side Panel entry and multi-chunk deterministic rendered output, strict request routing/policy; synthetic keys and worker-wide request interception, no real model calls |
+| `openrouter-sidepanel` | Options service/key persistence and independent clear, fixed-host permissions, pinned-model Side Panel entry and multi-chunk deterministic rendered output, strict request routing/policy, versioned progress and 60 acknowledged polls, tab closure during a delayed request; synthetic keys and worker-wide request interception, no real model calls |
 
 Reported-page checks navigate public pages read-only and use deterministic output where application is tested. They establish the local DOM paths stated above, not model quality or complete extension startup. Live-page block counts are observations rather than permanent assertions. Generic DIV/SPAN paragraph inference and other `data-as` values remain unsupported; headings with controls embedded within prose remain outside the edge-control contract.
+
+The [performance check](integration/performance.test.mjs) constructs 4,800 overlapping visible paragraphs in a disposable Chrome page so every paragraph participates in the same bounded scan. It counts admissions, scan callbacks, computed-style reads and element/range rectangle reads through the Viewport API. The count measurement uses a Session adapter that only records admission. A separate case uses the real Session, seeds one deterministic cache entry, applies it to 1,300 paragraphs through the real MutationObserver path and checks exact node restoration without a new request. Run the same check against another checkout with `npm run test:integration:performance -- --extension-dir /absolute/checkout/extension`. The comparison prints the browser version and uses a fixed viewport. The overlapping layout is synthetic; these operation counts establish neither realistic scrolling latency nor heap or model performance.
 
 ## Routing pilot preparation
 

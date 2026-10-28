@@ -47,6 +47,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [Performance improvement design interview](design/performance-improvements-2026-10-28.md) | Five improvements and confirmed scope, followed by separately authorized local implementation and measured operation counts on 2026-10-28 |
 | [Evaluation execution deepening design](design/evaluation-execution-deepening-2026-10-26.md) | Routing and model-quality execution responsibilities, preserved contracts and unbilled verification scope confirmed; implementation authorized on 2026-10-26 |
 | [Codebase simplification design](design/codebase-simplification-2026-10-26.md) | Five local simplifications, deferred documentation-anchor caching, scope and verification confirmed; implementation authorized on 2026-10-26 |
 | [UI polish accessibility design](design/ui-accessibility-polish-findings.md) | Language boundaries and keyboard access decisions; implementation authorized on 2026-10-26 |

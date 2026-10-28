@@ -108,13 +108,23 @@ async function main() {
 
   await ctx.page.navigate(`chrome-extension://${ctx.extension.id}/sidepanel.html`);
   await ctx.page.evaluate(`(() => {
-    globalThis.uiTestState = { status: 'done',
+    globalThis.uiTestState = { status: 'done', workerEpoch: 'ui-fixture', stateSequence: 1, bodyVersion: 1,
       extracted: { contentMarkdown: '<b>Bonjour.</b>', langHint: 'fr' },
       translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } };
     const send = chrome.runtime.sendMessage.bind(chrome.runtime);
     globalThis.uiStateReads = 0;
-    chrome.runtime.sendMessage = message => message.type === 'GET_STATE'
-      ? (globalThis.uiStateReads += 1, Promise.resolve({ ok: true, state: globalThis.uiTestState })) : send(message);
+    globalThis.uiOmittedReads = 0;
+    chrome.runtime.sendMessage = message => {
+      if (message.type !== 'GET_STATE') return send(message);
+      globalThis.uiStateReads += 1;
+      const state = { ...globalThis.uiTestState };
+      if (message.knownBody?.workerEpoch === state.workerEpoch &&
+          message.knownBody.bodyVersion === state.bodyVersion) {
+        delete state.extracted; delete state.translated;
+        globalThis.uiOmittedReads += 1;
+      }
+      return Promise.resolve({ ok: true, state });
+    };
     document.getElementById('targetLanguage').value = 'Japanese';
   })()`);
   assert.ok(await until(() => ctx.page.evaluate(`document.getElementById('translated').textContent === '안녕하세요.'`), 10000));
@@ -158,6 +168,14 @@ async function main() {
     focus: getSelection().focusNode === globalThis.uiSelectedNode,
   })`), { original: true, translated: true, selected: '안녕', anchor: true, focus: true });
   console.log('PASS UI polish - repeated panel polling preserves text nodes and selection');
+  assert.ok(await ctx.page.evaluate('uiOmittedReads > 0'), 'Unchanged polls acknowledge and omit owned bodies');
+  await ctx.page.evaluate("document.getElementById('translated').textContent = 'external change'");
+  assert.ok(await until(() => ctx.page.evaluate(`document.getElementById('translated').textContent ===
+    'Original\\n\\n<b>Bonjour.</b>\\n\\nTranslation\\n\\n안녕하세요.'`), 5000, 100));
+  assert.deepEqual(await ctx.page.evaluate(`({ source: document.getElementById('original').lang,
+    translated: document.querySelector('#translated [lang="ko"]')?.textContent })`),
+    { source: 'fr', translated: '안녕하세요.' });
+  console.log('PASS UI polish - omitted bodies retain bilingual rendering and repair externally changed DOM');
   for (const width of [240, 320, 460, 768]) {
     await resize(width);
     assert.equal(await ctx.page.evaluate(`(() => {

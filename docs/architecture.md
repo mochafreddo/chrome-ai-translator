@@ -76,6 +76,10 @@ Late responses still settle against their originating Session. Reported repairs 
 
 ### Cache and page changes
 
+An ordinary queued record that has never been sent can leave and reenter the viewport queue within the same Operation. If its original ownership and supported classification still match, Session reuses its record and serialized payload. Changed source is serialized again into that eligible record. Sent records and page-change retries keep their separate identities and history.
+
+Viewport retains the remaining traversal stack between bounded scans. Scroll, resize and observed DOM changes discard that position. Each synchronous scan shares its style and element-rectangle reads, collects candidates before admission can apply cached translations, then invalidates its remaining position if those applications changed the DOM. The existing node limit, debounce and viewport margin remain unchanged.
+
 Session cache buckets distinguish service, target language, tone, effective model, and reasoning effort. Existing settings without a service select OpenAI. An active Operation retains its starting service and effective settings in its batch snapshot when Options later changes. OpenRouter derives its pinned model and disabled reasoning before cache identity is computed, so stored OpenAI model and reasoning edits do not split that cache. Keys are excluded from cache identity. Entries also require compatible codec, serialized template, and protected context; cache application still checks the current DOM. Cached repair metadata is retained as result history, not charged again. Cache hits send no request and spend no Session Budget.
 
 If the page changes a queued block's text or replaces owned nodes, a returned translation cannot overwrite it. One page-change retry can reserialize eligible current content; the earlier record is excluded from unresolved Changed counts while its retry is pending. Viewport resets preserve a queued retry. Stop discards queued or in-flight retry ownership and exposes the unresolved change again. Page-change retry and model-output repair have separate limits; the original [retry design](design/inline-changed-text-retry-design.md) records the rationale, while Session owns today's transitions.
@@ -102,6 +106,14 @@ Programmatic injection confirms a valid `GET_INLINE_TRANSLATION_STATE` response 
 
 Inline Translation Authorization is separate from Chrome page access and checked before a new start; its lifetime is owned by Operation. An already-active Operation remains authorized after the initial grant expires, and an active Start only rescans. Side Panel Translation does not require that additional Inline authorization. Neither flow can use page access on restricted browser pages.
 
+## Panel state and tab lifetime
+
+Side Panel state carries a worker epoch, an ordered state sequence and a separate body version. Progress-only notifications omit unchanged `extracted` and `translated` fields. The panel recovers a missing body immediately, merges a useful older body without rolling back newer progress, and confirms an unfamiliar notification epoch through a current worker query. Tab visits and new translation actions invalidate previous body ownership and pending display work.
+
+An ordinary state query can acknowledge `{ workerEpoch, bodyVersion }` only after the panel has received both body fields, including explicit null values. The worker omits the fields only for that matching acknowledgement. The panel still renders accepted polling responses from its retained body, preserving language and view changes and repairing externally changed output DOM. One-second polling and independent Inline state responses remain in place. Worker restart discards in-memory results.
+
+Tab removal drops the worker's retained state and active translation, control and invocation identities. Late continuations cannot publish or recreate that tab's state; delayed shortcut selection also validates the tab before invocation. An already started document execution retains its existing request and settlement policy, and other tabs retain their results and active work. These lifecycle guards do not measure heap reclamation.
+
 ## Limits and accounting
 
 These values explain visible limits and billing-related behavior. Linked source files own the current constants; serialized record cost, reserved request cost, page characters, and model tokens are different units.
@@ -125,6 +137,8 @@ Repairs without context still use an approximation rather than the worker's exac
 The Session Budget belongs only to the content-script Session. Worker source admission uses actual record cost, while Session batch admission uses reserved cost; these existing rules remain distinct. The worker does not reconstruct a page visit or independently enforce Session's reservation. Diagnostic payload limits are independent and must not be merged with translation accounting ([ADR-0003](adr/0003-leave-the-semantic-block-session-cap-to-the-content-script.md)).
 
 ## Diagnostics and privacy
+
+Batch persistence enumerates storage keys with `getKeys()` when that API exists and reads only both namespace indexes and the current run's v2/v3 records. The key list still discovers orphan and legacy records for cleanup after a successful retained write. A missing API keeps the full `get(null)` path; an API failure uses the existing persistence-failure result without a full-read retry. Options loading and export retain their existing read path.
 
 Diagnostics describe Inline Translation only. Current physical writes and exports use schema 3; readers project retained schema-2 runs into that shape. Summary block counts are separate from `modelRequestAttempts`: a settled local-only run has zero model calls, while legacy or interrupted runs without a provable count use `null`. A diagnostics run is a batch-level record, not a page Session or an Operation.
 

@@ -159,6 +159,19 @@ async function main() {
     hasEffectiveModelSettings: typeof ChromeAiTranslatorDefaultModel.getEffectiveModelSettings === 'function'
   })`)));
   if (FLOW === 'sidepanel') {
+    const articleTarget = await ctx.findTarget(target => target.type === 'page' && target.url === fixture.url);
+    const article = await ctx.attach(articleTarget.id);
+    await ctx.cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1280, height: 900, deviceScaleFactor: 1, mobile: false,
+    }, article.sessionId);
+    await options.evaluate(`globalThis.bodyTelemetry = [];
+      chrome.runtime.onMessage.addListener(message => {
+        if (message.type === 'STATE_UPDATED' && message.tabId === ${tabId}) {
+          bodyTelemetry.push({ status: message.state.status,
+            originalChars: message.state.extracted?.contentMarkdown?.length || 0,
+            translatedChars: message.state.translated?.length || 0 });
+        }
+      });`);
     await panel.evaluate("document.getElementById('btnTranslate').click()");
     const done = await until(() => panel.evaluate("document.getElementById('status').textContent === 'Done'"), 15000, 100);
     if (!done || requests.length < 2) console.log('  translation readiness:', JSON.stringify({ requests: requests.length,
@@ -177,6 +190,43 @@ async function main() {
       request.body.model === 'deepseek/deepseek-v4.1-flash-1017' && request.body.reasoning?.effort === 'none' &&
       request.body.provider?.require_parameters === true && request.body.provider?.data_collection === 'deny' &&
       request.body.provider?.zdr === true && request.body.store === false));
+    const transfer = await options.evaluate(`(async () => {
+      const full = (await chrome.runtime.sendMessage({ type: 'GET_STATE', tabId: ${tabId} })).state;
+      let pollBodyChars = 0, omitted = 0;
+      for (let index = 0; index < 60; index++) {
+        const reply = (await chrome.runtime.sendMessage({ type: 'GET_STATE', tabId: ${tabId},
+          knownBody: { workerEpoch: full.workerEpoch, bodyVersion: full.bodyVersion } })).state;
+        pollBodyChars += (reply.extracted?.contentMarkdown?.length || 0) + (reply.translated?.length || 0);
+        if (!Object.hasOwn(reply, 'extracted') && !Object.hasOwn(reply, 'translated')) omitted++;
+      }
+      return { originalChars: full.extracted?.contentMarkdown?.length || 0,
+        translatedChars: full.translated?.length || 0, polls: 60, pollBodyChars, omitted,
+        progress: bodyTelemetry.filter(update => update.status === 'translating') };
+    })()`);
+    console.log('  body transfer:', JSON.stringify({ browser: ctx.browserVersion, viewport: [1280, 900], ...transfer }));
+    check('progress notifications transfer the source body only once', transfer.originalChars > 0 &&
+      transfer.progress.length > 1 && transfer.progress[0].originalChars === transfer.originalChars &&
+      transfer.progress.slice(1).every(update => update.originalChars === 0 && update.translatedChars === 0));
+    check('acknowledged unchanged polls omit retained bodies', transfer.omitted === 60 && transfer.pollBodyChars === 0);
+    await options.evaluate(`globalThis.closedTabUpdates = [];
+      chrome.runtime.onMessage.addListener(message => {
+        if (message.type === 'STATE_UPDATED' && message.tabId === ${tabId}) closedTabUpdates.push(message.state);
+      });`);
+    hold = true;
+    await panel.evaluate("document.getElementById('btnTranslate').click()");
+    if (!check('a second Side Panel request is pending before tab closure',
+      await until(() => held.length > 0, 5000, 100))) return;
+    await options.evaluate(`chrome.tabs.remove(${tabId})`);
+    const closedState = () => options.evaluate(`chrome.runtime.sendMessage({ type: 'GET_STATE', tabId: ${tabId} })`);
+    const absent = response => response?.ok && response.state?.status === 'idle' &&
+      !response.state.extracted && !response.state.translated;
+    check('tab closure releases retained Side Panel bodies', await until(async () => absent(await closedState()), 5000, 100));
+    const updatesAtClose = await options.evaluate('closedTabUpdates.length');
+    hold = false;
+    for (const fulfill of held.splice(0)) await fulfill();
+    await wait(800);
+    check('late model completion cannot restore or broadcast closed-tab state',
+      absent(await closedState()) && await options.evaluate('closedTabUpdates.length') === updatesAtClose);
   } else {
     const pageTarget = await ctx.findTarget(target => target.type === 'page' && target.url === fixture.url);
     const page = await ctx.attach(pageTarget.id);
