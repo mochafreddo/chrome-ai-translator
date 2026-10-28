@@ -261,7 +261,20 @@
       return /^hmac-sha256:[A-Za-z0-9_-]{43}$/.test(value || '');
     }
 
-    function getRunWrite(stored, run) {
+    async function readRunStorage(storage, run) {
+      if (typeof storage.getKeys !== 'function') {
+        const stored = await storage.get(null);
+        return { stored, keys: Object.keys(stored) };
+      }
+      const keys = await storage.getKeys();
+      const runId = String(run.runId || '');
+      const stored = await storage.get([
+        INDEX_KEY, V2_INDEX_KEY, `${RUN_PREFIX}${runId}`, `${V2_RUN_PREFIX}${runId}`,
+      ]);
+      return { stored, keys };
+    }
+
+    function getRunWrite(stored, run, keys) {
       const runId = String(run.runId || '');
       const previousV3 = Array.isArray(stored[INDEX_KEY]) ? stored[INDEX_KEY] : [];
       const previousV2 = Array.isArray(stored[V2_INDEX_KEY]) ? stored[V2_INDEX_KEY] : [];
@@ -278,7 +291,7 @@
       const keptSet = new Set(kept);
       const v3Ids = v3Uncapped.filter((id) => keptSet.has(id));
       const v2Ids = v2Uncapped.filter((id) => keptSet.has(id));
-      const removal = Object.keys(stored).filter((key) =>
+      const removal = keys.filter((key) =>
         key === 'inlineTranslationLogs' ||
         key.startsWith('inlineTranslationLogs:') ||
         (key.startsWith(RUN_PREFIX) && !keptSet.has(key.slice(RUN_PREFIX.length))) ||
@@ -308,8 +321,8 @@
     async function persistRun(chromeApi, run) {
       return serializeStorageMutation(async () => {
         const storage = chromeApi.storage.local;
-        const stored = await storage.get(null);
-        await writeRun(storage, getRunWrite(stored, run));
+        const { stored, keys } = await readRunStorage(storage, run);
+        await writeRun(storage, getRunWrite(stored, run, keys));
         return { persisted: true };
       }, { persisted: false });
     }
@@ -317,8 +330,8 @@
     async function persistRunIdempotent(chromeApi, run) {
       return serializeStorageMutation(async () => {
         const storage = chromeApi.storage.local;
-        const stored = await storage.get(null);
-        const write = getRunWrite(stored, run);
+        const { stored, keys } = await readRunStorage(storage, run);
+        const write = getRunWrite(stored, run, keys);
         const existingRecords = [
           stored[write.runKey],
           stored[`${V2_RUN_PREFIX}${write.runId}`],
