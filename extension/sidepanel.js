@@ -324,9 +324,13 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     }
   }
 
-  async function refreshState(requestedSelection, requestedControl = null) {
+  async function refreshState(requestedSelection, requestedControl = null, requireBody = false) {
     const request = stateRequest = {};
-    const response = await sendMessage({ type: 'GET_STATE', tabId });
+    const response = await sendMessage({ type: 'GET_STATE', tabId,
+      ...(hasBody && !requireBody ? { knownBody: {
+        workerEpoch: state.workerEpoch, bodyVersion: state.bodyVersion,
+      } } : {}),
+    });
     if (selection !== requestedSelection ||
       (requestedControl && inlineControl !== requestedControl) || !response?.ok) return;
     acceptState(response.state, stateRequest === request);
@@ -337,7 +341,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     if (bodyRecovery?.epoch === epoch && bodyRecovery.version === version) return;
     const recovery = bodyRecovery = { epoch, version };
     const requestedSelection = selection;
-    refreshState(requestedSelection).catch(() => {}).finally(() => {
+    refreshState(requestedSelection, null, true).catch(() => {}).finally(() => {
       if (bodyRecovery !== recovery || selection !== requestedSelection) return;
       bodyRecovery = null;
       if (!hasBody && state.workerEpoch === epoch && state.bodyVersion !== version) {

@@ -332,6 +332,108 @@ function modulePanel() {
 }
 
 exports.tests.push({
+  name: 'polls without acknowledgement while the required body is still being recovered',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const body = deferred();
+    panel.setSend(msg => msg.type === 'GET_STATE' ? body.promise : response(msg.type, 'independent'));
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1, state: {
+      workerEpoch: 'worker-fixture', stateSequence: 2, bodyVersion: 2,
+      status: 'translating', progress: { current: 1, total: 3 },
+    } });
+    const refresh = panel.controller.refresh();
+    await settle();
+    assert.equal(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody, undefined);
+    body.resolve({ ok: true, state: wireState({ status: 'translating',
+      extracted: { contentMarkdown: 'new source' } }, 2) });
+    await refresh;
+    assert.equal(panel.display().state.extracted.contentMarkdown, 'new source');
+  },
+}, {
+  name: 'actual omitted polling preserves language and view changes and repairs page-owned panel DOM',
+  async fn() {
+    const panel = domPanel();
+    await settle();
+    const current = wireState({ status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
+      translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } }, 2);
+    let bodyChars = 0;
+    panel.setSend(msg => {
+      if (msg.type !== 'GET_STATE') return response(msg.type, 'independent');
+      const outgoing = { ...current };
+      if (msg.knownBody?.workerEpoch === current.workerEpoch && msg.knownBody.bodyVersion === current.bodyVersion) {
+        delete outgoing.extracted;
+        delete outgoing.translated;
+      }
+      bodyChars += (outgoing.extracted?.contentMarkdown?.length || 0) + (outgoing.translated?.length || 0);
+      return { ok: true, state: outgoing };
+    });
+    panel.poll();
+    await settle();
+    assert.equal(panel.element('translated').textContent, '안녕하세요.');
+    bodyChars = 0;
+    for (const view of ['bilingual', 'translation']) {
+      panel.element('viewMode').value = view;
+      panel.poll();
+      await settle();
+      assert.equal(panel.element('original').textContent, 'Bonjour.');
+      assert.equal(panel.element('original').lang, 'fr');
+      assert.equal(panel.element('translated').lang, view === 'bilingual' ? '' : 'ko');
+      if (view === 'bilingual') assert.match(panel.element('translated').textContent, /Bonjour\./);
+      panel.element('original').textContent = 'external change';
+      panel.element('translated').textContent = 'external change';
+      panel.poll();
+      await settle();
+      assert.equal(panel.element('original').textContent, 'Bonjour.');
+      assert.match(panel.element('translated').textContent, /안녕하세요\./);
+    }
+    assert.equal(bodyChars, 0);
+    assert.equal(panel.element('inlineStatus').textContent, 'inline independent');
+  },
+}, {
+  name: 'body recovery and new visits omit acknowledgement while an owned null body is acknowledged',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    panel.setSend(msg => msg.type === 'GET_STATE'
+      ? { ok: true, state: wireState({ status: 'idle' }, 0, 0, 'worker-new') }
+      : response(msg.type, 'independent'));
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
+      state: { workerEpoch: 'worker-new', stateSequence: 0, bodyVersion: 0, status: 'idle' } });
+    await settle();
+    assert.equal(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody, undefined);
+    await panel.controller.refresh();
+    assert.deepEqual(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody,
+      { workerEpoch: 'worker-new', bodyVersion: 0 });
+    for (const tab of [2, 1]) {
+      await panel.activate(tab);
+      assert.equal(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody, undefined);
+    }
+    const reopened = modulePanel();
+    await reopened.controller.start(10);
+    assert.equal(reopened.sent.find(msg => msg.type === 'GET_STATE').knownBody, undefined);
+  },
+}, {
+  name: 'acknowledges only an owned body and retains it through omitted polling responses',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    assert.equal(panel.sent.find(msg => msg.type === 'GET_STATE').knownBody, undefined);
+    panel.setSend(msg => {
+      if (msg.type !== 'GET_STATE') return response(msg.type, 'independent');
+      return { ok: true, state: { workerEpoch: 'worker-fixture', stateSequence: 2, bodyVersion: 1,
+        status: 'translating', progress: { current: 2, total: 3 } } };
+    });
+    await panel.controller.refresh();
+    assert.deepEqual(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody,
+      { workerEpoch: 'worker-fixture', bodyVersion: 1 });
+    assert.equal(panel.display().state.status, 'translating');
+    assert.equal(panel.display().state.extracted.contentMarkdown, 'original 1');
+    assert.equal(panel.display().state.translated, 'translated 1');
+    assert.equal(panel.display().state.progress.current, 2);
+    assert.equal(panel.display().inline.snapshot.progress, 'inline independent');
+  },
+}, {
   name: 'actual panel immediately recovers omitted article text while retaining newer progress',
   async fn() {
     const panel = domPanel();
@@ -1113,7 +1215,8 @@ exports.tests.push(...['control', 'translate'].map((action) => ({
         pending.resolve({ ok: true, skipped: true });
         await settle();
         assert.deepEqual(panel.sent.slice(before), [
-          { type: 'GET_STATE', tabId: 1 },
+          { type: 'GET_STATE', tabId: 1, ...(action === 'control'
+            ? { knownBody: { workerEpoch: 'worker-fixture', bodyVersion: 1 } } : {}) },
           { type: 'GET_INLINE_TRANSLATION_STATE', tabId: 1 },
         ]);
       }
