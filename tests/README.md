@@ -90,6 +90,7 @@ Other checks run only through their dedicated scripts:
 | Script suffix after `test:integration:` | Scope |
 | --- | --- |
 | `ui` | Options service switching and responsive form layout; diagnostic name, keyboard focus/scrolling and asynchronous load focus; long errors; Side Panel snapshot language boundaries and safe bilingual text through synthetic browser-message responses, keyboard tabs; Floating Translate Button sizing and typography; disposable Chrome, no API key or model calls |
+| `inline-consent` | Real pointer clicks on host- or ancestor-concealed floating controls cannot start model requests; the panel button still starts and applies intercepted mock translation; disposable Chrome, synthetic key, no billed calls |
 | `disclosure-summary` | Local standard and renderer-wrapped disclosures: collection, apply, placement, disclosure behavior, exact restore |
 | `ai-hero-disclosure` | Reported AI Hero disclosure: deterministic apply and restore |
 | `ai-hero-grill-with-docs` | Reported skill page: visible-block preflight and repository-coordinate Source Syntax |

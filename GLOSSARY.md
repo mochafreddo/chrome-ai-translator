@@ -57,7 +57,7 @@ A runaway guard on cumulative serialized Semantic Block record cost within one I
 _Avoid_: character limit, quota, spending limit, budget cap
 
 **Floating Translate Button**:
-The extension-owned control at the page's bottom-right corner, providing Inline Translation start, stop, and restore actions. Progress and errors appear in the Inline Translation Section.
+The extension-owned control at the page's bottom-right corner, opening the Inline Translation Section and providing stop and restore actions. Translation starts in the section or through the Inline Translation Shortcut.
 _Avoid_: FAB, inline button, page button, widget
 
 **Inline Translation Section**:

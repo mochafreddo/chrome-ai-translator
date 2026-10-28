@@ -357,7 +357,7 @@ exports.tests = [
       assert.equal(snapshot.targetLanguage, 'Japanese');
       assert.equal(
         helpers.getInlineTranslatorUiModel(state).translateText,
-        'Page in Japanese'
+        'Open controls for Japanese'
       );
     },
   },
@@ -411,7 +411,7 @@ exports.tests = [
       assert.deepEqual(messages, [{ type: 'GET_SETTINGS' }]);
       assert.equal(
         helpers.getInlineTranslatorUiModel(state).translateText,
-        'Page in Japanese'
+        'Open controls for Japanese'
       );
     },
   },
@@ -447,7 +447,7 @@ exports.tests = [
       assert.equal(state.menuOpen, true);
       assert.equal(updates.length, 1);
       assert.equal(updates[0].menuOpen, true);
-      assert.equal(updates[0].translateText, 'Page in Korean');
+      assert.equal(updates[0].translateText, 'Open controls for Korean');
 
       resolveSettings({
         ok: true,
@@ -461,7 +461,7 @@ exports.tests = [
       await toggle;
 
       assert.equal(updates.length, 2);
-      assert.equal(updates[1].translateText, 'Page in Japanese');
+      assert.equal(updates[1].translateText, 'Open controls for Japanese');
     },
   },
 ];
@@ -497,7 +497,7 @@ exports.tests.push(
     },
   })),
   {
-    name: 'both control locations share trusted controls, display settings and hide/remount work',
+    name: 'floating start opens controls while panel instructions start translation',
     async fn() {
       const f = createOperationFixture();
       const page = createContentPage(f);
@@ -508,6 +508,15 @@ exports.tests.push(
       await flushMicrotasks();
       assert.equal(f.pending.length, 0);
       page.button('translate').click();
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 0);
+      assert.deepEqual(f.messages.filter(message => message.type === 'OPEN_INLINE_TRANSLATION_CONTROLS').map(message => ({ ...message })),
+        [{ type: 'OPEN_INLINE_TRANSLATION_CONTROLS' }]);
+      page.instruct('startInlineTranslation');
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 0);
+      page.instruct('grantInlineTranslationAuthorization');
+      page.instruct('startInlineTranslation');
       await flushMicrotasks();
       assert.equal(f.pending.length, 1);
       assert.deepEqual(Object.keys(page.snapshot()).sort(), ['error', 'progress', 'status']);
@@ -530,10 +539,40 @@ exports.tests.push(
       assert.equal(f.pending.length, 2);
       assert.equal(f.pending[1].message.settingsSnapshot.targetLanguage, 'Japanese');
       page.button('restore').click();
-      assert.equal(page.button('translate').textContent, 'Page in Japanese');
+      assert.equal(page.button('translate').textContent, 'Open controls for Japanese');
       page.instruct('stopInlineTranslation');
     },
   },
+  ...['authorized', 'active', 'stopped', 'restored'].map(status => ({
+    name: `floating start only opens controls with ${status} operation`,
+    async fn() {
+      const f = createOperationFixture();
+      const page = createContentPage(f);
+      page.inject();
+      page.instruct('mountFloatingTranslateButton');
+      page.instruct('grantInlineTranslationAuthorization');
+      if (status !== 'authorized') {
+        page.instruct('startInlineTranslation');
+        await flushMicrotasks();
+        await f.settle();
+      }
+      if (status === 'stopped') page.instruct('stopInlineTranslation');
+      if (status === 'restored') page.instruct('restoreInlineOriginal');
+      f.document.body.appendChild(f.paragraph(300));
+      const before = f.pending.length;
+      const messages = f.messages.length;
+      const snapshot = page.snapshot();
+      page.button('translate').click(false);
+      await flushMicrotasks();
+      assert.equal(f.messages.length, messages);
+      page.button('translate').click();
+      await flushMicrotasks();
+      assert.deepEqual(f.messages.slice(messages).map(message => ({ ...message })),
+        [{ type: 'OPEN_INLINE_TRANSLATION_CONTROLS' }]);
+      assert.equal(f.pending.length, before);
+      assert.deepEqual(page.snapshot(), snapshot);
+    },
+  })),
   {
     name: 'menu refresh changes displayed language without changing active requests',
     async fn() {
@@ -554,7 +593,7 @@ exports.tests.push(
       assert.equal(f.pending.length, 2);
       assert.equal(f.pending[1].message.settingsSnapshot.targetLanguage, 'Korean');
       page.button('restore').click();
-      assert.equal(page.button('translate').textContent, 'Page in Japanese');
+      assert.equal(page.button('translate').textContent, 'Open controls for Japanese');
     },
   },
   {

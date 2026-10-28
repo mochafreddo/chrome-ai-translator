@@ -764,6 +764,14 @@ function createBackgroundWorker(platform = {}) {
   function onMessage(msg, sender, sendResponse) {
     (async () => {
       try {
+        if (msg?.type === 'OPEN_INLINE_TRANSLATION_CONTROLS') {
+          if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0) {
+            throw new Error('Inline controls require a top-level page sender.');
+          }
+          await getChrome().sidePanel.open({ tabId: sender.tab.id });
+          sendResponse({ ok: true });
+          return;
+        }
         if (msg?.type === 'GET_STATE') {
           const tabId = msg.tabId;
           sendResponse({

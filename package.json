@@ -7,6 +7,7 @@
     "test": "node tests/run.js",
     "test:integration": "node tests/integration/action-click.test.mjs",
     "test:integration:ui": "node tests/integration/ui-polish.test.mjs",
+    "test:integration:inline-consent": "node tests/integration/inline-consent.test.mjs",
     "test:integration:routing-pilot": "node tests/integration/routing-pilot.mock.mjs",
     "test:integration:model-quality": "node tests/integration/model-quality.mock.mjs",
     "verify:live:model-quality": "node tests/integration/model-quality.live.mjs",

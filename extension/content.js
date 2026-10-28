@@ -37,10 +37,8 @@ var createInlineTranslationSettingsSnapshot = inlineTranslationSession.createSet
 // that injecting this script and granting Inline Translation Authorization can happen
 // without the button being mounted.
 //
-// Inline Translation has two homes — the Floating Translate Button and the Inline
-// Translation Section in the side panel — and the section reaches this script the same way
-// the worker does. So the three controls are instructions too, and each has one
-// implementation here whatever pressed it.
+// The section starts translation through worker instructions. The page-owned floating
+// control opens that section for confirmation; Stop and Original text remain local.
 function getDefaultInlineInstructionHandlers(state = inlineState) {
   return {
     grantInlineTranslationAuthorization: () => state.operation.authorize(),
@@ -159,9 +157,6 @@ function getInlineTranslatorUiModel(
   const targetLanguage =
     settings?.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage;
   const menuOpen = Boolean(state?.menuOpen);
-  // Which controls are on offer is the shared rule; only the labels are this home's own.
-  // Start is not among the rules — it stays pressable in every status, and reads as a
-  // rescan once a run is live.
   const { isActive, canStop, canRestore } =
     inlineTranslationControls.getInlineTranslationControlAvailability(status);
 
@@ -172,7 +167,7 @@ function getInlineTranslatorUiModel(
       ? 'Stopped'
       : 'Translate',
     menuOpen,
-    translateText: isActive ? 'Scan visible text' : `Page in ${targetLanguage}`,
+    translateText: isActive ? 'Open translation controls' : `Open controls for ${targetLanguage}`,
     stopDisabled: !canStop,
     restoreDisabled: !canRestore,
     expanded: String(menuOpen),
@@ -192,12 +187,6 @@ async function toggleInlineTranslatorMenu(
   } catch {}
   renderUi?.();
   return state.menuOpen;
-}
-
-function authorizeInlineTranslationFromUiEvent(event, state = inlineState) {
-  if (!isTrustedInlineUiEvent(event)) return false;
-  state.operation.authorize();
-  return true;
 }
 
 function pickArticleRoot() {
@@ -327,7 +316,7 @@ function ensureInlineTranslatorUi(state = inlineState) {
     <div data-role="container">
       <button type="button" data-role="toggle" aria-expanded="false">Translate</button>
       <div data-role="menu" hidden>
-        <button type="button" data-action="translate">Page in Korean</button>
+        <button type="button" data-action="translate">Open translation controls</button>
         <button type="button" data-action="stop">Stop</button>
         <button type="button" data-action="restore">Original text</button>
         <button type="button" data-action="close">Hide this button</button>
@@ -344,8 +333,8 @@ function ensureInlineTranslatorUi(state = inlineState) {
   inlineUiRoot
     .querySelector('[data-action="translate"]')
     .addEventListener('click', (event) => {
-      if (!authorizeInlineTranslationFromUiEvent(event, state)) return;
-      state.operation.start();
+      if (!isTrustedInlineUiEvent(event)) return;
+      chrome.runtime.sendMessage({ type: 'OPEN_INLINE_TRANSLATION_CONTROLS' }).catch(() => {});
     });
   inlineUiRoot
     .querySelector('[data-action="stop"]')
@@ -484,7 +473,6 @@ if (typeof module !== 'undefined' && module.exports) {
     isCodeLikeInlineText: inlineBlockCodec.isCodeLikeInlineText,
     buildArticleExtraction,
     isTrustedInlineUiEvent,
-    authorizeInlineTranslationFromUiEvent,
     getInlineShadowMode,
     getInlineHostStyleText,
     getDefaultInlineInstructionHandlers,

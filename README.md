@@ -48,7 +48,7 @@ You can change target language and tone for the current translation, and choose 
 
 ## Translate on the page
 
-Use the side panel's **Inline translation** section, the floating button, or the shortcut:
+Use the side panel's **Inline translation** section or the shortcut. The floating menu's **Open controls** action opens the side panel; choose **Translate visible text** there to start. A page can hide or move its own floating controls, so a floating click does not authorize or start translation.
 
 1. Choose **Translate visible text** to start. Newly visible article blocks translate as you scroll.
 2. Choose **Scan visible text** while active to rescan the current viewport.
@@ -58,7 +58,7 @@ Use the side panel's **Inline translation** section, the floating button, or the
 
 An active Operation keeps its starting service and effective settings, including when you rescan. A later Start after Stop or Original text reads Options again. Changing the service, effective model or reasoning effort, target language, or tone separates cached translations and restores safely owned prior translations before new work. Changing only a key preserves the matching cache.
 
-The floating menu offers the same start, stop, and restore actions; its start label reflects the target language. Progress and errors appear in the side panel's Inline Translation section regardless of where translation starts.
+The floating menu opens translation controls and offers Stop and Original text directly. Progress and errors appear in the side panel's Inline Translation section.
 
 | Status | Meaning |
 | --- | --- |

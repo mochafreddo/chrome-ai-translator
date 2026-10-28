@@ -3298,3 +3298,35 @@ exports.tests.push({
     assert.deepEqual(repair.records.map(record => record.id), ['b1']);
   },
 });
+
+exports.tests.push({
+  name: 'floating controls open only the sender tab panel without settings or instructions',
+  async fn() {
+    const calls = [];
+    const worker = helpers.createBackgroundWorker({ chrome: { sidePanel: {
+      open(options) { calls.push(options); return Promise.resolve(); },
+    } } });
+    const response = await new Promise(resolve => worker.handlers.onMessage(
+      { type: 'OPEN_INLINE_TRANSLATION_CONTROLS', tabId: 99 },
+      { tab: { id: 7 }, frameId: 0 }, resolve));
+    assert.deepEqual(response, { ok: true });
+    assert.deepEqual(calls, [{ tabId: 7 }]);
+    for (const sender of [{}, { tab: { id: 7 }, frameId: 1 }, { tab: { id: '7' }, frameId: 0 }]) {
+      const rejected = await new Promise(resolve => worker.handlers.onMessage(
+        { type: 'OPEN_INLINE_TRANSLATION_CONTROLS', tabId: 99 }, sender, resolve));
+      assert.equal(rejected.ok, false);
+    }
+    assert.equal(calls.length, 1);
+  },
+}, {
+  name: 'floating panel opening preserves browser failure without starting translation',
+  async fn() {
+    const worker = helpers.createBackgroundWorker({ chrome: { sidePanel: {
+      open() { return Promise.reject(new Error('Panel opening refused')); },
+    } } });
+    const response = await new Promise(resolve => worker.handlers.onMessage(
+      { type: 'OPEN_INLINE_TRANSLATION_CONTROLS' }, { tab: { id: 7 }, frameId: 0 }, resolve));
+    assert.equal(response.ok, false);
+    assert.equal(response.error.message, 'Panel opening refused');
+  },
+});
