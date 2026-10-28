@@ -68,6 +68,7 @@ Use deterministic request adapters, fake Chrome interfaces, and local DOM fixtur
 | `inline-diagnostics-controller` | Run lifecycle, local/runtime outcomes, persistence failures, retention, and finalization |
 | `inline-model-execution` | Request construction, output validation, repair, dispositions, and diagnostic metadata |
 | `sidepanel-translation-execution` | Extraction validation, chunking, one shared recovery, progress, and whole-document publication |
+| `settings-lifecycle` | Reads during pending saves, partial-save and key-removal ordering, failure recovery, and Button Visibility registration and permission races through the lifecycle interface |
 | Content/worker/panel/options checks | Browser-message adapters, controls, state rendering, reinjection, request counts, and classic-script loading |
 
 Probe Session Budget behavior through admission of real paragraphs and subsequent requests rather than reading an internal counter. The Session reconstruction is a synthetic approximation of the page measured in [ADR-0007](../docs/adr/0007-charge-the-session-budget-in-actual-record-cost.md), not live-page validation. The [issue #70 report](../docs/qa/issue-70-session-checks.md) retains its interface checks and mutation evidence.

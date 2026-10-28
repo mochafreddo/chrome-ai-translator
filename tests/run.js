@@ -22,6 +22,7 @@ const suiteFiles = [
   'inline-viewport',
   'inline-viewport.regression-1',
   'background-helpers',
+  'settings-lifecycle',
   'options-helpers',
   'sidepanel-failure',
   'sidepanel-helpers',

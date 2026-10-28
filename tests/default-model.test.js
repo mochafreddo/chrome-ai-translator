@@ -21,11 +21,18 @@ exports.name = 'default model';
 exports.tests = [
   {
     name: 'agrees with the settings the worker stores when the reader has chosen none',
-    fn() {
+    async fn() {
       // The point of the shared value: changing it there has to change what the extension
       // actually defaults to, not merely what one more copy of the string says.
+      const worker = background.createBackgroundWorker({
+        chrome: { storage: { local: { async get() { return {}; } } } },
+      });
+      const response = await new Promise((resolve) =>
+        worker.handlers.onMessage({ type: 'GET_SETTINGS' }, {}, resolve)
+      );
+      assert.equal(response.ok, true);
       assert.equal(
-        background.mergeSettingsWithExisting({}, {}).model,
+        response.settings.model,
         DEFAULT_MODEL
       );
     },

@@ -47,7 +47,8 @@ Every extension file is a classic script; there is no bundler or build step. The
 
 | Owner | Responsibility |
 | --- | --- |
-| [background.js](../extension/background.js) | Browser events, message routing, settings, per-tab state, Responses requests, and execution adapters |
+| [background.js](../extension/background.js) | Browser events, message routing, settings adapters, per-tab state, Responses requests, and execution adapters |
+| [settings-lifecycle.js](../extension/settings-lifecycle.js) | Settings reads, ordered saves and key removal, normalization, and Button Visibility registration and access reconciliation |
 | [worker-invocation.js](../extension/worker-invocation.js) | Toolbar and shortcut preparation, page-load instructions, panel opening, content readiness, instruction transport, and invocation error handling |
 | [content.js](../extension/content.js) | Article selection and extraction, floating UI, page instruction handler, persistent page state, and browser adapters |
 | [inline-translation-operation.js](../extension/inline-translation-operation.js) | Start/Stop/Original text orchestration, authorization, settings lookup, scanner lifecycle, request transport, and feedback eligibility |
@@ -95,6 +96,8 @@ The invocation module expresses those paths directly, without a caller-visible s
 
 The Floating Translate Button and Inline Translation Section share start, stop, and restore availability rules. Only the section displays progress and errors. Button Visibility controls where the floating button appears, rather than whether Inline Translation is available. Its every-page setting requests optional site permissions and enables dynamic injection; the other settings revoke that broad access. Automatic button appearance does not itself send a model request.
 
+The worker constructs a settings lifecycle with its Chrome interface and content-script file list. The lifecycle exposes `read()`, `save(partial)`, `clearKey(service)`, and `reconcile()`. Reads observe committed storage without waiting for pending saves. Saves, installation normalization, and key removal share an ordered mutation queue; registration uses a separate queue, and startup reconciliation waits for accepted mutations before joining it. Generations prevent older work from revoking a newer every-page permission grant. Storage errors reach the worker's fixed settings error response; registration failure leaves a successful settings write intact. Options retains the gesture-sensitive permission request, while the worker masks credentials in public settings responses.
+
 Programmatic injection confirms a valid `GET_INLINE_TRANSLATION_STATE` response after loading the ordered scripts. An unanswered or malformed response is an initialization failure, separate from Chrome refusing page access. Toolbar and shortcut invocations report it in the Inline Translation Section and stop the remaining page instructions; Side Panel Translation reports it through its own error area before extraction or model requests. A later successful preparation clears the Inline initialization failure. The panel keeps the initial side-panel opening ahead of asynchronous preparation. Automatic injection uses the registered file list and is verified separately; the programmatic check does not repair an old registration or replace code in an already-running worker.
 
 Inline Translation Authorization is separate from Chrome page access and checked before a new start; its lifetime is owned by Operation. An already-active Operation remains authorized after the initial grant expires, and an active Start only rescans. Side Panel Translation does not require that additional Inline authorization. Neither flow can use page access on restricted browser pages.
@@ -106,7 +109,7 @@ These values explain visible limits and billing-related behavior. Linked source 
 | Constraint | Current value | Source authority |
 | --- | --- | --- |
 | Side Panel extracted Markdown | 60,000 characters per document | [Document execution](../extension/sidepanel-translation-execution.js) |
-| Configurable Translation Chunk target | 12,000 characters by default; 2,000–60,000 allowed | [Worker settings normalization](../extension/background.js) |
+| Configurable Translation Chunk target | 12,000 characters by default; 2,000–60,000 allowed | [Settings normalization](../extension/settings-lifecycle.js) |
 | Side Panel output cap | At least 8,192 tokens, scaled by template length up to 128,000 | [Chunk execution](../extension/sidepanel-translation-execution.js) |
 | Inline Session record and batch admission | 12,000 reserved cost each | [Session](../extension/inline-translation-session.js), [request preparation](../extension/inline-request.js) |
 | Inline worker source record and batch admission | 12,000 actual record cost each | [Request preparation](../extension/inline-request.js) |

@@ -18,6 +18,54 @@ function loadClassicScript(scope, name) {
 exports.name = 'static assets';
 exports.tests = [
   {
+    name: 'loads the settings lifecycle after its dependencies in the classic worker',
+    async fn() {
+      const loaded = [];
+      const scope = vm.createContext({ TextEncoder, Buffer });
+      scope.importScripts = (...names) => names.forEach((name) => {
+        loaded.push(name);
+        loadClassicScript(scope, name);
+      });
+      loadClassicScript(scope, 'background.js');
+      assert.ok(loaded.indexOf('button-visibility.js') < loaded.indexOf('settings-lifecycle.js'));
+      assert.ok(loaded.indexOf('default-model.js') < loaded.indexOf('settings-lifecycle.js'));
+      let settings = { apiKey: 'sk-classic-synthetic', model: 'retained-model' };
+      let legacyKey = 'sk-legacy-synthetic';
+      const registrations = [];
+      const chrome = {
+        storage: { local: {
+          async get() { return { settings, openai_api_key: legacyKey }; },
+          async set(value) { settings = value.settings; },
+          async remove(key) { assert.equal(key, 'openai_api_key'); legacyKey = undefined; },
+        } },
+        permissions: { contains: async () => true },
+        scripting: { registerContentScripts: async (scripts) => registrations.push(...scripts) },
+      };
+      scope.chrome = chrome;
+      await assert.rejects(
+        () => scope.ChromeAiTranslatorSettingsLifecycle.createSettingsLifecycle().read(),
+        /built without chrome/
+      );
+      const worker = scope.createBackgroundWorker({ chrome });
+      const send = (message) => new Promise((resolve) =>
+        worker.handlers.onMessage(message, {}, resolve)
+      );
+      assert.equal((await send({ type: 'SAVE_SETTINGS', settings: {
+        buttonVisibility: 'allPages', tone: 'formal',
+      } })).ok, true);
+      assert.equal(registrations.at(-1).id, 'inline-translator-auto-show');
+      assert.equal(JSON.stringify(registrations.at(-1).js),
+        JSON.stringify(scope.getInlineContentScriptFiles()));
+      assert.equal((await send({ type: 'GET_SETTINGS' })).settings.apiKey, '***');
+      assert.equal((await send({ type: 'CLEAR_API_KEY' })).ok, true);
+      const publicSettings = (await send({ type: 'GET_SETTINGS' })).settings;
+      assert.equal(publicSettings.apiKey, '');
+      assert.equal(publicSettings.model, 'retained-model');
+      assert.equal(publicSettings.tone, 'formal');
+      assert.equal(legacyKey, undefined);
+    },
+  },
+  {
     name: 'provides explicit diagnostic focus and a heading-based region name',
     fn() {
       const html = fs.readFileSync(path.join(EXTENSION_DIR, 'options.html'), 'utf8');

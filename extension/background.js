@@ -87,6 +87,9 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorDefaultModel) {
     importScripts('default-model.js');
   }
+  if (!globalThis.ChromeAiTranslatorSettingsLifecycle) {
+    importScripts('settings-lifecycle.js');
+  }
 }
 const { getTargetLanguageCode } =
   globalThis.ChromeAiTranslatorTranslationSettings || require('./translation-settings.js');
@@ -95,8 +98,6 @@ const sidePanelTranslationExecution =
   require('./sidepanel-translation-execution.js');
 const inlineModelExecution =
   globalThis.ChromeAiTranslatorInlineModelExecution || require('./inline-model-execution.js');
-const { ALL_SITES_ORIGINS, BUTTON_VISIBILITY, readButtonVisibility } =
-  globalThis.ChromeAiTranslatorButtonVisibility || require('./button-visibility.js');
 const {
   INLINE_TRANSLATION_CONTROLS,
   getInlineTranslationControlStep,
@@ -109,27 +110,15 @@ const inlineDiagnosticsProtocol =
   globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol || require('./inline-diagnostics-protocol.js');
 const inlineDiagnosticsController =
   globalThis.ChromeAiTranslatorInlineDiagnosticsController || require('./inline-diagnostics-controller.js');
-const { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings, getOpenRouterFailureMessage } =
+const { OPENROUTER_MODEL, getEffectiveModelSettings, getOpenRouterFailureMessage } =
   globalThis.ChromeAiTranslatorDefaultModel || require('./default-model.js');
 
 const workerInvocation = globalThis.ChromeAiTranslatorWorkerInvocation ||
   require('./worker-invocation.js');
 
-const DEFAULT_SETTINGS = {
-  service: 'openai',
-  apiKey: '',
-  openrouterApiKey: '',
-  model: DEFAULT_MODEL,
-  reasoningEffort: 'none',
-  targetLanguage: 'Korean',
-  tone: 'technical',
-  viewMode: 'translation', // translation | bilingual
-  chunkMaxChars: 12000,
-  cacheEnabled: false,
-  cacheTtlDays: 7,
-  buttonVisibility: BUTTON_VISIBILITY.NEVER,
-};
-const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULT_SETTINGS));
+const { createSettingsLifecycle, DEFAULT_SETTINGS, mergeSettings } =
+  globalThis.ChromeAiTranslatorSettingsLifecycle || require('./settings-lifecycle.js');
+
 const PUBLIC_SETTINGS_USED_KEYS = Object.freeze([
   'service',
   'model',
@@ -154,11 +143,6 @@ const PUBLIC_TAB_STATE_KEYS = Object.freeze([
   'updatedAt',
 ]);
 
-const MIN_CHUNK_MAX_CHARS = 2000;
-const MAX_CHUNK_MAX_CHARS = 60000;
-// Named after the setting that used to govern it. Chrome keeps a registration under this id
-// across restarts, so renaming it would strand the old one on installs that already have it.
-const INLINE_CONTENT_SCRIPT_ID = 'inline-translator-auto-show';
 // There is deliberately no session cap here: the Semantic Block session is the content
 // script's, and only it knows when one starts, resets, or resumes. See ADR-0003.
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
@@ -168,15 +152,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function normalizeChunkMaxChars(value, fallback = DEFAULT_SETTINGS.chunkMaxChars) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(
-    MAX_CHUNK_MAX_CHARS,
-    Math.max(MIN_CHUNK_MAX_CHARS, Math.floor(parsed))
-  );
-}
-
 function normalizeMaxOutputTokens(value, fallback = DEFAULT_MAX_OUTPUT_TOKENS) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -184,29 +159,6 @@ function normalizeMaxOutputTokens(value, fallback = DEFAULT_MAX_OUTPUT_TOKENS) {
     MAX_MAX_OUTPUT_TOKENS,
     Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(parsed))
   );
-}
-
-function mergeSettings(partial) {
-  const merged = { ...DEFAULT_SETTINGS };
-  for (const key of SETTINGS_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(partial || {}, key)) {
-      merged[key] = partial[key];
-    }
-  }
-  merged.chunkMaxChars = normalizeChunkMaxChars(merged.chunkMaxChars);
-  merged.service = getEffectiveModelSettings(merged).service;
-  // Reading settings is the one place the older `inlineAutoShow` boolean can still arrive
-  // from storage, so it is the place it stops being visible: nothing downstream, and
-  // nothing written back, knows about it.
-  merged.buttonVisibility = readButtonVisibility(partial);
-  return merged;
-}
-
-function mergeSettingsWithExisting(existing, partial) {
-  return mergeSettings({
-    ...(existing || {}),
-    ...(partial || {}),
-  });
 }
 
 function mergeVisibleBatchSettingsSnapshot(currentSettings, settingsSnapshot = null) {
@@ -425,21 +377,6 @@ function describeInlineTranslationControlFailure(failure) {
   return message || 'Inline translation could not be reached on this tab.';
 }
 
-function getAllPagesContentScript() {
-  return {
-    id: INLINE_CONTENT_SCRIPT_ID,
-    matches: ALL_SITES_ORIGINS,
-    js: getInlineContentScriptFiles(),
-    runAt: 'document_idle',
-  };
-}
-
-function isDuplicateInlineContentScriptError(error) {
-  return String(error?.message || error).includes(
-    `Duplicate script ID '${INLINE_CONTENT_SCRIPT_ID}'`
-  );
-}
-
 // The worker the extension runs, with the platform it runs on handed to it.
 //
 // `platform` names the three things the worker cannot reach on its own: Chrome's extension
@@ -488,39 +425,10 @@ function createBackgroundWorker(platform = {}) {
   const stateByTab = new Map();
   const activeTranslationsByTab = new Map();
   const inlineControlsByTab = new Map();
-  let buttonVisibilityRegistrationSync = Promise.resolve();
-  let settingsMutation = Promise.resolve();
-  let settingsChangeGeneration = 0;
-  let allPagesAccessGeneration = 0;
-
-  async function getSettings() {
-    const chrome = getChrome();
-    const stored = await chrome.storage.local.get(['settings', 'openai_api_key']);
-    // Backward/compat: allow apiKey in openai_api_key
-    const settings = stored.settings || {};
-    const apiKey = settings.apiKey || stored.openai_api_key || '';
-    return mergeSettings({ ...settings, apiKey });
-  }
-
-  function changeSettings({ settings = {}, clearApiKey = false, service = 'openai' } = {}) {
-    const keyService = getEffectiveModelSettings({ service }).service;
-    const generation = ++settingsChangeGeneration;
-    if (readButtonVisibility(settings) === BUTTON_VISIBILITY.ALL_PAGES) {
-      allPagesAccessGeneration = generation;
-    }
-    // Read inside the ordered mutation: queued saves and install normalization must see
-    // completed writes, and a failed storage operation must leave later requests usable.
-    const nextMutation = settingsMutation.catch(() => {}).then(async () => {
-      const current = await getSettings();
-      const next = mergeSettingsWithExisting(current, settings);
-      if (clearApiKey) delete next[keyService === 'openrouter' ? 'openrouterApiKey' : 'apiKey'];
-      await getChrome().storage.local.set({ settings: next });
-      if (clearApiKey && keyService === 'openai') await getChrome().storage.local.remove('openai_api_key');
-      await syncButtonVisibilityRegistrationSafely(next, generation);
-    });
-    settingsMutation = nextMutation;
-    return nextMutation;
-  }
+  const settingsLifecycle = createSettingsLifecycle({
+    chrome: givenChrome,
+    contentScriptFiles: getInlineContentScriptFiles(),
+  });
 
   function setTabState(tabId, patch) {
     const chrome = getChrome();
@@ -556,7 +464,7 @@ function createBackgroundWorker(platform = {}) {
 
   const invocation = workerInvocation.createWorkerInvocation({
     getChrome,
-    getSettings,
+    getSettings: settingsLifecycle.read,
     contentScriptFiles: getInlineContentScriptFiles(),
     inlineErrors: {
       get: (tabId) => stateByTab.get(tabId)?.inlineTranslationError,
@@ -691,7 +599,7 @@ function createBackgroundWorker(platform = {}) {
       }
 
       const settings = mergeVisibleBatchSettingsSnapshot(
-        await getSettings(),
+        await settingsLifecycle.read(),
         settingsSnapshot
       );
       run.describe({ model: settings.model });
@@ -718,120 +626,6 @@ function createBackgroundWorker(platform = {}) {
     }
   }
 
-  async function hasAllSitesAccess() {
-    const chrome = getChrome();
-    if (!chrome.permissions?.contains) return false;
-    return chrome.permissions.contains({ origins: ALL_SITES_ORIGINS });
-  }
-
-  async function getRegisteredAllPagesContentScript() {
-    const chrome = getChrome();
-    if (!chrome.scripting.getRegisteredContentScripts) return null;
-    const scripts = await chrome.scripting.getRegisteredContentScripts({
-      ids: [INLINE_CONTENT_SCRIPT_ID],
-    });
-    return (scripts || []).find((script) => script?.id === INLINE_CONTENT_SCRIPT_ID);
-  }
-
-  async function updateAllPagesContentScript(script) {
-    const chrome = getChrome();
-    if (!chrome.scripting.updateContentScripts) return false;
-    try {
-      await chrome.scripting.updateContentScripts([script]);
-      return true;
-    } catch (error) {
-      if (isDuplicateInlineContentScriptError(error)) return false;
-      throw error;
-    }
-  }
-
-  async function syncButtonVisibilityRegistration(settings = null, generation = settingsChangeGeneration) {
-    // Startup reads after accepted writes, before joining the registration queue. Waiting
-    // inside that queue would deadlock a settings write awaiting its own registration.
-    if (!settings) await settingsMutation.catch(() => {});
-    const previousSync = buttonVisibilityRegistrationSync.catch(() => {});
-    const nextSync = previousSync.then(() =>
-      syncButtonVisibilityRegistrationNow(settings, generation)
-    );
-    buttonVisibilityRegistrationSync = nextSync;
-    return nextSync;
-  }
-
-  async function syncButtonVisibilityRegistrationSafely(settings = null, generation = settingsChangeGeneration) {
-    try {
-      await syncButtonVisibilityRegistration(settings, generation);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async function unregisterAllPagesContentScript() {
-    const chrome = getChrome();
-    try {
-      await chrome.scripting.unregisterContentScripts({
-        ids: [INLINE_CONTENT_SCRIPT_ID],
-      });
-    } catch {}
-  }
-
-  // Brings both things the all-pages choice needs — access to every site and a content script
-  // registered across pages — into line with the choice the reader has made.
-  async function syncButtonVisibilityRegistrationNow(settings = null, generation = settingsChangeGeneration) {
-    const chrome = getChrome();
-    const effective = settings || (await getSettings());
-    const visibility = readButtonVisibility(effective);
-
-    if (visibility !== BUTTON_VISIBILITY.ALL_PAGES) {
-      await unregisterAllPagesContentScript();
-      // Giving the access back belongs here as well as on the options page: an install
-      // migrating off the old checkbox reaches never without the reader opening options at
-      // all, and the access that checkbox asked for would otherwise outlive it.
-      try {
-        // A newer Options gesture may have granted access while this older write waited.
-        // Keep registration ordered even if that newer write fails, but do not revoke its grant.
-        if (generation >= allPagesAccessGeneration && chrome.permissions?.remove) {
-          await chrome.permissions.remove({ origins: ALL_SITES_ORIGINS });
-        }
-      } catch {}
-      return;
-    }
-
-    // Registering the content script across pages is what lets the button appear without the
-    // reader invoking the extension. It needs the access the choice asked for, which Chrome's
-    // own UI can revoke without the options page ever hearing about it.
-    if (!(await hasAllSitesAccess())) {
-      await unregisterAllPagesContentScript();
-      return;
-    }
-
-    const allPagesContentScript = getAllPagesContentScript();
-    try {
-      if (
-        chrome.scripting.updateContentScripts &&
-        (await getRegisteredAllPagesContentScript())
-      ) {
-        if (await updateAllPagesContentScript(allPagesContentScript)) return;
-      }
-    } catch {}
-
-    try {
-      await chrome.scripting.registerContentScripts([allPagesContentScript]);
-    } catch (error) {
-      if (isDuplicateInlineContentScriptError(error)) {
-        if (await updateAllPagesContentScript(allPagesContentScript)) return;
-        try {
-          await chrome.scripting.unregisterContentScripts({
-            ids: [INLINE_CONTENT_SCRIPT_ID],
-          });
-          await chrome.scripting.registerContentScripts([allPagesContentScript]);
-        } catch {}
-        return;
-      }
-      throw error;
-    }
-  }
-
   async function translateTab(tabId, overrideSettings = null) {
     if (activeTranslationsByTab.has(tabId)) {
       return { skipped: true, reason: 'already_running' };
@@ -842,7 +636,7 @@ function createBackgroundWorker(platform = {}) {
 
     try {
       const saved = mergeSettings({
-        ...(await getSettings()),
+        ...(await settingsLifecycle.read()),
         ...(overrideSettings || {}),
       });
       const settings = { ...saved, ...getEffectiveModelSettings(saved) };
@@ -932,14 +726,14 @@ function createBackgroundWorker(platform = {}) {
 
   // chrome.runtime.onInstalled.
   async function onInstalled() {
-    await changeSettings();
+    await settingsLifecycle.save({});
     await releaseActionClickToExtension();
   }
 
   // chrome.runtime.onStartup.
   async function onStartup() {
     await releaseActionClickToExtension();
-    await syncButtonVisibilityRegistrationSafely();
+    await settingsLifecycle.reconcile();
   }
 
   // chrome.action.onClicked. Deliberately not async: the first step opens the side panel,
@@ -1055,7 +849,7 @@ function createBackgroundWorker(platform = {}) {
             return;
           }
           const settings = mergeVisibleBatchSettingsSnapshot(
-            await getSettings(),
+            await settingsLifecycle.read(),
             msg.settingsSnapshot || null
           );
           sendResponse(await report.persist({
@@ -1075,19 +869,19 @@ function createBackgroundWorker(platform = {}) {
           return;
         }
         if (msg?.type === 'GET_SETTINGS') {
-          const settings = await getSettings();
+          const settings = await settingsLifecycle.read();
           settings.apiKey = settings.apiKey ? '***' : '';
           settings.openrouterApiKey = settings.openrouterApiKey ? '***' : '';
           sendResponse({ ok: true, settings });
           return;
         }
         if (msg?.type === 'SAVE_SETTINGS') {
-          await changeSettings({ settings: msg.settings || {} });
+          await settingsLifecycle.save(msg.settings || {});
           sendResponse({ ok: true });
           return;
         }
         if (msg?.type === 'CLEAR_API_KEY') {
-          await changeSettings({ clearApiKey: true, service: msg.service });
+          await settingsLifecycle.clearKey(msg.service);
           sendResponse({ ok: true });
           return;
         }
@@ -1119,8 +913,6 @@ function createBackgroundWorker(platform = {}) {
     requestTranslation,
     runInlineTranslationControl,
     sendInlineInstruction,
-    syncButtonVisibilityRegistration,
-    syncButtonVisibilityRegistrationSafely,
     translateVisibleBlockBatch,
   };
 }
@@ -1152,11 +944,9 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     createBackgroundWorker,
-    mergeSettingsWithExisting,
     safeError,
     sanitizePublicTabState,
     mergeVisibleBatchSettingsSnapshot,
-    normalizeChunkMaxChars,
     getInlineContentScriptFiles,
     classifyContentScriptFailure,
     INLINE_TRANSLATION_SHORTCUT_COMMAND,
