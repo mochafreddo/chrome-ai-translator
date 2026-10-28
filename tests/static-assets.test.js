@@ -1,6 +1,7 @@
 const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
+const { webcrypto } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -21,7 +22,7 @@ exports.tests = [
     name: 'loads the settings lifecycle after its dependencies in the classic worker',
     async fn() {
       const loaded = [];
-      const scope = vm.createContext({ TextEncoder, Buffer });
+      const scope = vm.createContext({ TextEncoder, Buffer, crypto: webcrypto });
       scope.importScripts = (...names) => names.forEach((name) => {
         loaded.push(name);
         loadClassicScript(scope, name);
@@ -80,7 +81,7 @@ exports.tests = [
   {
     name: 'loads worker diagnostics as classic scripts and Options diagnostics independently',
     async fn() {
-      const workerScope = vm.createContext({ TextEncoder, Buffer });
+      const workerScope = vm.createContext({ TextEncoder, Buffer, crypto: webcrypto });
       workerScope.importScripts = (...names) =>
         names.forEach((name) => loadClassicScript(workerScope, name));
       loadClassicScript(workerScope, 'background.js');
