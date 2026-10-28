@@ -832,14 +832,20 @@ function createBackgroundWorker(platform = {}) {
         }
         if (msg?.type === 'GET_STATE') {
           const tabId = msg.tabId;
+          const state = sanitizePublicTabState(
+            stateByTab.get(tabId) || {
+              status: 'idle', extracted: null, translated: null,
+              workerEpoch, stateSequence: 0, bodyVersion: 0,
+            }
+          );
+          if (msg.knownBody?.workerEpoch === state.workerEpoch &&
+            msg.knownBody.bodyVersion === state.bodyVersion) {
+            delete state.extracted;
+            delete state.translated;
+          }
           sendResponse({
             ok: true,
-            state: sanitizePublicTabState(
-              stateByTab.get(tabId) || {
-                status: 'idle', extracted: null, translated: null,
-                workerEpoch, stateSequence: 0, bodyVersion: 0,
-              }
-            ),
+            state,
           });
           return;
         }

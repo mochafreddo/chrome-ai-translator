@@ -384,11 +384,45 @@ async function runTabTranslation(
   const responses = await collectWorkerResponses(worker, [
     { type: 'TRANSLATE_TAB', tabId },
   ]);
-  return { responses, states, requestInputs, requestUrls };
+  return { worker, responses, states, requestInputs, requestUrls };
 }
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'omits acknowledged bodies across 60 polls and returns full bodies for every mismatch',
+    async fn() {
+      const { worker } = await runTabTranslation(42, [
+        createCompletedResponse('첫째 문단 번역.'),
+        createCompletedResponse('둘째 문단 번역.'),
+        createCompletedResponse('셋째 문단 번역.'),
+      ]);
+      const [full] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42 }]);
+      const knownBody = { workerEpoch: full.state.workerEpoch, bodyVersion: full.state.bodyVersion };
+      let deliveredBodyChars = 0;
+      for (let index = 0; index < 60; index += 1) {
+        const [polled] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, knownBody }]);
+        deliveredBodyChars += (polled.state.extracted?.contentMarkdown?.length || 0) +
+          (polled.state.translated?.length || 0);
+        assert.equal(Object.hasOwn(polled.state, 'extracted'), false);
+        assert.equal(Object.hasOwn(polled.state, 'translated'), false);
+        assert.equal(polled.state.status, 'done');
+        assert.equal(polled.state.stateSequence, full.state.stateSequence);
+        assert.equal(polled.state.bodyVersion, knownBody.bodyVersion);
+      }
+      assert.equal(deliveredBodyChars, 0);
+      for (const ack of [undefined, {}, { ...knownBody, workerEpoch: 'previous-worker' },
+        { ...knownBody, bodyVersion: knownBody.bodyVersion - 1 }]) {
+        const [response] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, knownBody: ack }]);
+        assert.deepEqual(response, full);
+      }
+      const restarted = helpers.createBackgroundWorker();
+      const [idle] = await collectWorkerResponses(restarted, [{ type: 'GET_STATE', tabId: 42, knownBody }]);
+      assert.equal(idle.state.extracted, null);
+      assert.equal(idle.state.translated, null);
+      assert.notEqual(idle.state.workerEpoch, knownBody.workerEpoch);
+    },
+  },
   {
     name: 'full initial state distinguishes restarted worker epochs without retaining article bodies',
     async fn() {
