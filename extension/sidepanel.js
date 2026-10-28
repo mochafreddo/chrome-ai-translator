@@ -488,7 +488,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     } catch (error) {
       if (selection !== requestedSelection || translationRequest !== request ||
         (startingState && (state.workerEpoch !== startingState.workerEpoch ||
-          (state.stateSequence || 0) > (startingState.stateSequence || 0)))) return;
+          state.bodyVersion !== startingState.bodyVersion))) return;
       panelError = describeSidePanelFailure({
         message: error?.message || String(error), code: error?.code,
       });
@@ -523,10 +523,9 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         return;
       }
       stateRequest = null;
+      if (controlErrorTabId !== tabId) forgetControlError();
       acceptState(incoming);
       if (!hasBody) recoverBody(state.workerEpoch, state.bodyVersion);
-      if (controlErrorTabId !== tabId) forgetControlError();
-      paint();
     },
     runInlineControl,
     translate,

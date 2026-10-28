@@ -318,20 +318,69 @@ exports.tests = [
 function modulePanel() {
   let active = 1;
   let displayed;
+  let renders = 0;
   let query = async () => ({ id: active });
   let send = (message) => response(message.type, String(message.tabId));
   const sent = [];
   const controller = helpers.createTabStateController({
     queryActiveTab: () => query(),
     sendMessage(message) { sent.push(message); return send(message); },
-    render(display) { displayed = display; },
+    render(display) { displayed = display; renders += 1; },
   });
-  return { controller, sent, display: () => displayed,
+  return { controller, sent, display: () => displayed, renderCount: () => renders,
     setQuery(fn) { query = fn; }, setSend(fn) { send = fn; },
     activate(id, windowId = 10) { if (windowId === 10) active = id; return controller.activate({ tabId: id, windowId }); } };
 }
 
 exports.tests.push({
+  name: 'an accepted same-worker notification renders the panel once',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const before = panel.renderCount();
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
+      state: wireState({ status: 'done', translated: 'current result' }, 2) });
+    assert.equal(panel.renderCount() - before, 1);
+    assert.equal(panel.display().state.translated, 'current result');
+  },
+}, {
+  name: 'current Translate failures survive unrelated Inline state updates and release prior body invalidation',
+  async fn() {
+    for (const actual of [false, true]) {
+      const panel = actual ? domPanel() : modulePanel();
+      if (actual) await settle();
+      else await panel.controller.start(10);
+      let current = wireState({ status: 'done', extracted: { contentMarkdown: 'retained source' },
+        translated: 'retained translation' }, 10, 3);
+      panel.setSend(msg => msg.type === 'GET_STATE' ? { ok: true, state: current }
+        : response(msg.type, 'independent'));
+      if (actual) { panel.poll(); await settle(); }
+      else await panel.controller.refresh();
+      const action = deferred();
+      panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? action.promise
+        : msg.type === 'GET_STATE' ? { ok: true, state: current } : response(msg.type, 'independent'));
+      const running = actual ? panel.element('btnTranslate').listeners.click() : panel.controller.translate({});
+      await settle();
+      current = { ...current, stateSequence: 11, inlineTranslationError: null };
+      const notification = { ...current };
+      delete notification.extracted;
+      delete notification.translated;
+      if (actual) panel.notify({ type: 'STATE_UPDATED', tabId: 1, state: notification });
+      else panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1, state: notification });
+      action.reject(new Error('Settings unavailable.'));
+      await running;
+      await settle();
+      assert.equal(actual ? panel.element('errorBox').textContent : panel.display().panelError,
+        'Settings unavailable.');
+      if (actual) { panel.poll(); await settle(); }
+      else await panel.controller.refresh();
+      assert.equal(actual ? panel.element('translated').textContent : panel.display().state.translated,
+        'retained translation');
+      const last = panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1);
+      assert.equal(last.knownBody, undefined);
+    }
+  },
+}, {
   name: 'polls without acknowledgement while the required body is still being recovered',
   async fn() {
     const panel = modulePanel();
