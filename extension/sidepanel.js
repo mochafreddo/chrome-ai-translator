@@ -361,12 +361,12 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     controlError = '';
     controlErrorTabId = null;
   }
-  function select(nextTabId) {
+  function select(nextTabId, initiatingRequest = null) {
     if (tabId === nextTabId) return;
-    // A new visit ends pending controls; the initial query may still select its tab.
+    // A query may discover the tab for its own action; other visits end pending actions.
     if (tabId !== null) {
-      inlineControl = null;
-      translationRequest = null;
+      if (inlineControl !== initiatingRequest) inlineControl = null;
+      if (translationRequest !== initiatingRequest) translationRequest = null;
     }
     tabId = nextTabId;
     selection = {};
@@ -384,13 +384,13 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     hasPageAccess = null;
     paint();
   }
-  async function resolveTab() {
+  async function resolveTab(initiatingRequest = null) {
     const version = ++queryVersion;
     const tab = await queryActiveTab();
     // A newer selection wins, but a poll confirming the same tab must not swallow
     // a button action that was waiting for its own query.
     if (version !== queryVersion) return tabId !== null && tab?.id === tabId;
-    select(tab?.id ?? null);
+    select(tab?.id ?? null, initiatingRequest);
     return tabId !== null;
   }
   async function refreshSelected(requestedControl = null) {
@@ -426,7 +426,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     paint();
     let requestedSelection = selection;
     try {
-      if (!(await resolveTab())) return;
+      if (!(await resolveTab(requestedControl))) return;
       if (inlineControl !== requestedControl) return;
       const requestedTab = tabId;
       requestedSelection = selection;
@@ -454,7 +454,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     let requestedSelection = selection;
     let startingState = null;
     try {
-      if (!(await resolveTab())) return;
+      if (!(await resolveTab(request))) return;
       if (translationRequest !== request && tabId !== null) return;
       const requestedTab = tabId;
       requestedSelection = selection;
