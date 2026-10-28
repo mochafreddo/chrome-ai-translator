@@ -425,6 +425,7 @@ function createBackgroundWorker(platform = {}) {
   const stateByTab = new Map();
   const activeTranslationsByTab = new Map();
   const inlineControlsByTab = new Map();
+  const activeInvocationsByTab = new Map();
   const settingsLifecycle = createSettingsLifecycle({
     chrome: givenChrome,
     contentScriptFiles: getInlineContentScriptFiles(),
@@ -462,7 +463,7 @@ function createBackgroundWorker(platform = {}) {
     }
   }
 
-  const invocation = workerInvocation.createWorkerInvocation({
+  const invocationOptions = {
     getChrome,
     getSettings: settingsLifecycle.read,
     contentScriptFiles: getInlineContentScriptFiles(),
@@ -471,7 +472,32 @@ function createBackgroundWorker(platform = {}) {
       set: (tabId, error) => setTabState(tabId, { inlineTranslationError: error }),
     },
     describeFailure: describeInlineTranslationControlFailure,
-  });
+  };
+  const invocation = workerInvocation.createWorkerInvocation(invocationOptions);
+  async function invokeForTab(trigger, tabId) {
+    const token = Symbol(`invoke-tab-${tabId}`);
+    activeInvocationsByTab.set(tabId, token);
+    const currentInvocation = workerInvocation.createWorkerInvocation({
+      ...invocationOptions,
+      inlineErrors: {
+        get: invocationOptions.inlineErrors.get,
+        set: (id, error) => {
+          if (activeInvocationsByTab.get(tabId) === token) {
+            setTabState(id, { inlineTranslationError: error });
+          }
+        },
+      },
+    });
+    try {
+      if (trigger === 'command') {
+        try { await getChrome().tabs.get(tabId); } catch { return; }
+        if (activeInvocationsByTab.get(tabId) !== token) return;
+      }
+      await currentInvocation.invoke(trigger, tabId);
+    } finally {
+      if (activeInvocationsByTab.get(tabId) === token) activeInvocationsByTab.delete(tabId);
+    }
+  }
   const sendInlineInstruction = invocation.sendInstruction;
   const clearInlineTranslationError = invocation.clearError;
 
@@ -633,12 +659,14 @@ function createBackgroundWorker(platform = {}) {
 
     const operationToken = Symbol(`translate-tab-${tabId}`);
     activeTranslationsByTab.set(tabId, operationToken);
+    const isCurrent = () => activeTranslationsByTab.get(tabId) === operationToken;
 
     try {
       const saved = mergeSettings({
         ...(await settingsLifecycle.read()),
         ...(overrideSettings || {}),
       });
+      if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
       const settings = { ...saved, ...getEffectiveModelSettings(saved) };
 
       const apiKey = settings.service === 'openrouter' ? settings.openrouterApiKey : settings.apiKey;
@@ -663,21 +691,25 @@ function createBackgroundWorker(platform = {}) {
         await invocation.preparePage(tabId);
       } catch (e) {
         const failure = classifyContentScriptFailure(e, await getTabUrl(tabId));
+        if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
         setTabState(tabId, {
           status: 'error',
           error: { message: failure.message },
         });
         return { skipped: true, reason: 'content_script_unavailable' };
       }
+      if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
 
       let translationStarted = false;
       try {
         const extraction = await extractArticle(tabId);
+        if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
         const translated = await sidePanelTranslationExecution.execute(
           extraction,
           createPublicSettingsUsed(settings),
           (request) => requestTranslation({ ...request, service: settings.service, apiKey }),
           ({ progress }) => {
+            if (!isCurrent()) return;
             if (!translationStarted) {
               translationStarted = true;
               setTabState(tabId, {
@@ -692,13 +724,14 @@ function createBackgroundWorker(platform = {}) {
             setTabState(tabId, { status: 'translating', progress });
           }
         );
-        setTabState(tabId, {
+        if (isCurrent()) setTabState(tabId, {
           status: 'done',
           translated,
           progress: null,
         });
         return { skipped: false };
       } catch (e) {
+        if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
         const failureState = {
           status: 'error',
           error: safeError(e),
@@ -736,12 +769,19 @@ function createBackgroundWorker(platform = {}) {
     await settingsLifecycle.reconcile();
   }
 
+  function onTabRemoved(tabId) {
+    stateByTab.delete(tabId);
+    activeTranslationsByTab.delete(tabId);
+    inlineControlsByTab.delete(tabId);
+    activeInvocationsByTab.delete(tabId);
+  }
+
   // chrome.action.onClicked. Deliberately not async: the first step opens the side panel,
   // and awaiting anything before it would forfeit the user gesture Chrome requires
   // (ADR-0001).
   function onActionClicked(tab) {
     if (!tab?.id) return;
-    invocation.invoke('action', tab.id);
+    invokeForTab('action', tab.id);
   }
 
   // The Inline Translation Shortcut, registered on chrome.commands.onCommand.addListener.
@@ -753,7 +793,7 @@ function createBackgroundWorker(platform = {}) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tabId = tabs?.[0]?.id;
     if (!tabId) return;
-    await invocation.invoke('command', tabId);
+    await invokeForTab('command', tabId);
   }
 
   // chrome.runtime.onMessage.
@@ -912,6 +952,7 @@ function createBackgroundWorker(platform = {}) {
     handlers: {
       onInstalled,
       onStartup,
+      onTabRemoved,
       onActionClicked,
       onCommand,
       onMessage,
@@ -940,6 +981,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   });
   chrome.runtime.onInstalled.addListener(backgroundWorker.handlers.onInstalled);
   chrome.runtime.onStartup.addListener(backgroundWorker.handlers.onStartup);
+  chrome.tabs.onRemoved.addListener(backgroundWorker.handlers.onTabRemoved);
   chrome.action.onClicked.addListener(backgroundWorker.handlers.onActionClicked);
   chrome.commands.onCommand.addListener(backgroundWorker.handlers.onCommand);
   chrome.runtime.onMessage.addListener(backgroundWorker.handlers.onMessage);

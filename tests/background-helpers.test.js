@@ -278,6 +278,7 @@ function createTabTranslationChrome({
       },
     },
     tabs: {
+      async get(tabId) { return { id: tabId }; },
       async sendMessage(tabId, message) {
         if (message.type === 'GET_INLINE_TRANSLATION_STATE') {
           return { ok: true, snapshot: { status: 'original', progress: '', error: '' } };
@@ -379,6 +380,197 @@ async function runTabTranslation(
 
 exports.name = 'background helpers';
 exports.tests = [
+  {
+    name: 'ignores a late live-tab lookup after removal without suppressing another tab command',
+    async fn() {
+      for (const closedId of [4201, 999]) {
+        const { worker, chrome, calls, broadcasts } = createInvocationWorker();
+        let release;
+        let lookupStarted = false;
+        const gate = new Promise(resolve => { release = resolve; });
+        chrome.tabs.get = async tabId => { lookupStarted = true; await gate; return { id: tabId }; };
+        const pending = worker.handlers.onCommand('translate-inline');
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(lookupStarted, true);
+        worker.handlers.onTabRemoved(closedId);
+        release();
+        await pending;
+        assert.deepEqual(broadcasts, []);
+        assert.equal(calls.some(call => call[0] === 'open'), closedId !== 4201);
+        assert.equal(calls.some(call => call[0] === 'message' && call[2].instruction === 'startInlineTranslation'), closedId !== 4201);
+      }
+    },
+  },
+  {
+    name: 'ignores a stale active-tab query after the tab closes before command invocation',
+    async fn() {
+      const { worker, chrome, calls, broadcasts } = createInvocationWorker();
+      let resolveQuery;
+      chrome.tabs.query = () => new Promise(resolve => { resolveQuery = resolve; });
+      chrome.tabs.get = async () => { throw new Error('No tab with id: 4201.'); };
+      chrome.tabs.sendMessage = async () => ({ ok: false, error: { message: 'The tab was closed.' } });
+      const pending = worker.handlers.onCommand('translate-inline');
+      assert.equal(typeof resolveQuery, 'function');
+      worker.handlers.onTabRemoved(4201);
+      resolveQuery([{ id: 4201 }]);
+      await pending;
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assert.deepEqual(broadcasts, []);
+      assert.deepEqual(calls, []);
+    },
+  },
+  {
+    name: 'closing one tab leaves another in-flight translation able to publish its result',
+    async fn() {
+      let release;
+      let entered;
+      const gate = new Promise(resolve => { release = resolve; });
+      const ready = new Promise(resolve => { entered = resolve; });
+      let requests = 0;
+      const chrome = createTabTranslationChrome({
+        settings: { apiKey: 'synthetic-key' },
+        extract: tabId => ({ title: 'Article', url: 'https://example.test', langHint: 'en',
+          contentMarkdown: `Article ${tabId}`, translationDocument: createPlainTranslationDocument(`Article ${tabId}`) }),
+      });
+      const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => {
+        if (++requests === 2) entered();
+        await gate;
+        return { ok: true, async json() { return createCompletedResponse('번역 결과'); } };
+      } });
+      const pending = [20, 21].map(tabId => new Promise(resolve =>
+        worker.handlers.onMessage({ type: 'TRANSLATE_TAB', tabId }, {}, resolve)));
+      await ready;
+      assert.equal(typeof worker.handlers.onTabRemoved, 'function');
+      worker.handlers.onTabRemoved(20);
+      const [other] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]);
+      assert.equal(other.state.status, 'translating');
+      assert.equal(other.state.extracted.contentMarkdown, 'Article 21');
+      release();
+      await Promise.all(pending);
+      const states = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }, { type: 'GET_STATE', tabId: 21 }]);
+      assert.deepEqual(states[0].state, { status: 'idle' });
+      assert.equal(states[1].state.status, 'done');
+      assert.equal(states[1].state.translated, '번역 결과');
+      assert.equal(requests, 2);
+    },
+  },
+  ...['action', 'command'].map(trigger => ({
+    name: `does not restore a closed tab error after a late ${trigger} invocation failure`,
+    async fn() {
+      const { worker, chrome, broadcasts } = createInvocationWorker();
+      let release;
+      let entered;
+      const gate = new Promise(resolve => { release = resolve; });
+      const ready = new Promise(resolve => { entered = resolve; });
+      const send = chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        if ((trigger === 'action' && message.type === 'GET_INLINE_TRANSLATION_STATE') ||
+            (trigger === 'command' && message.instruction === 'startInlineTranslation')) {
+          entered();
+          await gate;
+          return { ok: false, error: { message: 'The tab was closed.' } };
+        }
+        return send(tabId, message);
+      };
+      const pending = trigger === 'command'
+        ? worker.handlers.onCommand('translate-inline')
+        : worker.handlers.onActionClicked({ id: 4201 });
+      await ready;
+      assert.equal(typeof worker.handlers.onTabRemoved, 'function');
+      worker.handlers.onTabRemoved(4201);
+      release();
+      await pending;
+      await require('./inline-translation-operation.test').flushMicrotasks();
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assert.deepEqual(broadcasts, []);
+    },
+  })),
+  ...['settings', 'prepare', 'extract', 'model'].flatMap(phase => ['success', 'failure'].map(outcome => ({
+    name: `does not recreate a closed tab after late ${phase} ${outcome}`,
+    async fn() {
+      let release;
+      let entered;
+      const gate = new Promise(resolve => { release = resolve; });
+      const ready = new Promise(resolve => { entered = resolve; });
+      let blocked = false;
+      async function pause() {
+        if (blocked) return;
+        blocked = true;
+        entered();
+        await gate;
+        if (outcome === 'failure') throw new Error('late failure');
+      }
+      const broadcasts = [];
+      const requests = [];
+      const chrome = createTabTranslationChrome({
+        settings: { apiKey: 'synthetic-key', chunkMaxChars: 2000 },
+        extract: tabId => ({ title: 'Article', url: 'https://example.test', langHint: 'en',
+          contentMarkdown: tabId === 20 ? 'Closed article' : 'Other tab',
+          translationDocument: tabId === 20 ? THREE_CHUNK_DOCUMENT : createPlainTranslationDocument('Other tab') }),
+        onStateMessage: message => broadcasts.push(message),
+      });
+      const get = chrome.storage.local.get;
+      chrome.storage.local.get = async (...args) => {
+        if (phase === 'settings') await pause();
+        return get(...args);
+      };
+      chrome.scripting.executeScript = async ({ target }) => {
+        if (phase === 'prepare' && target.tabId === 20) await pause();
+      };
+      const send = chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage = async (tabId, message) => {
+        if (phase === 'extract' && tabId === 20 && message.type === 'EXTRACT_ARTICLE') await pause();
+        return send(tabId, message);
+      };
+      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (_url, options) => {
+        const input = JSON.parse(options.body).input;
+        requests.push(input);
+        if (phase === 'model' && input !== 'Other tab') await pause();
+        return { ok: true, async json() { return createCompletedResponse('번역 결과'); } };
+      } });
+      const pending = new Promise(resolve => worker.handlers.onMessage({ type: 'TRANSLATE_TAB', tabId: 20 }, {}, resolve));
+      await ready;
+      assert.equal(typeof worker.handlers.onTabRemoved, 'function');
+      worker.handlers.onTabRemoved(20);
+      const closedBroadcasts = broadcasts.filter(message => message.tabId === 20).length;
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]), [{ ok: true, state: { status: 'idle' } }]);
+      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 21 }]);
+      const [other] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]);
+      assert.equal(other.state.status, 'done');
+      release();
+      await pending;
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assert.equal(broadcasts.filter(message => message.tabId === 20).length, closedBroadcasts);
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]), [other]);
+      assert.equal(requests.filter(input => input !== 'Other tab').length, phase === 'model' ? (outcome === 'success' ? 3 : 1) : 0);
+    },
+  }))),
+  {
+    name: 'releases a closed tab result through the public removal event and preserves other tabs',
+    async fn() {
+      const broadcasts = [];
+      const chrome = createTabTranslationChrome({
+        settings: { apiKey: 'synthetic-key' },
+        extract: () => ({ title: 'Article', url: 'https://example.test', langHint: 'en',
+          contentMarkdown: 'Hello world.', translationDocument: createPlainTranslationDocument('Hello world.') }),
+        onStateMessage: message => broadcasts.push(message),
+      });
+      const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => ({
+        ok: true, async json() { return createCompletedResponse('번역 결과'); },
+      }) });
+      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 20 }, { type: 'TRANSLATE_TAB', tabId: 21 }]);
+      const [kept] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]);
+      assert.equal(kept.state.status, 'done');
+      assert.equal(kept.state.translated, '번역 결과');
+      assert.equal(typeof worker.handlers.onTabRemoved, 'function');
+      const beforeClose = broadcasts.length;
+      worker.handlers.onTabRemoved(20);
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]), [kept]);
+      assert.equal(broadcasts.length, beforeClose);
+    },
+  },
   {
     name: 'an unsupported explicit service refuses settings and translation before HTTP',
     async fn() {
