@@ -213,9 +213,17 @@ async function main() {
         if (message.type === 'STATE_UPDATED' && message.tabId === ${tabId}) closedTabUpdates.push(message.state);
       });`);
     hold = true;
-    await panel.evaluate("document.getElementById('btnTranslate').click()");
+    await options.evaluate(`(() => {
+      globalThis.closedTabTranslation = { settled: false, response: null };
+      closedTabTranslation.promise = chrome.runtime.sendMessage({ type: 'TRANSLATE_TAB', tabId: ${tabId} })
+        .then(response => { closedTabTranslation.response = response; closedTabTranslation.settled = true; },
+          () => { closedTabTranslation.response = { ok: false }; closedTabTranslation.settled = true; });
+      return true;
+    })()`);
     if (!check('a second Side Panel request is pending before tab closure',
       await until(() => held.length > 0, 5000, 100))) return;
+    if (!check('held Side Panel request has not completed through its public message',
+      await options.evaluate('closedTabTranslation.settled === false'))) return;
     await options.evaluate(`chrome.tabs.remove(${tabId})`);
     const closedState = () => options.evaluate(`chrome.runtime.sendMessage({ type: 'GET_STATE', tabId: ${tabId} })`);
     const absent = response => response?.ok && response.state?.status === 'idle' &&
@@ -224,7 +232,9 @@ async function main() {
     const updatesAtClose = await options.evaluate('closedTabUpdates.length');
     hold = false;
     for (const fulfill of held.splice(0)) await fulfill();
-    await wait(800);
+    if (!check('closed-tab translation completes through its public request before late-effect checks',
+      await until(() => options.evaluate('closedTabTranslation.settled === true'), 15000, 100) &&
+      await options.evaluate('closedTabTranslation.response?.ok === true'))) return;
     check('late model completion cannot restore or broadcast closed-tab state',
       absent(await closedState()) && await options.evaluate('closedTabUpdates.length') === updatesAtClose);
   } else {
