@@ -380,6 +380,37 @@ async function runTabTranslation(
 exports.name = 'background helpers';
 exports.tests = [
   {
+    name: 'full initial state distinguishes restarted worker epochs without retaining article bodies',
+    async fn() {
+      const first = helpers.createBackgroundWorker();
+      const restarted = helpers.createBackgroundWorker();
+      const [a] = await collectWorkerResponses(first, [{ type: 'GET_STATE', tabId: 42 }]);
+      const [b] = await collectWorkerResponses(restarted, [{ type: 'GET_STATE', tabId: 42 }]);
+      assert.notEqual(a.state.workerEpoch, b.state.workerEpoch);
+      assert.deepEqual({ ...a.state, workerEpoch: '' }, {
+        status: 'idle', extracted: null, translated: null, workerEpoch: '', stateSequence: 0, bodyVersion: 0,
+      });
+    },
+  },
+  {
+    name: 'versions full state while progress broadcasts omit unchanged article bodies',
+    async fn() {
+      const { states } = await runTabTranslation(42, [
+        createCompletedResponse('첫째 문단 번역.'),
+        createCompletedResponse('둘째 문단 번역.'),
+        createCompletedResponse('셋째 문단 번역.'),
+      ]);
+      const progress = states.filter(state => state.status === 'translating');
+      assert.equal(progress.length, 4);
+      assert.deepEqual(progress.map(state => state.extracted?.contentMarkdown?.length || 0), [26, 0, 0, 0]);
+      assert.equal(typeof states[0].workerEpoch, 'string');
+      assert.ok(states[0].workerEpoch);
+      assert.deepEqual(states.map(state => state.stateSequence), [1, 2, 3, 4, 5, 6]);
+      assert.deepEqual(states.map(state => state.bodyVersion), [1, 2, 2, 2, 2, 3]);
+      assert.equal(states.every(state => state.workerEpoch === states[0].workerEpoch), true);
+    },
+  },
+  {
     name: 'an unsupported explicit service refuses settings and translation before HTTP',
     async fn() {
       const { send, snapshot } = createSettingsWorker({ settings: { apiKey: 'sk-openai-synthetic' } });
@@ -1175,6 +1206,9 @@ exports.tests = [
       assert.deepEqual(responses, [{ ok: true }]);
       assert.equal(stateMessages.at(-1)?.state?.status, 'done');
       const publicStateKeys = new Set([
+        'workerEpoch',
+        'stateSequence',
+        'bodyVersion',
         'status',
         'error',
         'extracted',
@@ -2977,7 +3011,7 @@ exports.tests = [
       assert.match(broadcasts[0].state.inlineTranslationError.message, /Click the extension icon on this tab/);
       assert.equal(broadcasts[0].state.error, undefined);
       assert.deepEqual((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]))[0].state,
-        broadcasts[0].state);
+        { ...broadcasts[0].state, extracted: null, translated: null });
       broadcasts.length = 0;
       await invoke('action');
       assert.deepEqual(broadcasts, []);

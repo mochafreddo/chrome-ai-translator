@@ -141,6 +141,9 @@ const PUBLIC_TAB_STATE_KEYS = Object.freeze([
   'progress',
   'settingsUsed',
   'updatedAt',
+  'workerEpoch',
+  'stateSequence',
+  'bodyVersion',
 ]);
 
 // There is deliberately no session cap here: the Semantic Block session is the content
@@ -423,6 +426,9 @@ function createBackgroundWorker(platform = {}) {
 
   // Per-tab in-memory state (lost when service worker sleeps; UI can re-trigger)
   const stateByTab = new Map();
+  const workerEpoch = inlineDiagnosticsProtocol.createUuidV4(givenCrypto || globalThis.crypto);
+  let stateSequence = 0;
+  let bodyVersion = 0;
   const activeTranslationsByTab = new Map();
   const inlineControlsByTab = new Map();
   const settingsLifecycle = createSettingsLifecycle({
@@ -432,15 +438,27 @@ function createBackgroundWorker(platform = {}) {
 
   function setTabState(tabId, patch) {
     const chrome = getChrome();
-    const prev = stateByTab.get(tabId) || { status: 'idle' };
+    const prev = stateByTab.get(tabId) || {
+      status: 'idle', extracted: null, translated: null, bodyVersion: 0,
+    };
+    const bodyChanged = ['extracted', 'translated'].some(key =>
+      Object.prototype.hasOwnProperty.call(patch, key));
     const next = sanitizePublicTabState({
       ...prev,
       ...patch,
       updatedAt: nowIso(),
+      workerEpoch,
+      stateSequence: ++stateSequence,
+      bodyVersion: bodyChanged ? ++bodyVersion : prev.bodyVersion,
     });
     stateByTab.set(tabId, next);
+    const notification = { ...next };
+    if (!bodyChanged) {
+      delete notification.extracted;
+      delete notification.translated;
+    }
     chrome.runtime
-      .sendMessage({ type: 'STATE_UPDATED', tabId, state: next })
+      .sendMessage({ type: 'STATE_UPDATED', tabId, state: notification })
       .catch(() => {});
   }
 
@@ -777,7 +795,10 @@ function createBackgroundWorker(platform = {}) {
           sendResponse({
             ok: true,
             state: sanitizePublicTabState(
-              stateByTab.get(tabId) || { status: 'idle' }
+              stateByTab.get(tabId) || {
+                status: 'idle', extracted: null, translated: null,
+                workerEpoch, stateSequence: 0, bodyVersion: 0,
+              }
             ),
           });
           return;
