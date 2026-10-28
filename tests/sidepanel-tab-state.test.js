@@ -13,8 +13,12 @@ function deferred() {
 async function settle() {
   for (let i = 0; i < 64; i += 1) await Promise.resolve();
 }
+function wireState(value, stateSequence = 1, bodyVersion = stateSequence, workerEpoch = 'worker-fixture') {
+  return { workerEpoch, stateSequence, bodyVersion, extracted: null, translated: null, ...value };
+}
 function state(label) {
-  return { status: 'error', extracted: { contentMarkdown: `original ${label}` },
+  return { workerEpoch: 'worker-fixture', stateSequence: 1, bodyVersion: 1,
+    status: 'error', extracted: { contentMarkdown: `original ${label}` },
     translated: `translated ${label}`, progress: { current: 2, total: 3 },
     error: { message: `panel ${label}` }, inlineTranslationError: { message: `shortcut ${label}` } };
 }
@@ -77,10 +81,10 @@ exports.tests = [
       const panel = domPanel();
       await settle();
       panel.element('targetLanguage').value = 'Japanese';
-      panel.setSend((message) => message.type === 'GET_STATE' ? { ok: true, state: {
+      panel.setSend((message) => message.type === 'GET_STATE' ? { ok: true, state: wireState({
         status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
         translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' },
-      } } : response(message.type, '1'));
+      }) } : response(message.type, '1'));
       panel.poll();
       await settle();
       assert.equal(panel.element('original').lang, 'fr');
@@ -151,8 +155,8 @@ exports.tests = [
     async fn() {
       const panel = domPanel();
       await settle();
-      let current = { status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
-        translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } };
+      let current = wireState({ status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
+        translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } });
       panel.setSend(message => message.type === 'GET_STATE'
         ? { ok: true, state: current } : response(message.type, '1'));
       const original = panel.element('original');
@@ -191,7 +195,7 @@ exports.tests = [
       assert.equal(output.textContent, 'No translation yet.\n\nUse Translate current tab to translate the active article.');
       await settle();
       assert.equal(output.textContent, '안녕하세요.');
-      current = { status: 'extracting' };
+      current = wireState({ status: 'extracting' }, 2);
       panel.poll();
       await settle();
       assert.equal(original.textContent, 'Extracting article text...');
@@ -265,9 +269,9 @@ exports.tests = [
       await settle();
       const message = 'Initialization failed. Reload the extension and this page.';
       panel.setSend((request) => request.type === 'GET_STATE'
-        ? { ok: true, state: { status: 'idle', inlineTranslationError: {
+        ? { ok: true, state: wireState({ status: 'idle', inlineTranslationError: {
           code: 'content_script_not_ready', message,
-        } } }
+        } }) }
         : { ok: false, snapshot: null });
 
       panel.poll();
@@ -279,7 +283,7 @@ exports.tests = [
       assert.equal(panel.element('errorBox').textContent, '');
 
       panel.setSend((request) => request.type === 'GET_STATE'
-        ? { ok: true, state: { status: 'idle', inlineTranslationError: null } }
+        ? { ok: true, state: wireState({ status: 'idle', inlineTranslationError: null }) }
         : { ok: true, snapshot: { status: 'original', progress: '', error: '' } });
       panel.poll();
       await settle();
@@ -328,6 +332,184 @@ function modulePanel() {
 }
 
 exports.tests.push({
+  name: 'actual panel immediately recovers omitted article text while retaining newer progress',
+  async fn() {
+    const panel = domPanel();
+    await settle();
+    const body = deferred();
+    panel.setSend(msg => msg.type === 'GET_STATE' ? body.promise : response(msg.type, 'inline'));
+    const before = panel.sent.length;
+    panel.notify({ type: 'STATE_UPDATED', tabId: 1, state: {
+      workerEpoch: 'worker-fixture', stateSequence: 4, bodyVersion: 2, status: 'translating',
+      progress: { current: 2, total: 3 }, settingsUsed: { targetLanguage: 'Korean' },
+    } });
+    await settle();
+    assert.deepEqual(JSON.parse(JSON.stringify(panel.sent.slice(before))), [{ type: 'GET_STATE', tabId: 1 }]);
+    assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
+    assert.equal(panel.element('original').textContent, 'Extracting article text...');
+    body.resolve({ ok: true, state: wireState({ status: 'translating',
+      progress: { current: 1, total: 3 }, extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
+      translated: '안녕하세요.' }, 3, 2) });
+    await settle();
+    assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
+    assert.equal(panel.element('original').textContent, 'Bonjour.');
+    assert.equal(panel.element('original').lang, 'fr');
+    assert.equal(panel.element('translated').textContent, '안녕하세요.');
+    assert.equal(panel.element('translated').lang, 'ko');
+  },
+}, {
+  name: 'a delayed Translate error cannot overwrite a newer worker result or Translate action',
+  async fn() {
+    for (const newerAction of [false, true]) {
+      const panel = modulePanel();
+      await panel.controller.start(10);
+      const old = deferred();
+      panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? old.promise : response(msg.type, 'current'));
+      const first = panel.controller.translate({});
+      await settle();
+      if (newerAction) {
+        panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? { ok: true } : response(msg.type, 'current'));
+        await panel.controller.translate({});
+      }
+      panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
+        state: wireState({ status: 'done', translated: 'current result' }, 3) });
+      old.resolve({ ok: false, error: { message: 'old action failed' } });
+      await first;
+      assert.equal(panel.display().state.translated, 'current result');
+      assert.equal(panel.display().state.status, 'done');
+      assert.equal(panel.display().panelError, '');
+    }
+  },
+}, {
+  name: 'uses worker sequence for same-epoch replies even when requests started in reverse order',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const old = deferred();
+    panel.setSend(msg => msg.type === 'GET_STATE' ? old.promise : response(msg.type, 'inline'));
+    const pending = panel.controller.refresh();
+    await settle();
+    panel.setSend(msg => msg.type === 'GET_STATE'
+      ? { ok: true, state: wireState({ status: 'done', translated: 'third' }, 3) } : response(msg.type, 'inline'));
+    await panel.controller.refresh();
+    old.resolve({ ok: true, state: wireState({ status: 'done', translated: 'fourth' }, 4) });
+    await pending;
+    assert.equal(panel.display().state.translated, 'fourth');
+  },
+}, {
+  name: 'a skipped translation confirms and recovers the current same-version body',
+  async fn() {
+    for (const reason of ['already_running', 'missing_api_key']) {
+      const panel = modulePanel();
+      await panel.controller.start(10);
+      panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? { ok: true, skipped: true, reason }
+        : response(msg.type, 'still current'));
+      await panel.controller.translate({});
+      assert.equal(panel.display().state.translated, 'translated still current');
+    }
+  },
+}, {
+  name: 'recovers a progress body before the first full query and accepts an older useful body only',
+  async fn() {
+    const panel = modulePanel();
+    const initial = deferred();
+    const recovery = deferred();
+    let calls = 0;
+    panel.setSend(msg => msg.type === 'GET_STATE'
+      ? (++calls === 1 ? initial.promise : recovery.promise) : response(msg.type, 'independent'));
+    const start = panel.controller.start(10);
+    await settle();
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1, state: {
+      workerEpoch: 'worker-fixture', stateSequence: 3, bodyVersion: 2,
+      status: 'translating', progress: { current: 2, total: 3 },
+    } });
+    await settle();
+    assert.equal(calls, 2);
+    recovery.resolve({ ok: true, state: wireState({ status: 'translating',
+      progress: { current: 1, total: 3 }, extracted: { contentMarkdown: 'recovered source' } }, 2, 2) });
+    await settle();
+    initial.resolve({ ok: true, state: wireState({ status: 'done', translated: 'old translation' }, 1, 1) });
+    await start;
+    assert.equal(panel.display().state.stateSequence, 3);
+    assert.equal(panel.display().state.progress.current, 2);
+    assert.equal(panel.display().state.extracted.contentMarkdown, 'recovered source');
+    assert.equal(panel.display().inline.snapshot.progress, 'inline independent');
+  },
+}, {
+  name: 'confirms an unseen worker epoch and never readmits retired worker replies or notifications',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const old = deferred();
+    const fresh = deferred();
+    let calls = 0;
+    panel.setSend(msg => msg.type === 'GET_STATE'
+      ? (++calls === 1 ? old.promise : fresh.promise) : response(msg.type, 'independent'));
+    const poll = panel.controller.refresh();
+    await settle();
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
+      state: { status: 'translating', workerEpoch: 'worker-new', stateSequence: 1, bodyVersion: 1 } });
+    await settle();
+    assert.equal(calls, 2);
+    assert.equal(panel.display().state.workerEpoch, 'worker-fixture');
+    fresh.resolve({ ok: true, state: wireState({ status: 'done', translated: 'new worker result' }, 2, 1, 'worker-new') });
+    await settle();
+    old.resolve({ ok: true, state: wireState({ status: 'done', translated: 'late old reply' }, 999, 99) });
+    await poll;
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
+      state: wireState({ status: 'done', translated: 'late old notification' }, 1000, 100) });
+    assert.equal(calls, 2);
+    assert.equal(panel.display().state.translated, 'new worker result');
+    panel.setSend(msg => msg.type === 'GET_STATE'
+      ? { ok: true, state: wireState({ status: 'done', translated: 'new worker result' }, 2, 1, 'worker-new') }
+      : response(msg.type, 'independent'));
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
+      state: wireState({ status: 'done', translated: 'unseen old notification' }, 9000, 9000, 'worker-unseen') });
+    await settle();
+    assert.equal(panel.display().state.workerEpoch, 'worker-new');
+    assert.equal(panel.display().state.translated, 'new worker result');
+  },
+}, {
+  name: 'new translation invalidates the previous body even when an old full query returns',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const action = deferred();
+    panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? action.promise : response(msg.type, 'old body'));
+    const translating = panel.controller.translate({});
+    await settle();
+    await panel.controller.refresh();
+    assert.equal(panel.display().state.translated, null);
+    assert.equal(panel.display().state.status, 'translating');
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
+      state: wireState({ status: 'done', translated: 'fresh translation' }, 2) });
+    action.resolve({ ok: true });
+    await translating;
+    assert.equal(panel.display().state.translated, 'fresh translation');
+  },
+}, {
+  name: 'fetches a missing progress body immediately without regressing newer status',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const old = deferred();
+    panel.setSend(msg => msg.type === 'GET_STATE' ? old.promise : response(msg.type, 'inline'));
+    const before = panel.sent.filter(msg => msg.type === 'GET_STATE').length;
+    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1, state: {
+      workerEpoch: 'worker-fixture', stateSequence: 4, bodyVersion: 2,
+      status: 'translating', progress: { current: 2, total: 3 },
+    } });
+    await settle();
+    assert.equal(panel.sent.filter(msg => msg.type === 'GET_STATE').length, before + 1);
+    assert.equal(panel.display().state.extracted, null);
+    old.resolve({ ok: true, state: { ...state('recovered'), stateSequence: 3, bodyVersion: 2,
+      status: 'translating', progress: { current: 1, total: 3 } } });
+    await settle();
+    assert.equal(panel.display().state.extracted.contentMarkdown, 'original recovered');
+    assert.equal(panel.display().state.progress.current, 2);
+    assert.equal(panel.display().state.stateSequence, 4);
+  },
+}, {
   name: 'new control clears its predecessor error before its tab query answers',
   async fn() {
     const panel = modulePanel();
@@ -619,7 +801,7 @@ exports.tests.push(
       await panel.controller.refresh();
       model = helpers.getInlineTranslationPanelViewModel(panel.display().inline);
       assert.match(model.statusText, /then try again/);
-      panel.setSend((msg) => msg.type === 'GET_STATE' ? { ok: true, state: { status: 'idle' } } : response(msg.type, 'recovered'));
+      panel.setSend((msg) => msg.type === 'GET_STATE' ? { ok: true, state: wireState({ status: 'idle' }) } : response(msg.type, 'recovered'));
       await panel.controller.refresh();
       assert.equal(panel.display().inline.controlError, '');
       assert.equal(helpers.getInlineTranslationPanelViewModel(panel.display().inline).startDisabled, false);
@@ -966,9 +1148,13 @@ exports.tests.push(...['control', 'translate'].flatMap((action) =>
       await settle();
       for (let i = 0; i < 3; i += 1) await panel.controller.refresh();
       if (outcome === 'success' || outcome === 'skipped') {
-        panel.setSend((msg) => response(msg.type, 'completed'));
+        panel.setSend((msg) => {
+          const result = response(msg.type, 'completed');
+          if (result.state) Object.assign(result.state, { stateSequence: 2, bodyVersion: 2 });
+          return result;
+        });
         if (action === 'translate' && outcome === 'success') panel.controller.receive({ type: 'STATE_UPDATED',
-          tabId: 1, state: { status: 'done', translated: 'completed translation' } });
+          tabId: 1, state: wireState({ status: 'done', translated: 'completed translation' }, 2) });
         pending.resolve({ ok: true, skipped: outcome === 'skipped' });
       } else if (outcome === 'rejection') pending.reject(new Error('current action failed'));
       else pending.resolve({ ok: false, error: { message: 'current action failed' } });

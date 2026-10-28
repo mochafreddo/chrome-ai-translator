@@ -6,6 +6,15 @@ const { createProtectedFullPageChunk } = require('./sidepanel-translation-execut
 const { createReasoningFixture } = require('./inline-block.test');
 const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
+function assertIdleResponse(response) {
+  assert.equal(response.ok, true);
+  const { workerEpoch, ...state } = response.state;
+  assert.match(workerEpoch, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  assert.deepEqual(state, {
+    status: 'idle', extracted: null, translated: null, stateSequence: 0, bodyVersion: 0,
+  });
+}
+
 // Per-tab state is the worker's alone, and the only account of it a caller gets is the
 // STATE_UPDATED broadcast the panel listens to. Collecting those is how a test sees both
 // what was recorded and, just as importantly, when nothing was.
@@ -381,6 +390,37 @@ async function runTabTranslation(
 exports.name = 'background helpers';
 exports.tests = [
   {
+    name: 'full initial state distinguishes restarted worker epochs without retaining article bodies',
+    async fn() {
+      const first = helpers.createBackgroundWorker();
+      const restarted = helpers.createBackgroundWorker();
+      const [a] = await collectWorkerResponses(first, [{ type: 'GET_STATE', tabId: 42 }]);
+      const [b] = await collectWorkerResponses(restarted, [{ type: 'GET_STATE', tabId: 42 }]);
+      assert.notEqual(a.state.workerEpoch, b.state.workerEpoch);
+      assert.deepEqual({ ...a.state, workerEpoch: '' }, {
+        status: 'idle', extracted: null, translated: null, workerEpoch: '', stateSequence: 0, bodyVersion: 0,
+      });
+    },
+  },
+  {
+    name: 'versions full state while progress broadcasts omit unchanged article bodies',
+    async fn() {
+      const { states } = await runTabTranslation(42, [
+        createCompletedResponse('첫째 문단 번역.'),
+        createCompletedResponse('둘째 문단 번역.'),
+        createCompletedResponse('셋째 문단 번역.'),
+      ]);
+      const progress = states.filter(state => state.status === 'translating');
+      assert.equal(progress.length, 4);
+      assert.deepEqual(progress.map(state => state.extracted?.contentMarkdown?.length || 0), [26, 0, 0, 0]);
+      assert.equal(typeof states[0].workerEpoch, 'string');
+      assert.ok(states[0].workerEpoch);
+      assert.deepEqual(states.map(state => state.stateSequence), [1, 2, 3, 4, 5, 6]);
+      assert.deepEqual(states.map(state => state.bodyVersion), [1, 2, 2, 2, 2, 3]);
+      assert.equal(states.every(state => state.workerEpoch === states[0].workerEpoch), true);
+    },
+  },
+  {
     name: 'ignores a late live-tab lookup after removal without suppressing another tab command',
     async fn() {
       for (const closedId of [4201, 999]) {
@@ -415,7 +455,7 @@ exports.tests = [
       worker.handlers.onTabRemoved(4201);
       resolveQuery([{ id: 4201 }]);
       await pending;
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assertIdleResponse((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]))[0]);
       assert.deepEqual(broadcasts, []);
       assert.deepEqual(calls, []);
     },
@@ -449,7 +489,7 @@ exports.tests = [
       release();
       await Promise.all(pending);
       const states = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }, { type: 'GET_STATE', tabId: 21 }]);
-      assert.deepEqual(states[0].state, { status: 'idle' });
+      assertIdleResponse(states[0]);
       assert.equal(states[1].state.status, 'done');
       assert.equal(states[1].state.translated, '번역 결과');
       assert.equal(requests, 2);
@@ -482,7 +522,7 @@ exports.tests = [
       release();
       await pending;
       await require('./inline-translation-operation.test').flushMicrotasks();
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assertIdleResponse((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]))[0]);
       assert.deepEqual(broadcasts, []);
     },
   })),
@@ -534,13 +574,13 @@ exports.tests = [
       assert.equal(typeof worker.handlers.onTabRemoved, 'function');
       worker.handlers.onTabRemoved(20);
       const closedBroadcasts = broadcasts.filter(message => message.tabId === 20).length;
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assertIdleResponse((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]))[0]);
       await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 21 }]);
       const [other] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]);
       assert.equal(other.state.status, 'done');
       release();
       await pending;
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assertIdleResponse((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]))[0]);
       assert.equal(broadcasts.filter(message => message.tabId === 20).length, closedBroadcasts);
       assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]), [other]);
       assert.equal(requests.filter(input => input !== 'Other tab').length, phase === 'model' ? (outcome === 'success' ? 3 : 1) : 0);
@@ -566,7 +606,7 @@ exports.tests = [
       assert.equal(typeof worker.handlers.onTabRemoved, 'function');
       const beforeClose = broadcasts.length;
       worker.handlers.onTabRemoved(20);
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]), [{ ok: true, state: { status: 'idle' } }]);
+      assertIdleResponse((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]))[0]);
       assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]), [kept]);
       assert.equal(broadcasts.length, beforeClose);
     },
@@ -1367,6 +1407,9 @@ exports.tests = [
       assert.deepEqual(responses, [{ ok: true }]);
       assert.equal(stateMessages.at(-1)?.state?.status, 'done');
       const publicStateKeys = new Set([
+        'workerEpoch',
+        'stateSequence',
+        'bodyVersion',
         'status',
         'error',
         'extracted',
@@ -3169,7 +3212,7 @@ exports.tests = [
       assert.match(broadcasts[0].state.inlineTranslationError.message, /Click the extension icon on this tab/);
       assert.equal(broadcasts[0].state.error, undefined);
       assert.deepEqual((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]))[0].state,
-        broadcasts[0].state);
+        { ...broadcasts[0].state, extracted: null, translated: null });
       broadcasts.length = 0;
       await invoke('action');
       assert.deepEqual(broadcasts, []);
