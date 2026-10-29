@@ -226,7 +226,7 @@
           const storage = chromeApi.storage.local;
           const stored = await storage.get([SECRET_KEY]);
           let encoded = stored[SECRET_KEY];
-          let decode = null;
+          let decode;
           try {
             decode = typeof Buffer !== 'undefined'
               ? new Uint8Array(Buffer.from(String(encoded || ''), 'base64url'))

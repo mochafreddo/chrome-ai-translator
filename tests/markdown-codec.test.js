@@ -417,7 +417,7 @@ exports.tests = [
 
       assert.match(original, /\[the guide\]\(<https:\/\/example\.test\//);
       assert.match(original, /npm run `build`/);
-      assert.match(original, /    - Nested item/);
+      assert.match(original, / {4}- Nested item/);
       assert.equal(modelInput.includes('token=secret'), false);
       assert.equal(modelInput.includes('npm run'), false);
       assert.equal(modelInput.includes('const fence'), false);

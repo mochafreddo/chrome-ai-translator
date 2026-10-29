@@ -2,3 +2,4 @@
 .worktrees/
 .gstack/
 .env.local
+node_modules/

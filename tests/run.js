@@ -6,6 +6,7 @@ const suiteFiles = [
   'browser-check-mode',
   'dom-tree',
   'verify-local',
+  'lint',
   'placeholder-tokens',
   'inline-block',
   'inline-translation-session',

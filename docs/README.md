@@ -47,6 +47,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [lint 구성 설계 인터뷰](design/lint-configuration-2026-10-29.md) | ESLint flat config, recommended 규칙, 기존 위반 정리, 로컬 검증·CI 연결, 설치된 의존성 비교를 통한 검증 기록 재사용과 검증 범위 확정; 구현·현재 브랜치 커밋 승인 |
 | [코드베이스 단순화 설계 인터뷰](design/codebase-simplification-2026-10-29.md) | DOM 복원 검사 공유, 패널 오류 상태 축소, UUID 검증식 재사용, 무효 호출 삭제의 범위·검증 확정과 구현 승인 |
 | [검증 환경 개선](design/verification-environment-2026-10-29.md) | 로컬·공개 브라우저 검사 분리, CI fixture, 안전한 검증 기록, 키 입력 경로와 로컬 결과 재사용에 관한 회고 권장안 수락 |
 | [본문 내 버튼 보존 설계 인터뷰](design/aiforui-inline-button-2026-10-29.md) | aiforui.dev의 버튼 포함 문단 조사, Q1–Q5 합의와 2026-10-29 구현 요청 범위 |

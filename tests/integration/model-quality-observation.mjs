@@ -52,7 +52,7 @@ export async function prepareQualityPage() {
   });
   const extraction = buildArticleExtraction(root, { title: document.title, url: location.href,
     langHint: document.documentElement.lang || '' });
-  const normalize = value => String(value).replace(/⟦[^⟧]+⟧/g, '').replace(/\\([\\`*{}\[\]()#+\-.!_>])/g, '$1').replace(/\s+/g, ' ').trim();
+  const normalize = value => String(value).replace(/⟦[^⟧]+⟧/g, '').replace(/\\([\\`*{}[\]()#+\-.!_>])/g, '$1').replace(/\s+/g, ' ').trim();
   const markdown = normalize(extraction.contentMarkdown);
   const inventory = document.createTreeWalker(frozenRoot, NodeFilter.SHOW_TEXT);
   const protectedSource = readProtectedPage(frozenRoot);
@@ -188,7 +188,7 @@ export function protectedMarkdownMatches(extraction, output) {
 }
 
 export function mockDisplayedProseMatches(pieces, output) {
-  const normalize = value => String(value).replace(/\\([\\`*{}\[\]()#+\-.!_>])/g, '$1').replace(/\s+/g, ' ').trim();
+  const normalize = value => String(value).replace(/\\([\\`*{}[\]()#+\-.!_>])/g, '$1').replace(/\s+/g, ' ').trim();
   const displayed = normalize(output);
   let position = 0;
   return pieces.length > 0 && pieces.every(piece => {

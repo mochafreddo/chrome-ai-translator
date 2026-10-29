@@ -13,7 +13,7 @@ try {
   for (const sha of commits) {
     const [subject, ...body] = git('show', '-s', '--format=%B', sha).split('\n');
     const errors = [];
-    if (!/^[a-z]+\([a-z0-9][a-z0-9_\/-]*\): \S.*$/.test(subject)) {
+    if (!/^[a-z]+\([a-z0-9][a-z0-9_/-]*\): \S.*$/.test(subject)) {
       errors.push('subject must use type(scope): description');
     }
     if (body[0] !== '') errors.push('separate subject and body with a blank line');

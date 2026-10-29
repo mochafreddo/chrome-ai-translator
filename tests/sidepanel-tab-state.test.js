@@ -138,7 +138,7 @@ exports.tests = [
       await settle();
       assert.equal(output.textContent, 'Original\n\noriginal 1\n\nTranslation\n\ntranslated 1');
       assert.equal(output.childNodes.length, 4);
-      output.textContent = output.textContent;
+      Reflect.set(output, 'textContent', output.textContent);
       panel.poll();
       await settle();
       assert.equal(output.childNodes.length, 4);

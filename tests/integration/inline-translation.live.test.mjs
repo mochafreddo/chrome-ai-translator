@@ -251,7 +251,7 @@ async function main() {
 
 try {
   await main();
-} catch (error) {
+} catch {
   failures.push('harness');
   console.error('FAIL inline translation live - harness failed');
 } finally {

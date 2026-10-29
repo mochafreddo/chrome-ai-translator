@@ -179,7 +179,7 @@ async function toggleInlineTranslatorMenu(
   state = inlineState,
   renderUi = () => updateInlineTranslatorUi(state)
 ) {
-  state.menuOpen = !Boolean(state.menuOpen);
+  state.menuOpen = !state.menuOpen;
   renderUi?.();
   if (!state.menuOpen) return state.menuOpen;
   try {

@@ -99,7 +99,6 @@ const sidePanelTranslationExecution =
 const inlineModelExecution =
   globalThis.ChromeAiTranslatorInlineModelExecution || require('./inline-model-execution.js');
 const {
-  INLINE_TRANSLATION_CONTROLS,
   getInlineTranslationControlStep,
 } =
   globalThis.ChromeAiTranslatorInlineTranslationControls ||

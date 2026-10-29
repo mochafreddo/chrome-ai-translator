@@ -6,8 +6,9 @@ Use this guide to choose verification by what it requires. The [package scripts]
 
 | Command | Scope | Requirements and cost |
 | --- | --- | --- |
-| `npm test` | Registered browser-free unit suites | Node; no browser, network, or API key |
-| `npm run verify:local` | Unit, syntax and documentation checks with private logs and a completion record | Node and Git; no browser, network, or API key |
+| `npm test` | Registered browser-free unit suites | Node and installed development tools; no browser, network, or API key |
+| `npm run lint` | JavaScript error checks using ESLint recommended rules and runtime-specific configuration; no files are changed | Locked development tools installed; no browser, network, or API key |
+| `npm run verify:local` | Lint, syntax, documentation and unit checks with private logs and a completion record | Node, Git and installed development tools; no browser, network, or API key |
 | `npm run verify:local -- --check-reuse <summary.json>` | Validate an existing successful local verification record against current inputs and log integrity | Same checkout, source files, tool versions and recorded execution conditions; no checks are executed |
 | `npm run check:syntax` | Discover and parse regular `.js` files immediately inside `extension/`, sorted by path; fail on syntax errors or empty input | Node; no browser or model |
 | `npm run check:docs` | Check Git-tracked Markdown links and heading anchors, and `docs/README.md` coverage of other tracked Markdown under `docs/` | Node and Git; no network |
@@ -26,13 +27,29 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | `npm run verify:live:routing-pilot -- --output <new-directory> --budget-usd 2` | Fixed 36-run OpenRouter routing comparison under identical price ceilings and a shared USD 2 model-spend ledger | Browser prerequisites, network, `OPENROUTER_API_KEY` in `.env.local`; billed; separate authorization required |
 | `npm run verify:live` | Both billed checks, sequentially | Same prerequisites; attempts the second even if the first fails |
 
-Run the unit suite and syntax checks for ordinary implementation changes. Choose browser checks for the path being changed rather than treating `test:integration` as an aggregate. Keep billed checks separate and run them only within authorized scope.
+Install the locked development tools before running checks on a fresh checkout:
+
+```sh
+npm ci --ignore-scripts --no-audit --no-fund
+```
+
+Use a Node version supported by the installed ESLint package; CI's version is owned by [the workflow](../.github/workflows/checks.yml). Installation needs network access; the checks themselves do not. Loading the unpacked extension still needs no dependency installation or build.
+
+Run lint, the unit suite and syntax checks for ordinary implementation changes. Choose browser checks for the path being changed rather than treating `test:integration` as an aggregate. Keep billed checks separate and run them only within authorized scope.
+
+## JavaScript lint
+
+Run `npm run lint` to check the extension, scripts, tests and ESLint configuration. [The flat config](../eslint.config.mjs) owns file matching, runtime globals and rules. Extension scripts retain classic-script parsing and guarded CommonJS exports. The worker has service-worker globals without page DOM globals; Node scripts and unit tests use CommonJS, while integration modules and the config use ESM. Integration modules may contain serialized browser callbacks, and named injected helpers are allowed only in the files that use them. The diagnostics module also supports Node's Buffer in its CommonJS path.
+
+The recommended rules detect likely errors rather than enforce formatting. Two exceptions preserve existing deliberate patterns: empty catch blocks implement best-effort cleanup and optional probes, and an unused destructured property beside a rest binding removes that property from the result. Other empty blocks and unused variables remain errors. Warnings fail the command. Lint does not fix files, and no Git hook or formatter runs automatically. To change a rule, establish the incorrect diagnostic and document the narrow exception rather than adding a blanket suppression.
+
+The `lint` unit suite runs the real CLI on normal and invalid code for the supported environments, checks the deliberate exceptions and verifies that a failing file check preserves its input. It uses local temporary fixtures and no browser.
 
 ## Local verification records
 
-Run `npm run verify:local` for final local verification. It executes the existing syntax, documentation and unit commands, records each exit code or signal, and continues through all three checks even if one fails. It creates a new directory under the system temporary directory and prints its `summary.json` path. Use `--output <new-temporary-directory>` to choose a new temporary destination outside the checkout; its parent must already exist. Existing destinations are refused.
+Run `npm run verify:local` for final local verification. It executes lint, syntax, documentation and unit checks, records each exit code or signal, and continues through all checks even if one fails. It creates a new directory under the system temporary directory and prints its `summary.json` path. Use `--output <new-temporary-directory>` to choose a new temporary destination outside the checkout; its parent must already exist. Existing destinations are refused.
 
-The runner applies `umask 077` before starting checks, creates the directory with mode 0700 and exclusive mode-0600 log and summary files, and verifies their ownership and permissions. The record stores command arguments, start/end times, completion status, log hashes, tracked-source hashes and runtime metadata. It does not store source contents or environment values. Ignored credentials are not read; tracked secret-bearing paths are refused before checks. Keep the printed record with the work's verification evidence.
+The runner applies `umask 077` before starting checks, creates the directory with mode 0700 and exclusive mode-0600 log and summary files, and verifies their ownership and permissions. The record stores command arguments, start/end times, completion status, log hashes, tracked-source and installed-dependency hashes and runtime metadata. It does not store source or dependency contents or environment values. Ignored credentials are not read; tracked secret-bearing paths are refused before checks. Keep the printed record with the work's verification evidence.
 
 Before reusing a record for a later commit or push, run:
 
@@ -40,9 +57,13 @@ Before reusing a record for a later commit or push, run:
 npm run verify:local -- --check-reuse /path/printed/by/verification/summary.json
 ```
 
-Reuse is permitted only when this command exits 0. It requires all three checks to have completed successfully, unchanged inputs during that run, the same physical checkout and tracked file contents/modes, the same verification runner, Node/Git versions, OS/platform and recorded locale, timezone and execution environment fingerprint. The run-stability comparison includes file, parent-directory and Git index change metadata to detect ordinary edit-and-restore races or a temporarily changed check inventory. It also checks the private files and log hashes. A later commit or staging change that leaves these inputs identical does not invalidate the record; a source, checkout, tool or recorded-condition change does. Keep both the source and index fixed while checks run.
+Reuse is permitted only when this command exits 0. It requires every local check to have completed successfully, unchanged inputs during that run, the same physical checkout and tracked file contents/modes, the same installed dependency tree, verification runner, Node/Git versions, OS/platform and recorded locale, timezone and execution environment fingerprint. The run-stability comparison includes file, dependency-tree, parent-directory and Git index change metadata to detect ordinary edit-and-restore races or a temporarily changed check inventory. It also checks the private files and log hashes. A later commit or staging change that leaves these inputs identical does not invalidate the record; a source, checkout, tool or recorded-condition change does. Keep the source, installed dependencies and index fixed while checks run.
 
-Reuse is restricted to this dependency-free local check set under a plain Node invocation. Nonempty `NODE_OPTIONS`, `NODE_PATH` or Node startup flags prevent reuse rather than collecting externally loaded code. Untracked files, unmanaged dependencies, `node_modules` or ignored inputs outside the runner's explicit credential/agent-workspace exclusions also prevent reuse. The exclusions are owned by [the runner](../scripts/verify-local.js). Preserve unrelated work when reuse is refused and run fresh checks instead of staging, deleting or hiding it to obtain reuse. The runner hashes tracked files only and never reads untracked or ignored file contents for its input record.
+Reuse requires installed dependencies and a tracked lockfile whose root dependency declarations match `package.json`. The runner hashes the actual `node_modules` tree, including added or removed entries, file contents, permission modes and symbolic-link targets. Ordinary internal npm bin links are supported. A link must resolve to another collected dependency entry or a tracked checkout file; external, excluded, dangling or unsupported targets are refused. Required locked packages must be present, and declared root and transitive dependencies must resolve to collected inputs through Node's standard resolver. Each resolved installed package must belong to a lockfile package location; an unlisted nested package cannot shadow a locked package for reuse. Missing optional dependencies are allowed, but optional packages discovered in a parent installation prevent reuse. The lockfile describes intended installation and never substitutes for checking installed files. If dependencies become unreadable during checks, the runner retains the check logs and marks the run unsuccessful.
+
+Reuse remains restricted to a plain Node invocation. Nonempty `NODE_OPTIONS`, `NODE_PATH` or Node startup flags prevent reuse rather than collecting externally loaded code. Untracked files and ignored inputs outside `node_modules` and the runner's explicit credential/agent-workspace exclusions also prevent reuse. The exclusions are owned by [the runner](../scripts/verify-local.js). Preserve unrelated work when reuse is refused and run fresh checks instead of staging, deleting or hiding it to obtain reuse. The collector reads only tracked source files and the explicit dependency tree, without following dependency links into excluded files. Resolution checks cover declared package edges under the installed npm tools' loading conventions; they do not sandbox arbitrary undeclared or absolute imports.
+
+Export-restricted type-only and import-only packages are identified through metadata in Node's standard search paths. The same collected-path and lockfile-owner checks apply to those candidates. Built-in modules use the recorded Node version; an installed npm package sharing a built-in name still has its metadata checked.
 
 Browser checks, reported public pages, billed model checks, commit-format checks and history comparisons remain separate. A local record does not qualify them, establish a production deployment, or replace review. Recheck the intended Git target before publication even when local checks are reusable.
 
@@ -58,7 +79,7 @@ npm run check:docs:history -- --base 0123456789abcdef0123456789abcdef01234567
 
 The example hash is illustrative and must be replaced with the intended baseline commit. The command rejects a missing or symbolic baseline such as `HEAD` or `main`, and rejects invalid commits. It compares each historical tracked Markdown file under `docs/design`, `docs/qa`, and `docs/superpowers` with that baseline: the title and exact original body must match. Content before `## Original record` is excluded from the body comparison; the title remains protected. When that marker is absent in the baseline, the whole baseline file is treated as the original. A file present at only one side fails the check.
 
-The GitHub Actions `checks` job runs unit, syntax, documentation and commit-format checks on branch pushes and pull requests without a browser or API key. A separate `browser-fixtures` job installs pinned agent-browser and its Chrome/system prerequisites, then runs only the inline-button and heading-permalink fixture modes. Installation needs outbound network; those checks use local pages and no model credentials. See the [workflow](../.github/workflows/checks.yml). Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
+The GitHub Actions `checks` job runs commit-format checks and installs locked development tools with lifecycle scripts disabled before lint, syntax, documentation and unit checks on branch pushes and pull requests. Those checks need no browser or API key. A separate `browser-fixtures` job installs pinned agent-browser and its Chrome/system prerequisites, then runs only the inline-button and heading-permalink fixture modes. Installation needs outbound network; those checks use local pages and no model credentials. See the [workflow](../.github/workflows/checks.yml). Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
 
 ## Unit suite
 

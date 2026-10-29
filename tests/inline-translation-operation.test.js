@@ -1,7 +1,6 @@
 const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const { createReasoningFixture } = require('./inline-block.test');
-const sessionModule = require('../extension/inline-translation-session');
 
 async function flushMicrotasks(count = 256) {
   for (let index = 0; index < count; index += 1) await Promise.resolve();
@@ -242,7 +241,7 @@ exports.tests.push(
     ['failure', 'rejection'].map((outcome) => ({
       name: `discards superseded Start settings ${outcome} after ${control}`,
       async fn() {
-        await withInlineRequestLifecycle(async ({ operation, pending, instruct, holdSettings, listeners }) => {
+        await withInlineRequestLifecycle(async ({ operation, pending, instruct, holdSettings }) => {
           await instruct('restoreInlineOriginal');
           const settings = holdSettings();
           await instruct('startInlineTranslation');
@@ -282,7 +281,7 @@ exports.tests.push(
   {
     name: 'only the latest pending Start settings may begin an Inline Translation Operation',
     async fn() {
-      await withInlineRequestLifecycle(async ({ operation, pending, instruct, holdSettings, listeners }) => {
+      await withInlineRequestLifecycle(async ({ operation, pending, instruct, holdSettings }) => {
         await instruct('restoreInlineOriginal');
         const settings = holdSettings();
         await instruct('startInlineTranslation');
@@ -306,7 +305,7 @@ exports.tests.push(
   ...['success', 'missing key'].map((outcome) => ({
     name: `superseded Start settings ${outcome} preserves the latest preparation error`,
     async fn() {
-      await withInlineRequestLifecycle(async ({ operation, pending, instruct, holdSettings, listeners }) => {
+      await withInlineRequestLifecycle(async ({ operation, pending, instruct, holdSettings }) => {
         await instruct('restoreInlineOriginal');
         const settings = holdSettings();
         await instruct('startInlineTranslation');
@@ -326,7 +325,7 @@ exports.tests.push(
   ...['failure', 'rejection', 'missing key'].map((outcome) => ({
     name: `latest Start settings ${outcome} remains visible`,
     async fn() {
-      await withInlineRequestLifecycle(async ({ operation, pending, instruct, holdSettings, listeners }) => {
+      await withInlineRequestLifecycle(async ({ operation, pending, instruct, holdSettings }) => {
         await instruct('restoreInlineOriginal');
         const settings = holdSettings();
         await instruct('startInlineTranslation');
@@ -571,7 +570,7 @@ exports.tests.push(
   {
     name: 'reuses repaired cache output at an exhausted budget and gives a fresh content instance its own budget',
     async fn() {
-      await withInlineRequestLifecycle(async ({ block, operation, pending, instruct, createAnotherOperation }) => {
+      await withInlineRequestLifecycle(async ({ block, pending, instruct, createAnotherOperation }) => {
         const record = pending[0].message.records[0];
         pending[0].resolve({ ok: true, results: [{
           id: record.id, disposition: 'apply', attemptCount: 2,

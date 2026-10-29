@@ -609,7 +609,7 @@
       get spent() { return spent; },
       charge(cost) { spent += cost; },
     };
-    let session = null;
+    let session;
     let operation = null;
 
     // The translated records of the operation that is ending join what the visit has

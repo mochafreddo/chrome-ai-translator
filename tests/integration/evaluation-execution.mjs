@@ -64,9 +64,9 @@ export async function runEvaluation({ output, experiment, adapter, budget }) {
         try { budget.settle(record.ledgerId, null); } catch {}
       } finally {
         delete record.accounting;
-        try { save(`accounting-${randomUUID()}.json`, { synthetic: !live, budget: budget.snapshot(), request: record }); }
-        catch (error) { halted = true; throw error; }
       }
+      try { save(`accounting-${randomUUID()}.json`, { synthetic: !live, budget: budget.snapshot(), request: record }); }
+      catch (error) { halted = true; throw error; }
     };
     const request = ({ body, networkId, fulfill, fail }) => {
       const run = current;

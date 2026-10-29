@@ -88,7 +88,7 @@ exports.tests = [
           'check:commits': 'node check-commits.js',
         } }));
         const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/checks.yml'), 'utf8');
-        const script = workflow.match(/run: \|\n([\s\S]*?)(?=\n      -|$)/)[1];
+        const script = workflow.match(/run: \|\n([\s\S]*?)(?=\n {6}-|$)/)[1];
         const run = (baseSha, headSha) => {
           const result = spawnSync('bash', ['-e', '-c', script], { cwd: checkout, encoding: 'utf8',
             env: { ...process.env, BASE_SHA: baseSha, HEAD_SHA: headSha } });

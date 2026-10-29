@@ -4,7 +4,6 @@ const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
 const { createProtectedFullPageChunk } = require('./sidepanel-translation-execution.test.js');
 const { createReasoningFixture } = require('./inline-block.test');
-const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
 function assertIdleResponse(response) {
   assert.equal(response.ok, true);
@@ -13,19 +12,6 @@ function assertIdleResponse(response) {
   assert.deepEqual(state, {
     status: 'idle', extracted: null, translated: null, stateSequence: 0, bodyVersion: 0,
   });
-}
-
-// Per-tab state is the worker's alone, and the only account of it a caller gets is the
-// STATE_UPDATED broadcast the panel listens to. Collecting those is how a test sees both
-// what was recorded and, just as importantly, when nothing was.
-function createStateBroadcastChrome(broadcasts) {
-  return {
-    runtime: {
-      async sendMessage(message) {
-        broadcasts.push(message);
-      },
-    },
-  };
 }
 
 function createCompletedResponse(outputText) {
