@@ -8,11 +8,13 @@ import background from '../../extension/background.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until } from './harness.mjs';
+import { parseBrowserCheckMode } from './browser-check-mode.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXTENSION_DIR = join(HERE, '..', '..', 'extension');
 const SESSION = 'chrome-ai-translator-heading-permalink';
 const PAGE_URL = 'https://code.claude.com/docs/en/advisor';
+const mode = parseBrowserCheckMode(process.argv.slice(2));
 const { check, failures, finish } = createChecks('heading permalink');
 
 async function inject(evaluate) {
@@ -111,13 +113,15 @@ async function verifyPage(page, label) {
 let ctx;
 let fixture;
 try {
-  fixture = await serveFixture(join(HERE, 'fixtures', 'heading-permalink.html'));
-  ctx = await launchExtensionBrowser({ session: SESSION, url: fixture.url, extensionDir: EXTENSION_DIR });
+  if (mode.fixture) fixture = await serveFixture(join(HERE, 'fixtures', 'heading-permalink.html'));
+  ctx = await launchExtensionBrowser({ session: SESSION, url: fixture?.url || PAGE_URL, extensionDir: EXTENSION_DIR });
   if (!ctx.page || !ctx.extension) throw new Error('Fixture page or extension did not load');
-  await verifyPage(ctx.page, 'fixture');
-  await ctx.page.navigate(PAGE_URL);
-  const ready = await until(() => ctx.page.evaluate(`document.querySelectorAll('h2[id] a[href^="#"]').length > 0`), 20000);
-  if (check('reported page renders heading permalinks', ready)) await verifyPage(ctx.page, 'reported page');
+  if (mode.fixture) await verifyPage(ctx.page, 'fixture');
+  if (mode.reported) {
+    if (mode.fixture) await ctx.page.navigate(PAGE_URL);
+    const ready = await until(() => ctx.page.evaluate(`document.querySelectorAll('h2[id] a[href^="#"]').length > 0`), 20000);
+    if (check('reported page renders heading permalinks', ready)) await verifyPage(ctx.page, 'reported page');
+  }
 } catch (error) {
   failures.push('harness');
   console.error(`FAIL heading permalink - ${error?.message || error}`);

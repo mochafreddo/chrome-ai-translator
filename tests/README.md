@@ -7,6 +7,8 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | Command | Scope | Requirements and cost |
 | --- | --- | --- |
 | `npm test` | Registered browser-free unit suites | Node; no browser, network, or API key |
+| `npm run verify:local` | Unit, syntax and documentation checks with private logs and a completion record | Node and Git; no browser, network, or API key |
+| `npm run verify:local -- --check-reuse <summary.json>` | Validate an existing successful local verification record against current inputs and log integrity | Same checkout, source files, tool versions and recorded execution conditions; no checks are executed |
 | `npm run check:syntax` | Discover and parse regular `.js` files immediately inside `extension/`, sorted by path; fail on syntax errors or empty input | Node; no browser or model |
 | `npm run check:docs` | Check Git-tracked Markdown links and heading anchors, and `docs/README.md` coverage of other tracked Markdown under `docs/` | Node and Git; no network |
 | `npm run check:docs:history -- --base <full-commit-sha>` | Compare historical tracked Markdown with a fixed baseline | Node and Git; explicit full 40-character SHA-1 commit required |
@@ -26,6 +28,24 @@ Use this guide to choose verification by what it requires. The [package scripts]
 
 Run the unit suite and syntax checks for ordinary implementation changes. Choose browser checks for the path being changed rather than treating `test:integration` as an aggregate. Keep billed checks separate and run them only within authorized scope.
 
+## Local verification records
+
+Run `npm run verify:local` for final local verification. It executes the existing syntax, documentation and unit commands, records each exit code or signal, and continues through all three checks even if one fails. It creates a new directory under the system temporary directory and prints its `summary.json` path. Use `--output <new-temporary-directory>` to choose a new temporary destination outside the checkout; its parent must already exist. Existing destinations are refused.
+
+The runner applies `umask 077` before starting checks, creates the directory with mode 0700 and exclusive mode-0600 log and summary files, and verifies their ownership and permissions. The record stores command arguments, start/end times, completion status, log hashes, tracked-source hashes and runtime metadata. It does not store source contents or environment values. Ignored credentials are not read; tracked secret-bearing paths are refused before checks. Keep the printed record with the work's verification evidence.
+
+Before reusing a record for a later commit or push, run:
+
+```sh
+npm run verify:local -- --check-reuse /path/printed/by/verification/summary.json
+```
+
+Reuse is permitted only when this command exits 0. It requires all three checks to have completed successfully, unchanged inputs during that run, the same physical checkout and tracked file contents/modes, the same verification runner, Node/Git versions, OS/platform and recorded locale, timezone and execution environment fingerprint. The run-stability comparison includes file, parent-directory and Git index change metadata to detect ordinary edit-and-restore races or a temporarily changed check inventory. It also checks the private files and log hashes. A later commit or staging change that leaves these inputs identical does not invalidate the record; a source, checkout, tool or recorded-condition change does. Keep both the source and index fixed while checks run.
+
+Reuse is restricted to this dependency-free local check set under a plain Node invocation. Nonempty `NODE_OPTIONS`, `NODE_PATH` or Node startup flags prevent reuse rather than collecting externally loaded code. Untracked files, unmanaged dependencies, `node_modules` or ignored inputs outside the runner's explicit credential/agent-workspace exclusions also prevent reuse. The exclusions are owned by [the runner](../scripts/verify-local.js). Preserve unrelated work when reuse is refused and run fresh checks instead of staging, deleting or hiding it to obtain reuse. The runner hashes tracked files only and never reads untracked or ignored file contents for its input record.
+
+Browser checks, reported public pages, billed model checks, commit-format checks and history comparisons remain separate. A local record does not qualify them, establish a production deployment, or replace review. Recheck the intended Git target before publication even when local checks are reusable.
+
 ## Documentation checks
 
 `npm run check:docs` checks Git-tracked `*.md` and `*.markdown` files for local inline links and heading anchors. It skips fenced and inline code and makes no network requests. By default it reads the working-tree content of tracked files. It also requires `docs/README.md` to cover every other tracked Markdown file under `docs/`, excluding `docs/README.md` itself. New files must be added to Git's index before the checker includes them; linking an untracked file in the documentation index is not enough. Tests registered in the existing unit suite cover checker behavior.
@@ -38,7 +58,7 @@ npm run check:docs:history -- --base 0123456789abcdef0123456789abcdef01234567
 
 The example hash is illustrative and must be replaced with the intended baseline commit. The command rejects a missing or symbolic baseline such as `HEAD` or `main`, and rejects invalid commits. It compares each historical tracked Markdown file under `docs/design`, `docs/qa`, and `docs/superpowers` with that baseline: the title and exact original body must match. Content before `## Original record` is excluded from the body comparison; the title remains protected. When that marker is absent in the baseline, the whole baseline file is treated as the original. A file present at only one side fails the check.
 
-GitHub Actions runs unit, syntax, documentation, and commit-format checks on branch pushes and pull requests, without a browser or API key. See the [workflow](../.github/workflows/checks.yml). Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
+The GitHub Actions `checks` job runs unit, syntax, documentation and commit-format checks on branch pushes and pull requests without a browser or API key. A separate `browser-fixtures` job installs pinned agent-browser and its Chrome/system prerequisites, then runs only the inline-button and heading-permalink fixture modes. Installation needs outbound network; those checks use local pages and no model credentials. See the [workflow](../.github/workflows/checks.yml). Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
 
 ## Unit suite
 
@@ -88,6 +108,8 @@ The [content-readiness check](integration/content-readiness.test.mjs) uses a loc
 
 Other checks run only through their dedicated scripts:
 
+For `inline-button` and `heading-permalink`, pass `-- --fixture-only` for deterministic local regression checks or `-- --reported-only` for the public page alone. With no flag, both phases still run. Unknown, repeated or conflicting flags fail before starting a server or browser. Use fixture-only mode in CI and in mutation probes of local DOM behavior. Run the reported phase separately when validating current site compatibility; its failure remains visible rather than changing a local regression result.
+
 | Script suffix after `test:integration:` | Scope |
 | --- | --- |
 | `ui` | Options service switching and responsive form layout; diagnostic name, keyboard focus/scrolling and asynchronous load focus; long errors; Side Panel snapshot language boundaries and safe bilingual text through synthetic browser-message responses, keyboard tabs; Floating Translate Button sizing and typography; disposable Chrome, no API key or model calls |
@@ -104,6 +126,19 @@ Other checks run only through their dedicated scripts:
 | `openrouter-sidepanel` | Options service/key persistence and independent clear, fixed-host permissions, pinned-model Side Panel entry and multi-chunk deterministic rendered output, strict request routing/policy, versioned progress and 60 acknowledged polls, tab closure during a delayed request; synthetic keys and worker-wide request interception, no real model calls |
 
 Reported-page checks navigate public pages read-only and use deterministic output where application is tested. They establish the local DOM paths stated above, not model quality or complete extension startup. Live-page block counts are observations rather than permanent assertions. Generic DIV/SPAN paragraph inference and other `data-as` values remain unsupported. The edge-heading contract remains separate from the preserved inline-button contract. Disabling `moveBefore` in a current Chrome tests the legacy insertion branch; it does not establish execution on Chrome 116 itself.
+
+### Native keyboard input
+
+Use the existing `browser` driver from [harness.mjs](integration/harness.mjs) for ordinary native key input, keeping the check's named session explicit:
+
+```js
+await browser(['--session', SESSION, 'press', 'Enter']);
+check('dialog opens', await until(() => ctx.page.evaluate(
+  `document.querySelector('button').getAttribute('aria-expanded') === 'true' && !!document.querySelector('[role="dialog"]')`
+), 10000));
+```
+
+Assert the page handler's observable effect as well as input delivery. Wait for the actual state with `until`; a completed key command can precede rendering. Keep a native key command for keyboard acceptance checks. Reserve direct CDP key sequences for checks that specifically need protocol-level fields and verify their native effect. The [inline-button check](integration/inline-button.test.mjs) demonstrates activation while translated, dialog interaction and restoration; the [UI check](integration/ui-polish.test.mjs) retains its separate protocol-driven scroll scenarios.
 
 The [performance check](integration/performance.test.mjs) constructs 4,800 overlapping visible paragraphs in a disposable Chrome page so every paragraph participates in the same bounded scan. It counts admissions, scan callbacks, computed-style reads and element/range rectangle reads through the Viewport API. The count measurement uses a Session adapter that only records admission. A separate case uses the real Session, seeds one deterministic cache entry, applies it to 1,300 paragraphs through the real MutationObserver path and checks exact node restoration without a new request. Run the same check against another checkout with `npm run test:integration:performance -- --extension-dir /absolute/checkout/extension`. The comparison prints the browser version and uses a fixed viewport. The overlapping layout is synthetic; these operation counts establish neither realistic scrolling latency nor heap or model performance.
 
@@ -188,6 +223,7 @@ A later #104 verification on the same date ran the unchanged `test:integration:u
 
 These observations are retained from earlier verification, not rerun by reading or editing this guide:
 
+- On 2026-10-29, heading-permalink's two local fixture headings passed, but all 16 observed public advisor headings failed admission as `hidden_content / DIV` on both `15abb5e83ff1d1567392f5b4aa31b3eb98f0e2f3` and `6d9da2f2a5b2fa94156005d027ae46841250c6b6`. This is an unresolved reported-page failure; separating modes preserves the public failure and the independently passing fixture result.
 - The old `qa-issue-003.regression-1` file used `node:test` and was absent from the explicit suite list for two months. It now follows this harness and is registered; confirm both registration and output when adding a suite.
 - On 2026-10-06, the `github-skill-page` negative control against codec `65d1a1e` observed 19 visible blocks, one `unsupported_descendant / UL` rejection, zero model requests, and exit 1.
 - On 2026-09-10, heading-permalink verification observed 2 fixture and 16 reported-page headings. Codec `3d4848b` rejected all 18 as `hidden_content / DIV`; the fix passed collection, deterministic apply, control behavior, and exact restoration for all 18.

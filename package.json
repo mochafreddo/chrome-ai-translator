@@ -1,6 +1,7 @@
 {
   "private": true,
   "scripts": {
+    "verify:local": "node scripts/verify-local.js",
     "check:commits": "node scripts/check-commits.js",
     "check:docs": "node scripts/check-docs.js",
     "check:docs:history": "node scripts/check-docs.js --history",

@@ -8,6 +8,8 @@ Use `npm test` for "run the tests": it is the browser-free unit suite. `npm run 
 
 The runner prints one `PASS`/`FAIL` line per check and no summary at all, so the exit code is the only verdict. Several check names contain the word "failed", so grepping the output for failure matches passing checks.
 
+Before final local verification or reusing results for a later commit or push, follow [local verification records](tests/README.md#local-verification-records).
+
 ## Layout
 
 No bundler and no build step: `extension/` is loaded unpacked as-is and every file there is a classic script. Four runtimes share it. `background.js` is the MV3 service worker and pulls its dependencies in with `importScripts`. `content.js` runs in the page and is injected programmatically by the worker — the manifest declares no `content_scripts` — from the list in `getInlineContentScriptFiles()`. `sidepanel.js` and `options.js` run in extension pages and get their dependencies from `<script>` tags in `sidepanel.html` and `options.html`.

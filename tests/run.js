@@ -3,6 +3,8 @@ const suiteFiles = [
   'commit-format',
   'docs-check',
   'integration-harness',
+  'browser-check-mode',
+  'verify-local',
   'placeholder-tokens',
   'inline-block',
   'inline-translation-session',

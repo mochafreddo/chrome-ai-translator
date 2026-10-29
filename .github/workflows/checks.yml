@@ -38,3 +38,19 @@ jobs:
         if: ${{ !cancelled() }}
       - run: npm test
         if: ${{ !cancelled() }}
+
+  browser-fixtures:
+    if: github.event.deleted != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: npm install --global agent-browser@0.39.1
+      - run: agent-browser install --with-deps
+      - run: npm run test:integration:inline-button -- --fixture-only
+      - run: npm run test:integration:heading-permalink -- --fixture-only
