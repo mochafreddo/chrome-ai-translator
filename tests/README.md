@@ -80,6 +80,7 @@ Use deterministic request adapters, fake Chrome interfaces, and local DOM fixtur
 | --- | --- |
 | `syntax-check` | Directory discovery, invalid newly added scripts, and empty input through the syntax command |
 | `integration-harness` | CDP lifecycle plus launch success, missing prerequisites, redacted failure output, and cleanup through external browser adapters |
+| `dom-tree` | Independent test-only DOM capture and exact node/text/child-order comparison; the self-contained helper also runs through browser evaluation |
 | `evaluation-execution` | Shared comparison execution through deterministic adapters and the real budget: reservation evidence before transport, settlement, frozen-budget admission, interruption, and cleanup |
 | `inline-translation-session` | Admission, batches, settlement, accounting, cache, stop/restore, progress, and diagnostic outbox |
 | `inline-translation-operation` | Start/Stop/Original text wiring, transport, late settlement, feedback, and subsequent admission |

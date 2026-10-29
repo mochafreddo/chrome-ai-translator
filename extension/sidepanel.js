@@ -278,8 +278,6 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   let panelError = '';
   let snapshot = null;
   let controlError = '';
-  let controlErrorTabId = null;
-  let invocationError = '';
   let hasPageAccess = null;
   let hasBody = false;
   let bodyRecovery = null;
@@ -315,7 +313,6 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
       state = { ...state, extracted: incoming.extracted, translated: incoming.translated };
       hasBody = true;
     } else return;
-    invocationError = readInlineTranslationError(state);
     paint();
     if (pendingNotification?.workerEpoch === state.workerEpoch) {
       const notification = pendingNotification;
@@ -353,13 +350,12 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   function paint() {
     render({
       tabId, state, panelError,
-      inline: { snapshot, controlError, invocationError, hasPageAccess,
+      inline: { snapshot, controlError, invocationError: readInlineTranslationError(state), hasPageAccess,
         invocationErrorCode: state.inlineTranslationError?.code || '' },
     });
   }
   function forgetControlError() {
     controlError = '';
-    controlErrorTabId = null;
   }
   function select(nextTabId, initiatingRequest = null) {
     if (tabId === nextTabId) return;
@@ -380,7 +376,6 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     panelError = '';
     snapshot = null;
     forgetControlError();
-    invocationError = '';
     hasPageAccess = null;
     paint();
   }
@@ -395,7 +390,6 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   }
   async function refreshSelected(requestedControl = null) {
     if (tabId === null) return;
-    if (controlErrorTabId !== tabId) forgetControlError();
     const requestedTab = tabId;
     const requestedSelection = selection;
     await Promise.all([
@@ -437,7 +431,6 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
       if (!response?.ok) {
         controlError = response?.error?.message ||
           'Inline translation did not answer on this tab.';
-        controlErrorTabId = requestedTab;
         paint();
         return;
       }
@@ -445,7 +438,6 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     } catch (error) {
       if (selection !== requestedSelection || inlineControl !== requestedControl) return;
       controlError = error?.message || String(error);
-      controlErrorTabId = tabId;
       paint();
     }
   }
@@ -523,7 +515,6 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         return;
       }
       stateRequest = null;
-      if (controlErrorTabId !== tabId) forgetControlError();
       acceptState(incoming);
       if (!hasBody) recoverBody(state.workerEpoch, state.bodyVersion);
     },

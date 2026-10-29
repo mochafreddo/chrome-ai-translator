@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import viewportHarness from '../viewport-harness.js';
+import domTree from '../dom-tree.js';
 import background from '../../extension/background.js';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until } from './harness.mjs';
 
@@ -20,6 +21,7 @@ async function inject(evaluate) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
   await evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
+  await evaluate(`globalThis.captureDomTree = ${domTree.captureDomTree.toString()}`);
 }
 
 async function collectArticle() {
@@ -95,12 +97,7 @@ async function exerciseFixture() {
   for (const cell of cells) {
     cell.scrollIntoView({ block: 'center', behavior: 'instant' });
     const originalHtml = cell.outerHTML;
-    const graph = [];
-    const capture = (node) => {
-      graph.push({ node, children: [...node.childNodes], value: node.nodeValue });
-      node.childNodes.forEach(capture);
-    };
-    capture(cell);
+    const graph = captureDomTree(cell);
     const elements = [cell, ...cell.querySelectorAll('*')];
     const attributes = elements.map((node) => [...node.attributes].map(({ name, value }) => [name, value]));
     const application = ChromeAiTranslatorInlineTranslationSession.createInlineTranslationSession();
@@ -122,9 +119,7 @@ async function exerciseFixture() {
     const beforeRestoreCounts = application.progress().counts;
     application.restore();
     const exactRestore = application.status === 'original' && cell.outerHTML === originalHtml &&
-      graph.every(({ node, children, value }) => node.nodeValue === value &&
-        node.childNodes.length === children.length &&
-        children.every((child, index) => node.childNodes[index] === child));
+      graph.matches();
     results.push({ applied, preserved, exactRestore, beforeRestoreCounts, outcome });
   }
   return { scrolledToLowerContent, allCellsAdmitted,

@@ -4,6 +4,7 @@ const suiteFiles = [
   'docs-check',
   'integration-harness',
   'browser-check-mode',
+  'dom-tree',
   'verify-local',
   'placeholder-tokens',
   'inline-block',

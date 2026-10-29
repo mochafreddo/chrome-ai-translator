@@ -4,6 +4,7 @@
 // observed, not pinned; markup drift or a missing page fails this check.
 import { readFileSync } from 'node:fs';
 import viewportHarness from '../viewport-harness.js';
+import domTree from '../dom-tree.js';
 import background from '../../extension/background.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +23,7 @@ async function inject(evaluate) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
   await evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
+  await evaluate(`globalThis.captureDomTree = ${domTree.captureDomTree.toString()}`);
 }
 
 // Runs in the page, so references never leave the DOM being checked.
@@ -35,12 +37,7 @@ async function exerciseHeadings() {
     await new Promise((resolve) => setTimeout(resolve, 50));
     if (!heading.getBoundingClientRect().width || !heading.getBoundingClientRect().height) continue;
     const originalHtml = heading.outerHTML;
-    const graph = [];
-    const capture = (node) => {
-      graph.push({ node, children: [...node.childNodes], value: node.nodeValue });
-      node.childNodes.forEach(capture);
-    };
-    capture(heading);
+    const graph = captureDomTree(heading);
     const link = Array.from(heading.querySelectorAll('a')).find((node) => node.getAttribute('href') === `#${heading.id}`);
     let control = link;
     while (control.parentElement !== heading) control = control.parentElement;
@@ -84,9 +81,7 @@ async function exerciseHeadings() {
     const focusedBeforeRestore = document.activeElement === link;
     session.restore();
     const restored = session.status === 'original';
-    const exactGraph = graph.every(({ node, children, value }) =>
-      node.nodeValue === value && node.childNodes.length === children.length &&
-      children.every((child, index) => node.childNodes[index] === child));
+    const exactGraph = graph.matches();
     const focusedAfterRestore = document.activeElement === link;
     link.click();
     results.push({ collected: true, applied, translated: output !== record.template,

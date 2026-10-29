@@ -3,6 +3,7 @@
 // widths. No key is read and no translation request is made.
 import { readFileSync } from 'node:fs';
 import viewportHarness from '../viewport-harness.js';
+import domTree from '../dom-tree.js';
 import background from '../../extension/background.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +42,7 @@ async function exerciseLabels(page, context, width) {
   await wait(250);
   return page.evaluate(`(async () => {
     const createViewportProbe = ${viewportHarness.createViewportProbe.toString()};
+    const captureDomTree = ${domTree.captureDomTree.toString()};
     const cards = [
         ['/skills-to-spec', 'Previous skill'],
         ['/skills-implement', 'Next skill'],
@@ -62,16 +64,7 @@ async function exerciseLabels(page, context, width) {
         const visible = labels.find(
           (node) => getComputedStyle(node).display !== 'none'
         );
-        const graph = [];
-        const capture = (node) => {
-          graph.push({
-            node,
-            children: [...node.childNodes],
-            value: node.nodeValue,
-          });
-          node.childNodes.forEach(capture);
-        };
-        capture(block);
+        const graph = captureDomTree(block);
         const originalHtml = block.outerHTML;
         const hiddenHtml = hidden?.outerHTML || '';
         const originalParent = block.parentNode;
@@ -113,11 +106,7 @@ async function exerciseLabels(page, context, width) {
         const restored = session.status === 'original';
         originalParent.insertBefore(block, originalNextSibling);
         host.remove();
-        const exactGraph = graph.every(({ node, children, value }) =>
-          node.nodeValue === value &&
-          node.childNodes.length === children.length &&
-          children.every((child, index) => node.childNodes[index] === child)
-        );
+        const exactGraph = graph.matches();
         results.push({
           labelsFound: Boolean(hidden && visible),
           collectorOutcomeSafe:

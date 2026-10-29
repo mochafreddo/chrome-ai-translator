@@ -14,7 +14,7 @@
     for (const [token, entry] of Object.entries(value)) {
       const runId = typeof entry?.runId === 'string' ? entry.runId : '';
       if (
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token) ||
+        !protocol.uuidV4Pattern.test(token) ||
         !entry || typeof entry !== 'object' || Array.isArray(entry) ||
         !Number.isFinite(entry.expiresAt) || entry.expiresAt <= 0 ||
         !/^run-\d+-[a-z0-9]{1,12}$/.test(runId) ||

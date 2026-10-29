@@ -2,6 +2,7 @@
 // and the reported page. No key is read and no model request is sent.
 import { readFileSync } from 'node:fs';
 import viewportHarness from '../viewport-harness.js';
+import domTree from '../dom-tree.js';
 import background from '../../extension/background.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,12 +22,7 @@ async function exerciseParagraphs() {
     await new Promise(resolve => setTimeout(resolve, 50));
     if (!block.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
     const originalHtml = block.outerHTML;
-    const graph = [];
-    const capture = node => {
-      graph.push({ node, children: [...node.childNodes], value: node.nodeValue });
-      node.childNodes.forEach(capture);
-    };
-    capture(block);
+    const graph = captureDomTree(block);
     const elements = [block, ...block.querySelectorAll('*')];
     const attributes = elements.map(node => JSON.stringify([...node.attributes].map(a => [a.name, a.value])));
     const codeNodes = [...block.querySelectorAll('code')];
@@ -56,9 +52,7 @@ async function exerciseParagraphs() {
       const unique = duplicate.length === 0 && rescanned.length === 0 && session.takeBatch().length === 0;
       session.restore();
       const restored = session.status === 'original';
-      const exactGraph = graph.every(({ node, children, value }) =>
-        node.nodeValue === value && node.childNodes.length === children.length &&
-        children.every((child, index) => node.childNodes[index] === child));
+      const exactGraph = graph.matches();
       results.push({ collected: true, translated, preserved, unique, restored,
         exactGraph, exactHtml: block.outerHTML === originalHtml });
     } finally { viewport.stop(); }
@@ -71,6 +65,7 @@ async function verifyPage(page, label, expectedCount) {
     await page.evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
   await page.evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
+  await page.evaluate(`globalThis.captureDomTree = ${domTree.captureDomTree.toString()}`);
   const results = await page.evaluate(`(${exerciseParagraphs.toString()})().catch(error => ({ error: error.message }))`, 20000);
   check(`${label}: visible marked paragraphs are present`, Array.isArray(results) &&
     (expectedCount === undefined ? results.length > 0 : results.length === expectedCount), JSON.stringify(results));

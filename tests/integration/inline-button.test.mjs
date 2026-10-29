@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import viewportHarness from '../viewport-harness.js';
+import domTree from '../dom-tree.js';
 import background from '../../extension/background.js';
 import { browser, createChecks, launchExtensionBrowser, serveFixture, until } from './harness.mjs';
 import { parseBrowserCheckMode } from './browser-check-mode.mjs';
@@ -17,6 +18,7 @@ async function inject(page) {
     await page.evaluate(readFileSync(join(HERE, '../../extension', file), 'utf8'));
   }
   await page.evaluate(`globalThis.createViewportProbe = ${viewportHarness.createViewportProbe.toString()}`);
+  await page.evaluate(`globalThis.captureDomTree = ${domTree.captureDomTree.toString()}`);
 }
 
 function exerciseButtons(legacy, reported) {
@@ -28,12 +30,7 @@ function exerciseButtons(legacy, reported) {
     for (const paragraph of paragraphs) {
       paragraph.scrollIntoView({ block: 'center', behavior: 'instant' });
       const buttons = [...paragraph.querySelectorAll('button')];
-      const graph = [];
-      const capture = (node) => {
-        graph.push({ node, children: [...node.childNodes], value: node.nodeValue });
-        node.childNodes.forEach(capture);
-      };
-      capture(paragraph);
+      const graph = captureDomTree(paragraph);
       const buttonGraphs = buttons.map((button) => button.innerHTML);
       for (const focusButton of buttons) {
         const session = ChromeAiTranslatorInlineTranslationSession.createInlineTranslationSession();
@@ -61,7 +58,7 @@ function exerciseButtons(legacy, reported) {
         const focusedAfterApply = document.activeElement === focusButton && blurs === 0;
         const scrollStable = window.scrollY === scrollBefore;
         const buttonSubtrees = buttons.every((button, index) => button.innerHTML === buttonGraphs[index]);
-        const positionChanged = graph[0].children.some((child, index) => paragraph.childNodes[index] !== child);
+        const positionChanged = graph.children.some((child, index) => paragraph.childNodes[index] !== child);
         if (!reported) focusButton.click();
         const pageClickHandled = focusButton.dataset.clicks === '1';
         const clicked = observedClicks === 1;
@@ -70,8 +67,7 @@ function exerciseButtons(legacy, reported) {
         const blursBeforeRestore = blurs;
         session.restore();
         const focusedAfterRestore = document.activeElement === focusBeforeRestore && blurs === blursBeforeRestore;
-        const exactGraph = graph.every(({ node, children, value }) => node.nodeValue === value &&
-          node.childNodes.length === children.length && children.every((child, index) => node.childNodes[index] === child));
+        const exactGraph = graph.matches();
         const statePreserved = focusButton.getAttribute('aria-expanded') === stateBeforeRestore;
         if (!reported) focusButton.click();
         const clickAfterRestore = observedClicks === 2 && focusButton.dataset.clicks === '2';
@@ -173,9 +169,7 @@ try {
       const dialogPrepared = await ctx.page.evaluate(`(() => {
         const button = [...document.querySelectorAll('p button')].find(button => button.textContent.trim() === 'Lapse');
         const paragraph = button.closest('p');
-        const graph = [];
-        const capture = node => { graph.push({node, children:[...node.childNodes], value:node.nodeValue}); node.childNodes.forEach(capture); };
-        capture(paragraph);
+        const graph = captureDomTree(paragraph);
         const codec = ChromeAiTranslatorInlineBlock;
         const serialized = codec.serializeBlock(paragraph);
         if (!serialized.ok) return false;
@@ -200,8 +194,7 @@ try {
         const restored = ChromeAiTranslatorInlineBlock.restoreBlock(snapshot);
         return {restored:restored.ok, focused:document.activeElement === button,
           latestState:button.getAttribute('aria-expanded') === 'false',
-          exactGraph:graph.every(({node,children,value}) => node.nodeValue === value &&
-            node.childNodes.length === children.length && children.every((child,index) => node.childNodes[index] === child))};
+          exactGraph:graph.matches()};
       })()`);
       check('reported dialog interaction permits exact restore with current state', !!dialogRestored && Object.values(dialogRestored).every(Boolean), JSON.stringify(dialogRestored));
       await ctx.page.evaluate('globalThis.inlineButtonDialogProbe.button.click()');

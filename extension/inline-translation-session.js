@@ -461,7 +461,6 @@
           retained.push(record);
           continue;
         }
-        clearRetrySupersession(operation, record);
         record.state = 'original';
         continue;
       }
