@@ -754,13 +754,32 @@
     return rejection;
   }
 
+  function isSupportedInlineButton(node) {
+    if (getAttribute(node, 'type').toLowerCase() !== 'button' ||
+      !['', 'button'].includes(getAttribute(node, 'role').toLowerCase())) return false;
+    const stack = getChildNodes(node);
+    let visited = 0;
+    while (stack.length) {
+      const child = stack.pop();
+      if (++visited > MAX_STRUCTURE_NODES) return false;
+      if (child?.nodeType === 3 || child?.nodeType === 8) continue;
+      if (child?.nodeType !== 1 || !WRAPPER_TAGS.has(getTagName(child)) ||
+        isSemanticBlockElement(child) || classifyUnsupportedElement(child) ||
+        hasAttribute(child, 'tabindex') || hasInlineActionSemantics(child) ||
+        !['', 'none', 'presentation'].includes(getAttribute(child, 'role').toLowerCase())) return false;
+      stack.push(...getChildNodes(child));
+    }
+    return Boolean(normalizeVisibleLabel(node.textContent));
+  }
+
   function classifyUnsupportedElement(node) {
     if (node?.nodeType !== 1) return describeLocalRejection('unsupported_descendant', node);
     const tagName = getTagName(node);
     if (!tagName || tagName.includes('-')) {
       return describeLocalRejection(tagName.includes('-') ? 'custom_element' : 'invalid_root', node);
     }
-    if (INTERACTIVE_TAGS.has(tagName)) {
+    const supportedButton = tagName === 'BUTTON' && isSupportedInlineButton(node);
+    if (INTERACTIVE_TAGS.has(tagName) && !supportedButton) {
       return describeLocalRejection('interactive_content', node);
     }
     if (node?.hidden || hasAttribute(node, 'hidden')) {
@@ -776,15 +795,15 @@
       return describeLocalRejection('editable_content', node);
     }
     if (
-      hasAttribute(node, 'tabindex') &&
+      !supportedButton && hasAttribute(node, 'tabindex') &&
       Number(getAttribute(node, 'tabindex')) >= 0
     ) {
       return describeLocalRejection('interactive_content', node);
     }
-    if (hasAttribute(node, 'onclick')) {
+    if (!supportedButton && hasAttribute(node, 'onclick')) {
       return describeLocalRejection('interactive_content', node);
     }
-    if (EXCLUDED_ROLES.has(getAttribute(node, 'role').toLowerCase())) {
+    if (!supportedButton && EXCLUDED_ROLES.has(getAttribute(node, 'role').toLowerCase())) {
       return describeLocalRejection('interactive_content', node);
     }
     return null;
@@ -908,6 +927,7 @@
     const edgeRetainedSubtreeNodes = new Set();
     const opaqueAtomNodes = new Set();
     const inertPageNodes = new Set();
+    const retainedNodes = new Set();
     const contextualSourceSyntax = new Set();
     let wrapperIndex = 0;
     let atomIndex = 0;
@@ -993,6 +1013,7 @@
       const placement = parentId === 'ROOT' && getEdgeRetainedPlacement(node, block, classifier, blockChildNodes);
       if (placement) {
         edgeRetainedNodes.push({ node, placement, classifier });
+        retainedNodes.add(node);
         if (classifier === isHeadingControl) rememberOpaqueSubtree(node, edgeRetainedSubtreeNodes);
         return '';
       }
@@ -1026,11 +1047,16 @@
 
       const protectedLink =
         tagName === 'A' && isProtectedAtomicLinkLabel(node.textContent);
-      if (ATOM_TAGS.has(tagName) || protectedLink) {
+      if (ATOM_TAGS.has(tagName) || protectedLink || tagName === 'BUTTON') {
         const opaqueFailure = rememberOpaqueSubtree(node);
         if (opaqueFailure) {
           failed = opaqueFailure;
           return '';
+        }
+        if (tagName === 'BUTTON') {
+          for (let current = node; current && current !== block; current = current.parentNode) {
+            retainedNodes.add(current);
+          }
         }
         const structural = tagName === 'BR' || tagName === 'WBR';
         const atomKind = protectedLink
@@ -1149,6 +1175,7 @@
       blockChildNodes,
       opaqueAtomNodes,
       inertPageNodes,
+      retainedNodes,
       originalSignature,
       contract,
       template,
@@ -1450,18 +1477,26 @@
     };
   }
 
-  function replaceNodeChildren(node, children, edgeRetainedNodes = []) {
+  function replaceNodeChildren(node, children, retainedNodes = new Set()) {
     if (sameNodeList(node, children)) return;
-    const retained = new Set(edgeRetainedNodes.map((entry) => entry.node));
+    const retained = new Set(children.filter((child) => retainedNodes.has(child)));
     if (retained.size) {
-      // Never detach retained nodes: focus, listeners, and local state stay live.
+      const active = node.ownerDocument?.activeElement;
+      const anchor = children.find((child) => retained.has(child) && isNodeWithinBlock(active, child)) ||
+        children.find((child) => retained.has(child));
       for (const child of getChildNodes(node)) {
         if (!retained.has(child)) node.removeChild(child);
       }
       let next = null;
       for (let index = children.length - 1; index >= 0; index -= 1) {
         const child = children[index];
-        if (!retained.has(child)) node.insertBefore(child, next);
+        if (child !== anchor && (child.parentNode !== node || child.nextSibling !== next)) {
+          if (typeof node.moveBefore === 'function' && child.isConnected && node.isConnected) {
+            node.moveBefore(child, next);
+          } else {
+            node.insertBefore(child, next);
+          }
+        }
         next = child;
       }
       return;
@@ -1480,7 +1515,7 @@
     }
     for (const container of snapshot.originalContainers || []) {
       replaceNodeChildren(container.node, container.children,
-        container.node === snapshot.blockElement ? snapshot.edgeRetainedNodes : []);
+        snapshot.retainedNodes);
     }
     snapshot.appliedOwnership = null;
     snapshot.translatedSignature = null;
@@ -1501,9 +1536,9 @@
     }
     try {
       for (const container of plan.containerPlans) {
-        replaceNodeChildren(container.node, container.children);
+        replaceNodeChildren(container.node, container.children, snapshot.retainedNodes);
       }
-      replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.edgeRetainedNodes);
+      replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.retainedNodes);
       snapshot.appliedOwnership = captureAppliedOwnership(snapshot);
       const translatedFingerprint = getStructureFingerprint(
         snapshot.blockElement, snapshot.blockChildNodes

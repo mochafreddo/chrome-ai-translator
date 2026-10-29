@@ -112,6 +112,44 @@ function drain(visit, attemptCount = 1) {
 exports.name = 'inline translation session';
 exports.tests = [
   {
+    name: 'reuses button translations with current page nodes and separates changed labels',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const make = (label) => {
+        const { document, element, text } = createTestDocument();
+        const button = element('button', text(label));
+        button.setAttribute('type', 'button');
+        const block = element('p', text('You also get '), button, text(', an animation tool.'));
+        document.body.appendChild(block);
+        return { block, button };
+      };
+      const first = make('Lapse');
+      visit.admit(first.block);
+      const batch = visit.takeBatch();
+      assert.equal(batch.length, 1);
+      visit.settle(batch, { ok: true, results: [{ id: batch[0].id, disposition: 'apply',
+        template: `${batch[0].atoms[0].token} 애니메이션 도구도 받습니다.`, attemptCount: 1 }] });
+      assert.equal(first.block.textContent, 'Lapse 애니메이션 도구도 받습니다.');
+      const cached = make('Lapse');
+      cached.button.setAttribute('aria-expanded', 'true');
+      const cachedNodes = [...cached.block.childNodes];
+      visit.admit(cached.block);
+      assert.deepEqual(visit.takeBatch(), []);
+      assert.equal(cached.block.textContent, 'Lapse 애니메이션 도구도 받습니다.');
+      assert.equal(cached.block.childNodes[0], cached.button);
+      assert.equal(first.block.childNodes[0], first.button);
+      assert.equal(cached.button.getAttribute('aria-expanded'), 'true');
+      const changed = make('Other tool');
+      visit.admit(changed.block);
+      assert.equal(visit.takeBatch().length, 1);
+      visit.restore();
+      assert.deepEqual(cached.block.childNodes, cachedNodes);
+      assert.equal(cached.button.getAttribute('aria-expanded'), 'true');
+      assert.equal(first.block.textContent, 'You also get Lapse, an animation tool.');
+    },
+  },
+  {
     name: 'reuses one unsent Semantic Block admission across 100 viewport resets',
     fn() {
       const visit = session.createInlineTranslationSession();

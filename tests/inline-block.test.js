@@ -30,6 +30,11 @@ function createTestDocument() {
       return this.parentNode?.nodeType === 1 ? this.parentNode : null;
     }
 
+    get nextSibling() {
+      const siblings = this.parentNode?.childNodes || [];
+      return siblings[siblings.indexOf(this) + 1] || null;
+    }
+
     get isConnected() {
       let current = this;
       while (current?.parentNode) current = current.parentNode;
@@ -229,6 +234,104 @@ function createHeadingControlFixture(trailing = false) {
 
 exports.name = 'inline block codec';
 exports.tests = [
+  {
+    name: 'translates prose around an intact button and restores its original graph',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const label = element('span', element('strong', text('Lapse')));
+      const button = element('button', label);
+      button.setAttribute('type', 'button');
+      button.setAttribute('aria-haspopup', 'dialog');
+      button.setAttribute('tabindex', '0');
+      button.setAttribute('onclick', 'void 0');
+      const block = element('p', text('You also get '), button, text(', an animation tool.'));
+      document.body.appendChild(block);
+      const original = [...block.childNodes];
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      assert.equal(serialized.atoms[0].label, 'Lapse');
+      assert.equal(serialized.atoms[0].preserveText, true);
+      assert.equal(serialized.template.includes('Lapse'), false);
+      button.setAttribute('disabled', '');
+      const token = serialized.atoms[0].token;
+      assert.equal(codec.validateTranslatedTemplate('애니메이션 도구를 받습니다.', serialized.contract).ok, false);
+      assert.equal(codec.validateTranslatedTemplate(`${token}${token} 도구`, serialized.contract).ok, false);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, `${token} 애니메이션 도구도 받습니다.`).ok, true);
+      assert.equal(block.childNodes[0], button);
+      assert.equal(button.childNodes[0], label);
+      assert.equal(button.textContent, 'Lapse');
+      assert.equal(button.hasAttribute('disabled'), true);
+      button.setAttribute('aria-expanded', 'true');
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, original);
+      assert.equal(button.getAttribute('aria-expanded'), 'true');
+      assert.equal(button.hasAttribute('disabled'), true);
+    },
+  },
+  {
+    name: 'rejects unsafe button forms and rechecks support before apply and restore',
+    fn() {
+      const make = () => {
+        const { document, element, text } = createTestDocument();
+        const button = element('button', element('span', text('Lapse')));
+        button.setAttribute('type', 'button');
+        const block = element('p', text('Read about '), button, text(' here.'));
+        document.body.appendChild(block);
+        return { document, element, text, button, block };
+      };
+      const changes = [
+        ({ button }) => button.setAttribute('type', 'submit'),
+        ({ button }) => button.setAttribute('type', 'reset'),
+        ({ button }) => button.setAttribute('type', ''),
+        ({ button }) => button.setAttribute('role', 'checkbox'),
+        ({ button }) => button.setAttribute('contenteditable', 'true'),
+        ({ button }) => button.setAttribute('hidden', ''),
+        ({ button }) => button.setAttribute('aria-hidden', 'true'),
+        ({ button, element }) => button.appendChild(element('input')),
+        ({ button, element, text }) => button.appendChild(element('a', text('link'))),
+        ({ button }) => button.childNodes[0].setAttribute('tabindex', '0'),
+        ({ button }) => button.childNodes[0].setAttribute('tabindex', '-1'),
+        ({ button }) => button.childNodes[0].setAttribute('role', 'link'),
+        ({ button }) => button.childNodes[0].setAttribute('onclick', 'void 0'),
+        ({ button }) => button.childNodes[0].setAttribute('onkeydown', 'void 0'),
+        ({ button }) => { button.childNodes[0].onclick = () => {}; },
+        ({ button }) => button.childNodes[0].setAttribute('data-as', 'p'),
+        ({ button }) => button.childNodes[0].setAttribute('hidden', ''),
+      ];
+      for (const change of changes) {
+        const unsafe = make();
+        change(unsafe);
+        assertReaderFacingUnsupported(codec.serializeBlock(unsafe.block));
+        for (const applied of [false, true]) {
+          const fixture = make();
+          const serialized = codec.serializeBlock(fixture.block);
+          assert.equal(serialized.ok, true);
+          if (applied) assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, serialized.template).ok, true);
+          change(fixture);
+          const before = [...fixture.block.childNodes];
+          const result = applied ? codec.restoreBlock(serialized.snapshot) :
+            codec.applyTranslatedTemplate(serialized.snapshot, serialized.template);
+          assert.deepEqual(result, { ok: false, errorCode: 'block_changed' });
+          assert.deepEqual(fixture.block.childNodes, before);
+        }
+      }
+      for (const applied of [false, true]) {
+        for (const change of [
+          ({ button }) => { button.childNodes[0].childNodes[0].nodeValue = 'Updated'; },
+          ({ button, block }) => block.appendChild(button),
+          ({ button, text }) => button.replaceChildren(text('Lapse')),
+        ]) {
+          const fixture = make();
+          const serialized = codec.serializeBlock(fixture.block);
+          if (applied) assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, serialized.template).ok, true);
+          change(fixture);
+          const result = applied ? codec.restoreBlock(serialized.snapshot) :
+            codec.applyTranslatedTemplate(serialized.snapshot, serialized.template);
+          assert.deepEqual(result, { ok: false, errorCode: 'block_changed' });
+        }
+      }
+    },
+  },
   {
     name: 'translates a whole table-cell DIV without losing its container or original graph',
     fn() {

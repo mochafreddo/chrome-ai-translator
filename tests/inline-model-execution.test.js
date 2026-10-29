@@ -23,6 +23,43 @@ function translatedReasoning(record) {
 exports.name = 'inline model execution';
 exports.tests = [
   {
+    name: 'evaluates surrounding prose without treating a preserved button label as English residue',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      const button = element('button', text('Review every animation frame in slow motion'));
+      button.setAttribute('type', 'button');
+      const block = element('p', text('You also get '), button, text(', an animation tool.'));
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const record = { id: 'button', template: serialized.template, atoms: serialized.atoms,
+        contract: serialized.contract, repair: null };
+      let calls = 0;
+      const [result] = await execute(requestPreparation.normalizeSourceBatch([record]), SETTINGS, async (request) => {
+        calls += 1;
+        const input = JSON.parse(request.input).records[0];
+        assert.equal(input.atoms[0].label, 'Review every animation frame in slow motion');
+        assert.equal(input.atoms[0].preserveText, true);
+        assert.equal(input.template.includes('Review every animation'), false);
+        assert.equal(JSON.stringify(input).includes('type='), false);
+        return response([{ id: record.id, template: `${record.atoms[0].token} 애니메이션 도구도 받습니다.` }]);
+      });
+      assert.equal(calls, 1);
+      assert.equal(result.disposition, 'apply');
+      assert.equal(result.diagnostic.quality.status, 'complete');
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, result.template).ok, true);
+      assert.equal(button.textContent, 'Review every animation frame in slow motion');
+      let repairCalls = 0;
+      const [repaired] = await execute([record], SETTINGS, async () => {
+        repairCalls += 1;
+        return response([{ id: record.id, template: repairCalls === 1 ? record.template : result.template }]);
+      });
+      assert.equal(repairCalls, 2);
+      assert.equal(repaired.disposition, 'apply');
+      assert.equal(repaired.template, result.template);
+    },
+  },
+  {
     name: 'reserves bounded prior-template context using its escaped JSON size',
     fn() {
       const record = { id: 'escape-check', template: 'q"\\\n\t\u0001', atoms: [], repair: null };

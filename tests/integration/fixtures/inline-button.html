@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Inline button preservation</title>
+<style>body { max-width: 700px; padding: 24px; } p { margin: 32px 0; }</style>
+<p>You also get <button type="button" aria-haspopup="dialog" aria-expanded="false"><span><strong>Lapse</strong></span></button>, an animation tool, and <button type="button">Another tool</button> for reviewing work.</p>
+<p><span>Read about <button type="button"><em>Lapse</em></button> here.</span> <strong>Then review your animations.</strong></p>
+<p><span>Read about <button type="button">Lapse</button> here.</span> <strong>Also get <button type="button">Another tool</button> today.</strong></p>
+<ul><li><pre>Retained code</pre>Read this sentence.<figure><iframe title="Retained frame" srcdoc="<p>Frame state</p>"></iframe></figure></li></ul>
+<script>
+for (const button of document.querySelectorAll('button')) {
+  button.addEventListener('click', () => {
+    button.dataset.clicks = String(Number(button.dataset.clicks || 0) + 1);
+    button.setAttribute('aria-expanded', button.getAttribute('aria-expanded') !== 'true' ? 'true' : 'false');
+  });
+}
+</script>
+</html>
