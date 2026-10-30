@@ -130,7 +130,7 @@ The [content-readiness check](integration/content-readiness.test.mjs) uses a loc
 
 Other checks run only through their dedicated scripts:
 
-For `inline-button` and `heading-permalink`, pass `-- --fixture-only` for deterministic local regression checks or `-- --reported-only` for the public page alone. With no flag, both phases still run. Unknown, repeated or conflicting flags fail before starting a server or browser. Use fixture-only mode in CI and in mutation probes of local DOM behavior. Run the reported phase separately when validating current site compatibility; its failure remains visible rather than changing a local regression result.
+For `inline-button`, `heading-permalink`, and `github-release-accounts`, pass `-- --fixture-only` for deterministic local regression checks or `-- --reported-only` for the public page alone. With no flag, both phases still run. Unknown, repeated or conflicting flags fail before starting a server or browser. Use fixture-only mode in CI and in mutation probes of local DOM behavior. Run the reported phase separately when validating current site compatibility; its failure remains visible rather than changing a local regression result.
 
 | Script suffix after `test:integration:` | Scope |
 | --- | --- |
@@ -140,6 +140,7 @@ For `inline-button` and `heading-permalink`, pass `-- --fixture-only` for determ
 | `ai-hero-disclosure` | Reported AI Hero disclosure: deterministic apply and restore |
 | `ai-hero-grill-with-docs` | Reported skill page: visible-block preflight and repository-coordinate Source Syntax |
 | `github-skill-page` | Local table-cell fixture and both reported GitHub skill articles: viewport collection through nested scroll areas, metadata-cell admission, deterministic apply and exact restoration, and zero model requests |
+| `github-release-accounts` | Local contributor fixture and reported v1.3.2 release paragraph: account-link atoms, deterministic complete translation, real English-residue detection, link/node preservation and exact restoration; model execution uses an in-process fixed response, with no credential or model HTTP call |
 | `ai-hero-responsive-labels` | Desktop/mobile skill navigation: hidden alternatives as text-free Inert Page Nodes, deterministic apply, exact DOM restore, zero model requests |
 | `heading-permalink` | Local and reported advisor headings: edge controls, node identity, focus/click behavior, deterministic apply, exact restore |
 | `inline-button` | Local multi-button and wrapped-button fixtures: reordered application, node/subtree identity, click handlers, translated-state keyboard activation, focus without blur, state preservation and exact restoration; native moves and `moveBefore`-disabled paths also preserve a Block Child iframe's browsing context. Reported aiforui.dev paragraph: collection, deterministic application, focus, real dialog opening/closing by keyboard, exact restoration after closing, and working restored click behavior; no key or model request |
