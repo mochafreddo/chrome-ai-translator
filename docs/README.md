@@ -47,6 +47,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [GitHub 릴리스 Partial Translation 설계 인터뷰](design/github-release-partial-translation-2026-10-30.md) | v1.3.2 릴리스의 계정 이름 오탐 재현과 Q1–Q5 설계 확정; 계정 링크 보호, 최대 1회 보정, 공개 테스트 접점과 무료 검증 범위 합의; 구현·새 워크트리 커밋 요청 |
 | [lint 구성 설계 인터뷰](design/lint-configuration-2026-10-29.md) | ESLint flat config, recommended 규칙, 기존 위반 정리, 로컬 검증·CI 연결, 설치된 의존성 비교를 통한 검증 기록 재사용과 검증 범위 확정; 구현·현재 브랜치 커밋 승인 |
 | [코드베이스 단순화 설계 인터뷰](design/codebase-simplification-2026-10-29.md) | DOM 복원 검사 공유, 패널 오류 상태 축소, UUID 검증식 재사용, 무효 호출 삭제의 범위·검증 확정과 구현 승인 |
 | [검증 환경 개선](design/verification-environment-2026-10-29.md) | 로컬·공개 브라우저 검사 분리, CI fixture, 안전한 검증 기록, 키 입력 경로와 로컬 결과 재사용에 관한 회고 권장안 수락 |

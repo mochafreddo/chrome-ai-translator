@@ -126,6 +126,7 @@
     const value = String(label || '').replace(/\s+/g, ' ').trim();
     if (!value) return false;
     if (isCodeLikeInlineText(value)) return true;
+    if (/^@[A-Za-z0-9_][A-Za-z0-9_-]*$/.test(value)) return true;
 
     const words = value.split(' ');
     if (

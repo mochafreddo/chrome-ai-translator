@@ -23,6 +23,45 @@ function translatedReasoning(record) {
 exports.name = 'inline model execution';
 exports.tests = [
   {
+    name: 'accepts translated contributor prose while preserving linked account identifiers',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      const names = ['@jcwayne', '@baob', '@rynz', '@sponge-b0b'];
+      const links = names.map((name) => {
+        const link = element('a', text(name));
+        link.setAttribute('href', `https://github.com/${name.slice(1)}`);
+        return link;
+      });
+      const block = element('p', text('Read the release notes. Thanks '), links[0], text(', '), links[1],
+        text(', '), links[2], text(' and '), links[3], text('.'));
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const record = { id: 'contributors', template: serialized.template, atoms: serialized.atoms,
+        contract: serialized.contract, repair: null };
+      const requests = [];
+      const translated = record.template.replace('Read the release notes.', '릴리스 노트를 읽어보세요.')
+        .replace('Thanks ', '감사합니다 ').replace(' and ', ' 및 ');
+      const [result] = await execute([record], SETTINGS, async (request) => {
+        requests.push(JSON.parse(request.input).records[0]);
+        return response([{ id: record.id, template: translated }]);
+      });
+      assert.equal(result.disposition, 'apply');
+      assert.equal(result.diagnostic.quality.status, 'complete');
+      assert.equal(requests.length, 1);
+      assert.deepEqual(requests[0].atoms.map(({ label, preserveText }) => ({ label, preserveText })),
+        names.map((label) => ({ label, preserveText: true })));
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, result.template).ok, true);
+      assert.deepEqual(links.map((link) => link.textContent), names);
+
+      const [partial] = await execute([record], SETTINGS, async () =>
+        response([{ id: record.id, template: record.template.replace('Thanks ', '감사합니다 ') }]));
+      assert.equal(partial.disposition, 'apply_with_warning');
+      assert.equal(partial.terminalCode, 'quality.english_residue');
+      assert.equal(partial.attemptCount, 2);
+    },
+  },
+  {
     name: 'evaluates surrounding prose without treating a preserved button label as English residue',
     async fn() {
       const { document, element, text } = createTestDocument();

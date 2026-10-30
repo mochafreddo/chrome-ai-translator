@@ -1052,6 +1052,53 @@ exports.tests = [
     },
   },
   {
+    name: 'preserves linked account identifiers through reordering and exact restoration',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const account = element('a', element('span', text('@dev_1-name')));
+      account.setAttribute('href', 'https://example.org/dev_1-name');
+      const title = element('a', text('release notes'));
+      title.setAttribute('href', '/releases');
+      const block = element('p', text('Thanks '), account, text('. Read the '), title, text('.'));
+      document.body.appendChild(block);
+      const children = [...block.childNodes];
+      const labelNode = account.childNodes[0].childNodes[0];
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      assert.deepEqual(serialized.atoms.map(({ label }) => label), ['@dev_1-name']);
+      const wrapper = serialized.contract.entries.find((entry) => entry.kind === 'wrapper');
+      const translated = `${wrapper.openToken}릴리스 노트${wrapper.closeToken}를 읽으세요. ${serialized.atoms[0].token}님 감사합니다.`;
+      assert.equal(codec.validateTranslatedTemplate(translated, serialized.contract).ok, true);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
+      assert.equal(block.textContent, '릴리스 노트를 읽으세요. @dev_1-name님 감사합니다.');
+      assert.equal(account.getAttribute('href'), 'https://example.org/dev_1-name');
+      assert.equal(account.childNodes[0].childNodes[0], labelNode);
+      assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, children);
+      assert.equal(block.textContent, 'Thanks @dev_1-name. Read the release notes.');
+      assert.equal(account.childNodes[0].childNodes[0], labelNode);
+    },
+  },
+  {
+    name: 'keeps display names and account descriptions translatable',
+    fn() {
+      for (const label of ['Alice Smith', '@alice profile', 'Contact @alice', '@', '@-']) {
+        const { document, element, text } = createTestDocument();
+        const link = element('a', text(label));
+        link.setAttribute('href', 'https://example.org/alice');
+        const block = element('p', link);
+        document.body.appendChild(block);
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, true);
+        assert.equal(serialized.atoms.length, 0, label);
+        const [wrapper] = serialized.contract.entries;
+        assert.equal(codec.validateTranslatedTemplate(
+          `${wrapper.openToken}사용자 소개${wrapper.closeToken}`, serialized.contract
+        ).ok, true, label);
+      }
+    },
+  },
+  {
     name: 'classifies protected technical link labels conservatively',
     fn() {
       assert.equal(codec.isProtectedAtomicLinkLabel('GPT-5.5'), true);
