@@ -14,6 +14,7 @@ const suiteFiles = [
   'sidepanel-translation-execution',
   'openai-response',
   'inline-model-execution',
+  'inline-inspection',
   'inline-request-flow',
   'button-visibility',
   'inline-translation-controls',

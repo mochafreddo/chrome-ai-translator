@@ -3,6 +3,7 @@
   "scripts": {
     "lint": "eslint extension scripts tests eslint.config.mjs --max-warnings 0",
     "verify:local": "node scripts/verify-local.js",
+    "inspect:inline-blocks": "node scripts/inspect-inline-blocks.mjs",
     "check:commits": "node scripts/check-commits.js",
     "check:docs": "node scripts/check-docs.js",
     "check:docs:history": "node scripts/check-docs.js --history",
@@ -21,6 +22,7 @@
     "test:integration:ai-hero-grill-with-docs": "node tests/integration/ai-hero-grill-with-docs.test.mjs",
     "test:integration:github-skill-page": "node tests/integration/github-skill-page.test.mjs",
     "test:integration:github-release-accounts": "node tests/integration/github-release-accounts.test.mjs",
+    "test:integration:inline-inspection": "node tests/integration/inline-inspection.test.mjs",
     "test:integration:ai-hero-responsive-labels": "node tests/integration/ai-hero-responsive-labels.test.mjs",
     "test:integration:heading-permalink": "node tests/integration/heading-permalink.test.mjs",
     "test:integration:inline-button": "node tests/integration/inline-button.test.mjs",
