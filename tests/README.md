@@ -79,7 +79,7 @@ npm run check:docs:history -- --base 0123456789abcdef0123456789abcdef01234567
 
 The example hash is illustrative and must be replaced with the intended baseline commit. The command rejects a missing or symbolic baseline such as `HEAD` or `main`, and rejects invalid commits. It compares each historical tracked Markdown file under `docs/design`, `docs/qa`, and `docs/superpowers` with that baseline: the title and exact original body must match. Content before `## Original record` is excluded from the body comparison; the title remains protected. When that marker is absent in the baseline, the whole baseline file is treated as the original. A file present at only one side fails the check.
 
-The GitHub Actions `checks` job runs commit-format checks and installs locked development tools with lifecycle scripts disabled before lint, syntax, documentation and unit checks on branch pushes and pull requests. Those checks need no browser or API key. A separate `browser-fixtures` job installs pinned agent-browser and its Chrome/system prerequisites, then runs only the inline-button and heading-permalink fixture modes. Installation needs outbound network; those checks use local pages and no model credentials. See the [workflow](../.github/workflows/checks.yml). Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
+The GitHub Actions `checks` job runs commit-format checks and installs locked development tools with lifecycle scripts disabled before lint, syntax, documentation and unit checks on branch pushes and pull requests. Those checks need no browser or API key. A separate `browser-fixtures` job installs pinned agent-browser and its Chrome/system prerequisites, then runs the local fixture commands listed in the [workflow](../.github/workflows/checks.yml). Installation needs outbound network; those checks use local pages and no model credentials. Without explicit revisions, the commit checker examines `HEAD^..HEAD`; it checks the subject structure, explanatory body, and 80-column body limit, allowing standalone URLs. Review whether the subject is imperative and the explanation is useful separately.
 
 ## Unit suite
 
@@ -141,6 +141,7 @@ For `inline-button`, `heading-permalink`, and `github-release-accounts`, pass `-
 | `ai-hero-grill-with-docs` | Reported skill page: visible-block preflight and repository-coordinate Source Syntax |
 | `github-skill-page` | Local table-cell fixture and both reported GitHub skill articles: viewport collection through nested scroll areas, metadata-cell admission, deterministic apply and exact restoration, and zero model requests |
 | `github-release-accounts` | Local contributor fixture and reported v1.3.2 release paragraph: account-link atoms, deterministic complete translation, real English-residue detection, link/node preservation and exact restoration; model execution uses an in-process fixed response, with no credential or model HTTP call |
+| `inline-inspection` | Run the inspection CLI on a local nested LI/P fixture: preserve rejection reasons, report known source metrics including code-only and oversized blocks, continue after a long block, and exclude source text and URLs from output |
 | `ai-hero-responsive-labels` | Desktop/mobile skill navigation: hidden alternatives as text-free Inert Page Nodes, deterministic apply, exact DOM restore, zero model requests |
 | `heading-permalink` | Local and reported advisor headings: edge controls, node identity, focus/click behavior, deterministic apply, exact restore |
 | `inline-button` | Local multi-button and wrapped-button fixtures: reordered application, node/subtree identity, click handlers, translated-state keyboard activation, focus without blur, state preservation and exact restoration; native moves and `moveBefore`-disabled paths also preserve a Block Child iframe's browsing context. Reported aiforui.dev paragraph: collection, deterministic application, focus, real dialog opening/closing by keyboard, exact restoration after closing, and working restored click behavior; no key or model request |
@@ -149,6 +150,18 @@ For `inline-button`, `heading-permalink`, and `github-release-accounts`, pass `-
 | `openrouter-sidepanel` | Options service/key persistence and independent clear, fixed-host permissions, pinned-model Side Panel entry and multi-chunk deterministic rendered output, strict request routing/policy, versioned progress and 60 acknowledged polls, tab closure during a delayed request; synthetic keys and worker-wide request interception, no real model calls |
 
 Reported-page checks navigate public pages read-only and use deterministic output where application is tested. They establish the local DOM paths stated above, not model quality or complete extension startup. Live-page block counts are observations rather than permanent assertions. Generic DIV/SPAN paragraph inference and other `data-as` values remain unsupported. The edge-heading contract remains separate from the preserved inline-button contract. Disabling `moveBefore` in a current Chrome tests the legacy insertion branch; it does not establish execution on Chrome 116 itself.
+
+### Inspect candidate blocks
+
+Use the read-only [inspection command](../scripts/inspect-inline-blocks.mjs) to locate a Semantic Block before constructing a translation reproducer:
+
+```sh
+npm run --silent inspect:inline-blocks -- --url https://github.com/mattpocock/skills/releases/tag/v1.3.2 --root main
+```
+
+The command opens its own disposable Chrome session and scrolls each candidate into view. JSON output lists the index, tag, serialization success or rejection code/reason, and the current model-execution module's numeric `sourceChars` and `sourceProseWordCount` evidence for accepted candidates. A parent LI can be rejected while its own P child is accepted; inspect each result before using its template. The root selector defaults to `main`. Only HTTP(S) URLs without embedded credentials are accepted.
+
+Source, translations, templates, selectors and URLs are excluded from output. The command loads only serialization and model-validation modules and calls their shared quality assessor with fixed probe text to obtain source metrics, including for code-only or oversized blocks. It does not create a translation request or apply a result to the DOM. `syntheticProbe` identifies this local measurement; it does not measure translation quality or recover a past model response. Metrics belong to the current codec and page, so a later protection-rule change can alter them relative to a historical diagnostic. No API key or saved browser profile is used.
 
 ### Native keyboard input
 

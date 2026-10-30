@@ -458,7 +458,7 @@
     return results;
   }
 
-  const api = { execute };
+  const api = { execute, assessTranslationQuality };
   globalScope.ChromeAiTranslatorInlineModelExecution = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

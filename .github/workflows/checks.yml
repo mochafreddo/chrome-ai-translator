@@ -58,3 +58,5 @@ jobs:
       - run: agent-browser install --with-deps
       - run: npm run test:integration:inline-button -- --fixture-only
       - run: npm run test:integration:heading-permalink -- --fixture-only
+      - run: npm run test:integration:github-release-accounts -- --fixture-only
+      - run: npm run test:integration:inline-inspection
