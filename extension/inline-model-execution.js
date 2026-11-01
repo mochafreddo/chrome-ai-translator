@@ -121,7 +121,7 @@
 
   function words(value, contract = null) {
     const sourceSyntax = Array.isArray(contract?.sourceSyntax)
-      ? contract.sourceSyntax.map((item) => item?.value).filter(Boolean)
+      ? contract.sourceSyntax.map((item) => removeContractTokens(item?.value, contract)).filter(Boolean)
       : [];
     const proseOnly = codec.stripSourceSyntax(
       String(value || ''),
@@ -166,7 +166,9 @@
     let text = String(value || '');
     for (const entry of contract?.entries || []) {
       for (const token of [entry.token, entry.openToken, entry.closeToken]) {
-        if (typeof token === 'string' && token) text = text.split(token).join(' ');
+        if (typeof token === 'string' && token) {
+          text = text.split(token).join(entry.tagName === 'BR' ? '\n' : ' ');
+        }
       }
     }
     return text;
