@@ -1329,6 +1329,115 @@ exports.tests = [
     },
   },
   {
+    name: 'preserves aria-hidden symbol decorations through apply and restore',
+    fn() {
+      for (const symbol of ['·', '→', '|']) {
+        const { document, element, text } = createTestDocument();
+        const decoration = element('span', text(symbol));
+        decoration.setAttribute('aria-hidden', 'true');
+        const link = element('a', text('Installing on Windows?'));
+        link.setAttribute('href', '/installing-mise.html#windows');
+        const block = element('p', text(' macOS & Linux '), decoration, link);
+        document.body.appendChild(block);
+        const originalChildren = [...block.childNodes];
+        const originalDecorationChildren = [...decoration.childNodes];
+
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, true, JSON.stringify(serialized.localRejection));
+        const atom = serialized.contract.entries.find((entry) => entry.kind === 'atom');
+        assert.ok(atom);
+        assert.equal(serialized.template.includes(symbol), false);
+        const translated = serialized.template
+          .replace('macOS & Linux', '맥OS 및 리눅스')
+          .replace('Installing on Windows?', '윈도에 설치하시나요?');
+        assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
+        assert.equal(block.childNodes[1], decoration);
+        assert.equal(block.childNodes[2], link);
+        assert.deepEqual(decoration.childNodes, originalDecorationChildren);
+        assert.equal(decoration.textContent, symbol);
+        assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+        assert.deepEqual(block.childNodes, originalChildren);
+        assert.deepEqual(decoration.childNodes, originalDecorationChildren);
+        assert.equal(block.textContent, ` macOS & Linux ${symbol}Installing on Windows?`);
+      }
+    },
+  },
+  {
+    name: 'rejects aria-hidden letters and numbers as hidden content',
+    fn() {
+      for (const label of ['New', 'v2', '한', '字', '٢', 'Ⅷ', '· New']) {
+        const { document, element, text } = createTestDocument();
+        const hidden = element('span', text(label));
+        hidden.setAttribute('aria-hidden', 'true');
+        const block = element('p', text('Visible prose '), hidden);
+        document.body.appendChild(block);
+        assert.deepEqual(codec.serializeBlock(block), unsupportedBlock('hidden_content', 'SPAN'));
+      }
+    },
+  },
+  {
+    name: 'rejects aria-hidden symbols with accessible or interactive semantics',
+    fn() {
+      for (const [name, value] of [
+        ['role', 'none'], ['tabindex', '-1'], ['aria-label', 'Separator'],
+        ['aria-label', ''], ['aria-hidden', 'false'], ['title', 'Separator'], ['onclick', 'openMenu()'],
+      ]) {
+        const { document, element, text } = createTestDocument();
+        const decoration = element('span', text('·'));
+        decoration.setAttribute('aria-hidden', 'true');
+        decoration.setAttribute(name, value);
+        const block = element('p', text('Visible prose '), decoration);
+        document.body.appendChild(block);
+        const serialized = codec.serializeBlock(block);
+        if (name === 'aria-hidden') {
+          assert.equal(serialized.ok, true);
+          assert.equal(serialized.contract.entries.some((entry) => entry.kind === 'atom'), false);
+        } else {
+          assert.deepEqual(serialized, unsupportedBlock('hidden_content', 'SPAN'));
+        }
+      }
+    },
+  },
+  {
+    name: 'rejects symbol decorations hidden by layout or containing unsupported structure',
+    fn() {
+      for (const configure of [
+        (node) => node.setAttribute('hidden', ''),
+        (node) => { node.computedStyle = { display: 'none' }; },
+        (node, element) => node.appendChild(element('my-decoration')),
+        (node, element) => node.appendChild(element('p')),
+      ]) {
+        const { document, element, text } = createTestDocument();
+        const decoration = element('span', text('·'));
+        decoration.setAttribute('aria-hidden', 'true');
+        configure(decoration, element);
+        const block = element('p', text('Visible prose '), decoration);
+        document.body.appendChild(block);
+        assert.deepEqual(codec.serializeBlock(block), unsupportedBlock('hidden_content', 'SPAN'));
+      }
+    },
+  },
+  {
+    name: 'rejects symbol-bearing SVG decorations hidden by layout',
+    fn() {
+      for (const configure of [
+        (node) => node.setAttribute('hidden', ''),
+        (node) => { node.computedStyle = { display: 'none' }; },
+        (node) => node.childNodes[0].setAttribute('hidden', ''),
+      ]) {
+        const { document, element, text } = createTestDocument();
+        const decoration = element('svg', element('text', text('·')));
+        decoration.setAttribute('aria-hidden', 'true');
+        configure(decoration);
+        const block = element('p', text('Visible prose '), decoration);
+        document.body.appendChild(block);
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, false);
+        assert.deepEqual(serialized.localRejection, { reason: 'hidden_content', tag: 'SVG' });
+      }
+    },
+  },
+  {
     name: 'rejects image and SVG nodes that are not inert',
     fn() {
       for (const makeDecoration of [
