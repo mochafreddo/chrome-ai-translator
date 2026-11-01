@@ -385,7 +385,10 @@ exports.tests = [
         if (variant === 'after') cell.appendChild(text('Other prose.'));
         if (variant === 'multiple') cell.appendChild(element('div', text('Other prose.')));
         if (variant === 'nested') wrapper.appendChild(element('div', text('Nested prose.')));
-        if (variant === 'semantic') wrapper.appendChild(element('p', text('Separate paragraph.')));
+        if (variant === 'semantic') {
+          wrapper.appendChild(element('p', text('Separate paragraph.')));
+          wrapper.appendChild(text('Prose after the interior paragraph.'));
+        }
         if (variant === 'hidden') wrapper.hidden = true;
         if (variant === 'interactive') wrapper.appendChild(element('input'));
         if (variant === 'editable') wrapper.setAttribute('contenteditable', 'true');
@@ -480,6 +483,123 @@ exports.tests = [
           assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
           assert.deepEqual(block.childNodes, original);
           assert.equal(childText.nodeValue, 'Child content remains excluded.');
+        }
+      }
+    },
+  },
+  {
+    name: 'sole generic DIV keeps recipe prose and Block Children independent in either order',
+    fn() {
+      for (const childFirst of [true, false]) {
+        for (const restoreChildFirst of [true, false]) {
+          const { document, element, text } = createTestDocument();
+          const labelText = text('Step 1');
+          const label = element('span', labelText);
+          const headingText = text('Install mise');
+          const heading = element('h3', headingText);
+          const paragraphText = text('On macOS or Linux, install mise.');
+          const paragraph = element('p', paragraphText);
+          const wrapper = element('div', label, heading, paragraph);
+          for (const [name, value] of [['class', 'recipe-text'], ['id', 'step'],
+            ['style', 'display: block'], ['data-step', '1']]) wrapper.setAttribute(name, value);
+          const whitespace = text('\n ');
+          const block = element('li', whitespace, wrapper);
+          document.body.appendChild(block);
+          const parent = codec.serializeBlock(block);
+          assert.equal(parent.ok, true);
+          const entry = parent.contract.entries[0];
+          assert.equal(parent.template, `${entry.openToken}Step 1${entry.closeToken}`);
+          assert.deepEqual(parent.atoms, []);
+          const nested = [codec.serializeBlock(heading), codec.serializeBlock(paragraph)];
+          const parentJob = [parent, `${entry.openToken}1단계${entry.closeToken}`];
+          const childJobs = [[nested[0], 'mise 설치'], [nested[1], 'macOS나 Linux에서 mise를 설치합니다.']];
+          const jobs = childFirst ? [...childJobs, parentJob] : [parentJob, ...childJobs];
+          for (const [serialized, translated] of jobs) {
+            assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
+          }
+          assert.deepEqual(block.childNodes, [whitespace, wrapper]);
+          assert.deepEqual(wrapper.childNodes, [label, heading, paragraph]);
+          assert.equal(block.textContent, '\n 1단계mise 설치macOS나 Linux에서 mise를 설치합니다.');
+          const order = restoreChildFirst ? [...nested, parent] : [parent, ...nested];
+          for (const serialized of order) assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+          assert.deepEqual(block.childNodes, [whitespace, wrapper]);
+          assert.deepEqual(wrapper.childNodes, [label, heading, paragraph]);
+          assert.deepEqual(label.childNodes, [labelText]);
+          assert.deepEqual(heading.childNodes, [headingText]);
+          assert.deepEqual(paragraph.childNodes, [paragraphText]);
+        }
+      }
+    },
+  },
+  {
+    name: 'sole DIV rejects semantic attributes nesting and siblings',
+    fn() {
+      for (const variant of ['role', 'aria-label', 'tabindex', 'hidden', 'lang', 'dir',
+        'contenteditable', 'onclick', 'title', 'nested', 'sibling', 'text', 'comment']) {
+        const { document, element, text } = createTestDocument();
+        const wrapper = element('div', text('Step 1'), element('h3', text('Install mise')));
+        const block = element('li', wrapper);
+        if (variant === 'nested') wrapper.appendChild(element('div', text('Nested prose.')));
+        else if (variant === 'sibling') block.appendChild(element('span', text('Sibling.')));
+        else if (variant === 'text') block.appendChild(text('Sibling prose.'));
+        else if (variant === 'comment') block.appendChild(document.createComment('separator'));
+        else wrapper.setAttribute(variant, variant === 'tabindex' ? '-1' : 'value');
+        document.body.appendChild(block);
+        assert.deepEqual(codec.serializeBlock(block), unsupportedBlock('unsupported_descendant', 'DIV'), variant);
+      }
+    },
+  },
+  {
+    name: 'sole DIV excludes Block Child subtrees from request identity and parent snapshots',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const child = element('p', text('Child prose.'));
+      const wrapper = element('div', text('Step 1'), child);
+      const block = element('li', wrapper);
+      document.body.appendChild(block);
+      const parent = codec.serializeBlock(block);
+      assert.equal(parent.ok, true);
+      child.textContent = `⟦${parent.contract.namespace}:ATOM:A1⟧`;
+      const after = codec.serializeBlock(block);
+      assert.equal(after.originalSignature, parent.originalSignature);
+      assert.equal(after.cacheKey, parent.cacheKey);
+      assert.deepEqual(after.contract, parent.contract);
+      assert.equal(codec.applyTranslatedTemplate(parent.snapshot, '1단계').ok, true);
+      child.replaceChildren(element('strong', text('Changed child prose.')));
+      const children = [...child.childNodes];
+      assert.equal(codec.restoreBlock(parent.snapshot).ok, true);
+      assert.deepEqual(child.childNodes, children);
+      assert.equal(wrapper.childNodes[1], child);
+    },
+  },
+  {
+    name: 'sole DIV rechecks wrapper ownership before apply and restore',
+    fn() {
+      for (const applied of [true, false]) {
+        for (const mutation of ['role', 'aria-label', 'tabindex', 'hidden', 'lang',
+          'replace', 'sibling', 'text', 'move-child', 'replace-child', 'own-text']) {
+          const { document, element, text } = createTestDocument();
+          const child = element('p', text('Child prose.'));
+          const wrapper = element('div', text('Step 1'), child);
+          const block = element('li', wrapper);
+          document.body.appendChild(block);
+          const parent = codec.serializeBlock(block);
+          assert.equal(parent.ok, true);
+          if (applied) assert.equal(codec.applyTranslatedTemplate(parent.snapshot, '1단계').ok, true);
+          if (mutation === 'replace') block.replaceChildren(element('div', text('Step 1'), child));
+          else if (mutation === 'sibling') block.appendChild(element('span', text('Sibling.')));
+          else if (mutation === 'text') block.appendChild(text('New prose.'));
+          else if (mutation === 'move-child') wrapper.insertBefore(child, wrapper.childNodes[0]);
+          else if (mutation === 'replace-child') wrapper.replaceChildren(wrapper.childNodes[0], element('p', text('Child prose.')));
+          else if (mutation === 'own-text') wrapper.childNodes[0].nodeValue = 'Updated prose.';
+          else wrapper.setAttribute(mutation, 'value');
+          const graph = [...block.childNodes];
+          const contents = block.textContent;
+          const result = applied ? codec.restoreBlock(parent.snapshot) :
+            codec.applyTranslatedTemplate(parent.snapshot, '1단계');
+          assert.deepEqual(result, { ok: false, errorCode: 'block_changed' }, `${mutation}, applied=${applied}`);
+          assert.deepEqual(block.childNodes, graph);
+          assert.equal(block.textContent, contents);
         }
       }
     },

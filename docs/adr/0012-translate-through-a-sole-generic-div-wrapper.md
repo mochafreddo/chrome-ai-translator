@@ -1,0 +1,9 @@
+# Translate through a sole generic DIV wrapper
+
+Status: accepted
+
+A recipe list item can place its own step label and independent headings and paragraphs inside one layout DIV. Supplementing [ADR-0011](0011-exclude-block-children-from-own-prose.md), Inline Translation treats that DIV as transparent when it is the Semantic Block's only element child, every sibling is ignorable whitespace, and its attributes are limited to `class`, `id`, `style` and `data-*`. A second DIV wrapper, sibling element or prose, or any other wrapper attribute keeps the generic layout unsupported. Existing hidden and editable-content checks still apply. This supports the step label without inferring a new Semantic Block from a generic container or extending ownership into nested blocks.
+
+The original Semantic Block remains the record owner. The DIV is the prose container, stays connected in its original position, and receives the translated own prose. Leading and trailing Block Children inside it retain their existing identity and edge positions; their subtrees are excluded from the parent's fingerprint, namespace collision scan, text snapshots and container snapshots. The parent's fingerprint includes the DIV structure, and its container snapshots include both the Semantic Block and the DIV. Apply and restore recheck wrapper eligibility, container identity, child order and owned text, while allowing each Block Child to translate or restore independently. The wrapper itself has no model-facing Placeholder Token and cannot be moved by an answer.
+
+The existing whole-cell TD/TH DIV contract remains separate when its attributes prevent transparent treatment. No diagnostic schema, rejection reason, or privacy field is added. Current implementation responsibilities are in the [architecture reference](../architecture.md#dom-boundaries).
