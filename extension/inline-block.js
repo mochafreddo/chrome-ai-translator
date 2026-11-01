@@ -491,29 +491,37 @@
   }
 
   function isInertPageNode(node) {
+    const allowsSymbols = getAttribute(node, 'aria-hidden').toLowerCase() === 'true';
+    const isWrapper = WRAPPER_TAGS.has(getTagName(node));
     if (
       node?.nodeType !== 1 ||
-      !INERT_PAGE_NODE_TAGS.has(getTagName(node))
+      (!INERT_PAGE_NODE_TAGS.has(getTagName(node)) &&
+        !(allowsSymbols && isWrapper))
     ) {
       return false;
     }
+    const symbolDecoration = allowsSymbols && Boolean(normalizeVisibleLabel(node.textContent));
     const stack = [node];
     while (stack.length) {
       const current = stack.pop();
       if (current?.nodeType === 8) continue;
       if (current?.nodeType === 3) {
-        if (normalizeVisibleLabel(current.nodeValue)) return false;
+        const label = normalizeVisibleLabel(current.nodeValue);
+        if (label && (!allowsSymbols || /[\p{L}\p{N}]/u.test(label))) return false;
         continue;
       }
       if (current?.nodeType !== 1) return false;
       const tagName = getTagName(current);
+      if (isWrapper && !WRAPPER_TAGS.has(tagName)) return false;
+      if ((symbolDecoration || isWrapper) &&
+        (current.hidden || hasAttribute(current, 'hidden') || hasHiddenComputedStyle(current))) return false;
       const attributeNames = typeof current.getAttributeNames === 'function'
         ? current.getAttributeNames()
         : [];
       const hasAccessibleMetadata = attributeNames.some((name) => {
         const normalizedName = String(name).toLowerCase();
         const value = getAttribute(current, name).trim();
-        if (!normalizedName.startsWith('aria-') || !value) return false;
+        if (!normalizedName.startsWith('aria-') || (!value && !symbolDecoration)) return false;
         return normalizedName !== 'aria-hidden' || value.toLowerCase() !== 'true';
       });
       if (
