@@ -23,6 +23,112 @@ function translatedReasoning(record) {
 exports.name = 'inline model execution';
 exports.tests = [
   {
+    name: 'preserves whole prompt command lines as complete Source Syntax without repair',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      for (const source of ['$ mise use node@24', '$ mise env', '$ mise run test', '$ mise bootstrap']) {
+        const block = element('p', text(source));
+        document.body.appendChild(block);
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, true);
+        const record = { id: 'command', template: serialized.template, atoms: serialized.atoms,
+          contract: serialized.contract, repair: null };
+        const [result] = await execute([record], SETTINGS, async () =>
+          response([{ id: record.id, template: source }]));
+        assert.equal(result.diagnostic.quality.evidence.sourceProseWordCount, 0, source);
+        assert.equal(result.diagnostic.quality.status, 'complete', source);
+        assert.equal(result.disposition, 'apply', source);
+        assert.equal(result.attemptCount, 1, source);
+        assert.equal(result.template, source);
+        assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, result.template).ok, true);
+        assert.equal(block.textContent, source);
+        assert.deepEqual(codec.validateTranslatedTemplate(source.replace('mise', 'other'), record.contract),
+          { ok: false, errorCode: 'source_syntax_changed' });
+      }
+    },
+  },
+  {
+    name: 'preserves a prompt command through inline wrappers and inert nodes',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      for (const children of [
+        [element('span', text('$ mise use node@24'))],
+        [text('$ mise '), element('em', text('use')), text(' node@24')],
+        [document.createComment('separator'), text('$ mise use node@24')],
+        [text('$ mise '), document.createComment('separator'), text('use node@24')],
+        [text('$ mise '), element('wbr'), text('use node@24')],
+      ]) {
+        const block = element('p', ...children);
+        document.body.appendChild(block);
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, true);
+        const record = { id: 'wrapped-command', template: serialized.template, atoms: serialized.atoms,
+          contract: serialized.contract, repair: null };
+        const [result] = await execute([record], SETTINGS, async () =>
+          response([{ id: record.id, template: record.template }]));
+        assert.equal(result.diagnostic.quality.evidence.sourceProseWordCount, 0);
+        assert.equal(result.diagnostic.quality.status, 'complete');
+        assert.equal(result.disposition, 'apply');
+        assert.equal(result.attemptCount, 1);
+        assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, result.template).ok, true);
+        assert.equal(block.textContent, '$ mise use node@24');
+        assert.deepEqual(codec.validateTranslatedTemplate(record.template.replace('mise', 'other'), record.contract),
+          { ok: false, errorCode: 'source_syntax_changed' });
+      }
+    },
+  },
+  {
+    name: 'keeps prose after a line break out of command Source Syntax',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      const block = element('p', text('$ mise env'), element('br'), text('More prose'));
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const record = { id: 'multiline', template: serialized.template, atoms: serialized.atoms,
+        contract: serialized.contract, repair: null };
+      const [result] = await execute([record], SETTINGS, async () =>
+        response([{ id: record.id, template: record.template }]));
+      assert.equal(result.diagnostic.quality.evidence.sourceProseWordCount, 4);
+      assert.equal(result.disposition, 'reject');
+      assert.equal(result.terminalCode, 'quality.target_language_missing');
+      assert.equal(result.attemptCount, 2);
+    },
+  },
+  {
+    name: 'keeps prose and multiline prompt lookalikes subject to target-language checks',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      for (const [source, wordCount] of [
+        ['$ 5 off your first order', 4],
+        ['$ Save today', 2],
+        ['Run $ mise env now', 4],
+        ['> mise env', 2],
+        ['% mise env', 2],
+        ['$  mise env', 2],
+        ['$\tmise env', 2],
+        ['$ mise env\nMore prose', 4],
+        ['$ mise env\rMore prose', 4],
+        ['$ mise env\u2028More prose', 4],
+        ['$ mise env\u2029More prose', 4],
+        ['$ mise env\n', 2],
+      ]) {
+        const block = element('p', text(source));
+        document.body.appendChild(block);
+        const serialized = codec.serializeBlock(block);
+        assert.equal(serialized.ok, true);
+        const record = { id: 'prose', template: serialized.template, atoms: serialized.atoms,
+          contract: serialized.contract, repair: null };
+        const [result] = await execute([record], SETTINGS, async () =>
+          response([{ id: record.id, template: source }]));
+        assert.equal(result.diagnostic.quality.evidence.sourceProseWordCount, wordCount, source);
+        assert.equal(result.disposition, 'reject', source);
+        assert.equal(result.terminalCode, 'quality.target_language_missing', source);
+        assert.equal(result.attemptCount, 2, source);
+      }
+    },
+  },
+  {
     name: 'accepts translated contributor prose while preserving linked account identifiers',
     async fn() {
       const { document, element, text } = createTestDocument();

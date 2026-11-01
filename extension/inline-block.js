@@ -309,7 +309,7 @@
     ];
   }
 
-  function getSourceSyntaxLiterals(value, contextualLiterals = []) {
+  function getSourceSyntaxLiterals(value, contextualLiterals = [], entries = []) {
     const counts = new Map();
     const add = (literal) => {
       const normalized = String(literal || '');
@@ -318,6 +318,15 @@
       if (count > 0) counts.set(normalized, count);
     };
     const text = String(value || '');
+    let commandText = text;
+    for (const entry of entries) {
+      if (entry.kind === 'wrapper') {
+        commandText = commandText.split(entry.openToken).join('').split(entry.closeToken).join('');
+      } else {
+        commandText = commandText.split(entry.token).join(entry.tagName === 'BR' ? '\n' : '');
+      }
+    }
+    if (/^\$ [a-z]/.test(commandText) && !/[\r\n\u2028\u2029]/.test(commandText)) add(text);
     for (const match of text.matchAll(/\[[^\]\r\n|]+\|[^\]\r\n]+\]/g)) {
       add(match[0]);
     }
@@ -1124,7 +1133,7 @@
     }
 
     const sourceSyntax = Array.from(
-      getSourceSyntaxLiterals(template, contextualSourceSyntax),
+      getSourceSyntaxLiterals(template, contextualSourceSyntax, contractEntries),
       ([value, count]) => ({ value, count })
     );
     const contract = {
