@@ -212,13 +212,45 @@
     return isBlockChildContainerElement(node) || isSemanticBlockElement(node);
   }
 
+  function isTransparentWrapper(wrapper) {
+    if (getTagName(wrapper) !== 'DIV' || isSemanticBlockElement(wrapper)) return false;
+    if (getChildNodes(wrapper).some((child) => getTagName(child) === 'DIV')) return false;
+    return wrapper.getAttributeNames().every((name) =>
+      ['class', 'id', 'style'].includes(name) || name.startsWith('data-'));
+  }
+
   function findTransparentWrapper(block) {
     const children = getChildNodes(block).filter((child) => !isIgnorableWhitespace(child));
-    const wrapper = children[0];
-    if (children.length !== 1 || getTagName(wrapper) !== 'DIV' || isSemanticBlockElement(wrapper)) return null;
-    if (getChildNodes(wrapper).some((child) => getTagName(child) === 'DIV')) return null;
-    return wrapper.getAttributeNames().every((name) =>
-      ['class', 'id', 'style'].includes(name) || name.startsWith('data-')) ? wrapper : null;
+    return children.length === 1 && isTransparentWrapper(children[0]) ? children[0] : null;
+  }
+
+  function findMiseRecipe(block) {
+    const location = block?.ownerDocument?.location;
+    if (location?.origin !== 'https://mise.jdx.dev' || location.pathname !== '/' ||
+      getTagName(block) !== 'LI' || !getAttribute(block, 'class').split(/\s+/).includes('recipe-row')) return null;
+    const children = getChildNodes(block).filter((child) => !isIgnorableWhitespace(child));
+    if (children.length !== 2) return null;
+    const [proseContainer, codeContainer] = children;
+    if (!isTransparentWrapper(proseContainer) ||
+      !getAttribute(proseContainer, 'class').split(/\s+/).includes('recipe-text') ||
+      getTagName(codeContainer) !== 'DIV' ||
+      !['recipe-code', 'terminal-lines'].every((name) =>
+        getAttribute(codeContainer, 'class').split(/\s+/).includes(name))) return null;
+    const stack = [{ node: codeContainer, depth: 0 }];
+    let scheduledNodes = 1;
+    while (stack.length) {
+      const { node, depth } = stack.pop();
+      if (depth > MAX_STRUCTURE_DEPTH) return null;
+      if (node?.nodeType === 3) continue;
+      if (node?.nodeType !== 1 || !['DIV', 'SPAN'].includes(getTagName(node)) ||
+        isSemanticBlockElement(node) || classifyUnsupportedElement(node) ||
+        hasInlineActionSemantics(node) || hasAttribute(node, 'tabindex') || hasAttribute(node, 'autofocus') ||
+        !['', 'none', 'presentation'].includes(getAttribute(node, 'role').toLowerCase())) return null;
+      scheduledNodes += node.childNodes.length;
+      if (scheduledNodes > MAX_STRUCTURE_NODES) return null;
+      for (const child of getChildNodes(node)) stack.push({ node: child, depth: depth + 1 });
+    }
+    return { proseContainer, codeContainer };
   }
 
   // A heading's edge control is local UI, never a translatable atom. Requiring
@@ -927,8 +959,10 @@
     if (!isSemanticBlockElement(block)) {
       return createUnsupportedResult(describeLocalRejection('invalid_root', block));
     }
-    const proseContainer = findTransparentWrapper(block) || block;
+    const recipe = findMiseRecipe(block);
+    const proseContainer = recipe?.proseContainer || findTransparentWrapper(block) || block;
     const blockChildNodes = new Set(getChildNodes(proseContainer).filter(isBlockChild));
+    if (recipe) blockChildNodes.add(recipe.codeContainer);
     const sourceFingerprint = getStructureFingerprint(block, blockChildNodes);
     if (sourceFingerprint == null) {
       return createUnsupportedResult(describeLocalRejection('structure_limit_exceeded', block));
@@ -1146,6 +1180,7 @@
       rememberContainer(proseContainer);
       retainedNodes.add(proseContainer);
     }
+    if (recipe) retainedNodes.add(recipe.codeContainer);
     const template = getChildNodes(proseContainer)
       .map((child) => visit(child, 'ROOT'))
       .join('');
@@ -1200,6 +1235,7 @@
     const snapshot = {
       blockElement: block,
       proseContainer,
+      codeContainer: recipe?.codeContainer,
       entries: snapshotEntries,
       originalContainers,
       originalTextValues,
@@ -1396,7 +1432,9 @@
 
   function matchesSupportedClassification(snapshot) {
     if (isUnsupportedElement(snapshot?.blockElement)) return false;
-    if ((findTransparentWrapper(snapshot.blockElement) || snapshot.blockElement) !== snapshot.proseContainer) return false;
+    const recipe = findMiseRecipe(snapshot.blockElement);
+    if ((recipe?.proseContainer || findTransparentWrapper(snapshot.blockElement) || snapshot.blockElement) !== snapshot.proseContainer ||
+      recipe?.codeContainer !== snapshot.codeContainer) return false;
     for (const retained of snapshot?.edgeRetainedNodes || []) {
       if (getEdgeRetainedPlacement(retained.node, snapshot.blockElement, retained.classifier,
         snapshot.blockChildNodes, snapshot.proseContainer) !== retained.placement) return false;

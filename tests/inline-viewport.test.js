@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { createInlineViewport } = require('../extension/inline-viewport');
 const { createInlineTranslationSession } = require('../extension/inline-translation-session');
-const { createTestDocument } = require('./inline-block.test');
+const { createTestDocument, createMiseRecipeFixture } = require('./inline-block.test');
 const { createViewportProbe } = require('./viewport-harness');
 
 function createActiveInlineTranslationState() {
@@ -120,6 +120,26 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
 
 exports.name = 'inline viewport';
 exports.tests = [
+  {
+    name: 'discovers mise recipe step prose with independent heading and paragraph admission',
+    fn() {
+      const { block, heading, paragraph, code } = createMiseRecipeFixture();
+      const f = scannerFixture(block);
+      try {
+        f.viewport.start(block);
+        assert.deepEqual(f.admissions, [block, heading, paragraph]);
+        const records = f.session.takeBatch();
+        assert.deepEqual(records.map((record) => record.blockElement), [block, heading, paragraph]);
+        assert.match(records[0].template, /Step 1/);
+        assert.deepEqual(records.slice(1).map((record) => record.template), [
+          'Install mise', 'On macOS or Linux, install mise.',
+        ]);
+        for (const record of records) assert.doesNotMatch(record.template, /mise use node@24|v24\.x\.x/);
+        assert.equal(code.textContent, '$ mise use node@24v24.x.x');
+        assert.equal(f.session.progress().counts.failed, 0);
+      } finally { f.viewport.stop(); }
+    },
+  },
   {
     name: 'invalidates continuation when an attribute reveals earlier prose',
     fn() {

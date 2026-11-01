@@ -232,8 +232,253 @@ function createHeadingControlFixture(trailing = false) {
   return { document, element, text, block, control, link, icon };
 }
 
+function createMiseRecipeFixture() {
+  const { document, element, text } = createTestDocument();
+  document.location = new URL('https://mise.jdx.dev/');
+  const labelText = text('Step 1');
+  const label = element('span', labelText);
+  const heading = element('h3', text('Install mise'));
+  const paragraph = element('p', text('On macOS or Linux, install mise.'));
+  const prose = element('div', label, heading, paragraph);
+  prose.setAttribute('class', 'recipe-text');
+  const command = element('div', element('span', text('$ ')), text('mise use node@24'));
+  const output = element('div', text('v24.x.x'));
+  const code = element('div', command, output);
+  code.setAttribute('class', 'recipe-code terminal-lines');
+  const whitespace = text('\n ');
+  const block = element('li', whitespace, prose, text('\n '), code, text('\n'));
+  block.setAttribute('class', 'recipe-row');
+  document.body.appendChild(block);
+  return { document, element, text, block, prose, label, labelText, heading, paragraph, code, command, output };
+}
+
 exports.name = 'inline block codec';
 exports.tests = [
+  {
+    name: 'mise recipe admission uses the actual HTTPS homepage location rather than base URI',
+    fn() {
+      for (const url of ['https://mise.jdx.dev/', 'https://mise.jdx.dev/?theme=dark#recipes']) {
+        const { document, block } = createMiseRecipeFixture();
+        document.location = new URL(url);
+        document.baseURI = 'https://other.example/guide';
+        assert.equal(codec.serializeBlock(block).ok, true, url);
+      }
+      for (const url of ['https://other.example/', 'https://mise.jdx.dev.evil.example/',
+        'https://docs.mise.jdx.dev/', 'https://mise.jdx.dev/guide/', 'https://mise.jdx.dev/index.html',
+        'http://mise.jdx.dev/', 'https://mise.jdx.dev:8443/', null]) {
+        const { document, block } = createMiseRecipeFixture();
+        document.location = url ? new URL(url) : null;
+        document.baseURI = 'https://mise.jdx.dev/';
+        assert.deepEqual(codec.serializeBlock(block), unsupportedBlock('unsupported_descendant', 'DIV'), url);
+      }
+    },
+  },
+  {
+    name: 'mise recipe admission retains the exact sibling and prose wrapper boundary',
+    fn() {
+      for (const variant of ['wrong-root', 'row-class', 'prose-class', 'code-class', 'terminal-class',
+        'reverse', 'extra-element', 'extra-text', 'comment', 'nested-div', 'nested-span-div',
+        'role', 'aria-label', 'tabindex', 'hidden', 'lang', 'dir', 'contenteditable', 'onclick', 'title']) {
+        const { document, block, prose, code, element, text } = createMiseRecipeFixture();
+        let candidate = block;
+        if (variant === 'wrong-root') {
+          candidate = element('p', prose, code);
+          candidate.setAttribute('class', 'recipe-row');
+          document.body.appendChild(candidate);
+        } else if (variant === 'row-class') block.setAttribute('class', 'recipe-row-other');
+        else if (variant === 'prose-class') prose.setAttribute('class', 'other-recipe-text');
+        else if (variant === 'code-class') code.setAttribute('class', 'terminal-lines');
+        else if (variant === 'terminal-class') code.setAttribute('class', 'recipe-code');
+        else if (variant === 'reverse') block.insertBefore(code, prose);
+        else if (variant === 'extra-element') block.appendChild(element('span', text('More prose.')));
+        else if (variant === 'extra-text') block.appendChild(text('More prose.'));
+        else if (variant === 'comment') block.appendChild(document.createComment('separator'));
+        else if (variant === 'nested-div') prose.appendChild(element('div', text('More prose.')));
+        else if (variant === 'nested-span-div') prose.childNodes[0].appendChild(element('div', text('More prose.')));
+        else prose.setAttribute(variant, variant === 'tabindex' ? '-1' : 'true');
+        assert.equal(codec.serializeBlock(candidate).ok, false, variant);
+      }
+      const { block, prose } = createMiseRecipeFixture();
+      for (const [name, value] of [['id', 'step-1'], ['style', 'display: block'], ['data-step', '1']]) {
+        prose.setAttribute(name, value);
+      }
+      assert.equal(codec.serializeBlock(block).ok, true);
+    },
+  },
+  {
+    name: 'mise recipe preserves current terminal content through translation and restoration',
+    fn() {
+      const { block, prose, code, command, output, element, text } = createMiseRecipeFixture();
+      const parent = codec.serializeBlock(block);
+      assert.equal(parent.ok, true);
+      const entry = parent.contract.entries[0];
+      command.replaceChildren(element('span', text('$ ')), text('mise use node@25'));
+      output.textContent = `⟦${parent.contract.namespace}:ATOM:A1⟧`;
+      const updated = codec.serializeBlock(block);
+      assert.equal(updated.ok, true);
+      assert.equal(updated.originalSignature, parent.originalSignature);
+      assert.equal(updated.cacheKey, parent.cacheKey);
+      assert.deepEqual(updated.contract, parent.contract);
+      assert.equal(codec.applyTranslatedTemplate(parent.snapshot, `${entry.openToken}1단계${entry.closeToken}`).ok, true);
+      assert.equal(command.textContent, '$ mise use node@25');
+      assert.equal(output.textContent, `⟦${parent.contract.namespace}:ATOM:A1⟧`);
+      command.replaceChildren(element('span', text('$ mise run build')));
+      output.replaceChildren(element('span', text('development')));
+      const commandChildren = [...command.childNodes];
+      const outputChildren = [...output.childNodes];
+      const outer = [...block.childNodes];
+      assert.equal(codec.restoreBlock(parent.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, outer);
+      assert.equal(block.childNodes[1], prose);
+      assert.equal(block.childNodes[3], code);
+      assert.deepEqual(command.childNodes, commandChildren);
+      assert.deepEqual(output.childNodes, outputChildren);
+      assert.equal(command.textContent, '$ mise run build');
+      assert.equal(output.textContent, 'development');
+    },
+  },
+  {
+    name: 'mise recipe refuses changed site containers and terminal boundaries before apply and restore',
+    fn() {
+      for (const applied of [false, true]) {
+        for (const mutation of ['host', 'path', 'protocol', 'replace-code', 'replace-prose', 'move-code',
+          'remove-code', 'move-heading', 'replace-heading', 'own-text', 'row-class', 'prose-class',
+          'code-class', 'terminal-class', 'prose-attribute', 'extra-element', 'extra-text', 'code-hidden',
+          'code-event', 'code-editable', 'code-role', 'code-tabindex', 'descendant-event', 'descendant-hidden',
+          'descendant-interactive', 'descendant-semantic']) {
+          const { document, block, prose, label, code, output, heading, element, text } = createMiseRecipeFixture();
+          const parent = codec.serializeBlock(block);
+          assert.equal(parent.ok, true);
+          const entry = parent.contract.entries[0];
+          const translated = `${entry.openToken}1단계${entry.closeToken}`;
+          if (applied) assert.equal(codec.applyTranslatedTemplate(parent.snapshot, translated).ok, true);
+          if (mutation === 'host') document.location = new URL('https://other.example/');
+          else if (mutation === 'path') document.location = new URL('https://mise.jdx.dev/guide/');
+          else if (mutation === 'protocol') document.location = new URL('http://mise.jdx.dev/');
+          else if (mutation === 'replace-code') {
+            const replacement = element('div', element('div', text('development')));
+            replacement.setAttribute('class', 'recipe-code terminal-lines');
+            block.insertBefore(replacement, code);
+            block.removeChild(code);
+          } else if (mutation === 'replace-prose') {
+            const replacement = element('div', text('Step 1'), heading);
+            replacement.setAttribute('class', 'recipe-text');
+            block.insertBefore(replacement, prose);
+            block.removeChild(prose);
+          } else if (mutation === 'move-code') block.insertBefore(code, prose);
+          else if (mutation === 'remove-code') document.body.appendChild(code);
+          else if (mutation === 'move-heading') prose.insertBefore(heading, label);
+          else if (mutation === 'replace-heading') {
+            prose.insertBefore(element('h3', text('Install mise')), heading);
+            prose.removeChild(heading);
+          } else if (mutation === 'own-text') label.childNodes[0].nodeValue = 'New step label';
+          else if (mutation === 'row-class') block.setAttribute('class', 'other');
+          else if (mutation === 'prose-class') prose.setAttribute('class', 'other');
+          else if (mutation === 'code-class') code.setAttribute('class', 'terminal-lines');
+          else if (mutation === 'terminal-class') code.setAttribute('class', 'recipe-code');
+          else if (mutation === 'prose-attribute') prose.setAttribute('aria-label', 'Description');
+          else if (mutation === 'extra-element') block.appendChild(element('span', text('New prose.')));
+          else if (mutation === 'extra-text') block.appendChild(text('New prose.'));
+          else if (mutation === 'code-hidden') code.hidden = true;
+          else if (mutation === 'code-event') code.setAttribute('onkeydown', 'pageHandler()');
+          else if (mutation === 'code-editable') code.setAttribute('contenteditable', 'true');
+          else if (mutation === 'code-role') code.setAttribute('role', 'button');
+          else if (mutation === 'code-tabindex') code.setAttribute('tabindex', '0');
+          else if (mutation === 'descendant-event') output.setAttribute('onmouseover', 'pageHandler()');
+          else if (mutation === 'descendant-hidden') output.computedStyle = { visibility: 'hidden' };
+          else if (mutation === 'descendant-interactive') output.appendChild(element('button', text('Run')));
+          else if (mutation === 'descendant-semantic') {
+            const span = element('span', text('Independent prose.'));
+            span.setAttribute('data-as', 'p');
+            output.appendChild(span);
+          }
+          const outer = [...block.childNodes];
+          const proseChildren = [...prose.childNodes];
+          const codeChildren = [...code.childNodes];
+          const contents = document.body.textContent;
+          const result = applied ? codec.restoreBlock(parent.snapshot) : codec.applyTranslatedTemplate(parent.snapshot, translated);
+          assert.deepEqual(result, { ok: false, errorCode: 'block_changed' }, `${mutation}, applied=${applied}`);
+          assert.deepEqual(block.childNodes, outer);
+          assert.deepEqual(prose.childNodes, proseChildren);
+          assert.deepEqual(code.childNodes, codeChildren);
+          assert.equal(document.body.textContent, contents);
+        }
+      }
+    },
+  },
+  {
+    name: 'mise recipe refuses terminal subtrees outside visible noninteractive DIV SPAN and text',
+    fn() {
+      for (const variant of ['a', 'button', 'input', 'p', 'code', 'svg', 'custom-code', 'comment',
+        'semantic-span', 'contenteditable', 'ancestor-editable', 'hidden', 'aria-hidden', 'display',
+        'onclick', 'onkeydown', 'handler-property', 'tabindex', 'autofocus', 'role', 'deep', 'wide']) {
+        for (const atRoot of [true, false]) {
+          const { block, code, output, element, text, document } = createMiseRecipeFixture();
+          const target = atRoot ? code : output;
+          if (['a', 'button', 'input', 'p', 'code', 'svg', 'custom-code'].includes(variant)) {
+            target.appendChild(element(variant, text('Terminal control.')));
+          } else if (variant === 'comment') target.appendChild(document.createComment('Not observed.'));
+          else if (variant === 'semantic-span') {
+            const span = element('span', text('Independent prose.'));
+            span.setAttribute('data-as', 'p');
+            target.appendChild(span);
+          } else if (variant === 'display') target.computedStyle = { display: 'none' };
+          else if (variant === 'handler-property') target.onkeydown = () => {};
+          else if (variant === 'ancestor-editable') block.setAttribute('contenteditable', 'true');
+          else if (variant === 'deep') {
+            let nested = target;
+            for (let index = 0; index < 257; index += 1) nested = nested.appendChild(element('span'));
+            nested.appendChild(text('development'));
+          } else if (variant === 'wide') {
+            for (let index = 0; index < 4096; index += 1) target.appendChild(text('output'));
+          } else target.setAttribute(variant, variant === 'role' ? 'checkbox' : variant === 'tabindex' ? '-1' : 'true');
+          assert.equal(codec.serializeBlock(block).ok, false, `${variant}, root=${atRoot}`);
+        }
+      }
+    },
+  },
+  {
+    name: 'mise homepage recipe translates step prose independently of headings paragraphs and terminal output',
+    fn() {
+      for (const childFirst of [true, false]) {
+        for (const restoreChildFirst of [true, false]) {
+          const { block, prose, label, labelText, heading, paragraph, code, command, output } = createMiseRecipeFixture();
+          const outer = [...block.childNodes];
+          const parent = codec.serializeBlock(block);
+          assert.equal(parent.ok, true);
+          const entry = parent.contract.entries[0];
+          assert.equal(parent.template, `${entry.openToken}Step 1${entry.closeToken}`);
+          assert.deepEqual(parent.atoms, []);
+          const headingRecord = codec.serializeBlock(heading);
+          const paragraphRecord = codec.serializeBlock(paragraph);
+          const parentJob = [parent, `${entry.openToken}1단계${entry.closeToken}`];
+          const childJobs = [[headingRecord, 'mise 설치'], [paragraphRecord, 'macOS나 Linux에서 mise를 설치합니다.']];
+          for (const [record, translated] of childFirst ? [...childJobs, parentJob] : [parentJob, ...childJobs]) {
+            assert.equal(codec.validateTranslatedTemplate(translated, record.contract).ok, true);
+            assert.equal(codec.applyTranslatedTemplate(record.snapshot, translated).ok, true);
+          }
+          assert.deepEqual(block.childNodes, outer);
+          assert.deepEqual(prose.childNodes, [label, heading, paragraph]);
+          assert.deepEqual(code.childNodes, [command, output]);
+          assert.equal(label.textContent, '1단계');
+          assert.equal(heading.textContent, 'mise 설치');
+          assert.equal(paragraph.textContent, 'macOS나 Linux에서 mise를 설치합니다.');
+          assert.equal(code.textContent, '$ mise use node@24v24.x.x');
+          const children = [headingRecord, paragraphRecord];
+          for (const record of restoreChildFirst ? [...children, parent] : [parent, ...children]) {
+            assert.equal(codec.restoreBlock(record.snapshot).ok, true);
+          }
+          assert.deepEqual(block.childNodes, outer);
+          assert.deepEqual(prose.childNodes, [label, heading, paragraph]);
+          assert.deepEqual(label.childNodes, [labelText]);
+          assert.equal(label.textContent, 'Step 1');
+          assert.equal(heading.textContent, 'Install mise');
+          assert.equal(paragraph.textContent, 'On macOS or Linux, install mise.');
+          assert.deepEqual(code.childNodes, [command, output]);
+        }
+      }
+    },
+  },
   {
     name: 'translates prose around an intact button and restores its original graph',
     fn() {
@@ -3002,5 +3247,6 @@ exports.tests = [
 ];
 
 exports.createTestDocument = createTestDocument;
+exports.createMiseRecipeFixture = createMiseRecipeFixture;
 exports.createReasoningFixture = createReasoningFixture;
 exports.LINGUISTIC_SLASH_PROSE = LINGUISTIC_SLASH_PROSE;
