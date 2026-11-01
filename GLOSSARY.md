@@ -21,7 +21,7 @@ A Semantic Block for which no acceptable Inline Translation could be safely appl
 _Avoid_: failed translation, rejected result, request failure
 
 **Partial Translation**:
-An applied Inline Translation that still contains a material amount of source-language prose after its allowed repair. Isolated technical names and Source Syntax do not make a translation partial.
+An applied Inline Translation that still contains a material amount of source-language prose after its allowed repair. Isolated technical names, including each item of a punctuated list of names, and Source Syntax do not make a translation partial.
 _Avoid_: warning, degraded translation, incomplete result
 
 **Semantic Block**:
@@ -33,7 +33,7 @@ A page-owned block-level child at the leading or trailing edge of a Semantic Blo
 _Avoid_: block atom, nested chunk, protected block
 
 **Inert Page Node**:
-A page-owned node whose identity is preserved but that exposes no visible or accessible language, role, focus, action, or editing semantics, such as a separator comment or a text-free decoration. A hidden responsive alternative may contain text when its visible counterpart is structurally identifiable; other hidden prose is not inert.
+A page-owned node whose identity is preserved but that exposes no visible or accessible language, role, focus, action, or editing semantics, such as a separator comment, a text-free decoration, or a decorative symbol without letters or digits that is hidden from assistive technology. A hidden responsive alternative may contain text when its visible counterpart is structurally identifiable; other hidden prose is not inert.
 _Avoid_: decorative atom, trusted node, opaque node
 
 **Placeholder Token**:
@@ -41,7 +41,7 @@ A stand-in for page-owned structure that translation preserves while reordering 
 _Avoid_: bare token (ambiguous with a model token or a request correlation token), marker, tag, sentinel, protected span
 
 **Source Syntax**:
-Visible page-owned notation whose spelling and delimiters carry meaning, such as an unambiguous repository coordinate, path, or bracketed choice, preserved unchanged by Inline Translation. Ordinary linguistic abbreviations remain translatable prose; Source Syntax is distinct from a Placeholder Token inserted by the extension.
+Visible page-owned notation whose spelling and delimiters carry meaning, such as an unambiguous repository coordinate, path, bracketed choice, or a whole block that is one command line introduced by a shell prompt, preserved unchanged by Inline Translation. Ordinary linguistic abbreviations remain translatable prose; Source Syntax is distinct from a Placeholder Token inserted by the extension.
 _Avoid_: code, literal token, protected text, technical term
 
 **Inline Translation Session**:
