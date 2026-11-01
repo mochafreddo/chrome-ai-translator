@@ -1,6 +1,6 @@
 const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
-const { execute } = require('../extension/inline-model-execution.js');
+const { execute, assessTranslationQuality } = require('../extension/inline-model-execution.js');
 const codec = require('../extension/inline-block.js');
 const { createReasoningFixture, createTestDocument, LINGUISTIC_SLASH_PROSE } = require('./inline-block.test');
 
@@ -22,6 +22,53 @@ function translatedReasoning(record) {
 
 exports.name = 'inline model execution';
 exports.tests = [
+  {
+    name: 'breaks shared English sequences at list punctuation in either text',
+    fn() {
+      for (const separator of [',', '&', '/', '·']) {
+        const list = `macOS ${separator} Linux ${separator} Windows`;
+        for (const [source, output] of [
+          [list, 'macOS Linux Windows를 지원합니다.'],
+          ['macOS Linux Windows', `${list}를 지원합니다.`],
+        ]) {
+          const quality = assessTranslationQuality(source, output, 'ko');
+          assert.equal(quality.status, 'complete', `${source} -> ${output}`);
+          assert.equal(quality.evidence.sharedEnglishSequenceCount, 0);
+          assert.equal(quality.evidence.sourceProseWordCount, 3);
+        }
+      }
+    },
+  },
+  {
+    name: 'keeps prose list items and existing two-word residue rules',
+    fn() {
+      for (const source of ['Read the docs, run the tests', 'Read Linux', 'GitHub releases',
+        'mise bootstrap', 'Alpha Beta Gamma']) {
+        const quality = assessTranslationQuality(source, `${source} 번역`, 'ko');
+        assert.equal(quality.status, 'partial', source);
+        assert.deepEqual(quality.codes, ['quality.english_residue'], source);
+      }
+    },
+  },
+  {
+    name: 'accepts punctuated technical name lists as complete translations',
+    fn() {
+      for (const [source, output] of [
+        ['macOS, Linux & Windows', 'macOS, Linux 및 Windows'],
+        ['Shell activation for bash, zsh, fish, Nushell, PowerShell, and more',
+          'bash, zsh, fish, Nushell, PowerShell 등을 위한 셸 활성화'],
+        ['Packages from apt, dnf, pacman, AUR, zypper, apk, nix, flatpak, snap, Homebrew formulae and casks, …',
+          'apt, dnf, pacman, AUR, zypper, apk, nix, flatpak, snap, Homebrew 포뮬러와 캐스크 등의 패키지'],
+        ['Sourced from packslip, aqua, GitHub releases, cargo, npm, pypi, go, gem, http, vfox, and more.',
+          'packslip, aqua, GitHub 릴리스, cargo, npm, pypi, go, gem, http, vfox 등에서 가져옵니다.'],
+      ]) {
+        const quality = assessTranslationQuality(source, output, 'ko');
+        assert.equal(quality.status, 'complete', source);
+        assert.deepEqual(quality.codes, [], source);
+        assert.equal(quality.evidence.sharedEnglishSequenceCount, 0, source);
+      }
+    },
+  },
   {
     name: 'preserves whole prompt command lines as complete Source Syntax without repair',
     async fn() {

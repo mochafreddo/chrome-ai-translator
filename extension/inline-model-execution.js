@@ -119,7 +119,7 @@
     return `structure.${known.has(code) ? code : 'output_parse_failed'}`;
   }
 
-  function words(value, contract = null) {
+  function words(value, contract = null, includeListPunctuation = false) {
     const sourceSyntax = Array.isArray(contract?.sourceSyntax)
       ? contract.sourceSyntax.map((item) => removeContractTokens(item?.value, contract)).filter(Boolean)
       : [];
@@ -128,14 +128,14 @@
       sourceSyntax
     );
     return Array.from(
-      proseOnly.matchAll(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g),
+      proseOnly.matchAll(/[A-Za-z]+(?:['’-][A-Za-z]+)*|[,&/·]/g),
       (match) => match[0]
-    );
+    ).filter((word) => includeListPunctuation || /[A-Za-z]/.test(word));
   }
 
   function sharedEnglishEvidence(source, output, contract = null) {
-    const sourceWords = words(source, contract);
-    const outputWords = words(output, contract).map((word) => word.toLowerCase());
+    const sourceWords = words(source, contract, true);
+    const outputWords = words(output, contract, true).map((word) => word.toLowerCase());
     let longest = 0;
     let count = 0;
     const phrases = new Set();
@@ -146,6 +146,7 @@
       }
       for (let index = 0; index <= sourceWords.length - length; index += 1) {
         const sequence = sourceWords.slice(index, index + length);
+        if (sequence.some((word) => /^[,&/·]$/.test(word))) continue;
         const normalized = sequence.map((word) => word.toLowerCase());
         const looksLikeProse =
           length >= 3 ||
