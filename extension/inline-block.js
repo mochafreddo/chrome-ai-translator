@@ -194,9 +194,9 @@
     return leading === summaries[0] ? leading : null;
   }
 
-  function getEdgeRetainedPlacement(node, block, classifier, blockChildNodes) {
-    if (node?.parentNode !== block || !classifier(node, block)) return null;
-    const siblings = getChildNodes(block).filter((child) =>
+  function getEdgeRetainedPlacement(node, block, classifier, blockChildNodes, proseContainer = block) {
+    if (node?.parentNode !== proseContainer || !classifier(node, block)) return null;
+    const siblings = getChildNodes(proseContainer).filter((child) =>
       !isIgnorableWhitespace(child) && (child === node || !blockChildNodes.has(child)));
     const placement = siblings[0] === node
       ? 'leading'
@@ -210,6 +210,15 @@
 
   function isBlockChild(node) {
     return isBlockChildContainerElement(node) || isSemanticBlockElement(node);
+  }
+
+  function findTransparentWrapper(block) {
+    const children = getChildNodes(block).filter((child) => !isIgnorableWhitespace(child));
+    const wrapper = children[0];
+    if (children.length !== 1 || getTagName(wrapper) !== 'DIV' || isSemanticBlockElement(wrapper)) return null;
+    if (getChildNodes(wrapper).some((child) => getTagName(child) === 'DIV')) return null;
+    return wrapper.getAttributeNames().every((name) =>
+      ['class', 'id', 'style'].includes(name) || name.startsWith('data-')) ? wrapper : null;
   }
 
   // A heading's edge control is local UI, never a translatable atom. Requiring
@@ -918,14 +927,19 @@
     if (!isSemanticBlockElement(block)) {
       return createUnsupportedResult(describeLocalRejection('invalid_root', block));
     }
-    const blockChildNodes = new Set(getChildNodes(block).filter(isBlockChild));
+    const proseContainer = findTransparentWrapper(block) || block;
+    const blockChildNodes = new Set(getChildNodes(proseContainer).filter(isBlockChild));
     const sourceFingerprint = getStructureFingerprint(block, blockChildNodes);
     if (sourceFingerprint == null) {
       return createUnsupportedResult(describeLocalRejection('structure_limit_exceeded', block));
     }
     const unsupportedRoot = classifyUnsupportedElement(block);
     if (unsupportedRoot) return createUnsupportedResult(unsupportedRoot);
-    const namespace = createTokenNamespace(block, sourceFingerprint, blockChildNodes);
+    if (proseContainer !== block) {
+      const unsupportedWrapper = classifyUnsupportedElement(proseContainer);
+      if (unsupportedWrapper) return createUnsupportedResult(unsupportedWrapper);
+    }
+    const namespace = createTokenNamespace(proseContainer, sourceFingerprint, blockChildNodes);
     const contractEntries = [];
     const snapshotEntries = new Map();
     const originalContainers = [];
@@ -1019,15 +1033,22 @@
         failed = describeLocalRejection('unsupported_descendant', node);
         return '';
       }
+      const tagName = getTagName(node);
+      const wholeCellWrapper = proseContainer === block && tagName === 'DIV' && parentId === 'ROOT' &&
+        ['TD', 'TH'].includes(getTagName(block)) &&
+        getChildNodes(block).every((child) => child === node || isIgnorableWhitespace(child));
       const classifier = isBlockChild(node) ? isBlockChild : isHeadingControl;
-      const placement = parentId === 'ROOT' && getEdgeRetainedPlacement(node, block, classifier, blockChildNodes);
+      const placement = parentId === 'ROOT' && getEdgeRetainedPlacement(node, block, classifier, blockChildNodes, proseContainer);
       if (placement) {
         edgeRetainedNodes.push({ node, placement, classifier });
         retainedNodes.add(node);
         if (classifier === isHeadingControl) rememberOpaqueSubtree(node, edgeRetainedSubtreeNodes);
         return '';
       }
-      const tagName = getTagName(node);
+      if (tagName === 'DIV' && !wholeCellWrapper) {
+        failed = describeLocalRejection('unsupported_descendant', node);
+        return '';
+      }
       const responsive = isResponsiveAlternativeLabel(node);
       if (responsive || isInertPageNode(node)) {
         inertPageNodes.add(node);
@@ -1078,9 +1099,6 @@
       }
 
       const anchoredWrapper = node === anchoredSummary;
-      const wholeCellWrapper = tagName === 'DIV' && parentId === 'ROOT' &&
-        ['TD', 'TH'].includes(getTagName(block)) &&
-        getChildNodes(block).every((child) => child === node || isIgnorableWhitespace(child));
       const pairedWrapper =
         tagName === 'A' || WRAPPER_TAGS.has(tagName) || anchoredWrapper || wholeCellWrapper;
       if (!pairedWrapper) {
@@ -1124,7 +1142,11 @@
     }
 
     rememberContainer(block);
-    const template = getChildNodes(block)
+    if (proseContainer !== block) {
+      rememberContainer(proseContainer);
+      retainedNodes.add(proseContainer);
+    }
+    const template = getChildNodes(proseContainer)
       .map((child) => visit(child, 'ROOT'))
       .join('');
     if (failed) return createUnsupportedResult(failed);
@@ -1177,6 +1199,7 @@
     });
     const snapshot = {
       blockElement: block,
+      proseContainer,
       entries: snapshotEntries,
       originalContainers,
       originalTextValues,
@@ -1373,9 +1396,10 @@
 
   function matchesSupportedClassification(snapshot) {
     if (isUnsupportedElement(snapshot?.blockElement)) return false;
+    if ((findTransparentWrapper(snapshot.blockElement) || snapshot.blockElement) !== snapshot.proseContainer) return false;
     for (const retained of snapshot?.edgeRetainedNodes || []) {
       if (getEdgeRetainedPlacement(retained.node, snapshot.blockElement, retained.classifier,
-        snapshot.blockChildNodes) !== retained.placement) return false;
+        snapshot.blockChildNodes, snapshot.proseContainer) !== retained.placement) return false;
     }
     for (const node of snapshot?.inertPageNodes || []) {
       if (
@@ -1548,7 +1572,7 @@
       for (const container of plan.containerPlans) {
         replaceNodeChildren(container.node, container.children, snapshot.retainedNodes);
       }
-      replaceNodeChildren(snapshot.blockElement, plan.rootChildren, snapshot.retainedNodes);
+      replaceNodeChildren(snapshot.proseContainer, plan.rootChildren, snapshot.retainedNodes);
       snapshot.appliedOwnership = captureAppliedOwnership(snapshot);
       const translatedFingerprint = getStructureFingerprint(
         snapshot.blockElement, snapshot.blockChildNodes

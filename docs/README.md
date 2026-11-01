@@ -31,6 +31,7 @@ All ADRs below retain their existing numbers and accepted status. They are descr
 | [0009](adr/0009-model-local-rejections-in-diagnostics-v3.md) | Model local rejections explicitly in diagnostics v3 |
 | [0010](adr/0010-apply-an-answer-that-dropped-a-whole-emphasis-pair.md) | Allow eligible whole emphasis pairs to be absent from an answer |
 | [0011](adr/0011-exclude-block-children-from-own-prose.md) | Exclude edge Block Children from a parent's own prose |
+| [0012](adr/0012-translate-through-a-sole-generic-div-wrapper.md) | Translate own prose through a sole generic DIV wrapper |
 
 ## Agent procedures
 
