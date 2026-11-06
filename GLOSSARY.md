@@ -9,7 +9,7 @@ Translation of a page's article body into Markdown, presented in Chrome's side p
 _Avoid_: document translation, full-page translation, panel mode
 
 **Translation Chunk**:
-A block-aligned portion of an article's Markdown translated as a unit by Side Panel Translation. A block is never split between Translation Chunks.
+A portion of an article's Markdown translated as a unit by Side Panel Translation. Chunks normally follow block boundaries, but an oversized block may span chunks when it can be divided without breaking a protected structure.
 _Avoid_: batch, section, page part
 
 **Inline Translation**:

@@ -33,6 +33,7 @@ All ADRs below retain their existing numbers and accepted status. They are descr
 | [0011](adr/0011-exclude-block-children-from-own-prose.md) | Exclude edge Block Children from a parent's own prose |
 | [0012](adr/0012-translate-through-a-sole-generic-div-wrapper.md) | Translate own prose through a sole generic DIV wrapper |
 | [0013](adr/0013-recognize-mise-recipe-layout-explicitly.md) | Recognize the mise recipe layout as an explicit site boundary |
+| [0014](adr/0014-bind-translation-to-the-readers-document-and-provider.md) | Bind translation to the reader's document and provider choice (implementation pending) |
 
 ## Agent procedures
 
