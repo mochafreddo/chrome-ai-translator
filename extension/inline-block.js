@@ -1598,6 +1598,7 @@
         snapshot.retainedNodes);
     }
     snapshot.appliedOwnership = null;
+    snapshot.appliedTextOwnership = null;
     snapshot.translatedSignature = null;
   }
 
@@ -1605,6 +1606,7 @@
     return (snapshot.originalContainers || []).map((container) => ({
       node: container.node,
       children: getChildNodes(container.node),
+      parent: container.node.parentNode,
     }));
   }
 
@@ -1620,6 +1622,8 @@
       }
       replaceNodeChildren(snapshot.proseContainer, plan.rootChildren, snapshot.retainedNodes);
       snapshot.appliedOwnership = captureAppliedOwnership(snapshot);
+      snapshot.appliedTextOwnership = Array.from(snapshot.originalTextValues,
+        ([node, value]) => ({ node, value, parent: node.parentNode }));
       const translatedFingerprint = getStructureFingerprint(
         snapshot.blockElement, snapshot.blockChildNodes
       );
@@ -1650,7 +1654,10 @@
       return false;
     }
     return snapshot.appliedOwnership.every((container) =>
+      (container.node === block || container.node.parentNode === container.parent) &&
       sameNodeList(container.node, container.children)
+    ) && snapshot.appliedTextOwnership.every(({ node, value, parent }) =>
+      node.parentNode === parent && node.nodeValue === value
     );
   }
 

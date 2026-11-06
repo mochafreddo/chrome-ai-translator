@@ -227,16 +227,37 @@ async function clearStoredApiKey(chromeApi, service = 'openai') {
 }
 
 function handleClearClick() {
+  if (!settingsLoaded) return;
   clearKey().catch(() => {
     setError('Failed to clear stored API key');
     setStatus('');
   });
 }
 
+let settingsLoaded = false;
 let saveInFlight = false;
 
+async function initializeSettings() {
+  const retry = document.getElementById('btnRetrySettings');
+  retry.hidden = true;
+  document.getElementById('btnSave').disabled = true;
+  document.getElementById('btnClear').disabled = true;
+  try {
+    await load();
+  } catch {
+    retry.hidden = false;
+    setError('Failed to load settings');
+    return;
+  }
+  settingsLoaded = true;
+  setError('');
+  document.getElementById('btnSave').disabled = false;
+  document.getElementById('btnClear').disabled = false;
+  await loadInlineLogs();
+}
+
 function handleSaveClick() {
-  if (saveInFlight) return;
+  if (!settingsLoaded || saveInFlight) return;
   saveInFlight = true;
   const button = document.getElementById('btnSave');
   button.disabled = true;
@@ -260,9 +281,9 @@ if (hasDocument) {
   btnCopyDiagnostics.addEventListener('click', () => copyDiagnostics().catch((error) => setError(error?.message || String(error))));
   btnSaveDiagnostics.addEventListener('click', () => saveDiagnostics().catch((error) => setError(error?.message || String(error))));
 
-  load()
-    .then(loadInlineLogs)
-    .catch((e) => setError(e?.message || String(e)));
+  const initialize = () => initializeSettings().catch((error) => setError(error.message));
+  document.getElementById('btnRetrySettings').addEventListener('click', initialize);
+  initialize();
 }
 
 if (typeof module !== 'undefined' && module.exports) {

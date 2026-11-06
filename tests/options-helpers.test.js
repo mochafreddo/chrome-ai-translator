@@ -28,7 +28,7 @@ function createChoiceInputs(checkedValue = null) {
   }));
 }
 
-async function withOptionsScreen(check, { granted = true, confirmed = true, response = { ok: true } } = {}) {
+async function withOptionsScreen(check, { granted = true, confirmed = true, readSettings, response = { ok: true } } = {}) {
   const modulePath = require.resolve('../extension/options.js');
   const originalModule = require.cache[modulePath];
   const originals = { document: global.document, chrome: global.chrome, window: global.window,
@@ -61,6 +61,7 @@ async function withOptionsScreen(check, { granted = true, confirmed = true, resp
     runtime: { async sendMessage(message) {
       messages.push(message);
       events.push(message.type);
+      if (message.type === 'GET_SETTINGS' && readSettings) return readSettings();
       if (message.type === 'GET_SETTINGS') return { ok: true, settings: {
         apiKey: '***', openrouterApiKey: '***', model: 'current-model', reasoningEffort: 'low',
         viewMode: 'bilingual', buttonVisibility: 'onInvocation',
@@ -86,6 +87,26 @@ async function withOptionsScreen(check, { granted = true, confirmed = true, resp
 
 exports.name = 'options helpers';
 exports.tests = [
+  {
+    name: 'Options refuses writes until a failed settings read is retried successfully',
+    async fn() {
+      let reads = 0;
+      await withOptionsScreen(async ({ element, messages, events, flush }) => {
+        assert.equal(element('btnSave').disabled, true);
+        assert.equal(element('btnClear').disabled, true);
+        element('btnSave').listeners.click();
+        element('btnClear').listeners.click();
+        await flush();
+        assert.deepEqual(messages.map(message => message.type), ['GET_SETTINGS']);
+        assert.equal(events.includes('permission'), false);
+        element('btnRetrySettings').listeners.click();
+        await flush();
+        assert.equal(element('targetLanguage').value, 'French');
+        assert.equal(element('btnSave').disabled, false);
+        assert.equal(element('btnClear').disabled, false);
+      }, { readSettings: () => ++reads === 1 ? { ok: false } : { ok: true, settings: { targetLanguage: 'French' } } });
+    },
+  },
   {
     name: 'Options switches services with independent keys and preserves OpenAI model and reasoning',
     async fn() {

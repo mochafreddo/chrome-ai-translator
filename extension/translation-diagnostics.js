@@ -13,6 +13,14 @@
   const RUN_PREFIX = 'inlineDiagnostics:v3:run:';
   const SECRET_KEY = 'inlineDiagnostics:v2:hmacSecret';
   const CODE_PREFIXES = ['protocol.', 'structure.', 'quality.', 'runtime.'];
+  const TRANSPORT_CODES = new Set([
+    'openai.authentication', 'openai.access', 'openai.model', 'openai.rate_limit',
+    'openai.unavailable', 'openai.transport', 'openai.request',
+    'openrouter.authentication', 'openrouter.credits', 'openrouter.access', 'openrouter.model',
+    'openrouter.rate_limit', 'openrouter.unavailable', 'openrouter.transport', 'openrouter.request',
+    'response.incomplete.max_output_tokens', 'response.incomplete.other', 'response.failed',
+    'response.cancelled', 'response.not_completed', 'response.output_missing', 'document.departed', 'document.unavailable',
+  ]);
   const TIMELINE_STAGES = [
     'initial_validation',
     'repair_validation',
@@ -63,7 +71,7 @@
 
   function safeCode(value, fallback = 'runtime.request_failed') {
     const code = String(value || '');
-    return CODE_PREFIXES.some((prefix) => code.startsWith(prefix))
+    return TRANSPORT_CODES.has(code) || CODE_PREFIXES.some((prefix) => code.startsWith(prefix))
       ? code.slice(0, 80)
       : fallback;
   }

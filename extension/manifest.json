@@ -5,7 +5,7 @@
   "description": "Personal article translator using OpenAI or OpenRouter.",
   "minimum_chrome_version": "116",
 
-  "permissions": ["storage", "activeTab", "scripting", "sidePanel"],
+  "permissions": ["storage", "activeTab", "scripting", "sidePanel", "webNavigation"],
   "host_permissions": ["https://api.openai.com/*", "https://openrouter.ai/*"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
 

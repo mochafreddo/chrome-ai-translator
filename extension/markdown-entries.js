@@ -28,23 +28,41 @@
   }
 
   function renderCode(entry) {
-    const fence = '`'.repeat(Math.max(3, longestBacktickRun(entry.value) + 1));
-    if (entry.display === 'block') {
-      return `${fence}${entry.language || ''}\n${entry.value}\n${fence}`;
+    if (entry.tableCell) {
+      // Fences and literal newlines break table rows; the entry retains the exact source.
+      return entry.value.split(/\r\n|\r|\n/).map(value => value
+        ? escapeTableCell(renderCode({ ...entry, value, display: 'inline', tableCell: false }))
+        : '').join('<br>');
     }
+    const fence = '`'.repeat(Math.max(3, longestBacktickRun(entry.value) + 1));
     const padding = entry.value.includes('`') ? ' ' : '';
-    return `${fence}${padding}${entry.value}${padding}${fence}`;
+    const rendered = entry.display === 'block'
+      ? `${fence}${entry.language || ''}\n${entry.value}\n${fence}`
+      : `${fence}${padding}${entry.value}${padding}${fence}`;
+    return rendered.replace(/\n/g, `\n${'> '.repeat(entry.quoteDepth || 0)}`);
   }
 
-  function renderDestination(value) {
-    return `<${String(value || '').replace(/\\/g, '\\\\').replace(/>/g, '\\>')}>`;
+  function escapeTableCell(value) {
+    return String(value || '').replace(/\|/g, '\\|').replace(/\r\n|\r|\n/g, '<br>');
   }
 
-  function escapeMarkdownLinkLabel(value) {
-    return String(value || '')
+  function renderDestination(value, tableCell = false) {
+    const destination = `<${String(value || '').replace(/\\/g, '\\\\').replace(/>/g, '\\>')}>`;
+    return tableCell ? escapeTableCell(destination) : destination;
+  }
+
+  function escapeMarkdownLinkLabel(value, tableCell = false) {
+    const label = String(value || '')
       .replace(/\\/g, '\\\\')
       .replace(/\[/g, '\\[')
       .replace(/\]/g, '\\]');
+    return tableCell ? escapeTableCell(label) : label;
+  }
+
+  function renderAtomicEntry(entry) {
+    return Object.prototype.hasOwnProperty.call(entry, 'destination')
+      ? `[${escapeMarkdownLinkLabel(entry.value, entry.tableCell)}](${renderDestination(entry.destination, entry.tableCell)})`
+      : renderCode(entry);
   }
 
   // Two shapes, because a chunk on its way out carries its entries under `contract` and the
@@ -57,9 +75,12 @@
   }
 
   const api = {
+    MAX_TOTAL_CHARS: 60000,
+    escapeTableCell,
     escapeMarkdownLinkLabel,
     getChunkEntries,
     renderCode,
+    renderAtomicEntry,
     renderDestination,
   };
   globalScope.ChromeAiTranslatorMarkdownEntries = api;

@@ -78,14 +78,14 @@
     async function drain(store) {
       if (!isCurrent(store)) return;
       store.transport.flush();
-      while (isCurrent(store)) {
+      while (isCurrent(store) && session.canSubmit()) {
         const batch = session.takeBatch();
         store.transport.flush();
         update();
         if (!batch.length) return;
         // Every submitted batch settles, including transport failure and obsolete work.
         // Eligibility protects display and follow-up work after the Session's accounting.
-        Promise.resolve().then(() => sendMessage({
+        Promise.resolve().then(() => session.canSubmit() && isCurrent(store) ? sendMessage({
           type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
           operationId: store.id,
           settingsSnapshot: store.settings,
@@ -93,7 +93,7 @@
             id: record.id, template: record.template, atoms: record.atoms,
             contract: record.contract, repair: record.repair,
           })),
-        })).catch(() => null).then(response => {
+        }) : null).catch(() => null).then(response => {
           const settled = session.settle(batch, response);
           if (isCurrent(store) && store.settings.service === 'openrouter' && response?.ok === false) {
             store.serviceError = getOpenRouterFailureMessage(response.error?.code);
@@ -149,6 +149,7 @@
       const root = pickArticleRoot();
       if (!root) throw new Error('No article content found.');
       const store = begin(settings);
+      session.selectRoot(root);
       // Display settings have their own lifetime; content receives a separate snapshot.
       onSettings({ ...settings });
       store.scanner.start(root);
@@ -160,7 +161,14 @@
       onChange();
       // An existing operation keeps its authorization even when the initial grant expires.
       if (session.status === 'active') {
-        current.scanner.rescan();
+        const root = pickArticleRoot();
+        if (!root?.isConnected) {
+          error = 'No article content found.';
+          update();
+          return;
+        }
+        if (session.selectRoot(root)) current.scanner.selectRoot(root);
+        else current.scanner.rescan();
         update();
         return;
       }

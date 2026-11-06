@@ -55,8 +55,10 @@
     const openIndex = value.indexOf(entry.openToken);
     const contentStart = openIndex + entry.openToken.length;
     const closeIndex = value.indexOf(entry.closeToken, contentStart);
+    const sourceLabel = value.slice(contentStart, closeIndex);
     const label = markdownEntries.escapeMarkdownLinkLabel(
-      value.slice(contentStart, closeIndex)
+      entry.tableCell ? sourceLabel.replace(/\\\|/g, '|') : sourceLabel,
+      entry.tableCell
     );
     return `${value.slice(0, contentStart)}${label}${value.slice(closeIndex)}`;
   }
@@ -107,20 +109,13 @@
     }
     for (const entry of entries) {
       if (entry.kind === 'code') {
-        const replacement = Object.prototype.hasOwnProperty.call(
-          entry,
-          'destination'
-        )
-          ? `[${markdownEntries.escapeMarkdownLinkLabel(
-              entry.value
-            )}](${markdownEntries.renderDestination(entry.destination)})`
-          : markdownEntries.renderCode(entry);
+        const replacement = markdownEntries.renderAtomicEntry(entry);
         result = result.split(entry.token).join(replacement);
       } else if (entry.kind === 'link') {
         result = result.split(entry.openToken).join('[');
         result = result
           .split(entry.closeToken)
-          .join(`](${markdownEntries.renderDestination(entry.destination)})`);
+          .join(`](${markdownEntries.renderDestination(entry.destination, entry.tableCell)})`);
       }
     }
     return result;

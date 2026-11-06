@@ -6,6 +6,20 @@ const assert = require('node:assert/strict');
 const markdownDocument = require('../extension/markdown-document.js');
 const markdownRehydration = require('../extension/markdown-rehydration.js');
 const translationChunks = require('../extension/translation-chunks.js');
+const execution = require('../extension/sidepanel-translation-execution.js');
+
+async function echoTranslation(documentModel, translate = input => input) {
+  const requests = [];
+  const output = await execution.execute({
+    title: '', url: '', langHint: '',
+    contentMarkdown: markdownDocument.renderOriginalMarkdown(documentModel),
+    translationDocument: documentModel,
+  }, { model: 'test', targetLanguage: 'Korean', chunkMaxChars: 12000 }, async request => {
+    requests.push(request.input);
+    return translate(request.input);
+  });
+  return { output, input: requests.join('\n\n') };
+}
 
 function createTestDocument() {
   class TestNode {
@@ -188,6 +202,194 @@ function createProtectedNaturalLinkTest(tagName) {
 
 exports.name = 'Side Panel Translation Markdown codec';
 exports.tests = [
+  {
+    name: 'quotes every restored PRE line at each nested blockquote level',
+    async fn() {
+      for (const [depth, expected] of [
+        [1, '> ```\n> x\n> y\n> ```'],
+        [2, '> > ```\n> > x\n> > y\n> > ```'],
+        [3, '> > > ```\n> > > x\n> > > y\n> > > ```'],
+      ]) {
+        for (const wrapped of [false, true]) {
+          const { element, text } = createTestDocument();
+          let body = element('pre', {}, text('x\ny'));
+          if (wrapped) body = element('div', {}, body);
+          for (let index = 0; index < depth; index += 1) body = element('blockquote', {}, body);
+          const model = markdownDocument.serializeMarkdownDocument(element('main', {}, body,
+            element('pre', {}, text('outside'))), {}, { namespace: 'CAT_QUOTE_PRE' });
+          const result = await echoTranslation(model);
+          const expectedDocument = `${expected}\n\n\`\`\`\noutside\n\`\`\``;
+          assert.equal(markdownDocument.renderOriginalMarkdown(model), expectedDocument);
+          assert.equal(result.output, expectedDocument);
+          assert.deepEqual(model.entries.map(entry => entry.value), ['x\ny', 'outside']);
+        }
+      }
+    },
+  },
+  {
+    name: 'counts table escapes in the protected document character budget',
+    fn() {
+      for (const length of [29991, 29992]) {
+        const { element, text } = createTestDocument();
+        const serialize = () => markdownDocument.serializeMarkdownDocument(element('main', {},
+          element('table', {}, element('tr', {}, element('td', {}, element('code', {}, text('|'.repeat(length))))))
+        ), {}, { namespace: 'CAT_TABLE_CAP' });
+        if (length === 29991) assert.equal(markdownDocument.renderOriginalMarkdown(serialize()).length, 60000);
+        else assert.throws(serialize, /too much text/);
+      }
+    },
+  },
+  {
+    name: 'escapes restored code and link destinations without adding table columns or rows',
+    async fn() {
+      const { element, text } = createTestDocument();
+      const root = element('main', {}, element('table', {}, element('tr', {}, element('td', {},
+        text('Run '), element('code', {}, text('a|b')), text('; '),
+        element('a', { href: 'https://private.test/a|b' }, text('the | guide')), text(' '),
+        element('pre', {}, text('left\nright')), text(' '),
+        element('a', { href: 'https://private.test/atomic|link' }, text('https://label.test/a|b'))
+      ))));
+      const model = markdownDocument.serializeMarkdownDocument(root, {}, { namespace: 'CAT_TABLE_ESCAPE' });
+      const result = await echoTranslation(model);
+      const expected = '| Run ```a\\|b```; [the \\| guide](<https://private.test/a\\|b>) ```left```<br>```right``` [https://label.test/a\\|b](<https://private.test/atomic\\|link>) |\n| --- |';
+      assert.equal(markdownDocument.renderOriginalMarkdown(model), expected);
+      assert.equal(result.output, expected);
+      const translated = await echoTranslation(model, input => input.replace('the \\| guide', 'translated | label'));
+      assert.equal(translated.output, expected.replace('the \\| guide', 'translated \\| label'));
+      assert.deepEqual(model.entries.filter(entry => entry.kind === 'code').map(entry => entry.value),
+        ['a|b', 'left\nright', 'https://label.test/a|b']);
+      assert.doesNotMatch(result.input, /private\.test|a\|b|left|right/);
+    },
+  },
+  {
+    name: 'preserves all visible PRE text around and between code children without sending it',
+    async fn() {
+      const { element, text } = createTestDocument();
+      const root = element('main', {},
+        element('pre', {}, text('before '), element('code', { class: 'language-js' }, text('x')), text(' after')),
+        element('pre', {}, element('code', {}, text('first')), text(' / '),
+          element('code', {}, text('second')), element('span', { hidden: '' }, text('hidden')))
+      );
+      const model = markdownDocument.serializeMarkdownDocument(root, {}, { namespace: 'CAT_PRE_ALL' });
+      const result = await echoTranslation(model);
+      assert.deepEqual(model.entries.map(entry => entry.value), ['before x after', 'first / second']);
+      assert.equal(result.output, '```js\nbefore x after\n```\n\n```\nfirst / second\n```');
+      assert.equal(markdownDocument.renderOriginalMarkdown(model), result.output);
+      assert.doesNotMatch(result.input, /before|after|first|second|hidden/);
+    },
+  },
+  {
+    name: 'applies the document cap to retained headings and exact protected Markdown lengths',
+    fn() {
+      const { element, text } = createTestDocument();
+      const title = 'Guide '.repeat(5000).trim();
+      const duplicateTitles = markdownDocument.serializeMarkdownDocument(element('main', {},
+        element('h1', {}, text(title)), element('h1', {}, text(title)), element('h1', {}, text(title))
+      ), { title }, { namespace: 'CAT_CAP_TITLE' });
+      assert.equal(markdownDocument.renderOriginalMarkdown(duplicateTitles), `# ${title}`);
+      for (const length of [59992, 59993]) {
+        const serialize = () => markdownDocument.serializeMarkdownDocument(
+          element('main', {}, element('pre', {}, text('x'.repeat(length)))), {}, { namespace: 'CAT_CAP_CODE' }
+        );
+        if (length === 59992) assert.equal(markdownDocument.renderOriginalMarkdown(serialize()).length, 60000);
+        else assert.throws(serialize, /too much text/);
+      }
+    },
+  },
+  {
+    name: 'rejects table expansion at the document cap before reading the remaining cells',
+    fn() {
+      const { element, text } = createTestDocument();
+      const table = element('table', {},
+        element('tr', {}, ...Array.from({ length: 200 }, () => element('td', {}, text('x')))),
+        ...Array.from({ length: 199 }, () => element('tr', {}, element('td', {}, text('x'))))
+      );
+      let finalCellRead = false;
+      const last = table.childNodes.at(-1).childNodes[0].childNodes[0];
+      Object.defineProperty(last, 'nodeValue', { get() {
+        finalCellRead = true;
+        throw new Error('The cap should stop extraction before the final cell.');
+      } });
+      assert.throws(() => markdownDocument.serializeMarkdownDocument(
+        element('main', {}, table), {}, { namespace: 'CAT_CAP' }
+      ), /too much text/);
+      assert.equal(finalCellRead, false);
+    },
+  },
+  {
+    name: 'protects PRE code at every list and table depth through the outgoing request and exact restoration',
+    async fn() {
+      for (const location of ['list', 'cell', 'wrapped-quote']) {
+        const { element, text } = createTestDocument();
+        const source = 'private_call(  "value|x" );\n  return `secret`;';
+        const pre = element('pre', {}, text(source));
+        const link = element('a', { href: 'https://private.test/path?key=secret' }, text('the guide'));
+        const wrapper = element('div', {}, text('Read '), link, text('.'), pre);
+        const body = location === 'list'
+          ? element('ul', {}, element('li', {}, wrapper))
+          : location === 'cell'
+            ? element('table', {}, element('tr', {}, element('td', {}, wrapper)))
+            : element('blockquote', {}, wrapper);
+        const model = markdownDocument.serializeMarkdownDocument(element('main', {}, body), {}, { namespace: 'CAT_PRE' });
+        const result = await echoTranslation(model);
+        assert.doesNotMatch(result.input, /private_call|return|key=secret/);
+        assert.equal(model.entries.find(entry => entry.kind === 'code').value, source);
+        assert.equal(model.entries.find(entry => entry.kind === 'code').display, 'block');
+        assert.equal(result.output, markdownDocument.renderOriginalMarkdown(model));
+        if (location === 'cell') {
+          assert.equal(result.output.includes('private_call(  "value\\|x" );'), true);
+          assert.equal(result.output.includes('<br>'), true);
+          assert.equal(result.output.split('\n').length, 2);
+        } else if (location === 'wrapped-quote') {
+          assert.equal(result.output.includes('private_call(  "value|x" );\n>   return `secret`;'), true);
+        } else assert.equal(result.output.includes(source), true);
+        assert.equal(result.output.includes('https://private.test/path?key=secret'), true);
+      }
+    },
+  },
+  {
+    name: 'excludes hidden nested lists from outgoing requests and preserves wrapped lists in document order',
+    async fn() {
+      const { element, text } = createTestDocument();
+      const root = element('main', {}, element('ul', {}, element('li', {},
+        text('Before.'),
+        element('ul', { hidden: '' }, element('li', {}, text('Private direct list.'))),
+        element('div', { hidden: '' }, element('ul', {}, element('li', {}, text('Private wrapped list.')))),
+        element('div', {},
+          element('ul', { 'aria-hidden': 'true' }, element('li', {}, text('Private list prose.'))),
+          element('section', {}, element('ul', {}, element('li', {}, text('First nested.')))),
+          text('Between.'),
+          element('ol', {}, element('li', {}, text('Second nested.')))
+        ),
+        text('After.')
+      )));
+      const model = markdownDocument.serializeMarkdownDocument(root, {}, { namespace: 'CAT_NESTED' });
+      const expected = '- Before.\n\n    - First nested.\n\n  Between.\n\n    1. Second nested.\n\n  After.';
+      const result = await echoTranslation(model);
+      assert.equal(markdownDocument.renderOriginalMarkdown(model), expected);
+      assert.equal(result.output, expected);
+      assert.equal(result.input, expected);
+    },
+  },
+  {
+    name: 'excludes an extraction root inside hidden or interactive ancestors',
+    fn() {
+      for (const [tag, attributes] of [
+        ['section', { 'aria-hidden': 'true' }],
+        ['section', { hidden: '' }],
+        ['nav', {}],
+        ['section', { onclick: 'act()' }],
+      ]) {
+        const { element, text } = createTestDocument();
+        const root = element('article', {}, element('p', {}, text('Private ancestor prose.')));
+        element(tag, attributes, root);
+        const model = markdownDocument.serializeMarkdownDocument(root, {}, { namespace: 'CAT_ROOT' });
+        assert.equal(markdownDocument.renderOriginalMarkdown(model), '');
+        assert.deepEqual(model.blocks, []);
+        assert.deepEqual(model.entries, []);
+      }
+    },
+  },
   {
     name: 'groups protected blocks into source-ordered bounded chunks',
     fn() {

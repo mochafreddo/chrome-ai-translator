@@ -80,9 +80,9 @@ export function serveFixture(fixturePath) {
   });
 }
 
-export const closeAllBrowsers = async () => {
+export const closeSessionBrowser = async (session) => {
   try {
-    await browser(['close', '--all'], 30000);
+    await browser(['--session', session, 'close'], 30000);
   } catch {
     // Closing is best-effort cleanup; a driver that is already gone is not a failure.
   }
@@ -193,12 +193,12 @@ export async function launchExtensionBrowser({ session, url, extensionDir, headl
   let browserVersion = null;
   let stage = 'browser open';
   try {
-    await browser(['--extension', extensionDir, '--headed', String(!headless),
+    await browser(['--session', session, '--extension', extensionDir, '--headed', String(!headless),
       '--args', '--enable-unsafe-extension-debugging' + (headless ? ',--headless=new' : ''),
-      '--session', session, 'open', url]);
+      'open', url]);
 
     stage = 'CDP discovery';
-    const cdpUrl = (await browser(['get', 'cdp-url', '--session', session])).trim().split('\n').pop();
+    const cdpUrl = (await browser(['--session', session, 'get', 'cdp-url'])).trim().split('\n').pop();
     const httpBase = cdpUrl.replace(/^ws:\/\/([^/]+)\/.*$/, 'http://$1');
     const version = await (await fetch(`${httpBase}/json/version`)).json();
     browserVersion = /^(?:Chrome|HeadlessChrome)\/(\d+(?:\.\d+){0,3})$/.exec(version.Browser)?.[1] || null;
@@ -282,7 +282,7 @@ export async function launchExtensionBrowser({ session, url, extensionDir, headl
     }) };
     console.error(`DIAGNOSTIC browser launch - ${JSON.stringify(diagnostics)}`);
     try { cdp?.close(); } finally {
-      await browser(['close', '--session', session], 30000).catch(() => {});
+      await closeSessionBrowser(session);
     }
     throw new Error(`Browser launch failed: ${stage}`);
   }

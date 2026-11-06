@@ -143,6 +143,7 @@ const PUBLIC_TAB_STATE_KEYS = Object.freeze([
   'workerEpoch',
   'stateSequence',
   'bodyVersion',
+  'documentId',
 ]);
 
 // There is deliberately no session cap here: the Semantic Block session is the content
@@ -431,6 +432,73 @@ function createBackgroundWorker(platform = {}) {
   const activeTranslationsByTab = new Map();
   const inlineControlsByTab = new Map();
   const activeInvocationsByTab = new Map();
+  const documentsByTab = new Map();
+  const pendingByTab = new Map();
+  const documentLifetimes = new Map();
+
+  function documentEnded() {
+    return Object.assign(new Error('The original document is no longer open.'), { code: 'document.departed' });
+  }
+
+  async function getDocumentId(tabId) {
+    let frame;
+    try { frame = await getChrome().webNavigation.getFrame({ tabId, frameId: 0 }); } catch {}
+    if (!frame?.documentId) throw Object.assign(new Error('The extension could not identify this page’s document. Reload the page and try again.'),
+      { code: 'document.unavailable' });
+    return frame.documentId;
+  }
+
+  async function captureDocument(tabId, expectedDocumentId) {
+    const lifetime = documentLifetimes.get(tabId) || {};
+    documentLifetimes.set(tabId, lifetime);
+    const documentId = await getDocumentId(tabId);
+    if (documentLifetimes.get(tabId) !== lifetime ||
+        (expectedDocumentId && documentId !== expectedDocumentId)) throw documentEnded();
+    const previous = documentsByTab.get(tabId);
+    if (previous && previous !== documentId) invalidateDocument(tabId, documentId);
+    documentsByTab.set(tabId, documentId);
+    return documentId;
+  }
+
+  function createDocumentRequest(tabId, documentId) {
+    const controller = new AbortController();
+    const pending = pendingByTab.get(tabId) || new Set();
+    pending.add(controller);
+    pendingByTab.set(tabId, pending);
+    function assertCurrent() {
+      if (controller.signal.aborted || documentsByTab.get(tabId) !== documentId) throw documentEnded();
+    }
+    return {
+      signal: controller.signal,
+      assertCurrent,
+      async beforeRequest() {
+        assertCurrent();
+        const currentDocumentId = await getDocumentId(tabId);
+        assertCurrent();
+        if (currentDocumentId !== documentId) {
+          invalidateDocument(tabId);
+          throw documentEnded();
+        }
+      },
+      release() {
+        pending.delete(controller);
+        if (!pending.size && pendingByTab.get(tabId) === pending) pendingByTab.delete(tabId);
+      },
+    };
+  }
+
+  function invalidateDocument(tabId, documentId = null) {
+    if (documentId) documentLifetimes.set(tabId, {});
+    else documentLifetimes.delete(tabId);
+    for (const controller of pendingByTab.get(tabId) || []) controller.abort();
+    pendingByTab.delete(tabId);
+    activeTranslationsByTab.delete(tabId);
+    inlineControlsByTab.delete(tabId);
+    activeInvocationsByTab.delete(tabId);
+    stateByTab.delete(tabId);
+    if (documentId) documentsByTab.set(tabId, documentId);
+    else documentsByTab.delete(tabId);
+  }
   const settingsLifecycle = createSettingsLifecycle({
     chrome: givenChrome,
     contentScriptFiles: getInlineContentScriptFiles(),
@@ -446,6 +514,7 @@ function createBackgroundWorker(platform = {}) {
     const next = sanitizePublicTabState({
       ...prev,
       ...patch,
+      ...(documentsByTab.has(tabId) ? { documentId: documentsByTab.get(tabId) } : {}),
       updatedAt: nowIso(),
       workerEpoch,
       stateSequence: ++stateSequence,
@@ -489,6 +558,7 @@ function createBackgroundWorker(platform = {}) {
       set: (tabId, error) => setTabState(tabId, { inlineTranslationError: error }),
     },
     describeFailure: describeInlineTranslationControlFailure,
+    captureDocument,
   };
   const invocation = workerInvocation.createWorkerInvocation(invocationOptions);
   async function invokeForTab(trigger, tabId) {
@@ -496,6 +566,20 @@ function createBackgroundWorker(platform = {}) {
     activeInvocationsByTab.set(tabId, token);
     const currentInvocation = workerInvocation.createWorkerInvocation({
       ...invocationOptions,
+      isCurrent: () => activeInvocationsByTab.get(tabId) === token,
+      async documentUnavailable() {
+        let tab;
+        try { tab = await getChrome().tabs.get(tabId); } catch { return; }
+        if (activeInvocationsByTab.get(tabId) !== token) return;
+        const url = String(tab?.url || '');
+        const restricted = url && (!ORDINARY_WEB_PAGE_URL_PATTERN.test(url) || WEB_STORE_URL_PATTERN.test(url));
+        const message = restricted
+          ? classifyContentScriptFailure(new Error('Cannot access contents of this page.'), url).message
+          : 'The extension could not identify this page’s document. Reload the page and try again.';
+        invalidateDocument(tabId);
+        setTabState(tabId, { status: 'idle', documentId: null, extracted: null, translated: null,
+          inlineTranslationError: { code: 'document.unavailable', message } });
+      },
       inlineErrors: {
         get: invocationOptions.inlineErrors.get,
         set: (id, error) => {
@@ -506,10 +590,6 @@ function createBackgroundWorker(platform = {}) {
       },
     });
     try {
-      if (trigger === 'command') {
-        try { await getChrome().tabs.get(tabId); } catch { return; }
-        if (activeInvocationsByTab.get(tabId) !== token) return;
-      }
       await currentInvocation.invoke(trigger, tabId);
     } finally {
       if (activeInvocationsByTab.get(tabId) === token) activeInvocationsByTab.delete(tabId);
@@ -524,7 +604,8 @@ function createBackgroundWorker(platform = {}) {
   async function runInlineTranslationControl(
     tabId,
     control,
-    send = sendInlineInstruction
+    send = sendInlineInstruction,
+    expectedDocumentId = null
   ) {
     const { steps } = planInlineTranslationControl(control);
     if (!steps.length) {
@@ -533,10 +614,12 @@ function createBackgroundWorker(platform = {}) {
     const requestedControl = {};
     inlineControlsByTab.set(tabId, requestedControl);
     try {
+      const documentId = await captureDocument(tabId, expectedDocumentId);
       for (const step of steps) {
-        await send(tabId, step);
         if (inlineControlsByTab.get(tabId) !== requestedControl) return;
+        await send(tabId, step, documentId);
       }
+      if (inlineControlsByTab.get(tabId) !== requestedControl) return;
       // A control the tab has just carried out disproves a recorded failure to reach it, and
       // the Inline Translation Shortcut is only one of three ways into this feature. The
       // panel reports the control's own outcome itself, from the click it is still holding.
@@ -546,11 +629,11 @@ function createBackgroundWorker(platform = {}) {
     }
   }
 
-  async function extractArticle(tabId) {
+  async function extractArticle(tabId, documentId) {
     const chrome = getChrome();
     const resp = await chrome.tabs.sendMessage(tabId, {
       type: 'EXTRACT_ARTICLE',
-    });
+    }, { documentId });
     if (!resp || !resp.ok) {
       throw new Error(resp?.error?.message || 'Failed to extract article');
     }
@@ -566,7 +649,12 @@ function createBackgroundWorker(platform = {}) {
     input,
     textFormat = null,
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+    signal,
+    beforeRequest,
   }) {
+    if (!givenFetch) throw missingPlatform('a network');
+    if (beforeRequest) await beforeRequest();
+    if (signal?.aborted) throw documentEnded();
     const body = {
       model,
       instructions,
@@ -597,13 +685,18 @@ function createBackgroundWorker(platform = {}) {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
+        redirect: 'error',
+        signal,
       });
-    } catch (error) {
-      if (!openrouter) throw error;
-      throw Object.assign(new Error(getOpenRouterFailureMessage('openrouter.transport')), { code: 'openrouter.transport' });
+    } catch {
+      if (signal?.aborted) throw documentEnded();
+      const code = `${openrouter ? 'openrouter' : 'openai'}.transport`;
+      throw Object.assign(new Error(openrouter ? getOpenRouterFailureMessage(code) :
+        'OpenAI request could not reach the service.'), { code });
     }
 
     const json = await res.json().catch(() => null);
+    if (signal?.aborted) throw documentEnded();
     if (!res.ok) {
       if (openrouter) {
         const failures = {
@@ -613,14 +706,19 @@ function createBackgroundWorker(platform = {}) {
         const code = `openrouter.${failures[res.status] || 'request'}`;
         throw Object.assign(new Error(getOpenRouterFailureMessage(code)), { code });
       }
-      const msg = json?.error?.message || `OpenAI API error (${res.status})`;
-      throw new Error(msg);
+      const failures = { 401: ['authentication', 'OpenAI authentication failed. Check its API key in Options.'],
+        403: ['access', 'OpenAI refused access to this request.'],
+        404: ['model', 'OpenAI could not serve the selected model.'],
+        429: ['rate_limit', 'OpenAI rate limit or usage limit reached. Check your account or try again later.'],
+        503: ['unavailable', 'OpenAI is temporarily unavailable. Try again later.'] };
+      const [failure, message] = failures[res.status] || ['request', 'OpenAI request failed. Try again later.'];
+      throw Object.assign(new Error(message), { code: `openai.${failure}` });
     }
 
     try {
       return openAiResponse.parseCompletedResponse(json);
     } catch (error) {
-      if (openrouter) error.message = `OpenRouter: ${error.message}`;
+      error.message = `${openrouter ? 'OpenRouter' : 'OpenAI'} returned an invalid or incomplete translation response.`;
       throw error;
     }
   }
@@ -631,6 +729,11 @@ function createBackgroundWorker(platform = {}) {
     options = {}
   ) {
     getChrome();
+    let documentRequest = null;
+    if (Number.isInteger(options.tabId)) {
+      const documentId = await captureDocument(options.tabId, options.documentId);
+      documentRequest = createDocumentRequest(options.tabId, documentId);
+    }
     const run = inlineDiagnostics.beginTranslation(options.correlationContext);
 
     try {
@@ -658,18 +761,24 @@ function createBackgroundWorker(platform = {}) {
         reasoningEffort: settings.reasoningEffort,
         targetLanguage: settings.targetLanguage,
         tone: settings.tone,
-      }, (request) => {
-        run.modelAttempt();
-        return requestTranslation({ ...request, service: settings.service, apiKey });
-      });
-      return await run.complete(results);
+      }, (request) => requestTranslation({ ...request, service: settings.service, apiKey,
+        signal: documentRequest?.signal, beforeRequest: async () => {
+          if (documentRequest) await documentRequest.beforeRequest();
+          run.modelAttempt();
+        } }));
+      documentRequest?.assertCurrent();
+      const completed = await run.complete(results);
+      documentRequest?.assertCurrent();
+      return completed;
     } catch (error) {
       await run.fail(error);
       throw error;
+    } finally {
+      documentRequest?.release();
     }
   }
 
-  async function translateTab(tabId, overrideSettings = null) {
+  async function translateTab(tabId, overrideSettings = null, expectedDocumentId = null, displayedProvider = null) {
     if (activeTranslationsByTab.has(tabId)) {
       return { skipped: true, reason: 'already_running' };
     }
@@ -677,14 +786,21 @@ function createBackgroundWorker(platform = {}) {
     const operationToken = Symbol(`translate-tab-${tabId}`);
     activeTranslationsByTab.set(tabId, operationToken);
     const isCurrent = () => activeTranslationsByTab.get(tabId) === operationToken;
+    let documentRequest = null;
 
     try {
+      const documentId = await captureDocument(tabId, expectedDocumentId);
+      if (!isCurrent()) return { skipped: true, reason: 'document_changed' };
+      documentRequest = createDocumentRequest(tabId, documentId);
       const saved = mergeSettings({
         ...(await settingsLifecycle.read()),
         ...(overrideSettings || {}),
       });
       if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
       const settings = { ...saved, ...getEffectiveModelSettings(saved) };
+      if (displayedProvider && (displayedProvider.service !== settings.service || displayedProvider.model !== settings.model)) {
+        return { skipped: true, reason: 'provider_changed' };
+      }
 
       const apiKey = settings.service === 'openrouter' ? settings.openrouterApiKey : settings.apiKey;
       if (!apiKey) {
@@ -705,7 +821,7 @@ function createBackgroundWorker(platform = {}) {
         progress: null,
       });
       try {
-        await invocation.preparePage(tabId);
+        await invocation.preparePage(tabId, documentId, documentRequest.assertCurrent);
       } catch (e) {
         const failure = classifyContentScriptFailure(e, await getTabUrl(tabId));
         if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
@@ -718,13 +834,26 @@ function createBackgroundWorker(platform = {}) {
       if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
 
       let translationStarted = false;
+      let providerConfirmed = false;
       try {
-        const extraction = await extractArticle(tabId);
+        const extraction = await extractArticle(tabId, documentId);
         if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
         const translated = await sidePanelTranslationExecution.execute(
           extraction,
           createPublicSettingsUsed(settings),
-          (request) => requestTranslation({ ...request, service: settings.service, apiKey }),
+          (request) => requestTranslation({ ...request, service: settings.service, apiKey,
+            signal: documentRequest.signal, beforeRequest: async () => {
+              await documentRequest.beforeRequest();
+              if (!providerConfirmed && displayedProvider) {
+                const latest = getEffectiveModelSettings({ ...(await settingsLifecycle.read()), ...(overrideSettings || {}) });
+                documentRequest.assertCurrent();
+                if (latest.service !== displayedProvider.service || latest.model !== displayedProvider.model) {
+                  throw Object.assign(new Error('The selected service or model changed. Review it and translate again.'),
+                    { code: 'provider.changed' });
+                }
+              }
+              providerConfirmed = true;
+            } }),
           ({ progress }) => {
             if (!isCurrent()) return;
             if (!translationStarted) {
@@ -749,6 +878,11 @@ function createBackgroundWorker(platform = {}) {
         return { skipped: false };
       } catch (e) {
         if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
+        if (e?.code === 'provider.changed') {
+          setTabState(tabId, { status: 'idle', error: null, extracted: null, translated: null,
+            progress: null, settingsUsed: null });
+          return { skipped: true, reason: 'provider_changed' };
+        }
         const failureState = {
           status: 'error',
           error: safeError(e),
@@ -763,6 +897,7 @@ function createBackgroundWorker(platform = {}) {
         };
       }
     } finally {
+      documentRequest?.release();
       if (activeTranslationsByTab.get(tabId) === operationToken) {
         activeTranslationsByTab.delete(tabId);
       }
@@ -787,10 +922,16 @@ function createBackgroundWorker(platform = {}) {
   }
 
   function onTabRemoved(tabId) {
-    stateByTab.delete(tabId);
-    activeTranslationsByTab.delete(tabId);
-    inlineControlsByTab.delete(tabId);
-    activeInvocationsByTab.delete(tabId);
+    invalidateDocument(tabId);
+  }
+
+  function onNavigationCommitted(details) {
+    if (details.frameId !== 0) return;
+    if (!documentLifetimes.has(details.tabId) && !stateByTab.has(details.tabId)) return;
+    if (details.documentId && documentsByTab.get(details.tabId) === details.documentId) return;
+    invalidateDocument(details.tabId, details.documentId);
+    setTabState(details.tabId, { status: 'idle', extracted: null, translated: null,
+      error: null, inlineTranslationError: null, progress: null, settingsUsed: null });
   }
 
   // chrome.action.onClicked. Deliberately not async: the first step opens the side panel,
@@ -804,13 +945,10 @@ function createBackgroundWorker(platform = {}) {
   // The Inline Translation Shortcut, registered on chrome.commands.onCommand.addListener.
   // Chrome offers that listener every command the manifest declares, so
   // INLINE_TRANSLATION_SHORTCUT_COMMAND is what decides which of them reaches the worker.
-  async function onCommand(command) {
+  async function onCommand(command, tab) {
     if (command !== INLINE_TRANSLATION_SHORTCUT_COMMAND) return;
-    const chrome = getChrome();
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const tabId = tabs?.[0]?.id;
-    if (!tabId) return;
-    await invokeForTab('command', tabId);
+    if (!Number.isInteger(tab?.id) || tab.id < 0) return;
+    await invokeForTab('command', tab.id);
   }
 
   // chrome.runtime.onMessage.
@@ -831,10 +969,16 @@ function createBackgroundWorker(platform = {}) {
         }
         if (msg?.type === 'GET_STATE') {
           const tabId = msg.tabId;
+          const stored = stateByTab.get(tabId);
           const state = sanitizePublicTabState(
-            stateByTab.get(tabId) || {
+            (msg.documentId === null ? {
+              status: 'idle', documentId: null, extracted: null, translated: null,
+              workerEpoch, stateSequence: stored?.stateSequence || 0, bodyVersion: 0,
+              ...(stored?.documentId === null ? { inlineTranslationError: stored.inlineTranslationError } : {}),
+            } : msg.documentId && stored?.documentId !== msg.documentId ? null : stored) || {
               status: 'idle', extracted: null, translated: null,
               workerEpoch, stateSequence: 0, bodyVersion: 0,
+              ...(msg.documentId ? { documentId: msg.documentId } : {}),
             }
           );
           if (msg.knownBody?.workerEpoch === state.workerEpoch &&
@@ -850,7 +994,17 @@ function createBackgroundWorker(platform = {}) {
         }
         if (msg?.type === 'TRANSLATE_TAB') {
           const { tabId, settingsOverride } = msg;
-          const result = await translateTab(tabId, settingsOverride || null);
+          if (sender?.tab || typeof msg.documentId !== 'string' || !msg.documentId ||
+              !['openai', 'openrouter'].includes(msg.displayedProvider?.service) ||
+              typeof msg.displayedProvider?.model !== 'string' || !msg.displayedProvider.model) {
+            throw Object.assign(new Error('Translation requires the displayed document, service and model.'),
+              { code: 'translation.context_required' });
+          }
+          if (settingsOverride != null && (typeof settingsOverride !== 'object' || Array.isArray(settingsOverride) ||
+              Object.keys(settingsOverride).some(key => key === 'service' || !PUBLIC_SETTINGS_USED_KEYS.includes(key)))) {
+            throw Object.assign(new Error('Unsupported translation settings override.'), { code: 'settings.override_invalid' });
+          }
+          const result = await translateTab(tabId, settingsOverride || null, msg.documentId, msg.displayedProvider);
           sendResponse({
             ok: true,
             ...(result?.skipped
@@ -861,7 +1015,8 @@ function createBackgroundWorker(platform = {}) {
         }
         if (msg?.type === 'RUN_INLINE_TRANSLATION_CONTROL') {
           try {
-            await runInlineTranslationControl(msg.tabId, msg.control);
+            if (sender?.tab || typeof msg.documentId !== 'string' || !msg.documentId) throw documentEnded();
+            await runInlineTranslationControl(msg.tabId, msg.control, sendInlineInstruction, msg.documentId);
             sendResponse({ ok: true });
           } catch (e) {
             sendResponse({
@@ -878,7 +1033,7 @@ function createBackgroundWorker(platform = {}) {
           try {
             const resp = await getChrome().tabs.sendMessage(msg.tabId, {
               type: 'GET_INLINE_TRANSLATION_STATE',
-            });
+            }, { documentId: await captureDocument(msg.tabId, msg.documentId) });
             sendResponse({
               ok: Boolean(resp?.ok),
               snapshot: resp?.snapshot || null,
@@ -889,10 +1044,15 @@ function createBackgroundWorker(platform = {}) {
           return;
         }
         if (msg?.type === 'TRANSLATE_VISIBLE_BLOCK_BATCH') {
+          if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId) {
+            throw documentEnded();
+          }
           const results = await translateVisibleBlockBatch(
             msg.records || [],
             msg.settingsSnapshot || null,
             {
+              tabId: sender.tab.id,
+              documentId: sender.documentId,
               correlationContext: {
                 tabId: sender?.tab?.id,
                 operationId: msg.operationId ?? null,
@@ -979,6 +1139,7 @@ function createBackgroundWorker(platform = {}) {
       onInstalled,
       onStartup,
       onTabRemoved,
+      onNavigationCommitted,
       onActionClicked,
       onCommand,
       onMessage,
@@ -1008,6 +1169,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onInstalled.addListener(backgroundWorker.handlers.onInstalled);
   chrome.runtime.onStartup.addListener(backgroundWorker.handlers.onStartup);
   chrome.tabs.onRemoved.addListener(backgroundWorker.handlers.onTabRemoved);
+  chrome.webNavigation.onCommitted.addListener(backgroundWorker.handlers.onNavigationCommitted);
   chrome.action.onClicked.addListener(backgroundWorker.handlers.onActionClicked);
   chrome.commands.onCommand.addListener(backgroundWorker.handlers.onCommand);
   chrome.runtime.onMessage.addListener(backgroundWorker.handlers.onMessage);

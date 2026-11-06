@@ -33,7 +33,7 @@ function scan(root, { session }) {
   } finally { viewport.stop(); }
 }
 
-function scannerFixture(root, session = createActiveInlineTranslationState().session) {
+function scannerFixture(root, session = createActiveInlineTranslationState().session, onScan = () => {}) {
   const platform = platformFor(root);
   const targets = new Map();
   const scrollCaptures = new Map();
@@ -41,6 +41,7 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
   const observers = [];
   const admissions = [];
   let nextTimer = 0;
+  let clock = 0;
   let scans = 0;
   let resets = 0;
   function target(node) {
@@ -67,13 +68,16 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
   platform.document.scrollingElement = platform.document.documentElement;
   platform.setTimeout = (callback, delay) => {
     const id = nextTimer++;
-    timers.set(id, { callback, delay });
+    timers.set(id, { callback, delay, due: clock + delay });
     return id;
   };
   platform.clearTimeout = (id) => timers.delete(id);
   platform.MutationObserver = class {
-    constructor(callback) { this.callback = callback; this.disconnected = false; this.records = []; observers.push(this); }
-    observe(node, options) { this.node = node; this.options = options; }
+    constructor(callback) { this.callback = callback; this.disconnected = false; this.records = []; this.targets = new Map(); observers.push(this); }
+    observe(node, options) {
+      this.targets.set(node, options);
+      if (!this.node) { this.node = node; this.options = options; }
+    }
     disconnect() { this.disconnected = true; }
     takeRecords() { return this.records.splice(0); }
   };
@@ -86,7 +90,7 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
       admit(block) { admissions.push(block); return session.admit(block); },
     },
     platform,
-    onScan() { scans += 1; },
+    onScan() { scans += 1; onScan(); },
   });
   return {
     viewport, session, platform, targets, timers, observers, admissions, target,
@@ -108,6 +112,19 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
         if (ancestor) observer.callback([{ type: 'attributes', target: node }]);
       }
     },
+    tick(milliseconds) {
+      const until = clock + milliseconds;
+      for (;;) {
+        const next = [...timers.entries()].filter(([, task]) => task.due <= until)
+          .sort((a, b) => a[1].due - b[1].due)[0];
+        if (!next) break;
+        const [id, task] = next;
+        clock = task.due;
+        timers.delete(id);
+        task.callback();
+      }
+      clock = until;
+    },
     advance() {
       assert.equal(timers.size, 1);
       const [id, task] = timers.entries().next().value;
@@ -120,6 +137,133 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
 
 exports.name = 'inline viewport';
 exports.tests = [
+  ...['detached', 'moved outside the article'].map(change => ({
+    name: `retained continuation skips a pending subtree ${change}`,
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const filler = element('p', ...Array.from({ length: 1201 }, () => text('Hi ')));
+      const stale = element('p', text('No longer in the selected article.'));
+      const tail = element('p', text('The remaining visible tail.'));
+      const root = element('article', filler, stale, tail);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      let outsideReads = 0;
+      const getRect = stale.getBoundingClientRect.bind(stale);
+      stale.getBoundingClientRect = () => { outsideReads += 1; return getRect(); };
+      try {
+        f.viewport.start(root);
+        f.attribute(root, 'data-updated', 'first invalidation');
+        f.advance();
+        root.removeChild(stale);
+        if (change === 'moved outside the article') document.body.appendChild(stale);
+        f.attribute(root, 'data-updated', 'second invalidation');
+        f.advance();
+        assert.equal(f.admissions.includes(tail), true);
+        assert.equal(f.admissions.includes(stale), false);
+        assert.equal(outsideReads, 0);
+      } finally { f.viewport.stop(); }
+    },
+  })),
+  {
+    name: 'admits page prose inside an element whose ID collides with the floating host',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const paragraph = element('p', text('Page prose with a colliding host ID.'));
+      const collision = element('div', paragraph);
+      collision.id = 'chrome-ai-translator-inline';
+      for (const node of [collision, paragraph]) {
+        node.closest = selector => selector === '#chrome-ai-translator-inline' ? collision : null;
+      }
+      const root = element('article', collision);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.session.takeBatch().map(record => record.template), [
+          'Page prose with a colliding host ID.',
+        ]);
+        assert.equal(collision.parentNode, root);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'finishes a long visible sweep and then finds earlier new prose during continuous mutations',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const paragraphs = Array.from({ length: 3 }, () =>
+        element('p', ...Array.from({ length: 1000 }, () => text('Hi '))));
+      const tail = element('p', text('The final visible paragraph.'));
+      const root = element('article', ...paragraphs, tail);
+      document.body.appendChild(root);
+      const sent = [];
+      const f = scannerFixture(root, undefined, () => {
+        const batch = f.session.takeBatch();
+        sent.push(...batch.map(record => record.template));
+        f.session.settle(batch, { ok: true, results: batch.map(record => ({
+          id: record.id, disposition: 'reject', terminalCode: 'protocol.invalid_json',
+        })) });
+      });
+      try {
+        f.viewport.start(root);
+        let earlier;
+        for (let count = 0; count < 20; count += 1) {
+          f.attribute(root, 'data-updated', count);
+          f.tick(100);
+          if (count === 3) {
+            earlier = element('p', text('New prose before the existing sweep cursor.'));
+            root.insertBefore(earlier, paragraphs[0]);
+          }
+        }
+        assert.equal(sent.includes('The final visible paragraph.'), true);
+        assert.equal(sent.includes('New prose before the existing sweep cursor.'), true);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'discovers new prose within the scheduled scan deadline during continuous mutations',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const root = element('article', element('p', text('Initial paragraph.')));
+      document.body.appendChild(root);
+      const sent = [];
+      const f = scannerFixture(root, undefined, () => sent.push(...f.session.takeBatch()));
+      try {
+        f.viewport.start(root);
+        const next = element('p', text('New visible paragraph.'));
+        root.appendChild(next);
+        for (let count = 0; count < 4; count += 1) {
+          f.attribute(root, 'data-updated', count);
+          f.tick(100);
+        }
+        assert.equal(f.admissions.includes(next), true);
+        assert.deepEqual(sent.map(record => record.template), [
+          'Initial paragraph.', 'New visible paragraph.',
+        ]);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
+    name: 'admits visible Unicode prose while excluding code and punctuation-only blocks',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const paragraphs = [
+        '日本語の文章を翻訳します。', 'Русский текст для перевода.',
+        'مرحبا بالعالم', '한글 문단을 번역합니다.', 'English prose.',
+      ].map(value => element('p', text(value)));
+      const code = element('pre', text('日本語のコード'));
+      const punctuation = element('p', text('12345 — !!!'));
+      const root = element('article', ...paragraphs, code, punctuation);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.session.takeBatch().map(record => record.template), [
+          '日本語の文章を翻訳します。', 'Русский текст для перевода.',
+          'مرحبا بالعالم', '한글 문단을 번역합니다.', 'English prose.',
+        ]);
+      } finally { f.viewport.stop(); }
+    },
+  },
   {
     name: 'discovers mise recipe step prose with independent heading and paragraph admission',
     fn() {
@@ -256,7 +400,7 @@ exports.tests = [
     },
   },
   {
-    name: 'ignores a canceled continuation after nested scroll replaces its debounce timer',
+    name: 'retains the pending scan deadline when nested scroll invalidates continuation',
     fn() {
       const { document, element, text } = createTestDocument();
       const root = element('p', ...Array.from({ length: 1201 }, () => text('Hi ')));
@@ -269,10 +413,8 @@ exports.tests = [
       f.target(parent);
       try {
         f.viewport.start(root);
-        const canceled = [...f.timers.values()][0].callback;
-        f.event(parent, 'scroll');
         const pending = [...f.timers.entries()];
-        canceled();
+        f.event(parent, 'scroll');
         assert.equal(f.scans, 1);
         assert.deepEqual([...f.timers.entries()], pending);
         f.advance();

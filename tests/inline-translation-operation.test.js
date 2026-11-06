@@ -47,8 +47,8 @@ function createOperationFixture(options = {}) {
       removeEventListener(type, callback) { listeners.get(type)?.delete(callback); },
     },
     MutationObserver: class {
-      constructor(callback) { this.callback = callback; }
-      observe() { observers.add(this); }
+      constructor(callback) { this.callback = callback; this.targets = new Map(); }
+      observe(node, options) { this.targets.set(node, options); observers.add(this); }
       disconnect() { observers.delete(this); }
     },
     setTimeout(callback, delay) {
@@ -106,6 +106,18 @@ function createOperationFixture(options = {}) {
     async control(control, target = operation) { target[control](); await flushMicrotasks(); },
     async rescan() { operation.start(); advance(); await flushMicrotasks(); },
     viewportEvent(type = 'scroll') { for (const callback of listeners.get(type) || []) callback(); },
+    mutation(record) {
+      for (const observer of observers) {
+        const matches = [...observer.targets].some(([target, options]) => {
+          if (!options[record.type]) return false;
+          for (let node = record.target; node; node = options.subtree ? node.parentNode : null) {
+            if (node === target) return true;
+          }
+          return false;
+        });
+        if (matches) observer.callback([record]);
+      }
+    },
     async settle(index = 0, result = {}) {
       const request = pending[index];
       request.resolve({ ok: true, results: request.message.records.map(record => ({
@@ -119,6 +131,93 @@ function createOperationFixture(options = {}) {
 
 exports.name = 'inline translation operation';
 exports.tests = [{
+  name: 'root removal and reattachment in one mutation delivery still requires explicit rescan',
+  async fn() {
+    const f = createOperationFixture();
+    const root = f.document.createElement('article');
+    root.appendChild(f.block);
+    f.document.body.appendChild(root);
+    f.setRoot(root);
+    try {
+      await f.control('authorize');
+      await f.control('start');
+      await f.settle();
+      f.document.body.removeChild(root);
+      f.document.body.appendChild(root);
+      const next = f.paragraph(300);
+      root.appendChild(next);
+      f.mutation({
+        type: 'childList', target: f.document.body, removedNodes: [root],
+      });
+      f.mutation({ type: 'childList', target: root, removedNodes: [], addedNodes: [next] });
+      f.advance();
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 1);
+      await f.rescan();
+      assert.equal(f.pending.length, 2);
+    } finally { f.operation.stop(); }
+  },
+}, {
+  name: 'active Scan visible text selects the current article without rereading settings',
+  async fn() {
+    const f = createOperationFixture();
+    const root = f.document.createElement('article');
+    root.appendChild(f.block);
+    f.document.body.appendChild(root);
+    f.setRoot(root);
+    try {
+      await f.control('authorize');
+      await f.control('start');
+      await f.settle();
+      f.document.body.removeChild(root);
+      const replacement = f.document.createElement('article');
+      const next = f.paragraph(300);
+      replacement.appendChild(next);
+      f.document.body.appendChild(replacement);
+      f.setRoot(replacement);
+      f.viewportEvent();
+      f.advance();
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 1, 'replacement articles require an explicit rescan');
+      await f.rescan();
+      assert.equal(f.pending.length, 2);
+      assert.equal(f.pending[1].message.records[0].template, next.textContent);
+      assert.equal(f.messages.filter(message => message.type === 'GET_SETTINGS').length, 1);
+      assert.match(f.operation.getStatus().progress, /Translated 1/);
+    } finally { f.operation.stop(); }
+  },
+}, {
+  name: 'detached article pauses responses and page-change retries even when its block is reused elsewhere',
+  async fn() {
+    const f = createOperationFixture();
+    const original = f.block.textContent;
+    const root = f.document.createElement('article');
+    root.appendChild(f.block);
+    f.document.body.appendChild(root);
+    f.setRoot(root);
+    try {
+      await f.control('authorize');
+      await f.control('start');
+      f.document.body.removeChild(root);
+      f.document.body.appendChild(f.block);
+      f.block.appendChild(f.document.createTextNode(' Page update.'));
+      await f.settle();
+      f.viewportEvent();
+      f.advance();
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 1, 'a changed reused block cannot enqueue an automatic retry');
+      assert.equal(f.block.textContent, `${original} Page update.`);
+      f.document.body.appendChild(root);
+      root.appendChild(f.paragraph(300));
+      f.viewportEvent();
+      f.advance();
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 1, 'reattaching a root does not lift its pause');
+      await f.rescan();
+      assert.equal(f.pending.length, 2, 'explicit rescan resumes the reattached article');
+    } finally { f.operation.stop(); }
+  },
+}, {
   name: 'an OpenAI Operation carries its service in the worker request snapshot',
   async fn() {
     const f = createOperationFixture({ settings: { service: 'openai', apiKey: '***' } });
@@ -235,6 +334,26 @@ async function withInlineRequestLifecycle(fn, { headroom = null } = {}) {
     });
   } finally { operation.stop(); }
 }
+
+exports.tests.push({
+  name: 'selecting a replacement article retains the spent Session Budget',
+  async fn() {
+    await withInlineRequestLifecycle(async f => {
+      const oldBody = f.document.body;
+      const newBody = f.document.createElement('body');
+      const root = f.document.createElement('article');
+      root.appendChild(f.paragraph(f.recordCost * 2));
+      newBody.appendChild(root);
+      f.document.removeChild(oldBody);
+      f.document.body = newBody;
+      f.document.appendChild(newBody);
+      f.setRoot(root);
+      await f.rescan();
+      assert.equal(f.pending.length, 1);
+      assert.match(f.operation.getStatus().error, /reached this page visit's limit/);
+    }, { headroom: 2 });
+  },
+});
 
 exports.tests.push(
   ...['stopInlineTranslation', 'restoreInlineOriginal', 'startInlineTranslation'].flatMap((control) =>

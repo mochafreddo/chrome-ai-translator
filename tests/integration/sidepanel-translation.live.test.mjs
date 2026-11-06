@@ -47,7 +47,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  closeAllBrowsers,
+  closeSessionBrowser,
   createChecks,
   launchExtensionBrowser,
   serveFixture,
@@ -362,7 +362,7 @@ try {
   failures.push('harness');
   console.error(`FAIL side panel translation live - harness threw: ${error?.message || error}`);
 } finally {
-  await closeAllBrowsers();
+  await closeSessionBrowser(SESSION);
 }
 
 finish();

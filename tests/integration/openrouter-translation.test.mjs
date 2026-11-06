@@ -29,6 +29,16 @@ async function main() {
     target.url.startsWith(`chrome-extension://${ctx.extension.id}/`));
   if (!check('worker is available for network interception', Boolean(workerTarget))) return;
   const worker = await ctx.attach(workerTarget.id, 'service_worker');
+  const failedNetworkRequests = new Set();
+  let heldNetworkId;
+  if (FLOW === 'sidepanel') {
+    await ctx.cdp.send('Network.enable', {}, worker.sessionId);
+    ctx.cdp.on('Network.loadingFailed', (event, sessionId) => {
+      if (sessionId === worker.sessionId && (event.canceled || event.errorText === 'net::ERR_ABORTED')) {
+        failedNetworkRequests.add(event.requestId);
+      }
+    });
+  }
   stopRequests = ctx.cdp.on('Fetch.requestPaused', (event, sessionId) => {
     if (sessionId !== worker.sessionId) return;
     void (async () => {
@@ -67,7 +77,7 @@ async function main() {
         }, sessionId);
         if (response.__error || response.__timeout) interceptionErrors.push('fulfillment failed');
       };
-      if (hold) held.push(fulfill);
+      if (hold) { held.push(fulfill); heldNetworkId = event.networkId; }
       else await fulfill();
     })().catch(() => { interceptionErrors.push('interception failed'); });
   });
@@ -212,31 +222,52 @@ async function main() {
       chrome.runtime.onMessage.addListener(message => {
         if (message.type === 'STATE_UPDATED' && message.tabId === ${tabId}) closedTabUpdates.push(message.state);
       });`);
-    hold = true;
-    await options.evaluate(`(() => {
-      globalThis.closedTabTranslation = { settled: false, response: null };
-      closedTabTranslation.promise = chrome.runtime.sendMessage({ type: 'TRANSLATE_TAB', tabId: ${tabId} })
-        .then(response => { closedTabTranslation.response = response; closedTabTranslation.settled = true; },
-          () => { closedTabTranslation.response = { ok: false }; closedTabTranslation.settled = true; });
-      return true;
-    })()`);
-    if (!check('a second Side Panel request is pending before tab closure',
-      await until(() => held.length > 0, 5000, 100))) return;
-    if (!check('held Side Panel request has not completed through its public message',
-      await options.evaluate('closedTabTranslation.settled === false'))) return;
+    const startHeld = async documentId => {
+      hold = true;
+      await panel.evaluate(`(() => {
+        globalThis.closedTabTranslation = { settled: false, response: null };
+        chrome.runtime.sendMessage({ type: 'TRANSLATE_TAB', tabId: ${tabId},
+          documentId: ${JSON.stringify(documentId)}, displayedProvider: { service: 'openrouter', model: 'deepseek/deepseek-v4.1-flash-1017' } })
+          .then(response => { closedTabTranslation.response = response; closedTabTranslation.settled = true; });
+        return true;
+      })()`);
+      return until(() => held.length > 0, 5000, 100);
+    };
+    const readDocumentId = () => options.evaluate(`chrome.webNavigation.getFrame({tabId:${tabId},frameId:0}).then(frame=>frame.documentId)`);
+    const oldId = await readDocumentId();
+    if (!check('first chunk is pending before same-URL reload', await startHeld(oldId))) return;
+    const beforeReload = requests.length;
+    await ctx.cdp.send('Page.reload', {}, article.sessionId);
+    if (!check('reload creates a different document', await until(async () => {
+      const id = await readDocumentId();
+      return id && id !== oldId;
+    }, 5000, 100))) return;
+    if (!check('navigation aborts the held request before a response arrives',
+      await until(() => panel.evaluate('closedTabTranslation.settled'), 5000, 100),
+      'held fetch still pending after document replacement')) return;
+    held.length = 0;
+    const afterReload = await options.evaluate(`chrome.runtime.sendMessage({type:'GET_STATE',tabId:${tabId}})`);
+    check('replacement receives no previous article and no follow-up request', !afterReload.state.translated &&
+      !afterReload.state.extracted && requests.length === beforeReload);
+    const stale = await panel.evaluate(`chrome.runtime.sendMessage({type:'TRANSLATE_TAB',tabId:${tabId},
+      documentId:${JSON.stringify(oldId)},displayedProvider:{service:'openrouter',model:'deepseek/deepseek-v4.1-flash-1017'}})`);
+    check('a stale click cannot submit replacement content', stale?.error?.code === 'document.departed' && requests.length === beforeReload);
+    await ctx.cdp.send('Extensions.triggerAction', { id: ctx.extension.id, targetId: tabTarget.targetId });
+    if (!check('a Side Panel request is pending before tab closure', await startHeld(await readDocumentId()))) return;
+    const callsAtClose = requests.length;
+    const closingRequestId = heldNetworkId;
     await options.evaluate(`chrome.tabs.remove(${tabId})`);
     const closedState = () => options.evaluate(`chrome.runtime.sendMessage({ type: 'GET_STATE', tabId: ${tabId} })`);
     const absent = response => response?.ok && response.state?.status === 'idle' &&
       !response.state.extracted && !response.state.translated;
     check('tab closure releases retained Side Panel bodies', await until(async () => absent(await closedState()), 5000, 100));
     const updatesAtClose = await options.evaluate('closedTabUpdates.length');
+    check('tab closure cancels the in-flight worker network request',
+      await until(() => failedNetworkRequests.has(closingRequestId), 5000, 100));
     hold = false;
-    for (const fulfill of held.splice(0)) await fulfill();
-    if (!check('closed-tab translation completes through its public request before late-effect checks',
-      await until(() => options.evaluate('closedTabTranslation.settled === true'), 15000, 100) &&
-      await options.evaluate('closedTabTranslation.response?.ok === true'))) return;
-    check('late model completion cannot restore or broadcast closed-tab state',
-      absent(await closedState()) && await options.evaluate('closedTabUpdates.length') === updatesAtClose);
+    held.length = 0;
+    check('closure stops further requests and cannot restore closed-tab state',
+      absent(await closedState()) && requests.length === callsAtClose && await options.evaluate('closedTabUpdates.length') === updatesAtClose);
   } else {
     const pageTarget = await ctx.findTarget(target => target.type === 'page' && target.url === fixture.url);
     const page = await ctx.attach(pageTarget.id);

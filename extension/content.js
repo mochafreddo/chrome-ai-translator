@@ -190,7 +190,8 @@ async function toggleInlineTranslatorMenu(
 }
 
 function pickArticleRoot() {
-  const article = document.querySelector('article');
+  const candidateArticle = document.querySelector('article');
+  const article = markdownDocument.isEligibleRoot(candidateArticle) ? candidateArticle : null;
   if (article && (article.innerText || '').trim().length > 400) return article;
 
   const candidates = [
@@ -198,7 +199,7 @@ function pickArticleRoot() {
     document.querySelector('main'),
     document.querySelector('[role="main"]'),
     document.body,
-  ].filter(Boolean);
+  ].filter(markdownDocument.isEligibleRoot);
 
   // Choose the candidate with the most text, but prefer article/main
   let best = candidates[0];
@@ -233,21 +234,19 @@ function getInlineTranslationStatusSnapshot(state = inlineState) {
 }
 
 function detachInlineTranslatorUi() {
-  document.getElementById(INLINE_TRANSLATOR_ID)?.remove();
+  inlineUiRoot?.host?.remove();
   inlineUiRoot = null;
   globalThis.__chromeAiTranslatorInlineUiRoot = null;
 }
 
 function ensureInlineTranslatorUi(state = inlineState) {
-  let host = document.getElementById(INLINE_TRANSLATOR_ID);
-  if (host && inlineUiRoot) {
+  let host = inlineUiRoot?.host;
+  if (host?.isConnected) {
     refreshInlineTranslatorSettings(globalThis.chrome, state)
       .then(() => updateInlineTranslatorUi(state))
       .catch(() => {});
     return host;
   }
-  if (host) host.remove();
-
   host = document.createElement('div');
   host.id = INLINE_TRANSLATOR_ID;
   host.style.cssText = getInlineHostStyleText();

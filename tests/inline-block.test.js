@@ -2087,6 +2087,33 @@ exports.tests = [
       assert.equal(block.childNodes[1], pageOwnedCopy);
     },
   },
+  ...['reparented text', 'changed detached text', 'reparented dropped wrapper', 'changed dropped wrapper'].map(change => ({
+    name: `preserves page reuse of original nodes after translation: ${change}`,
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const originalText = text('Original prose ');
+      const emphasis = element('em', text('what'));
+      const block = element('p', originalText, emphasis, text(' to translate.'));
+      const elsewhere = element('div', text('Page content.'));
+      document.body.appendChild(block);
+      document.body.appendChild(elsewhere);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, '번역한 문장입니다.').ok, true);
+      if (change === 'reparented text') elsewhere.appendChild(originalText);
+      if (change === 'changed detached text') originalText.nodeValue = 'Page edited this detached node.';
+      if (change === 'reparented dropped wrapper') elsewhere.appendChild(emphasis);
+      if (change === 'changed dropped wrapper') emphasis.replaceChildren(text('Page edited emphasis.'));
+      const before = {
+        block: [...block.childNodes], elsewhere: [...elsewhere.childNodes],
+        originalValue: originalText.nodeValue, wrapperChildren: [...emphasis.childNodes],
+      };
+      assert.deepEqual(codec.restoreBlock(serialized.snapshot), { ok: false, errorCode: 'block_changed' });
+      assert.deepEqual(block.childNodes, before.block);
+      assert.deepEqual(elsewhere.childNodes, before.elsewhere);
+      assert.equal(originalText.nodeValue, before.originalValue);
+      assert.deepEqual(emphasis.childNodes, before.wrapperChildren);
+    },
+  })),
   {
     name: 'rejects equivalent page-owned replacements inside atoms before apply',
     fn() {

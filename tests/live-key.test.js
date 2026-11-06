@@ -59,6 +59,10 @@ function fakePage({ failSave = false, service = 'openai' } = {}) {
       // Order matters: the save expression reads storage too, so the buttons are matched
       // first. An expression matching none of them is a driving surface this fake does not
       // know about, and silently answering undefined would hide it.
+      if (source.includes('.disabled === false')) {
+        driven.push('settings ready');
+        return true;
+      }
       if (source.includes('btnSave')) {
         driven.push('save');
         if (failSave) throw new Error('the options page never answered');
@@ -259,6 +263,9 @@ exports.tests = [
         // module rather than from this file's own fixture.
         assert.equal(JSON.stringify(result).includes(OPENAI_SHAPED), false);
         assert.equal(seen.join('').includes(OPENAI_SHAPED), false);
+        assert.ok(page.driven.includes('clear'));
+        assert.deepEqual(page.driven.filter(step => ['settings ready', 'save', 'clear'].includes(step)),
+          ['settings ready', 'save', 'settings ready', 'clear']);
       });
     },
   },

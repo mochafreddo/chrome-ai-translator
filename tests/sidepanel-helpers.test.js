@@ -632,6 +632,8 @@ exports.tests = [
         },
       };
       global.chrome = {
+        webNavigation: { getFrame: async ({ tabId }) => ({ documentId: 'doc-' + tabId }), onCommitted: { addListener() {} } },
+        storage: { onChanged: { addListener() {} } },
         windows: { getCurrent: async () => ({ id: 10 }) },
         tabs: {
           onActivated: { addListener() {} },
@@ -708,17 +710,14 @@ exports.tests = [
         assert.equal(getElement('saveStatus').textContent, 'Saving...');
         assert.equal(getElement('status').textContent, 'Idle');
 
-        refreshInterval();
-        for (let i = 0; i < 4; i += 1) {
-          await Promise.resolve();
-        }
+        await refreshInterval();
         assert.equal(getElement('status').textContent, 'Idle');
         assert.equal(getElement('saveStatus').textContent, 'Saving...');
 
         runtimeListener({
           type: 'STATE_UPDATED',
           tabId: 77,
-          state: { status: 'translating', workerEpoch: 'worker-fixture', stateSequence: ++stateSequence, bodyVersion: 0 },
+          state: { status: 'translating', documentId: 'doc-77', workerEpoch: 'worker-fixture', stateSequence: ++stateSequence, bodyVersion: 0 },
         });
         assert.equal(getElement('status').textContent, 'Translating');
         assert.equal(getElement('saveStatus').textContent, 'Saving...');
@@ -771,10 +770,7 @@ exports.tests = [
         assert.equal(getElement('saveError').hidden, true);
         assert.equal(getElement('status').textContent, 'Translating');
 
-        refreshInterval();
-        for (let i = 0; i < 4; i += 1) {
-          await Promise.resolve();
-        }
+        await refreshInterval();
         assert.equal(getElement('status').textContent, 'Idle');
         assert.equal(getElement('saveStatus').textContent, 'Saved.');
 
@@ -856,6 +852,8 @@ exports.tests = [
         querySelectorAll: () => [],
       };
       global.chrome = {
+        webNavigation: { getFrame: async ({ tabId }) => ({ documentId: 'doc-' + tabId }), onCommitted: { addListener() {} } },
+        storage: { onChanged: { addListener() {} } },
         windows: { getCurrent: async () => ({ id: 10 }) },
         tabs: {
           onActivated: { addListener() {} },
@@ -905,7 +903,7 @@ exports.tests = [
         await settle();
 
         assert.deepEqual(controls, [
-          { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 77, control: 'start' },
+          { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 77, documentId: 'doc-77', control: 'start' },
         ]);
         assert.equal(getElement('inlineStatus').textContent, 'Translated 3 blocks.');
         assert.equal(getElement('btnInlineTranslate').textContent, 'Scan visible text');

@@ -58,7 +58,7 @@ if (process.env.HARNESS_SCENARIO === 'open-error' && args.includes('open')) proc
         }
         close() { fs.appendFileSync(effects, JSON.stringify(['socket-close']) + '\\n'); this.emit('close'); }
       };
-      const { launchExtensionBrowser, createChecks } = await import(${JSON.stringify(pathToFileURL(path.join(__dirname, 'integration/harness.mjs')).href)});
+      const { launchExtensionBrowser, createChecks, closeSessionBrowser } = await import(${JSON.stringify(pathToFileURL(path.join(__dirname, 'integration/harness.mjs')).href)});
       const { check, finish } = createChecks('launch fixture');
       try {
         const ctx = await launchExtensionBrowser({ session: 'fixture-session', url,
@@ -69,6 +69,7 @@ if (process.env.HARNESS_SCENARIO === 'open-error' && args.includes('open')) proc
           check('worker execution remains usable', await worker.evaluate('1 + 1') === 2);
         }
         ctx.close();
+        if (scenario === 'session-cleanup') await closeSessionBrowser('fixture-session');
       } catch (error) {
         check('launch succeeds', false, error.message);
       }
@@ -111,6 +112,14 @@ async function fixture(open = true) {
 exports.name = 'integration harness';
 exports.tests = [
   {
+    name: 'explicit browser cleanup closes only its named session',
+    fn() {
+      const result = launchFixture('session-cleanup');
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(result.effects.filter(args => args.includes('close')), [['--session', 'fixture-session', 'close']]);
+    },
+  },
+  {
     name: 'fails missing launch prerequisites and cleans up before returning a context',
     fn() {
       const stages = {
@@ -141,6 +150,8 @@ exports.tests = [
       assert.equal(result.status, 0, result.stdout + result.stderr);
       const args = result.effects.find(argv => argv.includes('open'));
       assert.ok(args);
+      assert.deepEqual(args.slice(0, 2), ['--session', 'fixture-session']);
+      assert.deepEqual(result.effects.find(argv => argv.includes('cdp-url')), ['--session', 'fixture-session', 'get', 'cdp-url']);
       assert.ok(args.includes('--headed'));
       assert.ok(args.includes('--args'));
       assert.equal(args[args.indexOf('--headed') + 1], 'false');

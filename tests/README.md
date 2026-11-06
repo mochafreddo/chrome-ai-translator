@@ -230,7 +230,7 @@ The real OpenRouter key stays inside the fixed-host Node transport; the disposab
 
 ## Billed model checks
 
-Both live checks launch their own Chrome session, save a key through Options, and clear it through the real **Clear key** control in `finally`. Run them sequentially: the harness's `closeAllBrowsers()` can close other driver sessions.
+Both live checks launch their own Chrome session, save a key through Options, and clear it through the real **Clear key** control in `finally`. Each check closes its own driver session.
 
 Provide an OpenAI key in the gitignored `.env.local`. [integration/live-key.mjs](integration/live-key.mjs) accepts the named entries `OPENAI_API_KEY`, `OPENAI_KEY`, or `OPENAI_SECRET_KEY`, in that order when nonempty. A missing or unattributable key fails rather than silently skipping. Add a newly approved provider-specific name to that helper instead of guessing from an `sk-` value, which can also identify another provider. The helper hands the key to the local CDP session without returning it to its caller or printing it.
 

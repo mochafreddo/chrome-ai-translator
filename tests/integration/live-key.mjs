@@ -92,6 +92,13 @@ export async function withOpenRouterTransport({ envPath, fetchImpl = globalThis.
   finally { active = false; }
 }
 
+async function openReadyOptions(page, url, button) {
+  await page.navigate(url);
+  if (!await until(() => page.evaluate(
+    `document.getElementById(${JSON.stringify(button)})?.disabled === false`
+  ), 10000, 100)) throw new Error('Options did not finish loading settings.');
+}
+
 async function storedSettings(page) {
   return page.evaluate('(async () => (await chrome.storage.local.get(["settings"])).settings || {})()');
 }
@@ -112,8 +119,10 @@ export async function withApiKey({ page, extension, envPath, targetLanguage, onC
   // The `try` opens before the save, not after it. The save is the step that puts the real key
   // in the browser profile, so a throw anywhere from here on -- including inside the save
   // itself, which may have stored the key before failing -- has to reach the `finally`.
+  let result;
+  let cleared;
   try {
-    await page.navigate(optionsUrl);
+    await openReadyOptions(page, optionsUrl, 'btnSave');
     const saved = await page.evaluate(`(async () => {
       const serviceChoice = document.querySelector('input[name="service"][value="${service}"]');
       serviceChoice.checked = true;
@@ -134,10 +143,13 @@ export async function withApiKey({ page, extension, envPath, targetLanguage, onC
       };
     })()`);
 
-    return await run(saved);
+    result = await run(saved);
   } finally {
-    onCleared?.(await clearApiKey({ page, optionsUrl, service, keyField: provider.keyField }));
+    cleared = await clearApiKey({ page, optionsUrl, service, keyField: provider.keyField });
+    onCleared?.(cleared);
   }
+  if (!cleared) throw new Error('Failed to clear the live-check key from the browser profile.');
+  return result;
 }
 
 // Drives the real Clear key control, confirmation dialog and all, then confirms the key is
@@ -149,7 +161,7 @@ export async function withApiKey({ page, extension, envPath, targetLanguage, onC
 async function clearApiKey({ page, optionsUrl, service, keyField }) {
   const stopAnswering = page.answerDialogs(true);
   try {
-    await page.navigate(optionsUrl);
+    await openReadyOptions(page, optionsUrl, 'btnClear');
     await page.evaluate(`(() => {
       const choice = document.querySelector('input[name="service"][value="${service}"]');
       choice.checked = true;

@@ -135,6 +135,14 @@
     return hasHiddenComputedStyle(node);
   }
 
+  function isEligibleRoot(node) {
+    if (!node) return false;
+    for (let current = node; current; current = current.parentElement) {
+      if (isExcludedElement(current)) return false;
+    }
+    return true;
+  }
+
   function getVisibleText(node) {
     if (!node) return '';
     if (node.nodeType === 3) return String(node.nodeValue || '');
@@ -211,11 +219,14 @@
     }
   }
 
-  function createSerializationContext(namespace, baseUrl) {
+  function createSerializationContext(namespace, baseUrl, title) {
     return {
       namespace,
       baseUrl,
+      title,
       entries: [],
+      originalTokens: new Map(),
+      originalLength: 0,
       nextLinkId: 0,
       nextCodeId: 0,
       nextBlockId: 0,
@@ -230,8 +241,11 @@
       openToken: `⟦${context.namespace}:LINK_OPEN:${id}⟧`,
       closeToken: `⟦${context.namespace}:LINK_CLOSE:${id}⟧`,
       destination: resolveDestination(destination, context.baseUrl),
+      ...(context.tableCell ? { tableCell: true } : {}),
     };
     context.entries.push(entry);
+    context.originalTokens.set(entry.openToken, '[');
+    context.originalTokens.set(entry.closeToken, `](${markdownEntries.renderDestination(entry.destination, entry.tableCell)})`);
     return entry;
   }
 
@@ -244,11 +258,14 @@
       display,
       value: String(value || ''),
       language: String(language || ''),
+      ...(context.tableCell ? { tableCell: true } : {}),
+      ...(context.quoteDepth ? { quoteDepth: context.quoteDepth } : {}),
     };
     if (destination != null) {
       entry.destination = resolveDestination(destination, context.baseUrl);
     }
     context.entries.push(entry);
+    context.originalTokens.set(entry.token, markdownEntries.renderAtomicEntry(entry));
     return entry;
   }
 
@@ -266,15 +283,16 @@
 
     if (isExcludedElement(node)) return { template: '', original: '' };
     const tagName = getTagName(node);
-    if (options.skipLists && (tagName === 'OL' || tagName === 'UL')) {
-      return { template: '', original: '' };
-    }
     if (tagName === 'BR') return { template: ' ', original: ' ' };
+    if (tagName === 'PRE') {
+      const block = serializeCodeBlock(node, context, { allocateId: false });
+      return { template: block?.template || '', original: block?.template || '' };
+    }
     if (tagName === 'CODE' || tagName === 'KBD' || tagName === 'SAMP') {
       const entry = addCodeEntry(context, getVisibleText(node), 'inline', '');
       return {
         template: entry.token,
-        original: markdownEntries.renderCode(entry),
+        original: entry.token,
       };
     }
     if (tagName === 'A') {
@@ -284,9 +302,7 @@
         const entry = addCodeEntry(context, label, 'inline', '', destination);
         return {
           template: entry.token,
-          original: `[${markdownEntries.escapeMarkdownLinkLabel(
-            label
-          )}](${markdownEntries.renderDestination(entry.destination)})`,
+          original: entry.token,
         };
       }
       const entry = addLinkEntry(context, destination);
@@ -296,9 +312,7 @@
       });
       return {
         template: `${entry.openToken}${labelResult.template}${entry.closeToken}`,
-        original: `[${labelResult.original}](${markdownEntries.renderDestination(
-          entry.destination
-        )})`,
+        original: `${entry.openToken}${labelResult.original}${entry.closeToken}`,
       };
     }
     return serializeInlineChildren(node, context, options);
@@ -321,6 +335,26 @@
     };
   }
 
+  function getOriginalLength(value, context) {
+    let length = value.length;
+    for (const match of value.matchAll(/⟦[^⟦⟧]*⟧/g)) {
+      const replacement = context.originalTokens.get(match[0]);
+      if (replacement != null) length += replacement.length - match[0].length;
+    }
+    return length;
+  }
+
+  function checkDocumentLength(length) {
+    if (length > markdownEntries.MAX_TOTAL_CHARS) {
+      throw new Error(`Full-page translation has too much text (${length}/${markdownEntries.MAX_TOTAL_CHARS} characters)`);
+    }
+  }
+
+  function isEquivalentTitle(block, title) {
+    return Boolean(title) && block?.kind === 'heading' && block?.level === 1 &&
+      normalizeInlineText(String(block.originalMarkdown || '').replace(/^#\s+/, '')) === title;
+  }
+
   function appendBlock(context, kind, values, extra = {}, options = {}) {
     if (!values.template && !values.original) return null;
     const entryStart = Number(values.entryStart) || 0;
@@ -334,6 +368,13 @@
       entries: context.entries.slice(entryStart).map((entry) => entry.id),
       ...extra,
     };
+    if (options.allocateId !== false) {
+      if (context.nextBlockId > 1 && isEquivalentTitle(block, context.title)) return null;
+      const length = context.originalLength + (context.originalLength ? 2 : 0) +
+        getOriginalLength(values.original, context);
+      checkDocumentLength(length);
+      context.originalLength = length;
+    }
     return block;
   }
 
@@ -427,7 +468,14 @@
 
   function serializeBlockquote(node, context, options) {
     const entryStart = context.entries.length;
-    const body = serializeBlockquoteBody(node, context);
+    const previousQuoteDepth = context.quoteDepth || 0;
+    let body;
+    context.quoteDepth = previousQuoteDepth + 1;
+    try {
+      body = serializeBlockquoteBody(node, context);
+    } finally {
+      context.quoteDepth = previousQuoteDepth;
+    }
     if (!body.template && !body.original) return null;
     return appendBlock(context, 'blockquote', {
       template: quoteMarkdown(body.template),
@@ -441,6 +489,7 @@
   }
 
   function serializeList(list, context, blocks, depth, options) {
+    if (isExcludedElement(list)) return;
     const ordered = getTagName(list) === 'OL';
     const items = getDirectChildren(list, 'LI');
     let ordinal = ordered
@@ -456,31 +505,40 @@
         if (ordered) ordinal += 1;
         return;
       }
-      const entryStart = context.entries.length;
-      const inline = normalizeInlineResult(
-        serializeInlineChildren(item, context, { skipLists: true })
-      );
       const marker = ordered ? `${ordinal}. ` : '- ';
-      const prefix = `${'    '.repeat(depth)}${marker}`;
-      const block = appendBlock(
-        context,
-        ordered ? 'ordered-item' : 'unordered-item',
-        {
+      let first = true;
+      let pending = { template: '', original: '', entryStart: context.entries.length };
+      function flushPending() {
+        const inline = normalizeInlineResult(pending);
+        if (!first && !inline.template && !inline.original) return;
+        const prefix = `${'    '.repeat(depth)}${first ? marker : ' '.repeat(marker.length)}`;
+        const block = appendBlock(context, ordered ? 'ordered-item' : 'unordered-item', {
           template: `${prefix}${inline.template}`,
           original: `${prefix}${inline.original}`,
-          entryStart,
-        },
-        ordered ? { depth, ordinal } : { depth },
-        options
-      );
-      if (block) blocks.push(block);
-      if (ordered) ordinal += 1;
-      for (const child of getChildNodes(item)) {
-        const childTag = getTagName(child);
-        if (childTag === 'OL' || childTag === 'UL') {
+          entryStart: pending.entryStart,
+        }, ordered ? { depth, ordinal } : { depth }, options);
+        if (block) blocks.push(block);
+        first = false;
+        pending = { template: '', original: '', entryStart: context.entries.length };
+      }
+      function visit(child) {
+        if (isExcludedElement(child)) return;
+        const tag = getTagName(child);
+        if (tag === 'OL' || tag === 'UL') {
+          flushPending();
           serializeList(child, context, blocks, depth + 1, options);
+          pending.entryStart = context.entries.length;
+        } else if (child.nodeType === 1 && !['A', 'PRE', 'CODE', 'KBD', 'SAMP', 'BR'].includes(tag)) {
+          for (const descendant of getChildNodes(child)) visit(descendant);
+        } else {
+          const inline = serializeInline(child, context);
+          pending.template += inline.template;
+          pending.original += inline.original;
         }
       }
+      for (const child of getChildNodes(item)) visit(child);
+      flushPending();
+      if (ordered) ordinal += 1;
     });
   }
 
@@ -497,33 +555,40 @@
     }
   }
 
-  function escapeTableCell(value) {
-    return String(value || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
-  }
-
   function serializeTable(table, context, options) {
     const rows = [];
     collectTableRows(table, rows, table);
     if (!rows.length) return null;
     const entryStart = context.entries.length;
-    const serializedRows = rows.map((row) =>
-      getChildNodes(row)
-        .filter(
-          (cell) =>
-            ['TH', 'TD'].includes(getTagName(cell)) &&
-            !isExcludedElement(cell)
-        )
-        .map((cell) => normalizeInlineResult(serializeInlineChildren(cell, context)))
-    ).filter((row) => row.length);
-    const width = serializedRows.reduce(
-      (maximum, row) => Math.max(maximum, row.length),
-      0
-    );
+    const serializedRows = [];
+    let width = 0;
+    let cellLength = 0;
+    for (const row of rows) {
+      const cells = [];
+      for (const cell of getChildNodes(row)) {
+        if (!['TH', 'TD'].includes(getTagName(cell)) || isExcludedElement(cell)) continue;
+        const previousTableCell = context.tableCell;
+        let inline;
+        context.tableCell = true;
+        try {
+          inline = normalizeInlineResult(serializeInlineChildren(cell, context));
+        } finally {
+          context.tableCell = previousTableCell;
+        }
+        cells.push(inline);
+        width = Math.max(width, cells.length);
+        cellLength += getOriginalLength(markdownEntries.escapeTableCell(inline.original), context);
+        const tableLength = cellLength + (serializedRows.length + 1) * (2 + 3 * width) + 1 + 6 * width;
+        checkDocumentLength(context.originalLength + (context.nextBlockId ? 2 : 0) + tableLength);
+      }
+      if (!cells.length) continue;
+      serializedRows.push(cells);
+    }
     if (!width) return null;
 
     function renderRow(row, key) {
       const cells = Array.from({ length: width }, (_, index) =>
-        escapeTableCell(row[index]?.[key] || '')
+        markdownEntries.escapeTableCell(row[index]?.[key] || '')
       );
       return `| ${cells.join(' | ')} |`;
     }
@@ -554,7 +619,7 @@
     const code = getChildNodes(pre).find(
       (child) => getTagName(child) === 'CODE' && !isExcludedElement(child)
     );
-    const source = getVisibleText(code || pre).replace(/\n+$/g, '');
+    const source = getVisibleText(pre).replace(/\n+$/g, '');
     if (!source.trim()) return null;
     const entryStart = context.entries.length;
     const entry = addCodeEntry(
@@ -568,7 +633,7 @@
       'code',
       {
         template: entry.token,
-        original: markdownEntries.renderCode(entry),
+        original: entry.token,
         entryStart,
       },
       {},
@@ -681,18 +746,11 @@
     const baseUrl = String(
       root?.ownerDocument?.baseURI || root?.baseURI || metadata.url || ''
     );
-    const context = createSerializationContext(namespace, baseUrl);
-    let blocks = isExcludedElement(root)
-      ? []
-      : serializeChildBlocks(root, context);
     const title = normalizeInlineText(metadata.title);
+    const context = createSerializationContext(namespace, baseUrl, title);
+    let blocks = isEligibleRoot(root) ? serializeChildBlocks(root, context) : [];
     if (title) {
-      const equivalentTitle = (block) =>
-        block?.kind === 'heading' &&
-        block?.level === 1 &&
-        normalizeInlineText(
-          String(block.originalMarkdown || '').replace(/^#\s+/, '')
-        ) === title;
+      const equivalentTitle = block => isEquivalentTitle(block, title);
       if (equivalentTitle(blocks[0])) {
         blocks = [
           blocks[0],
@@ -710,12 +768,18 @@
         });
       }
     }
+    checkDocumentLength(blocks.reduce((length, block, index) =>
+      length + (index ? 2 : 0) + getOriginalLength(block.originalMarkdown, context), 0));
     return {
       title: String(metadata.title || ''),
       url: String(metadata.url || ''),
       langHint: String(metadata.langHint || ''),
       namespace,
-      blocks,
+      blocks: blocks.map(block => ({
+        ...block,
+        originalMarkdown: block.originalMarkdown.replace(/⟦[^⟦⟧]*⟧/g,
+          token => context.originalTokens.get(token) ?? token),
+      })),
       entries: context.entries,
     };
   }
@@ -729,6 +793,7 @@
   }
 
   const api = {
+    isEligibleRoot,
     renderOriginalMarkdown,
     serializeMarkdownDocument,
   };

@@ -242,10 +242,25 @@
     return record;
   }
 
+  function canSubmit(operation) {
+    if (!operation?.articleRoot) return true;
+    if (!operation.articleRoot.isConnected) operation.rootDetached = true;
+    return !operation.rootDetached;
+  }
+
+  function isWithinSelectedRoot(operation, block) {
+    if (!canSubmit(operation)) return false;
+    if (!operation?.articleRoot) return true;
+    for (let node = block; node; node = node.parentNode) {
+      if (node === operation.articleRoot) return true;
+    }
+    return false;
+  }
+
   // Takes the next batch under the request-size caps and the Session Budget, refusing locally
   // any block either would never let through.
   function takeBatch(operation, maxChars = INLINE_BLOCK_BATCH_MAX_CHARS) {
-    if (!operation || operation.stopped || operation.inFlight >= INLINE_VIEWPORT_MAX_IN_FLIGHT) {
+    if (!operation || operation.stopped || !canSubmit(operation) || operation.inFlight >= INLINE_VIEWPORT_MAX_IN_FLIGHT) {
       return [];
     }
     const limit = Number(maxChars) || INLINE_BLOCK_BATCH_MAX_CHARS;
@@ -255,6 +270,13 @@
     while (operation.queue.length) {
       if (batch.length >= INLINE_MAX_RECORDS) break;
       const record = operation.queue[0];
+      if (!isWithinSelectedRoot(operation, record.blockElement)) {
+        operation.queue.shift();
+        clearRetrySupersession(operation, record);
+        record.state = 'stale';
+        record.code = 'runtime.page_changed';
+        continue;
+      }
       const { actualCost: cost, reservedCost } = measureRecord(record);
       if (cost > limit) {
         operation.queue.shift();
@@ -302,6 +324,7 @@
     if (
       !operation ||
       operation.stopped ||
+      !isWithinSelectedRoot(operation, parentRecord?.blockElement) ||
       !parentRecord?.blockElement?.isConnected ||
       operation.byBlock?.get(parentRecord.blockElement) !== parentRecord
     ) {
@@ -365,6 +388,10 @@
         continue;
       }
       record.correlationToken = result.correlationToken || null;
+      if (!isWithinSelectedRoot(operation, record.blockElement)) {
+        markChanged(record);
+        continue;
+      }
       if (result.disposition === 'reject' || typeof result.template !== 'string') {
         if (!inlineBlockCodec.matchesOriginalOwnership(record.snapshot)) {
           markChanged(record);
@@ -766,10 +793,20 @@
         return operation.localDiagnostics;
       },
       isCurrent,
+      canSubmit: () => isCurrent(operationId) && canSubmit(operation),
+      pauseRoot() { operation.rootDetached = true; },
+      selectRoot(root) {
+        if (operation.articleRoot === root && !operation.rootDetached) return false;
+        resetQueue(operation);
+        operation.articleRoot = root;
+        operation.rootDetached = false;
+        return true;
+      },
       begin,
       stop,
       restore,
-      admit: (blockElement) => admitBlock(operation, blockElement),
+      admit: (blockElement) => isWithinSelectedRoot(operation, blockElement)
+        ? admitBlock(operation, blockElement) : null,
       takeBatch: () => takeBatch(operation),
       settle,
       resetQueue: () => resetQueue(operation),

@@ -1,6 +1,6 @@
 # Bind translation to the reader's document and provider choice
 
-Status: accepted, implementation pending
+Status: accepted
 
 A translation gesture applies to the top-level document where the reader invoked it. A tab can load another document before extraction starts, even when its URL stays the same. Document replacement or tab closure ends that document's work: stop admitting chunks and repairs, abort outstanding transport where possible, discard late results, and clear the previous document's panel state. Requests already received by a provider may still incur charges. Scrolling and fragment navigation within the document preserve the operation.
 

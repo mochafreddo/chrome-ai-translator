@@ -31,6 +31,10 @@ function domPanel() {
   const elements = new Map();
   const sent = [];
   let active = 1;
+  let committed;
+  let settingsChanged;
+  let settings = {};
+  let frameId = 'doc-1';
   let poll;
   let activated;
   let notified;
@@ -45,13 +49,16 @@ function domPanel() {
     return elements.get(id);
   }
   const chrome = {
+    webNavigation: { getFrame: async () => ({ documentId: frameId }),
+      onCommitted: { addListener(fn) { committed = fn; } } },
+    storage: { onChanged: { addListener(fn) { settingsChanged = fn; } } },
     windows: { getCurrent: async () => ({ id: 10 }) },
     tabs: { query: async () => [{ id: active, windowId: 10 }],
       onActivated: { addListener(listener) { activated = listener; } } },
     runtime: { onMessage: { addListener(listener) { notified = listener; } },
       async sendMessage(message) {
         sent.push(message);
-        if (message.type === 'GET_SETTINGS') return { ok: true, settings: {} };
+        if (message.type === 'GET_SETTINGS') return { ok: true, settings };
         return send(message);
       } },
   };
@@ -71,10 +78,74 @@ function domPanel() {
   vm.runInContext(fs.readFileSync(require.resolve('../extension/sidepanel.js'), 'utf8'), context);
   return { element, sent, focused: () => focused, setSend(fn) { send = fn; }, poll() { poll(); },
     activate(id, windowId = 10) { active = windowId === 10 ? id : active; activated?.({ tabId: id, windowId }); },
-    notify(msg) { notified(msg); } };
+    changeSettings(value, notify = true) { settings = value; if (notify) settingsChanged?.({ settings: {} }, 'local'); },
+    navigate(id) { frameId = id; committed?.({ tabId: active, frameId: 0, documentId: id }); },
+    notify(msg) { notified({ ...msg, state: { documentId: frameId, ...msg.state } }); } };
 }
 exports.name = 'sidepanel tab state';
 exports.tests = [
+  {
+    name: 'panel refreshes a mismatched provider and requires a second click',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      panel.changeSettings({ service: 'openrouter' }, false);
+      panel.setSend(message => message.type === 'TRANSLATE_TAB'
+        ? { ok: true, skipped: true, reason: 'provider_changed' }
+        : response(message.type, '1'));
+      await panel.element('btnTranslate').listeners.click();
+      await settle();
+      assert.equal(panel.element('providerName').textContent, 'OpenRouter');
+      assert.equal(panel.sent.filter(message => message.type === 'TRANSLATE_TAB').length, 1);
+      assert.match(panel.element('errorBox').textContent, /click Translate again/i);
+    },
+  },
+  {
+    name: 'same-tab document replacement clears the old body and ignores old document notifications',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      const next = deferred();
+      panel.setSend(() => next.promise);
+      panel.navigate('doc-2');
+      assert.doesNotMatch(panel.element('translated').textContent, /translated 1/);
+      panel.notify({ type: 'STATE_UPDATED', tabId: 1, state: { ...state('departed'), documentId: 'doc-1' } });
+      assert.doesNotMatch(panel.element('translated').textContent, /departed/);
+      next.resolve({ ok: false });
+      await settle();
+    },
+  },
+  {
+    name: 'a provider switch refreshes the model before the next click and preserves language edits',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      panel.element('targetLanguage').value = 'French';
+      panel.changeSettings({ service: 'openrouter' });
+      await settle();
+      assert.equal(panel.element('model').disabled, true);
+      assert.equal(panel.element('targetLanguage').value, 'French');
+      panel.element('btnTranslate').listeners.click();
+      await settle();
+      const request = panel.sent.find(message => message.type === 'TRANSLATE_TAB');
+      assert.equal(request.displayedProvider.service, 'openrouter');
+      assert.equal(request.displayedProvider.model, 'deepseek/deepseek-v4.1-flash-1017');
+      assert.equal(request.documentId, 'doc-1');
+    },
+  },
+  {
+    name: 'a poll preserves both inline live region text nodes when their messages are unchanged',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      const ids = ['inlineStatus', 'inlineError'];
+      const nodes = ids.map(id => panel.element(id).childNodes[0]);
+      assert.ok(nodes.every(Boolean));
+      panel.poll();
+      await settle();
+      ids.forEach((id, index) => assert.equal(panel.element(id).childNodes[0], nodes[index]));
+    },
+  },
   {
     name: 'actual panel uses result language snapshots instead of edited settings',
     async fn() {
@@ -531,7 +602,7 @@ exports.tests.push({
       progress: { current: 2, total: 3 }, settingsUsed: { targetLanguage: 'Korean' },
     } });
     await settle();
-    assert.deepEqual(JSON.parse(JSON.stringify(panel.sent.slice(before))), [{ type: 'GET_STATE', tabId: 1 }]);
+    assert.deepEqual(JSON.parse(JSON.stringify(panel.sent.slice(before))), [{ type: 'GET_STATE', tabId: 1, documentId: 'doc-1' }]);
     assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
     assert.equal(panel.element('original').textContent, 'Extracting article text...');
     body.resolve({ ok: true, state: wireState({ status: 'translating',

@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  closeAllBrowsers,
+  closeSessionBrowser,
   createChecks,
   launchExtensionBrowser,
   serveFixture,
@@ -369,7 +369,7 @@ try {
   failures.push('harness');
   console.error(`FAIL disclosure summary - harness threw: ${error?.message || error}`);
 } finally {
-  await closeAllBrowsers();
+  await closeSessionBrowser(SESSION);
 }
 
 finish();

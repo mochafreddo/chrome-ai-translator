@@ -6,7 +6,8 @@
   const { getToneInstruction } = globalScope.ChromeAiTranslatorTranslationSettings ||
     (typeof module !== 'undefined' && module.exports ? require('./translation-settings.js') : {});
 
-  const MAX_TOTAL_CHARS = 60000;
+  const { MAX_TOTAL_CHARS } = globalScope.ChromeAiTranslatorMarkdownEntries ||
+    (typeof module !== 'undefined' && module.exports ? require('./markdown-entries.js') : {});
   const TOKEN_ERROR_CODES = new Set([
     'markdown.token_missing',
     'markdown.token_duplicate',

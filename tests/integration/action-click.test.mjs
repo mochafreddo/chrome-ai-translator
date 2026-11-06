@@ -27,7 +27,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  closeAllBrowsers,
+  closeSessionBrowser,
   createChecks,
   launchExtensionBrowser,
   until,
@@ -161,7 +161,7 @@ try {
     })}`);
   }
   diagnosticContext?.close();
-  await closeAllBrowsers();
+  await closeSessionBrowser(SESSION);
 }
 
 finish();

@@ -5,7 +5,6 @@
 
   const inlineBlockCodec = globalScope.ChromeAiTranslatorInlineBlock ||
     (typeof module !== 'undefined' && module.exports ? require('./inline-block.js') : null);
-  const INLINE_TRANSLATOR_ID = 'chrome-ai-translator-inline';
   const INLINE_EXCLUDED_TAGS = new Set([
     'SCRIPT',
     'STYLE',
@@ -45,12 +44,17 @@
     let root = null;
     let stopped = false;
     let scanStack = null;
+    let mutationSweep = false;
+    let freshPassPending = false;
     let timer = null;
     let observer = null;
     let scrollTargets = [];
+    const rootAncestors = new Set();
+    let rootPaused = false;
 
     function isCurrent() {
-      return !stopped && session.status === 'active' && session.isCurrent(operationId);
+      return !stopped && !rootPaused && session.status === 'active' && session.isCurrent(operationId) &&
+        (!session.canSubmit || session.canSubmit());
     }
 
     function isInlineTranslationExcludedTag(tagName) {
@@ -189,14 +193,13 @@
     function shouldSkipInlineBlockCandidateTextNode(textNode, reads) {
       const parent = textNode?.parentElement;
       if (!parent) return true;
-      if (parent.closest(`#${INLINE_TRANSLATOR_ID}`)) return true;
       if (isInlineEffectivelyEditable(parent)) return true;
       for (let element = parent; element; element = element.parentElement) {
         if (isInlineTranslationExcludedElement(element)) return true;
         if (isElementHidden(element, parent, reads)) return true;
       }
       const value = String(textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
-      if (!/[A-Za-z]/.test(value)) return true;
+      if (!/\p{L}/u.test(value)) return true;
       return inlineBlockCodec.isCodeLikeInlineText(value);
     }
 
@@ -206,7 +209,6 @@
 
     function shouldSkipInlineElementSubtree(node, viewport, reads) {
       if (!node || !(node instanceof platform.HTMLElement)) return false;
-      if (node.closest?.(`#${INLINE_TRANSLATOR_ID}`)) return true;
       if (
         isInlineTranslationExcludedElement(node) ||
         isInlineEffectivelyEditable(node) ||
@@ -222,6 +224,14 @@
       return Array.from(node?.childNodes || []);
     }
 
+    function isWithinRoot(node) {
+      if (!node?.isConnected) return false;
+      for (let current = node; current; current = current.parentNode) {
+        if (current === root) return true;
+      }
+      return false;
+    }
+
     function collectVisibleBlocks() {
       const limit = 1200;
       const viewport = getInlineViewportInfo();
@@ -232,6 +242,7 @@
 
       while (stack.length) {
         const node = stack.pop();
+        if (!isWithinRoot(node)) continue;
         if (isInlineTextNode(node)) {
           if (inspected >= limit) {
             stack.push(node);
@@ -294,37 +305,76 @@
     }
 
     function scan() {
-      if (!root || !isCurrent()) return;
+      if (!root?.isConnected || !isCurrent()) return;
       const blocks = collectVisibleBlocks();
       for (const block of blocks) {
         if (!isCurrent()) break;
-        let ancestor = block;
-        while (ancestor && ancestor !== root) ancestor = ancestor.parentNode;
-        if (ancestor === root) session.admit(block);
+        if (isWithinRoot(block)) session.admit(block);
       }
       if (!isCurrent()) return;
-      if (observer?.takeRecords?.().length) onViewportChange();
+      const mutations = observer?.takeRecords?.();
+      if (mutations?.length) onMutation(mutations);
+      if (!isCurrent()) return;
       if (scanStack) rescan();
+      else {
+        mutationSweep = false;
+        if (freshPassPending) {
+          freshPassPending = false;
+          mutationSweep = true;
+          rescan();
+        }
+      }
       onScan();
     }
 
     function rescan() {
       if (!root || !isCurrent()) return;
-      if (timer !== null) platform.clearTimeout(timer);
+      if (timer !== null) return;
       const scheduledTimer = platform.setTimeout(() => {
-        if (timer !== scheduledTimer || !isCurrent()) return;
+        if (timer !== scheduledTimer) return;
         timer = null;
+        if (!isCurrent()) return;
         scan();
       }, 250);
       timer = scheduledTimer;
     }
 
-    // Page changes invalidate the queued viewport, while Start and continuation retain it.
     function onViewportChange() {
       if (!isCurrent()) return;
       scanStack = null;
+      mutationSweep = true;
+      freshPassPending = false;
       session.resetQueue();
       rescan();
+    }
+
+    function onMutation(records) {
+      if (!isCurrent()) return;
+      if (records?.some(record => Array.from(record.removedNodes || [])
+        .some(node => rootAncestors.has(node)))) {
+        rootPaused = true;
+        session.pauseRoot?.();
+        scanStack = null;
+        session.resetQueue();
+        if (timer !== null) platform.clearTimeout(timer);
+        timer = null;
+        return;
+      }
+      if (!records?.length || records.some(record => {
+        for (let node = record.target; node; node = node.parentNode) {
+          if (node === root) return true;
+        }
+        return false;
+      })) {
+        if (!mutationSweep) {
+          onViewportChange();
+          return;
+        }
+        // Finish a restarted sweep before revisiting changes behind its cursor.
+        if (scanStack) freshPassPending = true;
+        session.resetQueue();
+        rescan();
+      }
     }
 
     function start(articleRoot) {
@@ -335,15 +385,20 @@
         target.addEventListener('scroll', onViewportChange, { passive: true, capture: true });
       }
       platform.window.addEventListener('resize', onViewportChange);
-      observer = new platform.MutationObserver(onViewportChange);
+      observer = new platform.MutationObserver(onMutation);
       observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true });
+      rootAncestors.add(root);
+      for (let ancestor = root.parentNode; ancestor; ancestor = ancestor.parentNode) {
+        rootAncestors.add(ancestor);
+        observer.observe(ancestor, { childList: true });
+      }
       scan();
     }
 
-    function stop() {
-      if (stopped) return;
-      stopped = true;
+    function stopWatching() {
       scanStack = null;
+      mutationSweep = false;
+      freshPassPending = false;
       if (timer !== null) {
         platform.clearTimeout(timer);
         timer = null;
@@ -355,9 +410,24 @@
       observer?.disconnect();
       observer = null;
       scrollTargets = [];
+      rootAncestors.clear();
     }
 
-    return { start, rescan, stop };
+    function selectRoot(articleRoot) {
+      if (stopped || !session.isCurrent(operationId)) return;
+      stopWatching();
+      rootPaused = false;
+      root = null;
+      start(articleRoot);
+    }
+
+    function stop() {
+      if (stopped) return;
+      stopped = true;
+      stopWatching();
+    }
+
+    return { start, selectRoot, rescan, stop };
   }
 
   const api = { createInlineViewport };

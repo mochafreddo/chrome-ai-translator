@@ -12,6 +12,31 @@ function makeState(overrides = {}) {
 exports.name = 'content helpers';
 exports.tests = [
   {
+    name: 'skips articles with excluded ancestors before preferring their text',
+    fn() {
+      const f = createOperationFixture();
+      const hidden = f.document.createElement('section');
+      hidden.setAttribute('aria-hidden', 'true');
+      const article = f.document.createElement('article');
+      article.textContent = 'Private source. '.repeat(50);
+      Object.defineProperty(article, 'innerText', { get() {
+        throw new Error('Excluded article text must not enter root selection.');
+      } });
+      hidden.appendChild(article);
+      const main = f.document.createElement('main');
+      main.textContent = 'Visible source. '.repeat(30).trim();
+      main.innerText = main.textContent;
+      f.document.body.replaceChildren(hidden, main);
+      f.document.body.innerText = f.document.body.textContent;
+      const page = createContentPage(f, { article, main });
+      page.inject();
+      const response = page.message({ type: 'EXTRACT_ARTICLE' });
+      assert.equal(response.ok, true);
+      assert.equal(response.data.contentMarkdown, main.textContent);
+      assert.doesNotMatch(JSON.stringify(response.data), /Private source/);
+    },
+  },
+  {
     name: 'extracts a preferred article without reading unrelated candidate text',
     fn() {
       const f = createOperationFixture();
@@ -474,12 +499,14 @@ exports.tests.push(
       const page = createContentPage(f);
       page.inject();
       f.holdSettings();
-      const worker = background.createBackgroundWorker({ chrome: { tabs: {
+      const worker = background.createBackgroundWorker({ chrome: { webNavigation: {
+        getFrame: async () => ({ documentId: 'document-9' }),
+      }, tabs: {
         sendMessage: async (tabId, message) => page.message(message),
       } } });
       let display;
       const controller = sidepanel.createTabStateController({
-        queryActiveTab: async () => ({ id: 9 }),
+        queryActiveTab: async () => ({ id: 9, documentId: 'document-9' }),
         sendMessage: message => new Promise(resolve => worker.handlers.onMessage(message, {}, resolve)),
         render(value) { display = value; },
       });
@@ -541,6 +568,32 @@ exports.tests.push(
       page.button('restore').click();
       assert.equal(page.button('translate').textContent, 'Open controls for Japanese');
       page.instruct('stopInlineTranslation');
+    },
+  },
+  {
+    name: 'mount reinjection and close preserve a page element with the floating host ID',
+    async fn() {
+      const f = createOperationFixture();
+      const page = createContentPage(f);
+      const collision = f.document.createElement('div');
+      collision.id = 'chrome-ai-translator-inline';
+      collision.textContent = 'Page-owned content survives.';
+      f.document.body.appendChild(collision);
+      page.inject();
+      page.instruct('mountFloatingTranslateButton');
+      await flushMicrotasks();
+      const host = f.document.body.childNodes.find(node => node !== collision && node.id === collision.id);
+      assert.equal(collision.parentNode, f.document.body);
+      assert.equal(collision.textContent, 'Page-owned content survives.');
+      assert.ok(host);
+      page.inject();
+      page.instruct('mountFloatingTranslateButton');
+      await flushMicrotasks();
+      assert.equal(f.document.body.childNodes.filter(node => node.id === collision.id).length, 2);
+      page.button('close').click();
+      assert.equal(host.parentNode, null);
+      assert.equal(collision.parentNode, f.document.body);
+      assert.equal(collision.textContent, 'Page-owned content survives.');
     },
   },
   ...['authorized', 'active', 'stopped', 'restored'].map(status => ({

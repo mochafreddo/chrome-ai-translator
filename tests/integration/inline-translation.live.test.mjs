@@ -5,7 +5,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  closeAllBrowsers,
+  closeSessionBrowser,
   createChecks,
   launchExtensionBrowser,
   serveFixture,
@@ -255,7 +255,7 @@ try {
   failures.push('harness');
   console.error('FAIL inline translation live - harness failed');
 } finally {
-  await closeAllBrowsers();
+  await closeSessionBrowser(SESSION);
 }
 
 finish();

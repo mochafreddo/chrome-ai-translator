@@ -18,6 +18,7 @@ function createContentPage(fixture, selectors = null) {
     node.attachShadow = () => {
       const controls = new Map();
       const shadow = {
+        host: node,
         set innerHTML(html) {
           for (const match of html.matchAll(/<(button|div)[^>]*data-(role|action)="([^"]+)"[^>]*>/g)) {
             const control = createElement(match[1]);

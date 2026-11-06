@@ -23,6 +23,8 @@ OpenAI remains the default for existing installations. Each service has its own 
 
 After updating this repository, open `chrome://extensions` and click **Reload** on **Chrome AI Translator (Personal)**. Then reload each page where you use the extension. Reload both even when the version number has not changed: an already-running worker or page can still hold code from before the update.
 
+The extension uses Chrome's navigation permission to bind translation to the top-level document where you invoked it. Reloading, replacing the document, or closing the tab stops new requests and discards late results. A provider may still charge for a request it already received.
+
 Reloading the page ends its Inline Translation Session, including its cache and Session Budget. Finish any work you want to keep before reloading. The extension does not reload itself automatically.
 
 If the panel says the extension could not initialize, reload the extension and the page in that order, then invoke it again. Clicking the toolbar icon opens the controls without sending a translation request.
@@ -69,6 +71,8 @@ The floating menu opens translation controls and offers Stop and Original text d
 | Failed | A block could not be translated or applied safely. Its original content remains. |
 
 Links, emphasis, and code retain their page-owned objects where the translation contract preserves them. Inline Translation can also translate prose around an explicit `type="button"` with simple text and formatting inside it. The button label, click behavior, focus and current page state are preserved, while the button can move with the translated word order. Submit/reset buttons and complex controls remain unsupported. Inline Translation skips unsupported or oversized blocks rather than translating fragments. An eligible missing emphasis pair may be omitted from a translated sentence; restoration keeps the original emphasis available.
+
+If the site replaces the article while keeping the same document open, automatic submission pauses. Choose **Scan visible text** to translate the current article with the same session budget. If the panel reports a service or model change, check its updated model field and click **Translate** again.
 
 Stop and **Original text** keep the page visit's cache and Session Budget. Reloading or leaving the page clears them. The budget guards runaway work; it does not cap your spending across page visits. See [limits and accounting](docs/architecture.md#limits-and-accounting) for the implementation constraints.
 

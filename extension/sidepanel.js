@@ -199,7 +199,7 @@ function getInlineTranslationPanelViewModel({
   // is a separate axis, and holding it on one tab grants nothing on another. So the
   // section dims all three and asks for the one thing that does help, rather than taking a
   // click and reporting the failure afterwards.
-  if (invocationErrorCode === 'content_script_not_ready') {
+  if (invocationErrorCode === 'content_script_not_ready' || invocationErrorCode === 'document.unavailable') {
     return {
       startText,
       startDisabled: true,
@@ -265,8 +265,10 @@ function readInlineTranslationError(state) {
 
 // One owner for the panel's tab selection and both Translation displays. Adapters
 // supply Chrome queries and messages; rendering observes only the public display state.
-function createTabStateController({ queryActiveTab, sendMessage, render }) {
+function createTabStateController({ queryActiveTab, sendMessage: send, render, refreshProvider }) {
   let tabId = null;
+  let documentId;
+  const sendMessage = (message) => send({ ...message, ...(documentId ? { documentId } : {}) });
   let selection = {};
   let queryVersion = 0;
   let stateRequest = null;
@@ -357,14 +359,15 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
   function forgetControlError() {
     controlError = '';
   }
-  function select(nextTabId, initiatingRequest = null) {
-    if (tabId === nextTabId) return;
+  function select(nextTabId, initiatingRequest = null, nextDocumentId) {
+    if (tabId === nextTabId && documentId === nextDocumentId) return;
     // A query may discover the tab for its own action; other visits end pending actions.
     if (tabId !== null) {
       if (inlineControl !== initiatingRequest) inlineControl = null;
       if (translationRequest !== initiatingRequest) translationRequest = null;
     }
     tabId = nextTabId;
+    documentId = nextDocumentId;
     selection = {};
     state = { status: 'idle' };
     hasBody = false;
@@ -384,8 +387,9 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
     const tab = await queryActiveTab();
     // A newer selection wins, but a poll confirming the same tab must not swallow
     // a button action that was waiting for its own query.
-    if (version !== queryVersion) return tabId !== null && tab?.id === tabId;
-    select(tab?.id ?? null, initiatingRequest);
+    if (version !== queryVersion) return tabId !== null && tab?.id === tabId && tab?.documentId === documentId;
+    const replaced = tab?.id === tabId && documentId && documentId !== tab?.documentId;
+    select(tab?.id ?? null, replaced ? null : initiatingRequest, tab?.documentId);
     return tabId !== null;
   }
   async function refreshSelected(requestedControl = null) {
@@ -441,7 +445,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
       paint();
     }
   }
-  async function translate(settingsOverride) {
+  async function translate(settingsOverride, displayedProvider) {
     const request = translationRequest = {};
     let requestedSelection = selection;
     let startingState = null;
@@ -460,7 +464,7 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
       state = { ...state, status: 'translating', extracted: null, translated: null };
       paint();
       const response = await sendMessage({
-        type: 'TRANSLATE_TAB', tabId: requestedTab, settingsOverride,
+        type: 'TRANSLATE_TAB', tabId: requestedTab, settingsOverride, ...(displayedProvider ? { displayedProvider } : {}),
       });
       // The worker can answer after translation finishes. Only this visit to the
       // requested tab may display its result; polling does not end that visit.
@@ -471,6 +475,11 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
         );
         if (typeof response?.error?.code === 'string') failure.code = response.error.code;
         throw failure;
+      }
+      if (response.reason === 'provider_changed') {
+        await refreshProvider();
+        if (selection !== requestedSelection) return;
+        panelError = 'The translation service or model changed. Check the model and click Translate again.';
       }
       if (response.skipped) {
         invalidatedBody = null;
@@ -501,11 +510,18 @@ function createTabStateController({ queryActiveTab, sendMessage, render }) {
       if (info.windowId !== windowId) return Promise.resolve();
       ++queryVersion;
       select(info.tabId);
+      return refresh();
+    },
+    navigate(info) {
+      if (info.tabId !== tabId || info.frameId !== 0 || info.documentId === documentId) return;
+      ++queryVersion;
+      select(tabId, null, info.documentId);
       return refreshSelected();
     },
     receive(msg) {
       if (msg?.type !== 'STATE_UPDATED' || msg.tabId !== tabId) return;
       const incoming = msg.state;
+      if (documentId !== undefined && (incoming?.documentId ?? null) !== documentId) return;
       if (!incoming || typeof incoming.workerEpoch !== 'string' ||
         retiredEpochs.has(incoming.workerEpoch)) return;
       if (incoming.workerEpoch !== state.workerEpoch) {
@@ -529,20 +545,31 @@ function renderInlineTranslation(input) {
   btnInlineTranslate.disabled = model.startDisabled;
   btnInlineStop.disabled = model.stopDisabled;
   btnInlineRestore.disabled = model.restoreDisabled;
-  elInlineStatus.textContent = model.statusText;
+  if (elInlineStatus.textContent !== model.statusText) elInlineStatus.textContent = model.statusText;
   elInlineError.hidden = !model.errorText;
-  elInlineError.textContent = model.errorText;
+  if (elInlineError.textContent !== model.errorText) elInlineError.textContent = model.errorText;
 }
 
+let savedProvider = null;
+let settingsVersion = 0;
+
 async function loadSettings() {
+  const version = ++settingsVersion;
   const resp = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
-  if (!resp?.ok) return;
+  if (version !== settingsVersion || !resp?.ok) return;
   const s = resp.settings;
+  const firstRead = savedProvider === null;
+  const effective = getEffectiveModelSettings(s);
+  if (!savedProvider || savedProvider.service !== effective.service || savedProvider.model !== effective.model) {
+    elModel.value = effective.model;
+    elModel.disabled = effective.service === 'openrouter';
+    document.getElementById('providerName').textContent = effective.service === 'openrouter' ? 'OpenRouter' : 'OpenAI';
+    savedProvider = effective;
+  }
+  if (!firstRead) return;
 
   elTargetLanguage.value = s.targetLanguage || 'Korean';
   elTone.value = s.tone || 'technical';
-  elModel.value = getEffectiveModelSettings(s).model;
-  elModel.disabled = s.service === 'openrouter';
   elViewMode.value = s.viewMode || 'translation';
 }
 
@@ -604,7 +631,7 @@ function renderSettingsSave({ saving, status, error }) {
 
 const settingsSaveController = hasDocument
   ? createSettingsSaveController({
-      sendMessage: (message) => chrome.runtime.sendMessage(message),
+      sendMessage: message => chrome.runtime.sendMessage(message),
       readSettings,
       render: renderSettingsSave,
     })
@@ -626,9 +653,7 @@ function renderState(state, panelErrorMessage) {
   btnTranslate.textContent = displayState.translateButtonText;
   btnTranslate.disabled = displayState.translateDisabled;
 
-  if (displayState.errorText) setError(displayState.errorText);
-  else if (panelErrorMessage) setError(panelErrorMessage);
-  else setError(null);
+  setError(panelErrorMessage || displayState.errorText || null);
 
   setProgress(displayState.progressText);
 
@@ -695,15 +720,29 @@ if (hasDocument) {
   const tabState = createTabStateController({
     queryActiveTab: async () => {
       const tabs = await chrome.tabs.query({ active: true, windowId: ownWindowId });
-      return tabs?.[0] || null;
+      const tab = tabs?.[0];
+      if (!tab) return null;
+      const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 }).catch(() => null);
+      return { id: tab.id, documentId: frame?.documentId || null };
     },
-    sendMessage: (message) => chrome.runtime.sendMessage(message),
+    sendMessage: (message) => {
+      if (!message.documentId && message.type === 'GET_STATE') return chrome.runtime.sendMessage({ ...message, documentId: null });
+      if (!message.documentId) return Promise.resolve({ ok: false, error: { message: MISSING_PAGE_ACCESS_MESSAGES.afterFailedAttempt } });
+      return chrome.runtime.sendMessage(message);
+    },
+    refreshProvider: loadSettings,
     render(display) {
       renderState(display.state, display.panelError);
       renderInlineTranslation(display.inline);
     },
   });
-  btnTranslate.addEventListener('click', () => tabState.translate(readSettings()));
+  btnTranslate.addEventListener('click', () => {
+    if (!savedProvider) return;
+    const settings = readSettings();
+    const model = settings.model || savedProvider.model;
+    if (settings.model === savedProvider.model) delete settings.model;
+    return tabState.translate(settings, { service: savedProvider.service, model });
+  });
   btnSave.addEventListener('click', () => settingsSaveController.save());
   document.getElementById('btnOpenOptions').addEventListener('click', () =>
     chrome.runtime.openOptionsPage()
@@ -723,6 +762,9 @@ if (hasDocument) {
   (async function init() {
     elModel.placeholder = DEFAULT_MODEL;
     setupTabs();
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes.settings) loadSettings().catch(() => {});
+    });
     await loadSettings();
     const ownWindow = await chrome.windows.getCurrent();
     ownWindowId = ownWindow.id;
@@ -730,6 +772,7 @@ if (hasDocument) {
     chrome.tabs.onActivated.addListener((info) =>
       tabState.activate(info).catch(() => {})
     );
+    chrome.webNavigation.onCommitted.addListener(info => tabState.navigate(info)?.catch(() => {}));
     const initialRefresh = tabState.start(ownWindow.id);
     setInterval(() => tabState.refresh().catch(() => {}), 1000);
     await initialRefresh;
