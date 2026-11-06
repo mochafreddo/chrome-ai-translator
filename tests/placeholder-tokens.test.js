@@ -240,7 +240,7 @@ exports.tests = [
       // The point of the module. Two codecs that each kept their own walk is the state this
       // replaced, and it is a state that reads as fine right up to the moment one of them is
       // fixed alone.
-      for (const file of ['inline-block.js', 'markdown-rehydration.js']) {
+      for (const file of ['inline-template.js', 'markdown-rehydration.js']) {
         const source = readExtensionFile(file);
         assert.match(source, /placeholderTokens\.enumerateExpectedTokens\(/, file);
         assert.match(source, /placeholderTokens\.walkExpectedTokens\(/, file);

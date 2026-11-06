@@ -1,6 +1,6 @@
 (function initInlineModelExecution(globalScope) {
-  const codec = globalScope.ChromeAiTranslatorInlineBlock ||
-    (typeof module !== 'undefined' && module.exports ? require('./inline-block.js') : null);
+  const inlineTemplate = globalScope.ChromeAiTranslatorInlineTemplate ||
+    (typeof module !== 'undefined' && module.exports ? require('./inline-template.js') : null);
   const { getToneInstruction, getTargetLanguageCode } =
     globalScope.ChromeAiTranslatorTranslationSettings ||
     (typeof module !== 'undefined' && module.exports ? require('./translation-settings.js') : {});
@@ -123,7 +123,7 @@
     const sourceSyntax = Array.isArray(contract?.sourceSyntax)
       ? contract.sourceSyntax.map((item) => removeContractTokens(item?.value, contract)).filter(Boolean)
       : [];
-    const proseOnly = codec.stripSourceSyntax(
+    const proseOnly = inlineTemplate.stripSourceSyntax(
       String(value || ''),
       sourceSyntax
     );
@@ -269,7 +269,7 @@
       protocol: { status: 'valid', codes: [] },
       records: (records || []).map((record) => {
         const template = returned.get(record.id);
-        const structureValidation = codec.validateTranslatedTemplate(
+        const structureValidation = inlineTemplate.validateTranslatedTemplate(
           template,
           record.contract
         );

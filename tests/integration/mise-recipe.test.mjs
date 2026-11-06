@@ -43,7 +43,7 @@ function exercise(captureDomTree, createViewportProbe) {
     }
     const ordered = childFirst ? [...entries].reverse() : entries;
     for (const entry of ordered) {
-      independent = codec.validateTranslatedTemplate(entry.translated, entry.contract).ok &&
+      independent = globalThis.ChromeAiTranslatorInlineTemplate.validateTranslatedTemplate(entry.translated, entry.contract).ok &&
         codec.applyTranslatedTemplate(entry.snapshot, entry.translated).ok && independent;
     }
     independent = prose.textContent === '1단계도구 설치설치 프로그램을 실행하세요.' &&

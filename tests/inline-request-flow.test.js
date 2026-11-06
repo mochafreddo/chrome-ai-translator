@@ -237,7 +237,7 @@ exports.tests.push({
       settingsSnapshot: SETTINGS, operationId: visit.operationId,
     });
     assert.equal(response.ok, false);
-    assert.match(response.error.message, /Invalid source token contract/);
+    assert.equal(response.error.message, `Invalid source token contract for block ${record.id}: output_parse_failed`);
     assert.equal(worker.requests.length, 0);
   },
 });

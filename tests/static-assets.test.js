@@ -19,6 +19,21 @@ function loadClassicScript(scope, name) {
 exports.name = 'static assets';
 exports.tests = [
   {
+    name: 'validates inline records in the classic worker without loading the page DOM codec',
+    fn() {
+      const scope = vm.createContext({ TextEncoder, Buffer, crypto: webcrypto });
+      scope.importScripts = (...files) => files.forEach((file) => {
+        assert.notEqual(file, 'inline-block.js', 'worker requires the page DOM codec');
+        loadClassicScript(scope, file);
+      });
+      loadClassicScript(scope, 'background.js');
+      const [source] = scope.ChromeAiTranslatorInlineRequest.normalizeSourceBatch([{
+        id: 'p1', template: 'Read this.', atoms: [], contract: { namespace: 'TEST', entries: [] },
+      }]);
+      assert.equal(source.template, 'Read this.');
+    },
+  },
+  {
     name: 'loads the settings lifecycle after its dependencies in the classic worker',
     async fn() {
       const loaded = [];
@@ -539,12 +554,13 @@ exports.tests = [
       const inPage = (file) => filesMatch[1].indexOf(`'${file}'`);
       const dependencies = [
         ['button-visibility.js', 'worker-invocation.js', ['worker']],
-        ['placeholder-tokens.js', 'inline-block.js', ['worker', 'page']],
+        ['placeholder-tokens.js', 'inline-template.js', ['worker', 'page']],
+        ['inline-template.js', 'inline-block.js', ['page']],
         ['placeholder-tokens.js', 'markdown-rehydration.js', ['worker']],
         ['markdown-entries.js', 'markdown-rehydration.js', ['worker']],
         ['markdown-entries.js', 'translation-chunks.js', ['worker']],
         ['markdown-entries.js', 'markdown-document.js', ['page']],
-        ['inline-block.js', 'inline-request.js', ['worker', 'page']],
+        ['inline-template.js', 'inline-request.js', ['worker', 'page']],
         ['inline-request.js', 'inline-translation-session.js', ['page']],
         ['inline-request.js', 'inline-model-execution.js', ['worker']],
         ['inline-diagnostics-protocol.js', 'inline-translation-session.js', ['page']],

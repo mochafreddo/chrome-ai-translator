@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { inlineQualityCompleted, summarizeQuality } from './model-quality-observation.mjs';
 
 const require = createRequire(import.meta.url);
-const codec = require('../../extension/inline-block.js');
+const inlineTemplate = require('../../extension/inline-template.js');
 const { parseCompletedResponse } = require('../../extension/openai-response.js');
 
 export function compatibleProfiles(records) {
@@ -420,7 +420,7 @@ export function validateQualityOutput(outputText, inputRecords, { structure = tr
   const translations = [];
   for (const [id, template] of returned) {
     const record = expected.get(id);
-    const validation = structure ? codec.validateTranslatedTemplate(template, record.contract) : { ok: true };
+    const validation = structure ? inlineTemplate.validateTranslatedTemplate(template, record.contract) : { ok: true };
     if (!validation.ok) fail(`Model output violates the structure contract (${validation.errorCode}).`);
     translations.push({
       id,

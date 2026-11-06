@@ -2,6 +2,7 @@ const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const { execute, assessTranslationQuality } = require('../extension/inline-model-execution.js');
 const codec = require('../extension/inline-block.js');
+const inlineTemplate = require('../extension/inline-template.js');
 const { createReasoningFixture, createTestDocument, LINGUISTIC_SLASH_PROSE } = require('./inline-block.test');
 
 const SETTINGS = { model: 'gpt-5.4-mini', reasoningEffort: 'none', targetLanguage: 'Korean', tone: 'technical' };
@@ -89,7 +90,7 @@ exports.tests = [
         assert.equal(result.template, source);
         assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, result.template).ok, true);
         assert.equal(block.textContent, source);
-        assert.deepEqual(codec.validateTranslatedTemplate(source.replace('mise', 'other'), record.contract),
+        assert.deepEqual(inlineTemplate.validateTranslatedTemplate(source.replace('mise', 'other'), record.contract),
           { ok: false, errorCode: 'source_syntax_changed' });
       }
     },
@@ -119,7 +120,7 @@ exports.tests = [
         assert.equal(result.attemptCount, 1);
         assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, result.template).ok, true);
         assert.equal(block.textContent, '$ mise use node@24');
-        assert.deepEqual(codec.validateTranslatedTemplate(record.template.replace('mise', 'other'), record.contract),
+        assert.deepEqual(inlineTemplate.validateTranslatedTemplate(record.template.replace('mise', 'other'), record.contract),
           { ok: false, errorCode: 'source_syntax_changed' });
       }
     },

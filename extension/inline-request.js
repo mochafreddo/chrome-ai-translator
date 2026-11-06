@@ -1,6 +1,6 @@
 (function initInlineRequest(globalScope) {
-  const codec = globalScope.ChromeAiTranslatorInlineBlock ||
-    (typeof module !== 'undefined' && module.exports ? require('./inline-block.js') : null);
+  const inlineTemplate = globalScope.ChromeAiTranslatorInlineTemplate ||
+    (typeof module !== 'undefined' && module.exports ? require('./inline-template.js') : null);
   const INLINE_MAX_RECORDS = 500;
   const INLINE_BLOCK_MAX_RECORD_COST = 12000;
   const INLINE_BLOCK_MAX_BATCH_COST = 12000;
@@ -141,14 +141,13 @@
         contract: record.contract,
         repair: normalizeBlockRepair(record.repair, id),
       };
-      const validation = codec?.validateTranslatedTemplate(
+      const validation = inlineTemplate.validateSourceTemplate(
         normalizedRecord.template,
         normalizedRecord.contract
       );
-      // A source template carries every token it lists; ADR-0010's allowance is for answers.
-      if (!validation?.ok || validation.droppedWrappers.length) {
+      if (!validation.ok) {
         throw new Error(
-          `Invalid source token contract for block ${id}: ${validation?.errorCode || 'output_parse_failed'}`
+          `Invalid source token contract for block ${id}: ${validation.errorCode}`
         );
       }
       const cost = getRecordCost(normalizedRecord);

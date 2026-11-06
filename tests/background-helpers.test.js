@@ -2663,6 +2663,7 @@ exports.tests = [
       assert.deepEqual(helpers.getInlineContentScriptFiles(), [
         'default-model.js',
         'placeholder-tokens.js',
+        'inline-template.js',
         'inline-block.js',
         'inline-request.js',
         'inline-diagnostics-protocol.js',

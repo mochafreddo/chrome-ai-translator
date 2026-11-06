@@ -20,7 +20,7 @@ try {
   await ctx.cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 1280, height: 900, deviceScaleFactor: 1, mobile: false,
   }, ctx.page.sessionId);
-  for (const name of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-request.js',
+  for (const name of ['default-model.js', 'placeholder-tokens.js', 'inline-template.js', 'inline-block.js', 'inline-request.js',
     'inline-diagnostics-protocol.js', 'inline-translation-session.js', 'inline-viewport.js']) {
     await ctx.page.evaluate(readFileSync(join(extensionDir, name), 'utf8'));
   }

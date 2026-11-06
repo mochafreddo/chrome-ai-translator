@@ -54,7 +54,7 @@ async function main(args) {
       `Boolean(document.querySelector(${JSON.stringify(selector)}))`
     ), 20000, 250);
     if (!ready) throw new Error('Inspection root is missing or invalid');
-    for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-block.js', 'inline-request.js', 'translation-settings.js', 'inline-model-execution.js']) {
+    for (const file of ['default-model.js', 'placeholder-tokens.js', 'inline-template.js', 'inline-block.js', 'inline-request.js', 'translation-settings.js', 'inline-model-execution.js']) {
       await context.page.evaluate(readFileSync(join(extensionDir, file), 'utf8'));
     }
     const result = await context.page.evaluate(

@@ -57,7 +57,7 @@ async function collectArticle() {
     const serialized = ChromeAiTranslatorInlineBlock.serializeBlock(candidate);
     if (!serialized.ok) continue;
     const translated = serialized.template.replace(/\b(e\.g\.|i\.e\.)/gi, 'for example');
-    abbreviationChecks.push(ChromeAiTranslatorInlineBlock.validateTranslatedTemplate(
+    abbreviationChecks.push(globalThis.ChromeAiTranslatorInlineTemplate.validateTranslatedTemplate(
       translated, serialized.contract
     ));
   }

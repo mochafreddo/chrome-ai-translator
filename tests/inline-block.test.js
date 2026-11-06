@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const codec = require('../extension/inline-block.js');
+const inlineTemplate = require('../extension/inline-template.js');
 
 const LINGUISTIC_SLASH_PROSE = Object.freeze([
   'and/or',
@@ -454,7 +455,7 @@ exports.tests = [
           const parentJob = [parent, `${entry.openToken}1단계${entry.closeToken}`];
           const childJobs = [[headingRecord, 'mise 설치'], [paragraphRecord, 'macOS나 Linux에서 mise를 설치합니다.']];
           for (const [record, translated] of childFirst ? [...childJobs, parentJob] : [parentJob, ...childJobs]) {
-            assert.equal(codec.validateTranslatedTemplate(translated, record.contract).ok, true);
+            assert.equal(inlineTemplate.validateTranslatedTemplate(translated, record.contract).ok, true);
             assert.equal(codec.applyTranslatedTemplate(record.snapshot, translated).ok, true);
           }
           assert.deepEqual(block.childNodes, outer);
@@ -499,8 +500,8 @@ exports.tests = [
       assert.equal(serialized.template.includes('Lapse'), false);
       button.setAttribute('disabled', '');
       const token = serialized.atoms[0].token;
-      assert.equal(codec.validateTranslatedTemplate('애니메이션 도구를 받습니다.', serialized.contract).ok, false);
-      assert.equal(codec.validateTranslatedTemplate(`${token}${token} 도구`, serialized.contract).ok, false);
+      assert.equal(inlineTemplate.validateTranslatedTemplate('애니메이션 도구를 받습니다.', serialized.contract).ok, false);
+      assert.equal(inlineTemplate.validateTranslatedTemplate(`${token}${token} 도구`, serialized.contract).ok, false);
       assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, `${token} 애니메이션 도구도 받습니다.`).ok, true);
       assert.equal(block.childNodes[0], button);
       assert.equal(button.childNodes[0], label);
@@ -601,8 +602,8 @@ exports.tests = [
         const translated = serialized.template.replace('Read ', '읽으세요: ')
           .replace(' and ', ' 및 ').replace('the guide', '안내서');
         const missingContainer = translated.replace(/⟦[^⟧]+:(?:OPEN|CLOSE):W1⟧/g, '');
-        assert.equal(codec.validateTranslatedTemplate(missingContainer, serialized.contract).ok, false);
-        assert.equal(codec.validateTranslatedTemplate(`빠져나온 본문${translated}`, serialized.contract).ok, false);
+        assert.equal(inlineTemplate.validateTranslatedTemplate(missingContainer, serialized.contract).ok, false);
+        assert.equal(inlineTemplate.validateTranslatedTemplate(`빠져나온 본문${translated}`, serialized.contract).ok, false);
         assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
         assert.equal(cell.childNodes[1], wrapper);
         assert.equal(wrapper.childNodes.includes(code), true);
@@ -651,7 +652,7 @@ exports.tests = [
       const serialized = codec.serializeBlock(block);
       assert.equal(serialized.ok, true);
       const translated = '예를 들면 이것이며, 즉 README.md 안내서입니다.';
-      assert.equal(codec.validateTranslatedTemplate(translated, serialized.contract).ok, true);
+      assert.equal(inlineTemplate.validateTranslatedTemplate(translated, serialized.contract).ok, true);
       assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
       assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
       assert.equal(block.textContent, 'Examples, e.g. this one, i.e. a guide in README.md.');
@@ -660,14 +661,14 @@ exports.tests = [
         document.body.appendChild(file);
         const record = codec.serializeBlock(file);
         assert.equal(record.ok, true);
-        assert.deepEqual(codec.validateTranslatedTemplate('안내서를 읽으세요.', record.contract),
+        assert.deepEqual(inlineTemplate.validateTranslatedTemplate('안내서를 읽으세요.', record.contract),
           { ok: false, errorCode: 'source_syntax_changed' }, source);
       }
       for (const abbreviation of ['e.g.', 'i.e.', 'E.g.', 'I.E.']) {
         const prose = element('p', text(`An example (${abbreviation} this one).`));
         document.body.appendChild(prose);
         const record = codec.serializeBlock(prose);
-        assert.equal(codec.validateTranslatedTemplate('예를 들면 이것입니다.', record.contract).ok, true, abbreviation);
+        assert.equal(inlineTemplate.validateTranslatedTemplate('예를 들면 이것입니다.', record.contract).ok, true, abbreviation);
       }
     },
   },
@@ -1542,7 +1543,7 @@ exports.tests = [
       assert.deepEqual(serialized.atoms.map(({ label }) => label), ['@dev_1-name']);
       const wrapper = serialized.contract.entries.find((entry) => entry.kind === 'wrapper');
       const translated = `${wrapper.openToken}릴리스 노트${wrapper.closeToken}를 읽으세요. ${serialized.atoms[0].token}님 감사합니다.`;
-      assert.equal(codec.validateTranslatedTemplate(translated, serialized.contract).ok, true);
+      assert.equal(inlineTemplate.validateTranslatedTemplate(translated, serialized.contract).ok, true);
       assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
       assert.equal(block.textContent, '릴리스 노트를 읽으세요. @dev_1-name님 감사합니다.');
       assert.equal(account.getAttribute('href'), 'https://example.org/dev_1-name');
@@ -1566,7 +1567,7 @@ exports.tests = [
         assert.equal(serialized.ok, true);
         assert.equal(serialized.atoms.length, 0, label);
         const [wrapper] = serialized.contract.entries;
-        assert.equal(codec.validateTranslatedTemplate(
+        assert.equal(inlineTemplate.validateTranslatedTemplate(
           `${wrapper.openToken}사용자 소개${wrapper.closeToken}`, serialized.contract
         ).ok, true, label);
       }
@@ -1603,21 +1604,21 @@ exports.tests = [
         (entry) => entry.tagName === 'A'
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${link.openToken}저장소 mattpocock/skills${link.closeToken}`,
           serialized.contract
         ).ok,
         true
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${link.openToken}mattpocock/skills는 저장소${link.closeToken}`,
           serialized.contract
         ).ok,
         true
       );
       assert.deepEqual(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${link.openToken}저장소 other/project${link.closeToken}`,
           serialized.contract
         ),
@@ -1639,7 +1640,7 @@ exports.tests = [
         assert.equal(syntaxRecord.ok, true);
         for (const changed of changedValues) {
           assert.deepEqual(
-            codec.validateTranslatedTemplate(
+            inlineTemplate.validateTranslatedTemplate(
               changed,
               syntaxRecord.contract
             ),
@@ -1663,7 +1664,7 @@ exports.tests = [
         const proseRecord = codec.serializeBlock(prose);
         assert.equal(proseRecord.ok, true);
         assert.equal(
-          codec.validateTranslatedTemplate(
+          inlineTemplate.validateTranslatedTemplate(
             '하나를 선택하세요.',
             proseRecord.contract
           ).ok,
@@ -1712,7 +1713,7 @@ exports.tests = [
       );
       const translated = `${atom.token}와 같은 ${wrapper.openToken}추론 모델${wrapper.closeToken}은 내부 추론 토큰을 사용합니다.`;
 
-      const result = codec.validateTranslatedTemplate(
+      const result = inlineTemplate.validateTranslatedTemplate(
         translated,
         serialized.contract
       );
@@ -1735,21 +1736,21 @@ exports.tests = [
       );
 
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           serialized.template.replace(atom.token, ''),
           serialized.contract
         ).errorCode,
         'token_missing'
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${serialized.template}${atom.token}`,
           serialized.contract
         ).errorCode,
         'token_duplicate'
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           serialized.template.replace(
             atom.token,
             `⟦${serialized.contract.namespace}:ATOM:A999⟧`
@@ -1759,14 +1760,14 @@ exports.tests = [
         'token_unknown'
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${serialized.template}⟦${serialized.contract.namespace}:BOGUS:X1⟧`,
           serialized.contract
         ).errorCode,
         'token_unknown'
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           serialized.template
             .replace(wrapper.openToken, '')
             .replace(wrapper.closeToken, `${wrapper.closeToken}${wrapper.openToken}`),
@@ -1796,7 +1797,7 @@ exports.tests = [
       assert.equal(serialized.ok, true);
       const translated = 'Docker Sandbox는 Claude가 실행할 수 있는 명령을 제한하지 않습니다.';
 
-      const validated = codec.validateTranslatedTemplate(translated, serialized.contract);
+      const validated = inlineTemplate.validateTranslatedTemplate(translated, serialized.contract);
       assert.equal(validated.ok, true);
       assert.deepEqual(validated.droppedWrappers, ['W1']);
       assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, translated).ok, true);
@@ -1824,7 +1825,7 @@ exports.tests = [
       const byTag = (tag) => serialized.contract.entries.find((entry) => entry.tagName === tag);
       const without = (...tokens) =>
         tokens.reduce((value, token) => value.split(token).join(''), serialized.template);
-      const validate = (value) => codec.validateTranslatedTemplate(value, serialized.contract);
+      const validate = (value) => inlineTemplate.validateTranslatedTemplate(value, serialized.contract);
 
       assert.equal(validate(without(byTag('A').openToken, byTag('A').closeToken)).errorCode, 'token_missing');
       assert.equal(validate(without(byTag('EM').closeToken)).errorCode, 'token_missing');
@@ -1842,21 +1843,21 @@ exports.tests = [
       const { serialized } = createReasoningFixture();
 
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${serialized.template}⟦${serialized.contract.namespace}:ATOM:A999`,
           serialized.contract
         ).errorCode,
         'token_unknown'
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${serialized.template}⟦FORGED:ATOM:X1⟧`,
           serialized.contract
         ).errorCode,
         'token_unknown'
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${serialized.template}⟦FORGED:ATOM:X1`,
           serialized.contract
         ).errorCode,
@@ -1875,11 +1876,11 @@ exports.tests = [
 
       assert.equal(serialized.ok, true);
       assert.equal(
-        codec.validateTranslatedTemplate(literal, serialized.contract).ok,
+        inlineTemplate.validateTranslatedTemplate(literal, serialized.contract).ok,
         true
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${literal} ⟦FORGED:ATOM:X1⟧`,
           serialized.contract
         ).errorCode,
@@ -1898,11 +1899,11 @@ exports.tests = [
 
       assert.equal(serialized.ok, true);
       assert.equal(
-        codec.validateTranslatedTemplate(literal, serialized.contract).ok,
+        inlineTemplate.validateTranslatedTemplate(literal, serialized.contract).ok,
         true
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${literal} ⟦FORGED:ATOM:X1 remains text.`,
           serialized.contract
         ).errorCode,
@@ -1928,7 +1929,7 @@ exports.tests = [
       const translated = `${outer.openToken}문서를 읽으세요${outer.closeToken}${inner.openToken}가이드${inner.closeToken}`;
 
       assert.equal(
-        codec.validateTranslatedTemplate(translated, serialized.contract)
+        inlineTemplate.validateTranslatedTemplate(translated, serialized.contract)
           .errorCode,
         'token_parent_changed'
       );
@@ -1943,7 +1944,7 @@ exports.tests = [
       )}`;
 
       assert.equal(
-        codec.validateTranslatedTemplate(translated, serialized.contract)
+        inlineTemplate.validateTranslatedTemplate(translated, serialized.contract)
           .errorCode,
         'output_too_long'
       );
@@ -1965,11 +1966,11 @@ exports.tests = [
       );
 
       assert.equal(
-        codec.validateTranslatedTemplate('', plain.contract).errorCode,
+        inlineTemplate.validateTranslatedTemplate('', plain.contract).errorCode,
         'output_parse_failed'
       );
       assert.equal(
-        codec.validateTranslatedTemplate(
+        inlineTemplate.validateTranslatedTemplate(
           `${atom.token}${wrapper.openToken}${wrapper.closeToken}`,
           serialized.contract
         ).errorCode,

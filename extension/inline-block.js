@@ -9,15 +9,8 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createCodec(globalScope) {
   'use strict';
 
-  // The Placeholder Token contract, which this codec shares with Side Panel Translation's
-  // rehydration half in `extension/markdown-rehydration.js`. In the page it is already loaded
-  // — the injected file list puts it ahead of this file — and under a CommonJS loader it comes
-  // in by require, which is how the unit suite reaches it.
-  const placeholderTokens =
-    globalScope?.ChromeAiTranslatorPlaceholderTokens ||
-    (typeof module !== 'undefined' && module.exports
-      ? require('./placeholder-tokens.js')
-      : null);
+  const inlineTemplate = globalScope.ChromeAiTranslatorInlineTemplate ||
+    (typeof module !== 'undefined' && module.exports ? require('./inline-template.js') : null);
 
   const CODEC_VERSION = 1;
   const SEMANTIC_BLOCK_TAGS = new Set([
@@ -91,19 +84,13 @@
   // deciding whether a link label is a protected atom, and the content script, deciding
   // whether a candidate text node is worth scanning at all. It lives here because the codec
   // already owns what a protected atom is, and one home is what keeps the two answers equal.
-  function hasSourcePathFileExtension(value) {
-    const text = String(value || '');
-    return !/^(?:e\.g|i\.e)\.?$/i.test(text) &&
-      /\.[\p{L}][\p{L}\p{N}]{0,9}$/u.test(text);
-  }
-
   function isCodeLikeInlineText(text) {
     const value = String(text || '').trim();
     if (!value) return true;
     if (/^https?:\/\//i.test(value)) return true;
     if (
       /^[\w./-]+$/i.test(value) &&
-      hasSourcePathFileExtension(value)
+      inlineTemplate.hasSourcePathFileExtension(value)
     ) {
       return true;
     }
@@ -337,96 +324,6 @@
       x: parseLength(x, referenceWidth),
       y: parseLength(y, referenceHeight),
     };
-  }
-
-  function getTokenLikeLiterals(value) {
-    const text = String(value || '');
-    return [
-      ...Array.from(text.matchAll(/⟦[^⟦⟧]*:[^⟦⟧]*⟧/g), (match) => match[0]),
-      ...Array.from(
-        text.matchAll(/⟦[^⟦⟧]*:[^⟦⟧]*(?=⟦|$)/g),
-        (match) => match[0]
-      ),
-    ];
-  }
-
-  function getSourceSyntaxLiterals(value, contextualLiterals = [], entries = []) {
-    const counts = new Map();
-    const add = (literal) => {
-      const normalized = String(literal || '');
-      if (!normalized) return;
-      const count = String(value || '').split(normalized).length - 1;
-      if (count > 0) counts.set(normalized, count);
-    };
-    const text = String(value || '');
-    let commandText = text;
-    for (const entry of entries) {
-      if (entry.kind === 'wrapper') {
-        commandText = commandText.split(entry.openToken).join('').split(entry.closeToken).join('');
-      } else {
-        commandText = commandText.split(entry.token).join(entry.tagName === 'BR' ? '\n' : '');
-      }
-    }
-    if (/^\$ [a-z]/.test(commandText) && !/[\r\n\u2028\u2029]/.test(commandText)) add(text);
-    for (const match of text.matchAll(/\[[^\]\r\n|]+\|[^\]\r\n]+\]/g)) {
-      add(match[0]);
-    }
-    for (const match of text.matchAll(
-      /(^|[\s([{"'`])((?:~\/|\.{1,2}\/|\/)[\p{L}\p{N}._~+@%-]+(?:\/[\p{L}\p{N}._~+@%-]+)*)/gu
-    )) {
-      add(match[2].replace(/[.,;:!?]+$/u, ''));
-    }
-    for (const match of text.matchAll(
-      /(^|[^\p{L}\p{N}_.~+@%/-])([\p{L}\p{N}_.~+@%-]+(?:\/[\p{L}\p{N}_.~+@%-]+)*)(?=$|[^\p{L}\p{N}_.~+@%/-])/gu
-    )) {
-      const literal = match[2].replace(/[.,;:!?]+$/u, '');
-      if (hasSourcePathFileExtension(literal)) {
-        add(literal);
-      }
-    }
-    for (const literal of contextualLiterals || []) add(literal);
-    return counts;
-  }
-
-  function stripSourceSyntax(value, contextualLiterals = []) {
-    let text = String(value || '');
-    for (const literal of getSourceSyntaxLiterals(
-      text,
-      contextualLiterals
-    ).keys()) {
-      text = text.split(literal).join(' ');
-    }
-    return text;
-  }
-
-  function isSourceSyntaxContinuation(text, index, direction) {
-    const value = String(text || '');
-    const character = value[index] || '';
-    if (/[A-Za-z0-9_~+@%/-]/.test(character)) return true;
-    if (character !== '.') return false;
-    const adjacent = value[index + direction] || '';
-    return /[\p{L}\p{N}]/u.test(adjacent);
-  }
-
-  function countPreservedSourceSyntax(value, literal) {
-    const text = String(value || '');
-    const expected = String(literal || '');
-    let count = 0;
-    let from = 0;
-    while (expected && from <= text.length - expected.length) {
-      const index = text.indexOf(expected, from);
-      if (index < 0) break;
-      const before = index - 1;
-      const after = index + expected.length;
-      if (
-        !isSourceSyntaxContinuation(text, before, -1) &&
-        !isSourceSyntaxContinuation(text, after, 1)
-      ) {
-        count += 1;
-      }
-      from = index + expected.length;
-    }
-    return count;
   }
 
   function getLinkedSourceSyntax(node) {
@@ -1004,7 +901,7 @@
     }
 
     function rememberLiteralTokens(value) {
-      for (const token of getTokenLikeLiterals(value)) {
+      for (const token of inlineTemplate.getTokenLikeLiterals(value)) {
         literalTokenCounts.set(token, (literalTokenCounts.get(token) || 0) + 1);
       }
     }
@@ -1198,7 +1095,7 @@
     }
 
     const sourceSyntax = Array.from(
-      getSourceSyntaxLiterals(template, contextualSourceSyntax, contractEntries),
+      inlineTemplate.getSourceSyntaxLiterals(template, contextualSourceSyntax, contractEntries),
       ([value, count]) => ({ value, count })
     );
     const contract = {
@@ -1271,136 +1168,8 @@
     };
   }
 
-  function escapeRegExp(value) {
-    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  // This codec's half of the adapter onto the shared contract: a wrapper entry is a pair, an
-  // atom entry is an atom, and nothing else in a contract is a Placeholder Token. The other
-  // half is that the failure strings the shared module returns are already this codec's
-  // reported codes, so `validationError` passes them through unchanged — they cross the worker
-  // seam and `inline-model-execution.js` maps them into `structure.*` from there.
-  function classifyContractEntry(entry) {
-    if (entry.kind === 'wrapper') return placeholderTokens.PAIR;
-    if (entry.kind === 'atom') return placeholderTokens.ATOM;
-    return null;
-  }
-
   function validationError(errorCode) {
     return { ok: false, errorCode };
-  }
-
-  function validateTranslatedTemplate(template, contract) {
-    if (
-      typeof template !== 'string' ||
-      !contract ||
-      typeof contract.namespace !== 'string' ||
-      !Array.isArray(contract.entries)
-    ) {
-      return validationError('output_parse_failed');
-    }
-    if (
-      Number.isFinite(contract.maxOutputChars) &&
-      template.length > contract.maxOutputChars
-    ) {
-      return validationError('output_too_long');
-    }
-    for (const item of contract.sourceSyntax || []) {
-      if (
-        typeof item?.value !== 'string' ||
-        !item.value ||
-        !Number.isInteger(item.count) ||
-        item.count < 1 ||
-        countPreservedSourceSyntax(template, item.value) !== item.count
-      ) {
-        return validationError('source_syntax_changed');
-      }
-    }
-
-    // A droppable pair counts as dropped only when both its tokens are gone.
-    const droppedWrappers = contract.entries
-      .filter(
-        (entry) =>
-          entry.droppable === true &&
-          !template.includes(entry.openToken) &&
-          !template.includes(entry.closeToken)
-      )
-      .map((entry) => entry.id);
-    const expectedTokens = placeholderTokens.enumerateExpectedTokens(
-      contract.entries.filter((entry) => !droppedWrappers.includes(entry.id)),
-      classifyContractEntry
-    );
-    const expected = new Set(expectedTokens.map((token) => token.value));
-    const literalTokenLimits = new Map();
-    for (const item of contract.literalTokens || []) {
-      if (
-        typeof item?.value !== 'string' ||
-        !item.value ||
-        !Number.isInteger(item.count) ||
-        item.count < 1
-      ) {
-        return validationError('output_parse_failed');
-      }
-      literalTokenLimits.set(item.value, item.count);
-    }
-    const literalTokenCounts = new Map();
-    for (const token of getTokenLikeLiterals(template)) {
-      if (expected.has(token)) continue;
-      const count = (literalTokenCounts.get(token) || 0) + 1;
-      if (count > (literalTokenLimits.get(token) || 0)) {
-        return validationError('token_unknown');
-      }
-      literalTokenCounts.set(token, count);
-    }
-    // Inventions inside this block's own namespace, which the shared residue test cannot see
-    // on its own: a token that is shaped right and closed right but names an entry the request
-    // never sent leaves no residue behind. The two questions together are why an answer this
-    // codec accepts holds only tokens it sent.
-    const tokenExpression = new RegExp(
-      `⟦${escapeRegExp(contract.namespace)}:[^⟧]+⟧`,
-      'g'
-    );
-    for (const match of template.matchAll(tokenExpression)) {
-      if (!expected.has(match[0])) return validationError('token_unknown');
-    }
-    const countFailure = placeholderTokens.findCountFailure(
-      template,
-      expectedTokens
-    );
-    if (countFailure) return validationError(countFailure);
-    if (
-      placeholderTokens.hasUnexpectedNamespaceResidue(
-        template,
-        contract.namespace,
-        expectedTokens
-      )
-    ) {
-      return validationError('token_unknown');
-    }
-    if (
-      contract.requiresText === true &&
-      !/[\p{L}\p{N}]/u.test(template.replace(tokenExpression, ''))
-    ) {
-      return validationError('output_parse_failed');
-    }
-
-    // The walk with parents enforced: this codec's entries record which entry they sat inside,
-    // and its tree supplies the children prepared by `applyTranslatedTemplate`.
-    const walked = placeholderTokens.walkExpectedTokens(
-      template,
-      expectedTokens,
-      { trackParents: true }
-    );
-    if (!walked.ok) return validationError(walked.reason);
-    if (
-      contract.entries.some((entry) => entry.kind === 'wrapper' &&
-        entry.tagName === 'DIV' && entry.parentId === 'ROOT') &&
-      walked.tree.children.some((child) => child.type === 'text' && child.value.trim())
-    ) {
-      return validationError('token_parent_changed');
-    }
-
-    return { ok: true, tree: walked.tree, template, droppedWrappers };
   }
 
   function sameNodeList(actual, expected) {
@@ -1497,7 +1266,7 @@
     if (!matchesOriginalOwnership(snapshot)) {
       return validationError('block_changed');
     }
-    const validated = validateTranslatedTemplate(
+    const validated = inlineTemplate.validateTranslatedTemplate(
       translatedTemplate,
       snapshot.contract
     );
@@ -1683,8 +1452,6 @@
     serializeBlock,
     isCodeLikeInlineText,
     isProtectedAtomicLinkLabel,
-    stripSourceSyntax,
     restoreBlock,
-    validateTranslatedTemplate,
   };
 });

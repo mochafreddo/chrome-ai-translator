@@ -54,7 +54,8 @@ Every extension file is a classic script; there is no bundler or build step. The
 | [inline-translation-operation.js](../extension/inline-translation-operation.js) | Start/Stop/Original text orchestration, authorization, settings lookup, scanner lifecycle, request transport, and feedback eligibility |
 | [inline-translation-session.js](../extension/inline-translation-session.js) | Page-visit budget, cache, progress, per-Operation records, admission, batching, settlement, application, retry, and restore |
 | [inline-viewport.js](../extension/inline-viewport.js) | Discovery, bounded scan continuation, viewport reset, and scroll/resize/mutation watchers |
-| [inline-block.js](../extension/inline-block.js) | Semantic Block classification, serialization, ownership checks, template validation, application, and restoration |
+| [inline-block.js](../extension/inline-block.js) | Semantic Block classification, serialization, ownership checks, application, and restoration |
+| [inline-template.js](../extension/inline-template.js) | Shared Source Syntax and Placeholder Token checks for serialized templates. Source records require all tokens; translated answers may omit an eligible emphasis pair under ADR-0010. |
 | [inline-request.js](../extension/inline-request.js) | Pure source-batch validation, actual/reserved record cost, initial/repair wire preparation, and bounded optional repair context |
 | [inline-model-execution.js](../extension/inline-model-execution.js) | Inline request construction, protocol/structure/quality validation, one repair, outcomes, and model-validation metadata |
 | [inline-local-diagnostic-transport.js](../extension/inline-local-diagnostic-transport.js) | Local diagnostic outbox batching, deferred flush, one retry, and Stop-time sending |

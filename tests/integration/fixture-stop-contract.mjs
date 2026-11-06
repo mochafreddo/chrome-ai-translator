@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const EXTENSION_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'extension');
 
 export async function readStopBlockContract(page) {
-  const codec = ['placeholder-tokens.js', 'inline-block.js']
+  const codec = ['placeholder-tokens.js', 'inline-template.js', 'inline-block.js']
     .map(file => readFileSync(join(EXTENSION_DIR, file), 'utf8')).join('\n');
   return page.evaluate(`${codec}
     (() => {

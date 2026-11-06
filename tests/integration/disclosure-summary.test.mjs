@@ -30,7 +30,7 @@ const SESSION = 'chrome-ai-translator-disclosure-summary';
 const { check, failures, finish } = createChecks('disclosure summary');
 
 async function injectCodec(evaluate) {
-  for (const file of ['placeholder-tokens.js', 'inline-block.js']) {
+  for (const file of ['placeholder-tokens.js', 'inline-template.js', 'inline-block.js']) {
     await evaluate(readFileSync(join(EXTENSION_DIR, file), 'utf8'));
   }
 }

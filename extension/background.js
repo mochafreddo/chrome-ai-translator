@@ -1,7 +1,7 @@
 // background.js (MV3 service worker)
 // Personal use only: API key is stored locally by the user.
 
-// The two modules below that read a translation back — the inline-block codec and Side Panel
+// The two modules below that read a translation back — the inline template validator and Side Panel
 // Translation's rehydration half — take the Placeholder Token contract off the global scope as
 // they load, so it goes in ahead of them rather than beside them.
 if (
@@ -12,9 +12,9 @@ if (
 }
 if (
   typeof importScripts === 'function' &&
-  !globalThis.ChromeAiTranslatorInlineBlock
+  !globalThis.ChromeAiTranslatorInlineTemplate
 ) {
-  importScripts('inline-block.js');
+  importScripts('inline-template.js');
 }
 if (typeof importScripts === 'function' && !globalThis.ChromeAiTranslatorInlineRequest) {
   importScripts('inline-request.js');
@@ -252,6 +252,7 @@ function getInlineContentScriptFiles() {
   return [
     'default-model.js',
     'placeholder-tokens.js',
+    'inline-template.js',
     'inline-block.js',
     'inline-request.js',
     'inline-diagnostics-protocol.js',
