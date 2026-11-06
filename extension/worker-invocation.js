@@ -5,7 +5,7 @@
 
   function createWorkerInvocation({
     getChrome, getSettings, contentScriptFiles, inlineErrors, describeFailure,
-    captureDocument, isCurrent = () => true, documentUnavailable,
+    captureDocument, isCurrent, documentUnavailable,
   }) {
     function clearError(tabId) {
       if (inlineErrors.get(tabId)) inlineErrors.set(tabId, null);
@@ -22,7 +22,7 @@
       } catch {}
     }
 
-    async function ensureContentScript(tabId, documentId, assertCurrent = () => {}) {
+    async function ensureContentScript(tabId, documentId, assertCurrent) {
       const chrome = getChrome();
       assertCurrent();
       await chrome.scripting.executeScript({

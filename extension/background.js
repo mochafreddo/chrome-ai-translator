@@ -413,12 +413,6 @@ function createBackgroundWorker(platform = {}) {
     return givenChrome;
   }
 
-  // Named `fetch` so the one request in this worker reads as it always has.
-  function fetch(...args) {
-    if (!givenFetch) throw missingPlatform('a network');
-    return givenFetch(...args);
-  }
-
   const inlineDiagnostics = inlineDiagnosticsController.createInlineDiagnostics({
     chrome: givenChrome,
     crypto: givenCrypto,
@@ -678,7 +672,7 @@ function createBackgroundWorker(platform = {}) {
 
     let res;
     try {
-      res = await fetch(openrouter ? 'https://openrouter.ai/api/v1/responses' : 'https://api.openai.com/v1/responses', {
+      res = await givenFetch(openrouter ? 'https://openrouter.ai/api/v1/responses' : 'https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

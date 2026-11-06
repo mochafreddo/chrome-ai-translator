@@ -45,7 +45,7 @@
     let stopped = false;
     let scanStack = null;
     let mutationSweep = false;
-    let freshPassPending = false;
+    let rescanAfterCurrentSweep = false;
     let timer = null;
     let observer = null;
     let scrollTargets = [];
@@ -318,8 +318,8 @@
       if (scanStack) rescan();
       else {
         mutationSweep = false;
-        if (freshPassPending) {
-          freshPassPending = false;
+        if (rescanAfterCurrentSweep) {
+          rescanAfterCurrentSweep = false;
           mutationSweep = true;
           rescan();
         }
@@ -343,7 +343,7 @@
       if (!isCurrent()) return;
       scanStack = null;
       mutationSweep = true;
-      freshPassPending = false;
+      rescanAfterCurrentSweep = false;
       session.resetQueue();
       rescan();
     }
@@ -370,8 +370,7 @@
           onViewportChange();
           return;
         }
-        // Finish a restarted sweep before revisiting changes behind its cursor.
-        if (scanStack) freshPassPending = true;
+        if (scanStack) rescanAfterCurrentSweep = true;
         session.resetQueue();
         rescan();
       }
@@ -398,7 +397,7 @@
     function stopWatching() {
       scanStack = null;
       mutationSweep = false;
-      freshPassPending = false;
+      rescanAfterCurrentSweep = false;
       if (timer !== null) {
         platform.clearTimeout(timer);
         timer = null;

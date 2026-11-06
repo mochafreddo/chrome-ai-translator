@@ -748,25 +748,16 @@
     );
     const title = normalizeInlineText(metadata.title);
     const context = createSerializationContext(namespace, baseUrl, title);
-    let blocks = isEligibleRoot(root) ? serializeChildBlocks(root, context) : [];
-    if (title) {
-      const equivalentTitle = block => isEquivalentTitle(block, title);
-      if (equivalentTitle(blocks[0])) {
-        blocks = [
-          blocks[0],
-          ...blocks.slice(1).filter((block) => !equivalentTitle(block)),
-        ];
-      } else {
-        blocks = blocks.filter((block) => !equivalentTitle(block));
-        blocks.unshift({
-          id: `m${(context.nextBlockId += 1)}`,
-          kind: 'heading',
-          level: 1,
-          template: `# ${title}`,
-          originalMarkdown: `# ${title}`,
-          entries: [],
-        });
-      }
+    const blocks = isEligibleRoot(root) ? serializeChildBlocks(root, context) : [];
+    if (title && !isEquivalentTitle(blocks[0], title)) {
+      blocks.unshift({
+        id: `m${(context.nextBlockId += 1)}`,
+        kind: 'heading',
+        level: 1,
+        template: `# ${title}`,
+        originalMarkdown: `# ${title}`,
+        entries: [],
+      });
     }
     checkDocumentLength(blocks.reduce((length, block, index) =>
       length + (index ? 2 : 0) + getOriginalLength(block.originalMarkdown, context), 0));
