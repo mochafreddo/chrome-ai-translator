@@ -894,6 +894,8 @@ exports.tests = [
           await Promise.resolve();
         }
 
+        await refreshInterval();
+        assert.equal(getElement('btnInlineTranslate').disabled, false);
         assert.equal(getElement('btnInlineTranslate').textContent, 'Translate visible text');
         assert.equal(getElement('btnInlineStop').disabled, true);
         assert.equal(getElement('btnInlineRestore').disabled, true);

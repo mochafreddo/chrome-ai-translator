@@ -59,12 +59,20 @@ const suiteFiles = [
   }
   const files = suiteFiles.filter((file) => !options['--suite'] || file === options['--suite']);
   let selected = 0;
+  let pending;
+  process.once('beforeExit', () => {
+    if (pending) {
+      console.error(`FAIL ${pending} - test did not settle`);
+      process.exitCode = 1;
+    }
+  });
 
   for (const file of files) {
     const suite = require(`./${file}.test`);
     for (const test of suite.tests) {
       if (options['--test'] && test.name !== options['--test']) continue;
       selected += 1;
+      pending = `${suite.name} - ${test.name}`;
       try {
         await test.fn();
         console.log(`PASS ${suite.name} - ${test.name}`);
@@ -72,6 +80,8 @@ const suiteFiles = [
         failures += 1;
         console.error(`FAIL ${suite.name} - ${test.name}`);
         console.error(error?.stack || error);
+      } finally {
+        pending = null;
       }
     }
   }

@@ -8,6 +8,17 @@ const run = (...args) => spawnSync(process.execPath, [path.join(__dirname, 'run.
 
 exports.name = 'unit runner';
 exports.tests = [{
+  name: 'exits unsuccessfully when a selected test never settles',
+  fn() {
+    const result = spawnSync(process.execPath, ['-e', `
+      require('./default-model.test').tests[0].fn = () => new Promise(() => {});
+      process.argv = [process.execPath, 'run.js', '--suite', 'default-model'];
+      require('./run.js');
+    `], { cwd: __dirname, encoding: 'utf8', timeout: 30000 });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /did not settle/);
+  },
+}, {
   name: 'selects a suite by its exact file stem',
   fn() {
     const result = run('--suite', 'default-model');

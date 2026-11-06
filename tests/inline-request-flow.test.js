@@ -15,6 +15,7 @@ function createWorker(answer, storageOptions = {}) {
   const worker = createBackgroundWorker({
     crypto: webcrypto,
     chrome: {
+      webNavigation: { getFrame: async () => ({ documentId: 'document-71' }) },
       runtime: { getManifest: () => ({ version: 'test' }) },
       storage: { local: {
         ...(storageOptions.supportsGetKeys === false ? {} : { async getKeys() {
@@ -47,7 +48,7 @@ function createWorker(answer, storageOptions = {}) {
     storageReads,
     storageWrites,
     send(message) {
-      return new Promise(resolve => worker.handlers.onMessage(message, { tab: { id: 71 } }, resolve));
+      return new Promise(resolve => worker.handlers.onMessage(message, { tab: { id: 71 }, documentId: 'document-71', frameId: 0 }, resolve));
     },
   };
 }

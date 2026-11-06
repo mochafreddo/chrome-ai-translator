@@ -265,7 +265,7 @@ function readInlineTranslationError(state) {
 
 // One owner for the panel's tab selection and both Translation displays. Adapters
 // supply Chrome queries and messages; rendering observes only the public display state.
-function createTabStateController({ queryActiveTab, sendMessage: send, render, refreshProvider }) {
+function createTabStateController({ queryActiveTab, readDocumentId, sendMessage: send, render, refreshProvider }) {
   let tabId = null;
   let documentId;
   const sendMessage = (message) => send({ ...message, ...(documentId ? { documentId } : {}) });
@@ -359,12 +359,11 @@ function createTabStateController({ queryActiveTab, sendMessage: send, render, r
   function forgetControlError() {
     controlError = '';
   }
-  function select(nextTabId, initiatingRequest = null, nextDocumentId) {
+  function select(nextTabId, nextDocumentId = null) {
     if (tabId === nextTabId && documentId === nextDocumentId) return;
-    // A query may discover the tab for its own action; other visits end pending actions.
     if (tabId !== null) {
-      if (inlineControl !== initiatingRequest) inlineControl = null;
-      if (translationRequest !== initiatingRequest) translationRequest = null;
+      inlineControl = null;
+      translationRequest = null;
     }
     tabId = nextTabId;
     documentId = nextDocumentId;
@@ -382,14 +381,13 @@ function createTabStateController({ queryActiveTab, sendMessage: send, render, r
     hasPageAccess = null;
     paint();
   }
-  async function resolveTab(initiatingRequest = null) {
+  async function resolveTab() {
     const version = ++queryVersion;
     const tab = await queryActiveTab();
     // A newer selection wins, but a poll confirming the same tab must not swallow
     // a button action that was waiting for its own query.
     if (version !== queryVersion) return tabId !== null && tab?.id === tabId && tab?.documentId === documentId;
-    const replaced = tab?.id === tabId && documentId && documentId !== tab?.documentId;
-    select(tab?.id ?? null, replaced ? null : initiatingRequest, tab?.documentId);
+    select(tab?.id ?? null, tab?.documentId);
     return tabId !== null;
   }
   async function refreshSelected(requestedControl = null) {
@@ -419,12 +417,13 @@ function createTabStateController({ queryActiveTab, sendMessage: send, render, r
     if (await resolveTab()) await refreshSelected();
   }
   async function runInlineControl(control) {
+    if (!documentId) return;
     const requestedControl = inlineControl = {};
     forgetControlError();
     paint();
     let requestedSelection = selection;
     try {
-      if (!(await resolveTab(requestedControl))) return;
+      if (!(await resolveTab())) return;
       if (inlineControl !== requestedControl) return;
       const requestedTab = tabId;
       requestedSelection = selection;
@@ -446,11 +445,12 @@ function createTabStateController({ queryActiveTab, sendMessage: send, render, r
     }
   }
   async function translate(settingsOverride, displayedProvider) {
+    if (!documentId) return;
     const request = translationRequest = {};
     let requestedSelection = selection;
     let startingState = null;
     try {
-      if (!(await resolveTab(request))) return;
+      if (!(await resolveTab())) return;
       if (translationRequest !== request && tabId !== null) return;
       const requestedTab = tabId;
       requestedSelection = selection;
@@ -506,22 +506,25 @@ function createTabStateController({ queryActiveTab, sendMessage: send, render, r
       return refresh();
     },
     refresh,
-    activate(info) {
-      if (info.windowId !== windowId) return Promise.resolve();
-      ++queryVersion;
+    async activate(info) {
+      if (info.windowId !== windowId) return;
+      const version = ++queryVersion;
       select(info.tabId);
-      return refresh();
+      const currentDocument = await readDocumentId(info.tabId);
+      if (version !== queryVersion) return;
+      select(info.tabId, currentDocument);
+      return refreshSelected();
     },
     navigate(info) {
       if (info.tabId !== tabId || info.frameId !== 0 || info.documentId === documentId) return;
       ++queryVersion;
-      select(tabId, null, info.documentId);
+      select(tabId, info.documentId);
       return refreshSelected();
     },
     receive(msg) {
       if (msg?.type !== 'STATE_UPDATED' || msg.tabId !== tabId) return;
       const incoming = msg.state;
-      if (documentId !== undefined && (incoming?.documentId ?? null) !== documentId) return;
+      if ((incoming?.documentId ?? null) !== documentId) return;
       if (!incoming || typeof incoming.workerEpoch !== 'string' ||
         retiredEpochs.has(incoming.workerEpoch)) return;
       if (incoming.workerEpoch !== state.workerEpoch) {
@@ -717,14 +720,18 @@ function setupTabs() {
 
 if (hasDocument) {
   let ownWindowId;
+  async function readDocumentId(tabId) {
+    const frame = await chrome.webNavigation.getFrame({ tabId, frameId: 0 }).catch(() => null);
+    return frame?.documentId || null;
+  }
   const tabState = createTabStateController({
     queryActiveTab: async () => {
       const tabs = await chrome.tabs.query({ active: true, windowId: ownWindowId });
       const tab = tabs?.[0];
       if (!tab) return null;
-      const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 }).catch(() => null);
-      return { id: tab.id, documentId: frame?.documentId || null };
+      return { id: tab.id, documentId: await readDocumentId(tab.id) };
     },
+    readDocumentId,
     sendMessage: (message) => {
       if (!message.documentId && message.type === 'GET_STATE') return chrome.runtime.sendMessage({ ...message, documentId: null });
       if (!message.documentId) return Promise.resolve({ ok: false, error: { message: MISSING_PAGE_ACCESS_MESSAGES.afterFailedAttempt } });

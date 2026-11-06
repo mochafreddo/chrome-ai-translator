@@ -35,6 +35,7 @@ function domPanel() {
   let settingsChanged;
   let settings = {};
   let frameId = 'doc-1';
+  let getFrame = async () => ({ documentId: frameId });
   let poll;
   let activated;
   let notified;
@@ -49,7 +50,7 @@ function domPanel() {
     return elements.get(id);
   }
   const chrome = {
-    webNavigation: { getFrame: async () => ({ documentId: frameId }),
+    webNavigation: { getFrame: (...args) => getFrame(...args),
       onCommitted: { addListener(fn) { committed = fn; } } },
     storage: { onChanged: { addListener(fn) { settingsChanged = fn; } } },
     windows: { getCurrent: async () => ({ id: 10 }) },
@@ -78,12 +79,36 @@ function domPanel() {
   vm.runInContext(fs.readFileSync(require.resolve('../extension/sidepanel.js'), 'utf8'), context);
   return { element, sent, focused: () => focused, setSend(fn) { send = fn; }, poll() { poll(); },
     activate(id, windowId = 10) { active = windowId === 10 ? id : active; activated?.({ tabId: id, windowId }); },
+    setFrame(fn) { getFrame = fn; },
     changeSettings(value, notify = true) { settings = value; if (notify) settingsChanged?.({ settings: {} }, 'local'); },
     navigate(id) { frameId = id; committed?.({ tabId: active, frameId: 0, documentId: id }); },
     notify(msg) { notified({ ...msg, state: { documentId: frameId, ...msg.state } }); } };
 }
 exports.name = 'sidepanel tab state';
 exports.tests = [
+  {
+    name: 'activation cannot publish an old article or forward a click while its document is unknown',
+    async fn() {
+      const panel = domPanel();
+      await settle();
+      const activation = deferred();
+      let reads = 0;
+      panel.setFrame(() => ++reads === 1 ? activation.promise : Promise.resolve({ documentId: 'replacement' }));
+      panel.activate(2);
+      panel.notify({ type: 'STATE_UPDATED', tabId: 2, state: { ...state('departed'), documentId: 'old-document' } });
+      await settle();
+      assert.doesNotMatch(panel.element('translated').textContent, /departed/);
+      panel.element('btnTranslate').listeners.click();
+      panel.element('btnInlineTranslate').listeners.click();
+      await settle();
+      assert.equal(panel.sent.some(msg => ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)), false);
+      activation.resolve({ documentId: 'replacement' });
+      await settle();
+      panel.element('btnTranslate').listeners.click();
+      await settle();
+      assert.equal(panel.sent.find(msg => msg.type === 'TRANSLATE_TAB').documentId, 'replacement');
+    },
+  },
   {
     name: 'panel refreshes a mismatched provider and requires a second click',
     async fn() {
@@ -394,17 +419,23 @@ function modulePanel() {
   let send = (message) => response(message.type, String(message.tabId));
   const sent = [];
   const controller = helpers.createTabStateController({
-    queryActiveTab: () => query(),
+    queryActiveTab: async () => {
+      const tab = await query();
+      return tab ? { ...tab, documentId: 'doc-' + tab.id } : null;
+    },
+    readDocumentId: async tabId => 'doc-' + tabId,
     sendMessage(message) { sent.push(message); return send(message); },
     render(display) { displayed = display; renders += 1; },
   });
+  const receive = controller.receive;
+  controller.receive = msg => receive({ ...msg, state: { documentId: 'doc-' + msg.tabId, ...msg.state } });
   return { controller, sent, display: () => displayed, renderCount: () => renders,
     setQuery(fn) { query = fn; }, setSend(fn) { send = fn; },
     activate(id, windowId = 10) { if (windowId === 10) active = id; return controller.activate({ tabId: id, windowId }); } };
 }
 
 exports.tests.push({
-  name: 'Inline control follows the active tab discovered by its own query',
+  name: 'Inline control requires another click when its query discovers a different tab',
   async fn() {
     const panel = modulePanel();
     await panel.controller.start(10);
@@ -413,16 +444,16 @@ exports.tests.push({
       ? { ok: false, error: { message: 'new tab control failed' } }
       : response(msg.type, '2'));
     await panel.controller.runInlineControl('START');
-    assert.deepEqual(panel.sent.filter(msg => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), [
-      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 2, control: 'START' },
-    ]);
+    assert.deepEqual(panel.sent.filter(msg => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), []);
+    await panel.controller.runInlineControl('START');
+    assert.equal(panel.sent.find(msg => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL').documentId, 'doc-2');
     assert.equal(panel.display().tabId, 2);
     assert.equal(panel.display().inline.controlError, 'new tab control failed');
   },
 });
 
 exports.tests.push({
-  name: 'Translate follows the active tab discovered by its own query',
+  name: 'Translate requires another click when its query discovers a different tab',
   async fn() {
     const panel = modulePanel();
     await panel.controller.start(10);
@@ -431,9 +462,9 @@ exports.tests.push({
       ? { ok: false, error: { message: 'new tab translation failed' } }
       : response(msg.type, '2'));
     await panel.controller.translate({ targetLanguage: 'Korean' });
-    assert.deepEqual(panel.sent.filter(msg => msg.type === 'TRANSLATE_TAB'), [
-      { type: 'TRANSLATE_TAB', tabId: 2, settingsOverride: { targetLanguage: 'Korean' } },
-    ]);
+    assert.deepEqual(panel.sent.filter(msg => msg.type === 'TRANSLATE_TAB'), []);
+    await panel.controller.translate({ targetLanguage: 'Korean' });
+    assert.equal(panel.sent.find(msg => msg.type === 'TRANSLATE_TAB').documentId, 'doc-2');
     assert.equal(panel.display().tabId, 2);
     assert.equal(panel.display().panelError, 'new tab translation failed');
   },
@@ -1067,9 +1098,9 @@ exports.tests.push(
       await panel.controller.translate({ targetLanguage: 'Korean' });
       assert.match(panel.display().panelError, /lost a link or code marker/);
       const control = panel.sent.find((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL');
-      assert.deepEqual(control, { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, control: 'STOP' });
+      assert.deepEqual(control, { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, documentId: 'doc-1', control: 'STOP' });
       const translation = panel.sent.find((msg) => msg.type === 'TRANSLATE_TAB');
-      assert.deepEqual(translation, { type: 'TRANSLATE_TAB', tabId: 1, settingsOverride: { targetLanguage: 'Korean' } });
+      assert.deepEqual(translation, { type: 'TRANSLATE_TAB', tabId: 1, documentId: 'doc-1', settingsOverride: { targetLanguage: 'Korean' } });
     },
   },
   {
@@ -1116,7 +1147,7 @@ exports.tests.push(...[false, true].map((actual) => ({
       assert.equal(panel.element('inlineError').textContent, 'shortcut notified');
       assert.equal(panel.element('inlineStatus').textContent, 'inline valid inline');
     } else {
-      assert.deepEqual(panel.display().state, state('notified'));
+      assert.deepEqual(panel.display().state, { ...state('notified'), documentId: 'doc-1' });
       assert.equal(panel.display().inline.invocationError, 'shortcut notified');
       assert.equal(panel.display().inline.snapshot.progress, 'inline valid inline');
     }
@@ -1275,7 +1306,7 @@ exports.tests.push(...['stop', 'restore', 'start'].map((control) => ({
     waiting.resolve({ id: 1 });
     await old;
     assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), [
-      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, control },
+      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, documentId: 'doc-1', control },
     ]);
   },
 })));
@@ -1299,15 +1330,13 @@ exports.tests.push(...[false, true].map((returnToA) => ({
 })));
 
 exports.tests.push({
-  name: 'an initial control selects its queried tab before sending',
+  name: 'an initial control waits for an identified document before sending',
   async fn() {
     const panel = modulePanel();
     panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
       ? { ok: true } : response(msg.type, 'current'));
     await panel.controller.runInlineControl('start');
-    assert.deepEqual(panel.sent.filter((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'), [
-      { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, control: 'start' },
-    ]);
+    assert.deepEqual(panel.sent, []);
   },
 });
 
@@ -1371,9 +1400,9 @@ exports.tests.push(...['control', 'translate'].map((action) => ({
         pending.resolve({ ok: true, skipped: true });
         await settle();
         assert.deepEqual(panel.sent.slice(before), [
-          { type: 'GET_STATE', tabId: 1, ...(action === 'control'
+          { type: 'GET_STATE', tabId: 1, documentId: 'doc-1', ...(action === 'control'
             ? { knownBody: { workerEpoch: 'worker-fixture', bodyVersion: 1 } } : {}) },
-          { type: 'GET_INLINE_TRANSLATION_STATE', tabId: 1 },
+          { type: 'GET_INLINE_TRANSLATION_STATE', tabId: 1, documentId: 'doc-1' },
         ]);
       }
       panel.setSend((msg) => response(msg.type, 'new visit'));
