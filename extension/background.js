@@ -1,9 +1,6 @@
 // background.js (MV3 service worker)
 // Personal use only: API key is stored locally by the user.
 
-// The two modules below that read a translation back — the inline template validator and Side Panel
-// Translation's rehydration half — take the Placeholder Token contract off the global scope as
-// they load, so it goes in ahead of them rather than beside them.
 if (
   typeof importScripts === 'function' &&
   !globalThis.ChromeAiTranslatorPlaceholderTokens

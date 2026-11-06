@@ -123,10 +123,7 @@
     const sourceSyntax = Array.isArray(contract?.sourceSyntax)
       ? contract.sourceSyntax.map((item) => removeContractTokens(item?.value, contract)).filter(Boolean)
       : [];
-    const proseOnly = inlineTemplate.stripSourceSyntax(
-      String(value || ''),
-      sourceSyntax
-    );
+    const proseOnly = inlineTemplate.stripSourceSyntax(value, sourceSyntax);
     return Array.from(
       proseOnly.matchAll(/[A-Za-z]+(?:['’-][A-Za-z]+)*|[,&/·]/g),
       (match) => match[0]

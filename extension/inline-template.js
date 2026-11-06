@@ -71,20 +71,17 @@
   }
 
   function isSourceSyntaxContinuation(text, index, direction) {
-    const value = String(text || '');
-    const character = value[index] || '';
+    const character = text[index] || '';
     if (/[A-Za-z0-9_~+@%/-]/.test(character)) return true;
     if (character !== '.') return false;
-    const adjacent = value[index + direction] || '';
+    const adjacent = text[index + direction] || '';
     return /[\p{L}\p{N}]/u.test(adjacent);
   }
 
-  function countPreservedSourceSyntax(value, literal) {
-    const text = String(value || '');
-    const expected = String(literal || '');
+  function countPreservedSourceSyntax(text, expected) {
     let count = 0;
     let from = 0;
-    while (expected && from <= text.length - expected.length) {
+    while (from <= text.length - expected.length) {
       const index = text.indexOf(expected, from);
       if (index < 0) break;
       const before = index - 1;
@@ -141,7 +138,6 @@
       }
     }
 
-    // A droppable pair counts as dropped only when both its tokens are gone.
     const droppedWrappers = contract.entries
       .filter(
         (entry) =>
@@ -176,16 +172,12 @@
       }
       literalTokenCounts.set(token, count);
     }
-    // Inventions inside this block's own namespace, which the shared residue test cannot see
-    // on its own: a token that is shaped right and closed right but names an entry the request
-    // never sent leaves no residue behind. The two questions together are why an answer this
-    // codec accepts holds only tokens it sent.
-    const tokenExpression = new RegExp(
+    const closedNamespaceTokenPattern = new RegExp(
       `⟦${escapeRegExp(contract.namespace)}:[^⟧]+⟧`,
       'g'
     );
-    for (const match of template.matchAll(tokenExpression)) {
-      if (!expected.has(match[0])) return validationError('token_unknown');
+    for (const [token] of template.matchAll(closedNamespaceTokenPattern)) {
+      if (!expected.has(token)) return validationError('token_unknown');
     }
     const countFailure = placeholderTokens.findCountFailure(
       template,
@@ -203,13 +195,11 @@
     }
     if (
       contract.requiresText === true &&
-      !/[\p{L}\p{N}]/u.test(template.replace(tokenExpression, ''))
+      !/[\p{L}\p{N}]/u.test(template.replace(closedNamespaceTokenPattern, ''))
     ) {
       return validationError('output_parse_failed');
     }
 
-    // The walk with parents enforced: this codec's entries record which entry they sat inside,
-    // and its tree supplies the children prepared by `applyTranslatedTemplate`.
     const walked = placeholderTokens.walkExpectedTokens(
       template,
       expectedTokens,
