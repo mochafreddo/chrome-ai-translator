@@ -351,12 +351,17 @@ function createBackgroundWorker(platform = {}) {
   const textRetention = new Map();
 
   function textOwner(tabId, documentId) {
-    if (!textRetention.has(tabId)) textRetention.set(tabId, { documentId, revision: 0, queue: Promise.resolve() });
+    if (!textRetention.has(tabId)) textRetention.set(tabId, { documentId, queue: Promise.resolve() });
     return textRetention.get(tabId);
   }
 
-  function enqueueTextState(owner, task) {
-    const result = owner.queue.then(task);
+  function enqueueTextState(owner, task, prepare) {
+    const preparation = Promise.resolve().then(() => prepare?.()).then(() => null, error => error);
+    const result = owner.queue.then(async () => {
+      const error = await preparation;
+      if (error) throw error;
+      return task();
+    });
     owner.queue = result.catch(() => {});
     return result;
   }
@@ -716,7 +721,6 @@ function createBackgroundWorker(platform = {}) {
     const owner = textRetention.get(details.tabId);
     if (owner) {
       owner.documentId = details.documentId;
-      owner.revision = 0;
     }
     if (!documentLifetimes.has(details.tabId) && !stateByTab.has(details.tabId)) return;
     if (details.documentId && documentsByTab.get(details.tabId) === details.documentId) return;
@@ -755,38 +759,36 @@ function createBackgroundWorker(platform = {}) {
             throw new Error('Text Translation requires its own extension page.');
           }
           const tabId = sender.tab.id;
-          await captureDocument(tabId, sender.documentId, getTextDocumentId);
           const owner = textOwner(tabId, sender.documentId);
-          if (!owner.closed && msg.type === 'GET_TEXT_TRANSLATION_STATE' && owner.documentId !== sender.documentId) {
-            owner.documentId = sender.documentId;
-            owner.revision = 0;
-          }
-          if (owner.closed || owner.documentId !== sender.documentId) throw documentEnded();
           const key = `text-translation:${tabId}`;
-          if (msg.type === 'GET_TEXT_TRANSLATION_STATE') {
-            stopTextTranslationsForTab(tabId, sender.documentId);
-            const state = await enqueueTextState(owner, async () => {
-              const saved = (await getChrome().storage.session.get(key))[key];
-              if (!saved) return null;
-              const state = textTranslationRequest.retainedState(saved);
-              if (state.job?.status === 'running') state.job.status =
+          const response = await enqueueTextState(owner, async () => {
+            if (owner.closed) throw documentEnded();
+            const saved = (await getChrome().storage.session.get(key))[key];
+            if (owner.closed) throw documentEnded();
+            if (saved && (typeof saved.documentId !== 'string' || !saved.documentId ||
+                !Number.isSafeInteger(saved.revision) || saved.revision < 0)) throw documentEnded();
+            if (msg.type === 'GET_TEXT_TRANSLATION_STATE') {
+              stopTextTranslationsForTab(tabId, sender.documentId);
+              const state = saved ? saved.state === null ? null : textTranslationRequest.retainedState(saved.state) : null;
+              if (state?.job?.status === 'running') state.job.status =
                 state.job.results.length === state.job.units.length ? 'complete' : 'stopped';
-              return state;
-            });
-            if (owner.closed || owner.documentId !== sender.documentId) throw documentEnded();
-            sendResponse({ ok: true, state });
-          } else {
+              await getChrome().storage.session.set({ [key]: { documentId: sender.documentId,
+                revision: saved?.documentId === sender.documentId ? saved.revision : 0, state } });
+              owner.documentId = sender.documentId;
+              return { ok: true, state };
+            }
+            if (saved && saved.documentId !== sender.documentId) throw documentEnded();
+            if (!saved && msg.type === 'CLEAR_TEXT_TRANSLATION_STATE') throw documentEnded();
             if (!Number.isSafeInteger(msg.revision) || msg.revision < 1) throw documentEnded();
-            if (msg.revision <= owner.revision) { sendResponse({ ok: true }); return; }
+            if (msg.revision <= (saved?.revision || 0)) return { ok: true };
             const state = msg.type === 'SAVE_TEXT_TRANSLATION_STATE' ? textTranslationRequest.retainedState(msg.state) : null;
-            owner.revision = msg.revision;
-            await enqueueTextState(owner, async () => {
-              if (owner.closed || (owner.documentId === sender.documentId && owner.revision !== msg.revision)) return;
-              if (state) await getChrome().storage.session.set({ [key]: state });
-              else await getChrome().storage.session.remove(key);
-            });
-            sendResponse({ ok: true });
-          }
+            await getChrome().storage.session.set({ [key]: { documentId: sender.documentId, revision: msg.revision, state } });
+            owner.documentId = sender.documentId;
+            return { ok: true };
+          }, msg.type === 'CLEAR_TEXT_TRANSLATION_STATE' ? null :
+            () => captureDocument(tabId, sender.documentId, getTextDocumentId));
+          if (owner.closed) throw documentEnded();
+          sendResponse(response);
           return;
         }
         if (['TRANSLATE_TEXT', 'STOP_TEXT_TRANSLATION'].includes(msg?.type)) {

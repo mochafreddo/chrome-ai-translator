@@ -36,6 +36,7 @@
     get('sourceText').disabled = !ready || Boolean(active);
     get('btnTranslate').disabled = !ready || Boolean(active);
     get('btnStop').disabled = !active;
+    get('btnClear').disabled = !ready;
     get('btnResume').disabled = !ready || Boolean(active) ||
       !job || !['stopped', 'failed'].includes(job.status) || !sameInput();
     get('btnSwap').disabled = !ready || Boolean(active) || !job || job.status !== 'complete';
@@ -225,6 +226,7 @@
   get('btnResume').addEventListener('click', () => { void translate(true); });
   get('btnSwap').addEventListener('click', swap);
   get('btnClear').addEventListener('click', () => {
+    if (!ready) return;
     stop();
     job = null;
     get('sourceText').value = '';
