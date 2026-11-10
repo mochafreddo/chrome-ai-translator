@@ -59,18 +59,6 @@ function originalBody(records = [plainRecord()]) {
   };
 }
 
-function sidePanelBody(input = '# Setup\n\nTranslate these Markdown paragraphs.') {
-  return {
-    model: 'deepseek/deepseek-v4.1-flash-1017',
-    reasoning: { effort: 'none' },
-    provider: { require_parameters: true, data_collection: 'deny', zdr: true },
-    store: false,
-    instructions: 'Translate the page Markdown into Korean.',
-    input,
-    max_output_tokens: 8192,
-  };
-}
-
 function response(translations) {
   return JSON.stringify({ translations });
 }
@@ -96,23 +84,23 @@ exports.tests = [{
     assert.equal(PROFILES.find((profile) => profile.key === 'mimo-v2.6-flash').compatibilityPending, true);
   },
 }, {
-  name: 'builds one unique run for every page, translation flow, and profile',
+  name: 'builds one unique Inline run for every page and profile',
   fn() {
     const pages = Array.from({ length: 12 }, (_, index) => `page-${index + 1}`);
     const plan = buildQualityPlan(pages);
-    assert.equal(plan.length, 144);
-    assert.equal(new Set(plan.map((run) => run.id)).size, 144);
-    assert.deepEqual([...new Set(plan.map((run) => run.flow))], ['inline', 'sidepanel']);
+    assert.equal(plan.length, 72);
+    assert.equal(new Set(plan.map((run) => run.id)).size, 72);
+    assert.deepEqual([...new Set(plan.map((run) => run.flow))], ['inline']);
     assert.deepEqual([...new Set(plan.map((run) => run.profileKey))], PROFILE_KEYS);
     assert.deepEqual(plan.slice(0, 6).map((run) => run.flow), Array(6).fill('inline'));
     assert.throws(() => buildQualityPlan([]));
     assert.throws(() => buildQualityPlan(['same', 'same']));
 
-    const requestedIds = ['page-1|sidepanel|deepseek', 'page-1|inline|deepseek'];
-    const continuation = buildQualityPlan(['page-1'], ['deepseek'], requestedIds);
+    const requestedIds = ['page-2|inline|deepseek', 'page-1|inline|deepseek'];
+    const continuation = buildQualityPlan(['page-1', 'page-2'], ['deepseek'], requestedIds);
     assert.deepEqual(continuation.map(run => run.id), requestedIds);
-    assert.deepEqual(continuation.map(run => run.flow), ['sidepanel', 'inline']);
-    for (const invalidIds of [[], [requestedIds[0], requestedIds[0]], ['missing|inline|deepseek'], [12]]) {
+    assert.deepEqual(continuation.map(run => run.flow), ['inline', 'inline']);
+    for (const invalidIds of [[], [requestedIds[0], requestedIds[0]], ['missing|inline|deepseek'], ['page-1|sidepanel|deepseek'], [12]]) {
       assert.throws(() => buildQualityPlan(['page-1'], ['deepseek'], invalidIds));
     }
   },
@@ -149,34 +137,6 @@ exports.tests = [{
         assert.equal(validateQualityRequest(adapted, profile.key), true);
       }
     }
-  },
-}, {
-  name: 'adapts and validates plain-text Side Panel requests without inventing JSON schema fields',
-  fn() {
-    const repairInstructions = 'Translate the same Markdown again, preserving every placeholder.';
-    const inputs = [
-      sidePanelBody(),
-      { ...sidePanelBody(), instructions: repairInstructions },
-    ];
-    for (const profile of PROFILES) {
-      const adapted = inputs.map((body) => adaptQualityRequest(body, profile));
-      for (let index = 0; index < inputs.length; index += 1) {
-        assert.equal(Object.hasOwn(adapted[index], 'text'), false);
-        assert.equal(adapted[index].input, inputs[index].input);
-        assert.equal(adapted[index].instructions, inputs[index].instructions);
-        assert.equal(adapted[index].model, profile.model);
-        assert.deepEqual(adapted[index].reasoning, profile.reasoning);
-        assert.deepEqual(adapted[index].provider.max_price, profile.priceCap);
-        assert.equal(validateQualityRequest(adapted[index], profile.key), true);
-      }
-      assert.deepEqual(Object.keys(adapted[0]).sort(), Object.keys(adapted[1]).sort());
-    }
-    const selected = PROFILES[1];
-    const adapted = adaptQualityRequest(sidePanelBody('ordinary Markdown, not JSON'), selected);
-    assert.throws(() => validateQualityRequest(adapted, PROFILES[0].key), /selected model profile/);
-    assert.throws(() => adaptQualityRequest({ ...sidePanelBody(), tools: [] }, selected));
-    assert.throws(() => validateQualityRequest({ ...adapted, fallback_models: ['other'] }, selected.key));
-    assert.throws(() => validateQualityRequest({ ...adapted, max_output_tokens: selected.maxOutputTokens + 1 }, selected.key));
   },
 }, {
   name: 'validates the selected model, reasoning, privacy cap, schema, and request limits exactly',

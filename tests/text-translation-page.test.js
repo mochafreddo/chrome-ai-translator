@@ -104,6 +104,76 @@ exports.tests = [{
     assert.equal(page.element('btnClear').disabled, false);
   },
 }, {
+  name: 'uncertain language requires a manual choice and incomplete work cannot be swapped',
+  async fn() {
+    const page = await openPage();
+    page.source('Hello');
+    await page.start();
+    assert.equal(page.element('btnSwap').disabled, true);
+    page.event('btnSwap', 'click');
+    assert.equal(page.element('sourceText').value, 'Hello');
+    page.requests[0].respond('안녕', 'completed', null);
+    await page.flush();
+    page.event('btnSwap', 'click');
+    assert.equal(page.element('sourceText').value, 'Hello');
+    assert.equal(page.element('errorBox').hidden, false);
+    page.element('sourceLanguage').value = 'English';
+    page.event('translationSettings', 'change');
+    page.event('btnSwap', 'click');
+    await page.flush();
+    assert.equal(page.element('sourceText').value, '안녕');
+    assert.equal(page.element('sourceLanguage').value, 'Korean');
+    assert.equal(page.element('targetLanguage').value, 'English');
+    assert.equal(page.requests.length, 1);
+    const restored = await page.reload();
+    assert.equal(restored.element('sourceText').value, '안녕');
+    assert.ok(restored.element('resultRelationship').textContent);
+    assert.equal(restored.requests.length, 1);
+  },
+}, {
+  name: 'previous result remains associated with its old input until a valid new run',
+  async fn() {
+    const page = await openPage();
+    page.source('Hello');
+    await page.start();
+    page.requests[0].respond('안녕');
+    await page.flush();
+    assert.equal(page.element('resultRelationship').textContent, '');
+    page.source('');
+    assert.ok(page.element('resultRelationship').textContent);
+    page.source('Hello');
+    assert.equal(page.element('resultRelationship').textContent, '');
+    page.source('');
+    await page.start();
+    assert.equal(page.element('translatedText').value, '안녕');
+    assert.equal(page.requests.length, 1);
+    page.source('Next');
+    await page.start();
+    assert.equal(page.element('translatedText').value, '');
+    assert.equal(page.element('resultRelationship').textContent, '');
+    assert.equal(page.requests[1].body.input, 'Next');
+  },
+}, {
+  name: 'completed result swaps using its original language snapshot without a request',
+  async fn() {
+    const page = await openPage();
+    page.element('sourceLanguage').value = 'English';
+    page.source('Hello');
+    await page.start();
+    page.requests[0].respond('안녕');
+    await page.flush();
+    page.element('targetLanguage').value = 'Japanese';
+    page.element('sourceLanguage').value = 'French';
+    page.event('translationSettings', 'input');
+    page.event('btnSwap', 'click');
+    await page.flush();
+    assert.equal(page.element('sourceText').value, '안녕');
+    assert.equal(page.element('sourceLanguage').value, 'Korean');
+    assert.equal(page.element('targetLanguage').value, 'English');
+    assert.equal(page.element('translatedText').value, '안녕');
+    assert.equal(page.requests.length, 1);
+  },
+}, {
   name: 'reload restores idle input and page settings without requesting a translation',
   async fn() {
     const page = await openPage();
@@ -379,6 +449,9 @@ exports.tests = [{
     await page.stop();
     assert.equal(page.requests[1].signal.aborted, true);
     assert.equal(page.element('btnResume').disabled, false);
+    assert.equal(page.element('btnSwap').disabled, true);
+    page.event('btnSwap', 'click');
+    assert.equal(page.element('sourceText').value, first + second);
     page.requests[1].respond('오래된 응답');
     await page.flush();
     assert.equal(page.element('translatedText').value, '첫 문단\n\n');

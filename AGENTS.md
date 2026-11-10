@@ -2,7 +2,7 @@
 
 Use `npm test` for "run the tests": it is the browser-free unit suite. `npm run test:integration` runs only the toolbar-action browser check, not all integration checks. Other unbilled browser checks have separate `test:integration:*` scripts in `package.json`. Before choosing or adding a browser check, read `tests/README.md` for its scope and prerequisites.
 
-`npm run verify:live` runs both billed browser checks; `verify:live:inline` and `verify:live:sidepanel` can also run separately and each bills a real model. These commands need `agent-browser`, network access, and an OpenAI key in `.env.local`. Keep all `verify:live*` checks separate from unit and unbilled integration checks.
+`npm run verify:live` runs the billed Inline browser check; `verify:live:inline` names the same check directly. These commands need `agent-browser`, network access, and an OpenAI key in `.env.local`. Keep all `verify:live*` checks separate from unit and unbilled integration checks.
 
 Before running checks on a fresh checkout, install the locked development tools with `npm ci --ignore-scripts --no-audit --no-fund`. `npm run lint` checks JavaScript without modifying files; its runtime boundaries and rule exceptions are described in `tests/README.md`. `npm run check:syntax` parses every extension script outside a browser. There is no formatter or type checker. Documentation check commands and their scope are described in `tests/README.md`.
 
@@ -25,7 +25,7 @@ For shared modules in `extension/`, keep both the `ChromeAiTranslator*` browser 
 - The `<script>` tags in `extension/sidepanel.html` or `options.html`, if it runs in the side panel or the options page.
 - The suite list in `tests/run.js`, for its test file. See `tests/README.md`.
 
-A module both runtimes reach is in two of those lists at once and has to be ordered correctly in each. `extension/placeholder-tokens.js` and `extension/markdown-entries.js` are both like that: the worker imports each ahead of the modules that read it there, and the page gets it from the injected list ahead of the ones that read it there.
+A module both runtimes reach is in two of those lists at once and has to be ordered correctly in each. The worker imports `extension/placeholder-tokens.js` ahead of the modules that read it there, and the page gets it from the injected list ahead of its consumers.
 
 `tests/static-assets.test.js` guards loader order and wiring. `tests/syntax-check.test.js` exercises syntax discovery, syntax failures, and the empty-input error through the command's filesystem seam.
 

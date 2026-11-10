@@ -12,24 +12,11 @@
     reasoningEffort: 'none',
     targetLanguage: 'Korean',
     tone: 'technical',
-    viewMode: 'translation', // translation | bilingual
-    chunkMaxChars: 12000,
     cacheEnabled: false,
     cacheTtlDays: 7,
     buttonVisibility: BUTTON_VISIBILITY.NEVER,
   };
   const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULT_SETTINGS));
-
-  const MIN_CHUNK_MAX_CHARS = 2000;
-  const MAX_CHUNK_MAX_CHARS = 60000;
-  function normalizeChunkMaxChars(value, fallback = DEFAULT_SETTINGS.chunkMaxChars) {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    return Math.min(
-      MAX_CHUNK_MAX_CHARS,
-      Math.max(MIN_CHUNK_MAX_CHARS, Math.floor(parsed))
-    );
-  }
 
   function mergeSettings(partial) {
     const merged = { ...DEFAULT_SETTINGS };
@@ -38,7 +25,6 @@
         merged[key] = partial[key];
       }
     }
-    merged.chunkMaxChars = normalizeChunkMaxChars(merged.chunkMaxChars);
     merged.service = getEffectiveModelSettings(merged).service;
     // Reading settings is the one place the older `inlineAutoShow` boolean can still arrive
     // from storage, so it is the place it stops being visible: nothing downstream, and

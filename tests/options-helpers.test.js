@@ -127,7 +127,7 @@ exports.tests = [
         assert.deepEqual(messages.at(-1), { type: 'SAVE_SETTINGS', settings: {
           service: 'openrouter', openrouterApiKey: 'sk-or-synthetic', targetLanguage: 'Korean',
           tone: 'technical', model: 'custom-openai', reasoningEffort: 'high',
-          chunkMaxChars: 12000, buttonVisibility: 'onInvocation',
+            buttonVisibility: 'onInvocation',
         } });
         element('btnClear').listeners.click();
         await flush();
@@ -258,17 +258,17 @@ exports.tests = [
     async fn() {
       await withOptionsScreen(async ({ element, messages, events, flush }) => {
         assert.equal(element('model').value, 'current-model');
+        assert.equal(element('model').placeholder, require('../extension/default-model.js').DEFAULT_MODEL);
         assert.equal(element('apiKey').value, '');
         element('targetLanguage').value = 'Japanese';
         element('tone').value = 'formal';
-        element('chunkMaxChars').value = '9000';
         element('btnSave').listeners.click();
         await flush();
         assert.deepEqual(messages, [
           { type: 'GET_SETTINGS' },
           { type: 'SAVE_SETTINGS', settings: {
             service: 'openai', targetLanguage: 'Japanese', tone: 'formal', model: 'current-model', reasoningEffort: 'low',
-            chunkMaxChars: 9000, buttonVisibility: 'onInvocation',
+            buttonVisibility: 'onInvocation',
           } },
         ]);
         assert.equal(events.includes('storage'), false);

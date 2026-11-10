@@ -1,5 +1,11 @@
 # A failed Translation Chunk ends the whole Side Panel Translation
 
+Status: retired with article Side Panel Translation
+
+Current applicability: the article execution path has been removed. Text Translation preserves completed portions on interruption under [ADR-0015](0015-preserve-completed-text-translation-on-interruption.md); it does not inherit the whole-result discard rule. The original accepted decision and its evidence are retained below.
+
+## Original record
+
 Status: accepted
 
 Current behavior and source ownership: [architecture reference](../architecture.md#side-panel-translation). Historical measurements and verification limitations below describe the recorded investigation.

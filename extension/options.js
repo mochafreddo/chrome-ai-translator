@@ -9,9 +9,6 @@ const elModel = hasDocument ? document.getElementById('model') : null;
 const elReasoningEffort = hasDocument ? document.getElementById('reasoningEffort') : null;
 const elServices = hasDocument
   ? Array.from(document.querySelectorAll('input[name="service"]')) : [];
-const elChunkMaxChars = hasDocument
-  ? document.getElementById('chunkMaxChars')
-  : null;
 const elButtonVisibility = hasDocument
   ? Array.from(document.querySelectorAll('input[name="buttonVisibility"]'))
   : [];
@@ -61,7 +58,6 @@ async function load() {
   elReasoningEffort.value = s.reasoningEffort || 'none';
   checkChoice(elServices, s.service === 'openrouter' ? 'openrouter' : 'openai');
   updateService();
-  elChunkMaxChars.value = s.chunkMaxChars || 12000;
   checkChoice(elButtonVisibility, readButtonVisibility(s));
 }
 
@@ -181,7 +177,6 @@ async function save() {
     tone: elTone.value,
     model: elModel.value.trim() || DEFAULT_MODEL,
     reasoningEffort: elReasoningEffort.value,
-    chunkMaxChars: Number(elChunkMaxChars.value) || 12000,
     buttonVisibility,
   };
 
