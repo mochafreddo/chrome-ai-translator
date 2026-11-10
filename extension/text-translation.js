@@ -203,8 +203,12 @@
   document.addEventListener('compositionstart', () => { composing = true; });
   document.addEventListener('compositionend', () => { composing = false; });
   document.addEventListener('keydown', event => {
-    if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return;
+    if (event.key !== 'Enter') return;
     if (composing || event.isComposing || event.keyCode === 229) return;
+    if (!(event.metaKey || event.ctrlKey)) {
+      if (event.target?.tagName === 'INPUT' && event.target.type === 'text') event.preventDefault();
+      return;
+    }
     event.preventDefault();
     void translate();
   });
