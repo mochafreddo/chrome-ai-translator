@@ -49,6 +49,12 @@ The extension cannot translate restricted pages such as `chrome://` pages. If In
 
 Page settings apply to that page. Choose **Save as default** to update the shared defaults explicitly; source language remains page-specific. Each translation keeps its starting source and effective settings while running. **Stop** cancels further work and ignores late responses; **Clear all** clears the current work. HTML and Markdown remain plain text. The former **Translate current tab** article extraction and Markdown result views have been removed.
 
+You can enter up to 60,000 Unicode code points. Long text is divided at paragraph boundaries where possible and translated in order. Completed parts appear as they finish. Stop or failure leaves an incomplete result; choose **Resume translation** to request only the remaining parts while the source and effective settings match. Requests already received by the service may still be billed after Stop.
+
+Editing the source or settings keeps the earlier result and marks it as belonging to previous input. A valid new translation clears that result; invalid input leaves it available. **Swap languages and use translation** uses a completed result and its original language settings to prepare the reverse translation. If automatic detection was uncertain, choose the original source language first. Swap does not start a request.
+
+Each translation tab retains its draft and completed parts in memory. Reload restores them and interrupts running work without restarting it. Other translation tabs stay independent. **Clear all** removes the retained content, and closing the tab removes its record. There is no long-term translation history; restarting the browser or reloading the extension also clears these records.
+
 ## Translate on the page
 
 Use the side panel's **Inline translation** section or the shortcut. The floating menu's **Open controls** action opens the side panel; choose **Translate visible text** there to start. A page can hide or move its own floating controls, so a floating click does not authorize or start translation.

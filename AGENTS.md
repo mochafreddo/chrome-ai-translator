@@ -12,7 +12,7 @@ Before final local verification or reusing results for a later commit or push, f
 
 ## Layout
 
-No bundler and no build step: `extension/` is loaded unpacked as-is and every file there is a classic script. Four runtimes share it. `background.js` is the MV3 service worker and pulls its dependencies in with `importScripts`. `content.js` runs in the page and is injected programmatically by the worker — the manifest declares no `content_scripts` — from the list in `getInlineContentScriptFiles()`. `sidepanel.js` and `options.js` run in extension pages and get their dependencies from `<script>` tags in `sidepanel.html` and `options.html`.
+No bundler and no build step: `extension/` is loaded unpacked as-is and every file there is a classic script. `background.js` is the MV3 service worker and pulls its dependencies in with `importScripts`. `content.js` runs in the page and is injected programmatically by the worker from `getInlineContentScriptFiles()`; the manifest declares no `content_scripts`. The side panel, Options and Text Translation pages load their dependencies through their HTML `<script>` tags.
 
 For shared modules in `extension/`, keep both the `ChromeAiTranslator*` browser API on `globalThis` and the guarded `module.exports` export used by the unit suite. Entry scripts need not expose a named browser API: `background.js`, `content.js`, and `options.js` export helpers only for CommonJS tests; `sidepanel.js` also exposes a browser API. Keep scripts compatible with their classic-script loaders and the CommonJS test harness.
 
@@ -22,7 +22,7 @@ For shared modules in `extension/`, keep both the `ChromeAiTranslator*` browser 
 
 - The `importScripts` calls at the top of `extension/background.js`, if it runs in the worker. Order matters — a module that resolves a dependency as it loads has to come in after that dependency.
 - `getInlineContentScriptFiles()` in `extension/background.js`, if it runs in the page. Order matters — dependencies come before `content.js`.
-- The `<script>` tags in `extension/sidepanel.html` or `options.html`, if it runs in the side panel or the options page.
+- The `<script>` tags in `extension/sidepanel.html`, `options.html` or `text-translation.html`, if it runs in an extension page.
 - The suite list in `tests/run.js`, for its test file. See `tests/README.md`.
 
 A module both runtimes reach is in two of those lists at once and has to be ordered correctly in each. The worker imports `extension/placeholder-tokens.js` ahead of the modules that read it there, and the page gets it from the injected list ahead of its consumers.

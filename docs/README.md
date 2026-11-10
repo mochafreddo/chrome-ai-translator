@@ -34,7 +34,7 @@ ADRs retain their existing numbers and original rationale. Current applicability
 | [0012](adr/0012-translate-through-a-sole-generic-div-wrapper.md) | Translate own prose through a sole generic DIV wrapper |
 | [0013](adr/0013-recognize-mise-recipe-layout-explicitly.md) | Recognize the mise recipe layout as an explicit site boundary |
 | [0014](adr/0014-bind-translation-to-the-readers-document-and-provider.md) | Bind translation to the reader's document and provider choice |
-| [0015](adr/0015-preserve-completed-text-translation-on-interruption.md) | Preserve completed Text Translation on interruption; accepted design, implementation pending |
+| [0015](adr/0015-preserve-completed-text-translation-on-interruption.md) | Preserve completed Text Translation on interruption and resume matching work explicitly |
 
 ## Agent procedures
 
