@@ -57,6 +57,30 @@ try {
     await wait(200);
     await page.navigate(browser.url);
     check('swapped language and result relationship survive reload', await browser.ready() && await page.evaluate("document.getElementById('sourceText').value === '결과' && document.getElementById('sourceLanguage').value === 'Swahili' && Boolean(document.getElementById('resultRelationship').textContent)") && requests.length === 3);
+    for (const field of ['targetLanguage', 'model']) {
+      const before = requests.length;
+      const contents = await page.evaluate(`(() => {
+        const input = document.getElementById(${JSON.stringify(field)});
+        input.value += 'x'; input.dispatchEvent(new Event('input', { bubbles: true })); input.focus();
+        return [document.getElementById('sourceText').value, document.getElementById('translatedText').value];
+      })()`);
+      await browser.press('Enter');
+      await wait(300);
+      const after = await page.evaluate("[document.getElementById('sourceText').value, document.getElementById('translatedText').value]");
+      check(`ordinary Enter in ${field} does not translate`, requests.length === before && JSON.stringify(after) === JSON.stringify(contents));
+    }
+    for (const key of ['Enter', 'Space']) {
+      const before = requests.length;
+      await page.evaluate("document.getElementById('btnTranslate').focus()");
+      await browser.press(key);
+      check(`${key} activates the focused Translate button`, await until(() => requests.length === before + 1, 5000, 100) &&
+        await until(() => page.evaluate("!document.getElementById('btnTranslate').disabled"), 5000, 100));
+    }
+    const beforeNewline = requests.length;
+    await page.evaluate("(() => { const source = document.getElementById('sourceText'); source.focus(); source.setSelectionRange(source.value.length, source.value.length); })()");
+    await browser.press('Enter');
+    check('ordinary Enter in source inserts a newline without translating', requests.length === beforeNewline &&
+      await page.evaluate("document.getElementById('sourceText').value === '결과\\n'"));
     check('fixed provider interception remains fail-closed', browser.errors.length === 0);
   }
 } catch (error) {
