@@ -16,6 +16,7 @@ const suiteFiles = [
   'inline-model-execution',
   'inline-inspection',
   'inline-request-flow',
+  'text-translation-page',
   'button-visibility',
   'inline-translation-controls',
   'default-model',

@@ -5,6 +5,7 @@
   let ready = false;
   let composing = false;
   let active = null;
+  let job = null;
   let openaiModel = '';
   let openaiReasoningEffort = 'none';
   let selectedService = 'openai';
@@ -19,7 +20,37 @@
     get('sourceText').disabled = !ready || Boolean(active);
     get('btnTranslate').disabled = !ready || Boolean(active);
     get('btnStop').disabled = !active;
+    get('btnResume').disabled = !ready || Boolean(active) ||
+      !job || !['stopped', 'failed'].includes(job.status) || !sameInput();
     get('btnCopy').disabled = !get('translatedText').value;
+  }
+
+  function sameInput() {
+    if (!job || get('sourceText').value !== job.source) return false;
+    try {
+      const settings = readSettings();
+      return Object.keys(job.settings).every(key => job.settings[key] === settings[key]);
+    } catch { return false; }
+  }
+
+  function renderJob() {
+    get('translatedText').value = job ? job.results.map(result => result.translation).join('') : '';
+    get('progressStatus').textContent = job
+      ? `${job.results.length} of ${job.units.length} parts complete.${job.status === 'complete' ? '' : ' Incomplete translation.'}` : '';
+    if (job?.results.length) {
+      const languages = job.results.filter((_result, index) => job.units[index].trim()).map(result => result.sourceLanguage);
+      const detected = languages.length && languages[0] && languages.every(language => language === languages[0]) ? languages[0] : null;
+      get('languageStatus').textContent = job.settings.sourceLanguage === 'auto'
+        ? detected ? `Detected source language: ${detected}` : 'Source language is uncertain.'
+        : `Source language: ${job.settings.sourceLanguage}`;
+    } else get('languageStatus').textContent = '';
+    renderBusy();
+  }
+
+  function inputChanged() {
+    get('errorBox').hidden = true;
+    get('inputHint').textContent = `${Array.from(get('sourceText').value).length.toLocaleString('en-US')} / ${contract.MAX_SOURCE_CHARACTERS.toLocaleString('en-US')} Unicode characters (code points). Plain text only.`;
+    renderBusy();
   }
 
   function rememberOpenai() {
@@ -48,13 +79,14 @@
     const operation = active;
     active = null;
     if (operation) {
+      operation.job.status = 'stopped';
       void chrome.runtime.sendMessage({ type: 'STOP_TEXT_TRANSLATION', operationId: operation.id }).catch(() => {});
       get('status').textContent = 'Stopped.';
     }
-    renderBusy();
+    renderJob();
   }
 
-  async function translate() {
+  async function translate(resume = false) {
     if (!ready || active || composing) return;
     get('errorBox').hidden = true;
     let source;
@@ -66,31 +98,42 @@
       showError(error);
       return;
     }
-    const operation = { id: crypto.randomUUID(), source, settings };
+    if (resume && (!job || !['stopped', 'failed'].includes(job.status) || !sameInput())) {
+      showError(new Error('Source or translation settings changed. Start a new translation.'));
+      return;
+    }
+    if (!resume) job = { source, settings, units: contract.splitSource(source), results: [], status: 'running' };
+    job.status = 'running';
+    const operation = { id: crypto.randomUUID(), job };
     active = operation;
-    get('translatedText').value = '';
-    get('languageStatus').textContent = '';
     get('status').textContent = 'Translating…';
-    renderBusy();
+    renderJob();
     try {
-      const response = await chrome.runtime.sendMessage({ type: 'TRANSLATE_TEXT',
-        operationId: operation.id, source: operation.source, settings: operation.settings });
-      if (active !== operation) return;
-      if (!response?.ok) throw new Error(response?.error?.message || 'Text Translation failed. Try again.');
-      get('translatedText').value = response.result.translation;
-      get('languageStatus').textContent = settings.sourceLanguage === 'auto'
-        ? response.result.sourceLanguage ? `Detected source language: ${response.result.sourceLanguage}` : 'Source language is uncertain.'
-        : `Source language: ${settings.sourceLanguage}`;
+      while (job.results.length < job.units.length) {
+        const unit = job.units[job.results.length];
+        let result = { translation: unit, sourceLanguage: null };
+        if (unit.trim()) {
+          const response = await chrome.runtime.sendMessage({ type: 'TRANSLATE_TEXT',
+            operationId: operation.id, source: unit, settings: job.settings });
+          if (!response?.ok) throw new Error(response?.error?.message || 'Text Translation failed. Try again.');
+          result = response.result;
+        }
+        if (active !== operation) return;
+        job.results.push(result);
+        renderJob();
+      }
+      job.status = 'complete';
       get('status').textContent = 'Translation complete.';
     } catch (error) {
       if (active === operation) {
+        job.status = 'failed';
         get('status').textContent = 'Translation failed.';
         showError(error);
       }
     } finally {
       if (active === operation) {
         active = null;
-        renderBusy();
+        renderJob();
       }
     }
   }
@@ -112,16 +155,21 @@
     selectedService = get('service').value;
     displayService();
   });
-  get('sourceText').addEventListener('input', () => { get('errorBox').hidden = true; });
+  get('sourceText').addEventListener('input', inputChanged);
+  get('translationSettings').addEventListener('input', inputChanged);
+  get('translationSettings').addEventListener('change', inputChanged);
   get('btnStop').addEventListener('click', stop);
+  get('btnResume').addEventListener('click', () => { void translate(true); });
   get('btnClear').addEventListener('click', () => {
     stop();
+    job = null;
     get('sourceText').value = '';
     get('translatedText').value = '';
     get('languageStatus').textContent = '';
     get('status').textContent = '';
     get('errorBox').hidden = true;
-    renderBusy();
+    inputChanged();
+    renderJob();
     get('sourceText').focus();
   });
   get('btnCopy').addEventListener('click', async () => {
@@ -147,7 +195,7 @@
     } catch (error) { showError(error); }
   });
   window.addEventListener('pagehide', stop);
-  get('inputHint').textContent = `Up to ${contract.MAX_SOURCE_CHARACTERS.toLocaleString('en-US')} characters per translation. Plain text only.`;
+  inputChanged();
   void (async () => {
     try {
       const response = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });

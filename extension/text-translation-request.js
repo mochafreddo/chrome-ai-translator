@@ -1,7 +1,8 @@
 (function initTextTranslationRequest(globalScope) {
   const { getEffectiveModelSettings } = globalScope.ChromeAiTranslatorDefaultModel || require('./default-model.js');
   const { getToneInstruction } = globalScope.ChromeAiTranslatorTranslationSettings || require('./translation-settings.js');
-  const MAX_SOURCE_CHARACTERS = 12000;
+  const MAX_SOURCE_CHARACTERS = 60000;
+  const MAX_REQUEST_CHARACTERS = 12000;
   const SETTINGS_KEYS = ['service', 'model', 'reasoningEffort', 'sourceLanguage', 'targetLanguage', 'tone'];
 
   function normalizeSettings(settings) {
@@ -21,19 +22,37 @@
     return { ...settings, ...getEffectiveModelSettings(settings) };
   }
 
-  function validateSource(source) {
+  function validateSource(source, limit = MAX_SOURCE_CHARACTERS) {
     if (typeof source !== 'string' || !source.trim()) throw new Error('Enter text to translate.');
-    if (Array.from(source).length > MAX_SOURCE_CHARACTERS) {
-      throw new Error(`This page currently accepts up to ${MAX_SOURCE_CHARACTERS.toLocaleString('en-US')} characters per translation.`);
+    if (Array.from(source).length > limit) {
+      throw new Error(`Text Translation accepts up to ${limit.toLocaleString('en-US')} Unicode characters (code points).`);
     }
     return source;
+  }
+
+  function splitSource(source) {
+    const characters = Array.from(validateSource(source));
+    const units = [];
+    for (let start = 0; start < characters.length;) {
+      let end = Math.min(start + MAX_REQUEST_CHARACTERS, characters.length);
+      if (end < characters.length) {
+        const candidate = characters.slice(start, end).join('');
+        const paragraphs = [...candidate.matchAll(/(?:\r\n|\r(?!\n)|\n)(?:[ \t]*(?:\r\n|\r(?!\n)|\n))+/g)];
+        const boundary = paragraphs.at(-1);
+        if (boundary) end = start + Array.from(candidate.slice(0, boundary.index + boundary[0].length)).length;
+        if (characters[end - 1] === '\r' && characters[end] === '\n') end -= 1;
+      }
+      units.push(characters.slice(start, end).join(''));
+      start = end;
+    }
+    return units;
   }
 
   function prepare(source, settings) {
     const snapshot = normalizeSettings(settings);
     return {
       ...snapshot,
-      input: validateSource(source),
+      input: validateSource(source, MAX_REQUEST_CHARACTERS),
       instructions: [
         `Translate the supplied plain text into ${snapshot.targetLanguage}.`,
         snapshot.sourceLanguage === 'auto' ? 'Detect the source language in this same request.' :
@@ -50,7 +69,7 @@
     };
   }
 
-  function parseResult(output) {
+  function parseResult(output, source) {
     let result;
     try { result = JSON.parse(output); } catch { throw new Error('The service returned an invalid text translation.'); }
     if (!result || typeof result.translation !== 'string' || !result.translation.trim() ||
@@ -58,10 +77,16 @@
           result.sourceLanguage.trim() && result.sourceLanguage.length <= 200))) {
       throw new Error('The service returned an invalid text translation.');
     }
-    return { translation: result.translation, sourceLanguage: result.sourceLanguage };
+    const translation = result.translation.trim();
+    const lineBreaks = value => value.match(/\r\n|\r|\n/g) || [];
+    if (JSON.stringify(lineBreaks(source.trim())) !== JSON.stringify(lineBreaks(translation))) {
+      throw new Error('The translation did not preserve the source line breaks.');
+    }
+    return { translation: source.match(/^\s*/u)[0] + translation + source.match(/\s*$/u)[0],
+      sourceLanguage: result.sourceLanguage };
   }
 
-  const api = { MAX_SOURCE_CHARACTERS, normalizeSettings, validateSource, prepare, parseResult };
+  const api = { MAX_SOURCE_CHARACTERS, normalizeSettings, validateSource, splitSource, prepare, parseResult };
   globalScope.ChromeAiTranslatorTextTranslationRequest = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

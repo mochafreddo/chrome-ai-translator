@@ -127,11 +127,11 @@ try {
 
     const beforeInvalid = requests.length;
     await page.evaluate(`(() => {
-      document.getElementById('sourceText').value = '😀'.repeat(12001);
+      document.getElementById('sourceText').value = '😀'.repeat(60001);
       document.getElementById('btnTranslate').click();
     })()`);
     check('over-limit source is refused intact before transport', await page.evaluate(
-      "!document.getElementById('errorBox').hidden && Array.from(document.getElementById('sourceText').value).length === 12001 && document.getElementById('translatedText').value === '新しい結果'") && requests.length === beforeInvalid);
+      "!document.getElementById('errorBox').hidden && Array.from(document.getElementById('sourceText').value).length === 60001 && document.getElementById('translatedText').value === '新しい結果'") && requests.length === beforeInvalid);
 
     for (const width of [1280, 375]) {
       await browser.ctx.cdp.send('Emulation.setDeviceMetricsOverride', { width, height: 900,
