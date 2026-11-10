@@ -5,6 +5,15 @@ const contentHelpers = require('../extension/content.js');
 const { createProtectedFullPageChunk } = require('./sidepanel-translation-execution.test.js');
 const { createReasoningFixture } = require('./inline-block.test');
 
+const TEXT_SENDER = { tab: { id: 90 }, frameId: 0, documentId: 'text-document',
+  url: 'chrome-extension://test/text-translation.html' };
+const TEXT_SETTINGS = { service: 'openrouter', model: 'ignored', reasoningEffort: 'high',
+  sourceLanguage: 'auto', targetLanguage: 'Korean', tone: 'natural' };
+
+async function sendTextMessage(worker, message, sender = TEXT_SENDER) {
+  return new Promise(resolve => worker.handlers.onMessage(message, sender, resolve));
+}
+
 function assertIdleResponse(response) {
   assert.equal(response.ok, true);
   const { workerEpoch, ...state } = response.state;
@@ -3956,6 +3965,134 @@ exports.tests.push(...['stop', 'restore', 'start'].map((control) => ({
     ]);
   },
 })));
+
+exports.tests.push({
+  name: 'Text Translation sends the explicit snapshot through the selected fixed transport',
+  async fn() {
+    const requests = [];
+    const chrome = createBlockBatchChrome({ settings: { apiKey: 'sk-other-synthetic',
+      openrouterApiKey: 'sk-text-synthetic', service: 'openai' } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: async (url, options) => {
+      requests.push({ url, body: JSON.parse(options.body), authorization: options.headers.Authorization });
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translation: '<b>번역</b>\n\n두 번째 문단', sourceLanguage: null,
+      })) };
+    } });
+    const response = await sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'first',
+      source: '<b>Source</b>\n\nSecond paragraph', settings: TEXT_SETTINGS });
+    assert.deepEqual(response, { ok: true, result: { translation: '<b>번역</b>\n\n두 번째 문단',
+      sourceLanguage: null } });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, 'https://openrouter.ai/api/v1/responses');
+    assert.equal(requests[0].authorization, 'Bearer sk-text-synthetic');
+    assert.equal(requests[0].body.model, 'deepseek/deepseek-v4.1-flash-1017');
+    assert.deepEqual(requests[0].body.reasoning, { effort: 'none' });
+    assert.deepEqual(requests[0].body.provider, { require_parameters: true, data_collection: 'deny', zdr: true });
+    assert.equal(requests[0].body.store, false);
+    assert.equal(requests[0].body.input, '<b>Source</b>\n\nSecond paragraph');
+    assert.match(requests[0].body.instructions, /Korean/);
+    assert.match(requests[0].body.instructions, /natural/);
+    assert.equal(JSON.stringify(response).includes('sk-'), false);
+  },
+});
+
+exports.tests.push({
+  name: 'Text Translation rejects untrusted senders, empty and oversized input before sending',
+  async fn() {
+    const chrome = createBlockBatchChrome();
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: () => assert.fail('invalid input cannot send') });
+    for (const [source, sender, settings] of [
+      ['hello', { ...TEXT_SENDER, url: 'https://example.test/text-translation.html' }, TEXT_SETTINGS],
+      ['hello', { ...TEXT_SENDER, frameId: 1 }, TEXT_SETTINGS],
+      ['', TEXT_SENDER, TEXT_SETTINGS], ['  \n', TEXT_SENDER, TEXT_SETTINGS],
+      ['😀'.repeat(12001), TEXT_SENDER, TEXT_SETTINGS],
+      ['hello', TEXT_SENDER, { ...TEXT_SETTINGS, apiKey: 'forbidden' }],
+      ['hello', TEXT_SENDER, { ...TEXT_SETTINGS, service: 'other' }],
+    ]) {
+      const result = await sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'invalid', source, settings }, sender);
+      assert.equal(result.ok, false);
+    }
+  },
+}, {
+  name: 'Text Translation tab departure aborts transport and refuses a delayed response',
+  async fn() {
+    let release;
+    let signal;
+    const chrome = createBlockBatchChrome({ settings: { openrouterApiKey: 'sk-text-synthetic' } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: async (_url, options) => {
+      signal = options.signal;
+      await new Promise(resolve => { release = resolve; });
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translation: '오래된 응답', sourceLanguage: null,
+      })) };
+    } });
+    const pending = sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'departed',
+      source: 'hello', settings: TEXT_SETTINGS });
+    await new Promise(resolve => setImmediate(resolve));
+    worker.handlers.onTabRemoved(90);
+    assert.equal(signal.aborted, true);
+    release();
+    assert.equal((await pending).ok, false);
+  },
+}, {
+  name: 'Text Translation rejects duplicate work, scopes Stop, and keeps snapshot settings',
+  async fn() {
+    let release;
+    let signal;
+    const requests = [];
+    const settings = { ...TEXT_SETTINGS, service: 'openai', model: 'starting-model', reasoningEffort: 'low' };
+    const chrome = createBlockBatchChrome({ settings: { apiKey: 'sk-text-synthetic' } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      signal = options.signal;
+      await new Promise(resolve => { release = resolve; });
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translation: '번역', sourceLanguage: null,
+      })) };
+    } });
+    const pending = sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'snapshot',
+      source: '😀'.repeat(12000), settings });
+    settings.model = 'later-model';
+    settings.targetLanguage = 'French';
+    await new Promise(resolve => setImmediate(resolve));
+    const duplicate = await sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'duplicate',
+      source: 'second', settings: TEXT_SETTINGS });
+    assert.equal(duplicate.ok, false);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].model, 'starting-model');
+    assert.match(requests[0].instructions, /Korean/);
+    assert.equal(Array.from(requests[0].input).length, 12000);
+    await sendTextMessage(worker, { type: 'STOP_TEXT_TRANSLATION', operationId: 'other' });
+    assert.equal(signal.aborted, false);
+    await sendTextMessage(worker, { type: 'STOP_TEXT_TRANSLATION', operationId: 'snapshot' },
+      { ...TEXT_SENDER, documentId: 'another-document' });
+    assert.equal(signal.aborted, false);
+    await sendTextMessage(worker, { type: 'STOP_TEXT_TRANSLATION', operationId: 'snapshot' });
+    assert.equal(signal.aborted, true);
+    release();
+    assert.equal((await pending).ok, false);
+  },
+}, {
+  name: 'Text Translation refuses malformed model output without retrying',
+  async fn() {
+    let requests = 0;
+    const chrome = createBlockBatchChrome({ settings: { openrouterApiKey: 'sk-text-synthetic' } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => {
+      requests += 1;
+      return { ok: true, json: async () => createCompletedResponse('<b>not the response contract</b>') };
+    } });
+    const response = await sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'malformed',
+      source: 'hello', settings: TEXT_SETTINGS });
+    assert.equal(response.ok, false);
+    assert.equal(requests, 1);
+    assert.equal(Object.hasOwn(response, 'result'), false);
+  },
+});
 
 exports.tests.push({
   name: 'controls on separate tabs retain their Authorization and execution order',
