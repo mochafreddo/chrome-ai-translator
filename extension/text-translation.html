@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Text Translation · AI Translator</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="text-translation.css" />
+  </head>
+  <body>
+    <header class="header">
+      <h1 class="title">Text Translation</h1>
+      <a class="btn" href="options.html" target="_blank" rel="noopener">Options</a>
+    </header>
+    <main class="text-page">
+      <form id="translationForm" action="text-translation.html" method="post">
+        <fieldset id="translationSettings" disabled>
+          <legend>Translation settings</legend>
+          <div class="text-settings">
+            <label for="sourceLanguage">Source language
+              <select id="sourceLanguage" name="sourceLanguage">
+                <option value="auto">Auto-detect</option>
+                <option>English</option><option>Korean</option><option>Japanese</option>
+                <option>Chinese</option><option>Spanish</option><option>French</option>
+                <option>German</option><option>Portuguese</option><option>Italian</option>
+                <option>Arabic</option><option>Russian</option><option>Hindi</option>
+              </select>
+            </label>
+            <label for="targetLanguage">Target language
+              <input id="targetLanguage" name="targetLanguage" type="text" list="languages" required />
+            </label>
+            <label for="tone">Tone
+              <select id="tone" name="tone">
+                <option value="technical">technical</option><option value="natural">natural</option>
+                <option value="formal">formal</option>
+              </select>
+            </label>
+            <label for="service">Translation service
+              <select id="service" name="service"><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option></select>
+            </label>
+            <label for="model">Model
+              <input id="model" name="model" type="text" required autocorrect="off" autocapitalize="off" spellcheck="false" />
+            </label>
+            <label for="reasoningEffort">Reasoning effort
+              <select id="reasoningEffort" name="reasoningEffort">
+                <option>none</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option>
+              </select>
+            </label>
+          </div>
+          <button id="btnSaveDefaults" type="button" class="btn">Save as default</button>
+        </fieldset>
+        <datalist id="languages"><option>English</option><option>Korean</option><option>Japanese</option><option>Chinese</option><option>Spanish</option><option>French</option></datalist>
+        <div class="text-comparison">
+          <label for="sourceText">Source text
+            <textarea id="sourceText" name="sourceText" rows="16" aria-describedby="inputHint" required disabled></textarea>
+          </label>
+          <label for="translatedText">Translation
+            <textarea id="translatedText" name="translatedText" rows="16" readonly aria-describedby="languageStatus"></textarea>
+          </label>
+        </div>
+        <p id="inputHint" class="muted"></p>
+        <div class="row">
+          <button id="btnTranslate" type="submit" class="btn primary" disabled>Translate</button>
+          <button id="btnStop" type="button" class="btn" disabled>Stop</button>
+          <button id="btnClear" type="button" class="btn">Clear all</button>
+          <button id="btnCopy" type="button" class="btn" disabled>Copy translation</button>
+        </div>
+        <p class="muted">Translate with Cmd/Ctrl+Enter. Changes stay on this page until you save defaults.</p>
+        <div id="status" role="status" aria-live="polite"></div>
+        <div id="languageStatus" class="muted"></div>
+        <div id="errorBox" class="error" role="alert" hidden></div>
+      </form>
+    </main>
+    <script src="default-model.js"></script>
+    <script src="translation-settings.js"></script>
+    <script src="text-translation-request.js"></script>
+    <script src="text-translation.js"></script>
+  </body>
+</html>

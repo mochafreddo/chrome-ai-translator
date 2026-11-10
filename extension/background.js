@@ -87,7 +87,11 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorSettingsLifecycle) {
     importScripts('settings-lifecycle.js');
   }
+  if (!globalThis.ChromeAiTranslatorTextTranslationRequest) {
+    importScripts('text-translation-request.js');
+  }
 }
+const textTranslationRequest = globalThis.ChromeAiTranslatorTextTranslationRequest || require('./text-translation-request.js');
 const { getTargetLanguageCode } =
   globalThis.ChromeAiTranslatorTranslationSettings || require('./translation-settings.js');
 const sidePanelTranslationExecution =
@@ -427,6 +431,7 @@ function createBackgroundWorker(platform = {}) {
   const documentsByTab = new Map();
   const pendingByTab = new Map();
   const documentLifetimes = new Map();
+  const textTranslations = new Map();
 
   function documentEnded() {
     return Object.assign(new Error('The original document is no longer open.'), { code: 'document.departed' });
@@ -914,11 +919,22 @@ function createBackgroundWorker(platform = {}) {
   }
 
   function onTabRemoved(tabId) {
+    stopTextTranslationsForTab(tabId);
     invalidateDocument(tabId);
+  }
+
+  function stopTextTranslationsForTab(tabId, currentDocumentId = null) {
+    for (const [owner, operation] of textTranslations) {
+      if (owner.startsWith(`${tabId}:`) && owner !== `${tabId}:${currentDocumentId}`) {
+        operation.controller.abort();
+        textTranslations.delete(owner);
+      }
+    }
   }
 
   function onNavigationCommitted(details) {
     if (details.frameId !== 0) return;
+    stopTextTranslationsForTab(details.tabId, details.documentId);
     if (!documentLifetimes.has(details.tabId) && !stateByTab.has(details.tabId)) return;
     if (details.documentId && documentsByTab.get(details.tabId) === details.documentId) return;
     invalidateDocument(details.tabId, details.documentId);
@@ -951,6 +967,40 @@ function createBackgroundWorker(platform = {}) {
   function onMessage(msg, sender, sendResponse) {
     (async () => {
       try {
+        if (['TRANSLATE_TEXT', 'STOP_TEXT_TRANSLATION'].includes(msg?.type)) {
+          if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId ||
+              sender.url !== getChrome().runtime.getURL('text-translation.html') ||
+              typeof msg.operationId !== 'string' || !msg.operationId || msg.operationId.length > 100) {
+            throw new Error('Text Translation requires its own extension page.');
+          }
+          const owner = `${sender.tab.id}:${sender.documentId}`;
+          const current = textTranslations.get(owner);
+          if (msg.type === 'STOP_TEXT_TRANSLATION') {
+            if (current?.operationId === msg.operationId) {
+              current.controller.abort();
+              textTranslations.delete(owner);
+            }
+            sendResponse({ ok: true });
+            return;
+          }
+          if (current) throw new Error('A text translation is already running.');
+          const prepared = textTranslationRequest.prepare(msg.source, msg.settings);
+          const operation = { operationId: msg.operationId, controller: new AbortController() };
+          textTranslations.set(owner, operation);
+          try {
+            const stored = await settingsLifecycle.read();
+            const apiKey = prepared.service === 'openrouter' ? stored.openrouterApiKey : stored.apiKey;
+            if (!apiKey) throw new Error(`${prepared.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`);
+            const output = await requestTranslation({ ...prepared, apiKey, signal: operation.controller.signal });
+            if (textTranslations.get(owner) !== operation || operation.controller.signal.aborted) {
+              throw new Error('Text Translation stopped.');
+            }
+            sendResponse({ ok: true, result: textTranslationRequest.parseResult(output) });
+          } finally {
+            if (textTranslations.get(owner) === operation) textTranslations.delete(owner);
+          }
+          return;
+        }
         if (msg?.type === 'OPEN_INLINE_TRANSLATION_CONTROLS') {
           if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0) {
             throw new Error('Inline controls require a top-level page sender.');
