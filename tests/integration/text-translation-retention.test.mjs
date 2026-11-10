@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { createChecks, until, wait } from './harness.mjs';
 import { launchTextTranslationBrowser } from './text-translation-helper.mjs';
 
@@ -65,6 +66,14 @@ try {
   await page.navigate(browser.url);
   check('completed result survives reload', await browser.ready() &&
     await page.evaluate("document.getElementById('translatedText').value === '앞부분\\n\\n나머지' && document.getElementById('btnResume').disabled") && requests.length === 3);
+  const retainedPrivacy = await worker.evaluate(`chrome.storage.session.get(null).then(value => {
+    const serialized = JSON.stringify(value);
+    return { containsReaderData: serialized.includes('A'.repeat(8000)) && serialized.includes('앞부분'),
+      containsCredential: serialized.includes('sk-text-openai-synthetic') || serialized.includes('sk-text-openrouter-synthetic') };
+  })`);
+  check('whole session storage contains the retained source and result', retainedPrivacy.containsReaderData);
+  assert.equal(retainedPrivacy.containsCredential, false, 'Retained session storage contains a credential');
+  await worker.evaluate("chrome.storage.session.set({ retentionSentinel: 'Unrelated session state survives' })");
 
   for (const status of ['stopped', 'failed']) {
     const before = requests.length;
@@ -103,11 +112,16 @@ try {
   await browser.release();
   check('another tab Clear does not cancel the current tab request',
     await until(() => duplicate.evaluate("document.getElementById('translatedText').value === '나머지'"), 5000, 100) && requests.length === duplicateRequest);
+  await save('Surviving first-tab draft');
 
   const duplicateId = await duplicate.evaluate('chrome.tabs.getCurrent().then(tab => tab.id)');
   await page.evaluate(`chrome.tabs.remove(${duplicateId})`);
   check('tab close removes its retained data instead of keeping a hidden history',
-    await until(() => worker.evaluate(`chrome.storage.session.get('text-translation:${duplicateId}').then(value => !Object.hasOwn(value, 'text-translation:${duplicateId}'))`), 5000, 100));
+    await until(() => worker.evaluate(`chrome.storage.session.get(null).then(value => {
+      const serialized = JSON.stringify(value);
+      return !serialized.includes('Other tab') && !serialized.includes('나머지') &&
+        serialized.includes('Surviving first-tab draft') && value.retentionSentinel === 'Unrelated session state survives';
+    })`), 5000, 100));
   await save('Delete pending translation');
   browser.hold();
   const pendingRequest = requests.length + 1;
@@ -121,10 +135,8 @@ try {
   check('Clear during a request prevents late delivery and later reload from reviving the job',
     await browser.ready() && requests.length === pendingRequest &&
     await page.evaluate("document.getElementById('sourceText').value === '' && document.getElementById('translatedText').value === '' && document.getElementById('btnResume').disabled"));
-  check('retained records contain no actual or synthetic credential values', await worker.evaluate(`chrome.storage.session.get(null).then(value => {
-    const retained = Object.fromEntries(Object.entries(value).filter(([key]) => key.startsWith('text-translation:')));
-    return !JSON.stringify(retained).includes('sk-text-');
-  })`));
+  check('scoped Clear preserves unrelated session storage', await worker.evaluate(`chrome.storage.session.get(null)
+    .then(value => value.retentionSentinel === 'Unrelated session state survives')`));
   check('fixed provider interception remains fail-closed', browser.errors.length === 0);
 } catch (error) {
   failures.push('harness');

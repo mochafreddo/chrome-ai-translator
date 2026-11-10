@@ -19,7 +19,7 @@
         !['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(settings.reasoningEffort)) {
       throw new Error('Choose a supported tone and reasoning effort.');
     }
-    return { ...settings, ...getEffectiveModelSettings(settings) };
+    return { ...settings, sourceLanguage: settings.sourceLanguage.trim(), ...getEffectiveModelSettings(settings) };
   }
 
   function validateSource(source, limit = MAX_SOURCE_CHARACTERS) {
@@ -79,7 +79,9 @@
     }
     const translation = result.translation.trim();
     const lineBreaks = value => value.match(/\r\n|\r|\n/g) || [];
-    if (JSON.stringify(lineBreaks(source.trim())) !== JSON.stringify(lineBreaks(translation))) {
+    const emptyLines = value => value.split(/\r\n|\r|\n/).map(line => !line.trim());
+    if (JSON.stringify(lineBreaks(source.trim())) !== JSON.stringify(lineBreaks(translation)) ||
+        JSON.stringify(emptyLines(source.trim())) !== JSON.stringify(emptyLines(translation))) {
       throw new Error('The translation did not preserve the source line breaks.');
     }
     return { translation: source.match(/^\s*/u)[0] + translation + source.match(/\s*$/u)[0],

@@ -78,30 +78,22 @@
     retainEdits();
   }
 
-  function setSourceLanguage(language) {
-    const select = get('sourceLanguage');
-    select.value = language;
-    if (select.value !== language) {
-      const option = document.createElement('option');
-      option.value = language;
-      option.textContent = language;
-      select.append(option);
-      select.value = language;
-    }
-  }
-
   function swap() {
     if (!ready || active || !job || job.status !== 'complete') return;
     const detected = detectedSourceLanguage();
-    const sourceLanguage = job.settings.sourceLanguage !== 'auto' ? job.settings.sourceLanguage :
-      detected || (get('sourceLanguage').value !== 'auto' ? get('sourceLanguage').value : null);
+    let sourceLanguage = job.settings.sourceLanguage !== 'auto' ? job.settings.sourceLanguage : detected;
     if (!sourceLanguage) {
+      try {
+        sourceLanguage = contract.normalizeSettings({ ...job.settings, sourceLanguage: get('sourceLanguage').value }).sourceLanguage;
+      } catch {}
+    }
+    if (!sourceLanguage || sourceLanguage === 'auto') {
       showError(new Error('Choose the source language before swapping.'));
       get('sourceLanguage').focus();
       return;
     }
     get('sourceText').value = job.results.map(result => result.translation).join('');
-    setSourceLanguage(job.settings.targetLanguage);
+    get('sourceLanguage').value = job.settings.targetLanguage;
     get('targetLanguage').value = sourceLanguage;
     inputChanged();
   }
@@ -280,8 +272,7 @@
       if (retained.state) {
         const state = contract.retainedState(retained.state);
         for (const [key, value] of Object.entries(state.settings)) {
-          if (key === 'sourceLanguage') setSourceLanguage(value);
-          else get(key).value = value;
+          get(key).value = value;
         }
         get('sourceText').value = state.source;
         selectedService = state.settings.service;

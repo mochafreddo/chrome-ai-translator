@@ -18,13 +18,14 @@
           <legend>Translation settings</legend>
           <div class="text-settings">
             <label for="sourceLanguage">Source language
-              <select id="sourceLanguage" name="sourceLanguage">
-                <option value="auto">Auto-detect</option>
+              <input id="sourceLanguage" name="sourceLanguage" type="text" list="sourceLanguages" value="auto" required />
+              <datalist id="sourceLanguages">
+                <option value="auto" label="Auto-detect"></option>
                 <option>English</option><option>Korean</option><option>Japanese</option>
                 <option>Chinese</option><option>Spanish</option><option>French</option>
                 <option>German</option><option>Portuguese</option><option>Italian</option>
                 <option>Arabic</option><option>Russian</option><option>Hindi</option>
-              </select>
+              </datalist>
             </label>
             <label for="targetLanguage">Target language
               <input id="targetLanguage" name="targetLanguage" type="text" list="languages" required />
