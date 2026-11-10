@@ -1,20 +1,12 @@
 # Chrome AI Translator
 
-Vocabulary for the extension's translation experiences, including Text Translation agreed during design. Current behavior and implementation responsibilities are described in the [architecture reference](docs/architecture.md).
+Vocabulary for the extension's translation experiences. Current behavior and implementation responsibilities are described in the [architecture reference](docs/architecture.md).
 
 ## Language
 
 **Text Translation**:
 Translation of text supplied directly by the reader, with the source and translated text available for comparison and copying.
 _Avoid_: manual translation, paste mode, Side Panel Translation
-
-**Side Panel Translation**:
-Translation of a page's article body into Markdown, presented in Chrome's side panel beside the unchanged page.
-_Avoid_: document translation, full-page translation, panel mode
-
-**Translation Chunk**:
-A portion of an article's Markdown translated as a unit by Side Panel Translation. Chunks normally follow block boundaries, but an oversized block may span chunks when it can be divided without breaking a protected structure.
-_Avoid_: batch, section, page part
 
 **Inline Translation**:
 Translation of a page's article content in place, one Semantic Block at a time as the reader scrolls. Page-owned inline elements survive the replacement and may move with the translated word order.
@@ -41,7 +33,7 @@ A page-owned node whose identity is preserved but that exposes no visible or acc
 _Avoid_: decorative atom, trusted node, opaque node
 
 **Placeholder Token**:
-A stand-in for page-owned structure that translation preserves while reordering the surrounding prose. Both translation experiences use it for structure such as links or code; Inline Translation also uses it for wrappers and Inert Page Nodes.
+A stand-in for page-owned structure that Inline Translation preserves while reordering the surrounding prose, including links, code, wrappers and Inert Page Nodes.
 _Avoid_: bare token (ambiguous with a model token or a request correlation token), marker, tag, sentinel, protected span
 
 **Source Syntax**:
@@ -65,7 +57,7 @@ The extension-owned control at the page's bottom-right corner, opening the Inlin
 _Avoid_: FAB, inline button, page button, widget
 
 **Inline Translation Section**:
-The side panel's home for Inline Translation controls, progress, and errors, separate from its Side Panel Translation controls.
+The side panel's home for Inline Translation controls, progress, and errors.
 _Avoid_: inline panel, panel controls, inline pane
 
 **Inline Translation Shortcut**:
@@ -77,5 +69,5 @@ The reader's standing choice of when the Floating Translate Button may appear: n
 _Avoid_: auto-show, always-on, auto-inject
 
 **Inline Translation Authorization**:
-The time-limited permission to start Inline Translation on a page, granted by a deliberate reader gesture through the extension. Side Panel Translation does not require this separate authorization.
+The time-limited permission to start Inline Translation on a page, granted by a deliberate reader gesture through the extension.
 _Avoid_: inline consent, activeTab grant

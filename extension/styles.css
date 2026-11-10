@@ -46,21 +46,13 @@ body {
   font-weight: 700;
 }
 
-.status,
 .muted {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
 
-.status {
-  font-size: 13px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
 .controls,
-.options,
-.main {
+.options {
   padding: 14px 16px;
 }
 
@@ -204,14 +196,12 @@ input::placeholder {
   color: #991b1b;
 }
 
-.btn:disabled,
-.tab:disabled {
+.btn:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }
 
-.btn:hover:not(:disabled),
-.tab:hover:not(:disabled) {
+.btn:hover:not(:disabled) {
   border-color: #6b7280;
   background: var(--canvas);
 }
@@ -241,34 +231,6 @@ input::placeholder {
   overflow-wrap: anywhere;
 }
 
-.tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.tab {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-  min-height: 44px;
-  padding: 7px 10px;
-}
-
-.tab[aria-selected="true"] {
-  border-color: var(--accent);
-  background: #eff6ff;
-  color: var(--accent-hover);
-  font-weight: 700;
-}
-
-.panel {
-  min-height: 240px;
-}
-
-.pre,
 #inlineDiagnostics {
   margin: 0;
   padding: 12px;

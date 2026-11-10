@@ -10,8 +10,6 @@ const suiteFiles = [
   'placeholder-tokens',
   'inline-block',
   'inline-translation-session',
-  'markdown-codec',
-  'sidepanel-translation-execution',
   'openai-response',
   'inline-model-execution',
   'inline-inspection',
@@ -29,7 +27,6 @@ const suiteFiles = [
   'background-helpers',
   'settings-lifecycle',
   'options-helpers',
-  'sidepanel-failure',
   'sidepanel-helpers',
   'sidepanel-tab-state',
   'static-assets',
@@ -41,7 +38,6 @@ const suiteFiles = [
   'model-quality',
   'model-quality-preparation',
   'model-quality-live',
-  'protected-spans',
   'qa-issue-003.regression-1',
 ];
 

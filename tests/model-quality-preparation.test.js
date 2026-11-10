@@ -4,7 +4,7 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { createHash } = require('node:crypto');
 const { loadQualityCorpus } = require('./integration/model-quality-corpus.mjs');
-const { coverageMatches, summarizeQuality, inlineQualityCompleted, inlineQualityTerminal, protectedMarkdownMatches, mockDisplayedProseMatches } = require('./integration/model-quality-observation.mjs');
+const { coverageMatches, summarizeQuality, inlineQualityCompleted, inlineQualityTerminal, mockDisplayedProseMatches } = require('./integration/model-quality-observation.mjs');
 const { runEvaluation } = require('./integration/evaluation-execution.mjs');
 const { createQualityExperiment } = require('./integration/model-quality.mjs');
 const { createBudget } = require('./integration/routing-budget.mjs');
@@ -121,7 +121,7 @@ exports.tests = [{
     });
   },
 }, {
-  name: 'matches Inline blocks as a multiset and Side Panel initial chunks in order',
+  name: 'matches Inline blocks as a multiset',
   fn() {
     const duplicate = JSON.stringify({ template: 'same block', atoms: [] });
     const other = JSON.stringify({ template: 'other block', atoms: [{ token: '⟦ATOM⟧' }] });
@@ -142,18 +142,6 @@ exports.tests = [{
     inline.requests[2].blockKeys = [];
     assert.equal(coverageMatches(inline), false);
 
-    const sidepanel = {
-      flow: 'sidepanel',
-      expectedChunks: ['first chunk', 'second chunk'],
-      requests: [
-        { phase: 'initial', input: 'first chunk' },
-        { phase: 'repair', input: 'repair request is ignored' },
-        { phase: 'initial', input: 'second chunk' },
-      ],
-    };
-    assert.equal(coverageMatches(sidepanel), true);
-    sidepanel.requests.reverse();
-    assert.equal(coverageMatches(sidepanel), false);
   },
 }, {
   name: 'requires an observed completion for every request and matching initial inputs across profiles',
@@ -172,18 +160,15 @@ exports.tests = [{
     assert.throws(() => summarizeQuality(mismatched, makeObserver(mismatched)), /initial inputs differ/);
   },
 }, {
-  name: 'rejects missing source prose, serializer refusals, and an empty Side Panel chunk set',
+  name: 'rejects missing source prose and serializer refusals',
   fn() {
     const inline = { flow: 'inline', expected: { blocks: [{ template: 'source', atoms: [] }],
-      census: { inlineMissing: ['missing source paragraph'], rejectedBlocks: [], sidepanelMissing: [] } },
+      census: { inlineMissing: ['missing source paragraph'], rejectedBlocks: [] } },
       requests: [{ phase: 'initial', blockKeys: [JSON.stringify({ template: 'source', atoms: [] })] }] };
     assert.equal(coverageMatches(inline), false);
     inline.expected.census.inlineMissing = [];
     inline.expected.census.rejectedBlocks = [{ tag: 'P', code: 'unsupported' }];
     assert.equal(coverageMatches(inline), false);
-    assert.equal(coverageMatches({ flow: 'sidepanel', expectedChunks: [], requests: [] }), false);
-    assert.equal(coverageMatches({ flow: 'sidepanel', expected: { census: { sidepanelMissing: ['lost paragraph'] } },
-      expectedChunks: ['known chunk'], requests: [{ phase: 'initial', input: 'known chunk' }] }), false);
   },
 }, {
   name: 'requires every mock block to be applied with no pending, changed, or failed outcomes',
@@ -214,31 +199,12 @@ exports.tests = [{
     for (const [outcomes, expectedBlocks] of invalid) assert.equal(inlineQualityTerminal(outcomes, expectedBlocks), false);
   },
 }, {
-  name: 'checks protected Markdown snippets and their counts without expecting rendered HTML',
-  fn() {
-    const extraction = { contentMarkdown: 'Use ```value()``` and [guide](<https://example.org/>).',
-      translationDocument: { entries: [{ kind: 'code', display: 'inline', value: 'value()' },
-        { kind: 'link', destination: 'https://example.org/' }] } };
-    assert.equal(protectedMarkdownMatches(extraction, '모의 응답.\nUse ```value()``` and [guide](<https://example.org/>).'), true);
-    assert.equal(protectedMarkdownMatches(extraction, 'Use ```changed()``` and [guide](<https://example.org/>).'), false);
-    assert.equal(protectedMarkdownMatches(extraction, 'Use ```value()``` and [guide](<https://other.example/>).'), false);
-    assert.equal(protectedMarkdownMatches(extraction, extraction.contentMarkdown + ' ```value()```'), false);
-  },
-}, {
   name: 'rejects a lost or reused displayed prose occurrence while allowing synthetic prefixes',
   fn() {
     const pieces = ['The first sentence.', 'Repeated sentence.', 'Repeated sentence.'];
     assert.equal(mockDisplayedProseMatches(pieces, '모의 응답입니다. The first sentence. Repeated sentence. 모의 응답입니다. Repeated sentence.'), true);
     assert.equal(mockDisplayedProseMatches(pieces, 'The first sentence. Repeated sentence. ```code()```'), false);
     assert.equal(mockDisplayedProseMatches(pieces, 'Repeated sentence. Repeated sentence. ```code()```'), false);
-  },
-}, {
-  name: 'uses protected entry source text when original Markdown collapses inline-code whitespace',
-  fn() {
-    const extraction = { contentMarkdown: 'Use ```method(self, args)```.', translationDocument: {
-      entries: [{ kind: 'code', display: 'inline', value: 'method(self,\nargs)' }] } };
-    assert.equal(protectedMarkdownMatches(extraction, 'Use ```method(self,\nargs)```.'), true);
-    assert.equal(protectedMarkdownMatches(extraction, 'Use ```method(self, args)```.'), false);
   },
 }, {
   name: 'rejects quality live without the approved shared USD 5 ledger before preparing output or credentials',

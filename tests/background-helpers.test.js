@@ -2,7 +2,6 @@ const requestPreparation = require('../extension/inline-request.js');
 const assert = require('node:assert/strict');
 const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
-const { createProtectedFullPageChunk } = require('./sidepanel-translation-execution.test.js');
 const { createReasoningFixture } = require('./inline-block.test');
 
 const TEXT_SENDER = { tab: { id: 90 }, frameId: 0, documentId: 'text-document',
@@ -19,7 +18,7 @@ function assertIdleResponse(response) {
   const { workerEpoch, ...state } = response.state;
   assert.match(workerEpoch, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
   assert.deepEqual(state, {
-    status: 'idle', extracted: null, translated: null, stateSequence: 0, bodyVersion: 0,
+    stateSequence: 0,
   });
 }
 
@@ -39,10 +38,6 @@ function createIncompleteResponse() {
     incomplete_details: { reason: 'max_output_tokens' },
     output: [],
   };
-}
-
-function createApiErrorResponse(message) {
-  return { apiError: message };
 }
 
 // Drives one request and hands back the body it carried. The two checks that use it are about
@@ -65,20 +60,6 @@ async function runTranslationRequest(request) {
 
   const output = await worker.requestTranslation(request);
   return { requestBody, output };
-}
-
-function createPlainTranslationDocument(markdown) {
-  return {
-    namespace: 'CAT_TAB',
-    entries: [],
-    blocks: [{
-      id: 'm1',
-      kind: 'paragraph',
-      template: markdown,
-      originalMarkdown: markdown,
-      entries: [],
-    }],
-  };
 }
 
 function createBlockApiRecord(id = 'b1') {
@@ -160,27 +141,6 @@ function createBlockBatchChrome({
   };
 }
 
-// Three blocks, each too long to share a Translation Chunk with the next at the smallest
-// chunk size the options page accepts, so the fixture cuts into three chunks. That is what
-// lets a failure arrive late: two answers are already in hand, and billed, when the third
-// request goes out.
-const THREE_CHUNK_BLOCKS = [1, 2, 3].map((index) => {
-  const template = `Paragraph ${index} ${'word '.repeat(299)}`.trim();
-  return {
-    id: `m${index}`,
-    kind: 'paragraph',
-    template,
-    originalMarkdown: template,
-    entries: [],
-  };
-});
-
-const THREE_CHUNK_DOCUMENT = {
-  namespace: 'CAT_TAB_SEQUENCE',
-  entries: [],
-  blocks: THREE_CHUNK_BLOCKS,
-};
-
 // Hands messages to a worker the way Chrome does and collects the answers. The handler
 // returns before the work it started finishes — it returns `true` to keep the channel open
 // and calls `sendResponse` later — so a caller waits on the callback rather than on the
@@ -201,9 +161,8 @@ async function collectWorkerResponses(worker, messages, sender = {}) {
     const pageSender = message.type === 'TRANSLATE_VISIBLE_BLOCK_BATCH'
       ? { tab: { id: 4201 }, frameId: 0, documentId: `document-${sender.tab?.id || 4201}`, ...sender }
       : sender;
-    const boundMessage = ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(message.type)
+    const boundMessage = message.type === 'RUN_INLINE_TRANSLATION_CONTROL'
       ? { documentId: `document-${message.tabId}`,
-        ...(message.type === 'TRANSLATE_TAB' ? { displayedProvider: { service: 'openai', model: 'gpt-5.6-luna' } } : {}),
         ...message } : message;
     worker.handlers.onMessage(boundMessage, pageSender, (response) => responses.push(response));
   }
@@ -255,20 +214,8 @@ async function completeSettingsWork(work) {
   }
 }
 
-
-// The five namespaces a whole-tab translation reaches and nothing else: `runtime` for the
-// state broadcast the panel listens to, `sidePanel` for the panel it opens beside the page,
-// `scripting` for the content script it makes sure is there, `storage` for the settings it
-// translates under, and `tabs` for the extraction it asks the page for. The checks that
-// drive one vary the same three things — what the settings say, what the page hands back,
-// and whether the broadcast is collected — so those are the parameters and the rest is the
-// same platform every time.
-//
-// `extract` is handed the tab id, because a check covering what article extraction can come
-// back with needs a different answer per tab.
-function createTabTranslationChrome({
+function createPageChrome({
   settings,
-  extract,
   onStateMessage = () => {},
 }) {
   return {
@@ -298,9 +245,6 @@ function createTabTranslationChrome({
         if (message.type === 'GET_INLINE_TRANSLATION_STATE') {
           return { ok: true, snapshot: { status: 'original', progress: '', error: '' } };
         }
-        if (message.type === 'EXTRACT_ARTICLE') {
-          return { ok: true, data: extract(tabId) };
-        }
         return { ok: true };
       },
     },
@@ -310,7 +254,7 @@ function createTabTranslationChrome({
 function createInvocationWorker(settings = {}) {
   const calls = [];
   const broadcasts = [];
-  const chrome = createTabTranslationChrome({ settings,
+  const chrome = createPageChrome({ settings,
     onStateMessage: (message) => broadcasts.push(message) });
   chrome.sidePanel.open = async (options) => calls.push(['open', options]);
   chrome.sidePanel.setOptions = async (options) => calls.push(['options', options]);
@@ -333,64 +277,6 @@ function createInvocationWorker(settings = {}) {
       await require('./inline-translation-operation.test').flushMicrotasks();
     }
   } };
-}
-
-// Drives a whole Side Panel Translation the way the panel does — one TRANSLATE_TAB message
-// through the worker's document execution adapter — and hands back every state the panel would have seen,
-// which is the only place the discard is visible. A queue that runs dry throws, so an
-// unexpected extra request fails loudly instead of replaying the last answer.
-//
-// The platform carries the five namespaces this path reaches: `runtime` for the broadcast
-// each recorded state travels on, `sidePanel` for the panel the translation opens beside the
-// page, `scripting` for the content script it makes sure is there, `storage` for the settings
-// it translates under, and `tabs` for the extraction it asks the page for.
-async function runTabTranslation(
-  tabId,
-  answers,
-  documentModel = THREE_CHUNK_DOCUMENT,
-  settings = {}
-) {
-  const queue = [...answers];
-  const states = [];
-  const requestInputs = [];
-  const requestUrls = [];
-
-  const worker = helpers.createBackgroundWorker({
-    fetch: async (url, options) => {
-      requestUrls.push(url);
-      requestInputs.push(JSON.parse(options.body).input);
-      if (!queue.length) {
-        throw new Error(`Unexpected full-page request #${requestInputs.length}`);
-      }
-      const answer = queue.shift();
-      if (answer?.apiError) {
-        return {
-          ok: false,
-          status: 400,
-          async json() {
-            return { error: { message: answer.apiError } };
-          },
-        };
-      }
-      return { ok: true, async json() { return answer; } };
-    },
-    chrome: createTabTranslationChrome({
-      settings: { apiKey: 'sk-test', chunkMaxChars: 2000, ...settings },
-      extract: () => ({
-        title: 'Article',
-        url: 'https://example.test',
-        langHint: 'en',
-        contentMarkdown: 'Original display Markdown.',
-        translationDocument: documentModel,
-      }),
-      onStateMessage: (message) => states.push(message.state),
-    }),
-  });
-
-  const responses = await collectWorkerResponses(worker, [
-    { type: 'TRANSLATE_TAB', tabId, displayedProvider: require('../extension/default-model.js').getEffectiveModelSettings(settings) },
-  ]);
-  return { worker, responses, states, requestInputs, requestUrls };
 }
 
 exports.name = 'background helpers';
@@ -444,22 +330,21 @@ exports.tests = [
       assert.equal(response.state.documentId, null);
       assert.equal(response.state.inlineTranslationError.code, 'document.unavailable');
       assert.match(response.state.inlineTranslationError.message, /Chrome does not allow extensions/);
-      assert.equal(response.state.extracted, null);
-      assert.equal(response.state.translated, null);
+      assert.equal(Object.hasOwn(response.state, 'extracted'), false);
+      assert.equal(Object.hasOwn(response.state, 'translated'), false);
     },
   },
   {
-    name: 'unknown-document metadata reads never expose a previous document article or settings',
+    name: 'unknown-document metadata reads never expose the previous document inline error',
     async fn() {
-      const { worker } = await runTabTranslation(42, [createCompletedResponse('이전 문서 번역')],
-        createPlainTranslationDocument('Previous article'));
-      const [response] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, documentId: null }]);
+      const { worker, chrome } = createInvocationWorker();
+      chrome.tabs.sendMessage = async () => { throw new Error('previous document failure'); };
+      await worker.handlers.onCommand('translate-inline', { id: 4201 });
+      const [response] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201, documentId: null }]);
       assert.equal(response.ok, true);
       assert.equal(response.state.documentId, null);
-      assert.equal(response.state.extracted, null);
-      assert.equal(response.state.translated, null);
-      assert.equal(Object.hasOwn(response.state, 'settingsUsed'), false);
       assert.equal(Object.hasOwn(response.state, 'inlineTranslationError'), false);
+      assert.equal(JSON.stringify(response).includes('previous document failure'), false);
     },
   },
   {
@@ -485,52 +370,50 @@ exports.tests = [
     },
   },
   {
-    name: 'a departed request lookup cannot invalidate the replacement document owner',
+    name: 'a departed Inline request lookup cannot invalidate the replacement document owner',
     async fn() {
-      let releaseLookup;
-      let lookupEntered;
+      let releaseLookup, lookupEntered, releaseModel, modelEntered;
       const lookupReady = new Promise(resolve => { lookupEntered = resolve; });
       const lookupGate = new Promise(resolve => { releaseLookup = resolve; });
-      let releaseModel;
-      let modelEntered;
       const modelReady = new Promise(resolve => { modelEntered = resolve; });
       const modelGate = new Promise(resolve => { releaseModel = resolve; });
       let currentDocument = 'document-42';
       let lookups = 0;
       let replacementSignal;
-      const chrome = createTabTranslationChrome({ settings: { apiKey: 'synthetic' },
-        extract: () => ({ title: 'A', url: 'https://example.test/same', langHint: 'en', contentMarkdown: 'A',
-          translationDocument: createPlainTranslationDocument('A') }) });
+      const chrome = createBlockBatchChrome();
+      chrome.runtime.sendMessage = async () => {};
       chrome.webNavigation.getFrame = async () => {
         if (++lookups === 2) { lookupEntered(); await lookupGate; return { documentId: 'departed-lookup-result' }; }
         return { documentId: currentDocument };
       };
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (_url, options) => {
+      const worker = helpers.createBackgroundWorker({ chrome, crypto: globalThis.crypto, fetch: async (_url, options) => {
         replacementSignal = options.signal; modelEntered(); await modelGate;
-        return { ok: true, async json() { return createCompletedResponse('새 문서 번역'); } };
+        return { ok: true, async json() { return createCompletedResponse(JSON.stringify({ translations: [
+          { id: 'b1', template: '새 문서 번역' },
+        ] })); } };
       } });
-      const old = collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 42, documentId: currentDocument }]);
+      const request = () => collectWorkerResponses(worker, [{ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        records: [createTestPlainBlockRecord()] }], { tab: { id: 42 }, frameId: 0, documentId: currentDocument });
+      const old = request();
       await lookupReady;
       currentDocument = 'replacement-42';
       worker.handlers.onNavigationCommitted({ tabId: 42, frameId: 0, documentId: currentDocument });
-      const replacement = collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 42, documentId: currentDocument }]);
+      const replacement = request();
       await modelReady;
       releaseLookup();
       await old;
-      const aborted = replacementSignal.aborted;
+      assert.equal(replacementSignal.aborted, false);
       releaseModel();
-      await replacement;
-      assert.equal(aborted, false);
-      const [response] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, documentId: currentDocument }]);
-      assert.equal(response.state.status, 'done');
-      assert.equal(response.state.translated, '새 문서 번역');
+      const [response] = await replacement;
+      assert.equal(response.ok, true);
+      assert.equal(response.results[0].disposition, 'apply');
     },
   },
   {
     name: 'unrelated navigation and closed-tab navigation create no extension state or broadcasts',
     async fn() {
       const broadcasts = [];
-      const worker = helpers.createBackgroundWorker({ chrome: createTabTranslationChrome({ settings: {},
+      const worker = helpers.createBackgroundWorker({ chrome: createPageChrome({ settings: {},
         onStateMessage: message => broadcasts.push(message) }) });
       for (let tabId = 100; tabId < 200; tabId += 1) {
         worker.handlers.onNavigationCommitted({ tabId, frameId: 0, documentId: `unrelated-${tabId}` });
@@ -547,18 +430,18 @@ exports.tests = [
     },
   },
   {
-    name: 'a document capture resolving after tab closure cannot recreate its deleted lifetime',
+    name: 'an Inline document capture resolving after tab closure cannot recreate its deleted lifetime',
     async fn() {
-      let release;
-      let entered;
+      let release, entered;
       const ready = new Promise(resolve => { entered = resolve; });
       const gate = new Promise(resolve => { release = resolve; });
       const broadcasts = [];
-      const chrome = createTabTranslationChrome({ settings: { apiKey: 'synthetic' },
-        extract: () => assert.fail('closed capture cannot extract'), onStateMessage: message => broadcasts.push(message) });
+      const chrome = createPageChrome({ settings: { apiKey: 'synthetic' },
+        onStateMessage: message => broadcasts.push(message) });
       chrome.webNavigation.getFrame = async () => { entered(); await gate; return { documentId: 'document-42' }; };
       const worker = helpers.createBackgroundWorker({ chrome, fetch: () => assert.fail('closed capture cannot send') });
-      const pending = collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 42 }]);
+      const pending = collectWorkerResponses(worker, [{ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        records: [createTestPlainBlockRecord()] }], { tab: { id: 42 }, frameId: 0, documentId: 'document-42' });
       await ready;
       worker.handlers.onTabRemoved(42);
       release();
@@ -593,24 +476,6 @@ exports.tests = [
     },
   },
   {
-    name: 'translation messages require document and provider context and reject credential or service overrides',
-    async fn() {
-      const worker = helpers.createBackgroundWorker({ chrome: createTabTranslationChrome({ settings: { apiKey: 'synthetic' },
-        extract: () => assert.fail('invalid context cannot extract') }), fetch: () => assert.fail('invalid context cannot send') });
-      const valid = { type: 'TRANSLATE_TAB', tabId: 42, documentId: 'document-42',
-        displayedProvider: { service: 'openai', model: 'gpt-5.6-luna' } };
-      for (const message of [{ ...valid, documentId: undefined }, { ...valid, displayedProvider: undefined },
-        ...['service', 'apiKey', 'openrouterApiKey', 'endpoint'].map(key => ({ ...valid, settingsOverride: { [key]: 'forged' } }))]) {
-        const response = await new Promise(resolve => worker.handlers.onMessage(message, {}, resolve));
-        assert.equal(response.ok, false);
-        assert.doesNotMatch(JSON.stringify(response), /forged/);
-      }
-      const response = await new Promise(resolve => worker.handlers.onMessage(valid,
-        { tab: { id: 42 }, frameId: 0, documentId: 'document-42' }, resolve));
-      assert.equal(response.ok, false);
-    },
-  },
-  {
     name: 'diagnostic transport codes are exact allowlisted values',
     fn() {
       const { serializeProblemBlock } = require('../extension/translation-diagnostics.js');
@@ -622,62 +487,6 @@ exports.tests = [
       }
     },
   },
-  {
-    name: 'a changed displayed provider refuses before extraction or transport',
-    async fn() {
-      const chrome = createTabTranslationChrome({ settings: { service: 'openrouter', openrouterApiKey: 'synthetic' },
-        extract: () => assert.fail('stale provider cannot extract') });
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: () => assert.fail('stale provider cannot send') });
-      const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 42,
-        documentId: 'document-42', displayedProvider: { service: 'openai', model: 'gpt-5.6-luna' } }]);
-      assert.deepEqual(response, { ok: true, skipped: true, reason: 'provider_changed' });
-    },
-  },
-  ...['navigation', 'closure'].map(departure => ({
-    name: `${departure} aborts pending transport and stops later chunks and repairs`,
-    async fn() {
-      let release;
-      let entered;
-      const ready = new Promise(resolve => { entered = resolve; });
-      const gate = new Promise(resolve => { release = resolve; });
-      let currentDocument = 'document-42';
-      let requestCount = 0;
-      let signal;
-      const targets = [];
-      const chrome = createTabTranslationChrome({ settings: { apiKey: 'synthetic', chunkMaxChars: 2000 },
-        extract: () => ({ title: 'A', url: 'https://example.test', langHint: 'en', contentMarkdown: 'A',
-          translationDocument: THREE_CHUNK_DOCUMENT }) });
-      chrome.webNavigation.getFrame = async () => ({ documentId: currentDocument });
-      const send = chrome.tabs.sendMessage;
-      chrome.tabs.sendMessage = async (tabId, message, options) => {
-        targets.push(options);
-        return send(tabId, message);
-      };
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (_url, options) => {
-        requestCount += 1;
-        signal = options.signal;
-        entered();
-        await gate;
-        return { ok: true, async json() { return createIncompleteResponse(); } };
-      } });
-      const pending = collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 42, documentId: currentDocument }]);
-      await ready;
-      if (departure === 'closure') worker.handlers.onTabRemoved(42);
-      else {
-        currentDocument = 'replacement-42';
-        worker.handlers.onNavigationCommitted?.({ tabId: 42, frameId: 0, documentId: currentDocument });
-      }
-      const aborted = signal?.aborted;
-      release();
-      await pending;
-      assert.equal(aborted, true);
-      assert.equal(requestCount, 1);
-      assert.equal(targets.every(target => target?.documentId === 'document-42'), true);
-      const [state] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, documentId: currentDocument }]);
-      assert.equal(state.state.translated, null);
-      assert.equal(state.state.extracted, null);
-    },
-  })),
   ...['openai', 'openrouter'].map(service => ({
     name: `${service} transport refuses redirects and redacts upstream failures`,
     async fn() {
@@ -689,47 +498,6 @@ exports.tests = [
       await assert.rejects(worker.requestTranslation({ service, apiKey: 'synthetic', model: 'm', input: 'A' }),
         error => error.code === `${service}.authentication` && !error.message.includes('secret'));
       assert.equal(options.redirect, 'error');
-    },
-  })),
-  ...['settings', 'prepare', 'extract'].map(phase => ({
-    name: `same-URL document replacement during ${phase} never translates the replacement`,
-    async fn() {
-      let entered;
-      let release;
-      const ready = new Promise(resolve => { entered = resolve; });
-      const gate = new Promise(resolve => { release = resolve; });
-      let currentDocument = 'document-42';
-      const chrome = createTabTranslationChrome({ settings: { apiKey: 'synthetic' },
-        extract: () => ({ title: 'A', url: 'https://example.test/same', langHint: 'en', contentMarkdown: 'A',
-          translationDocument: createPlainTranslationDocument('A') }) });
-      chrome.webNavigation.getFrame = async () => ({ documentId: currentDocument });
-      const read = chrome.storage.local.get;
-      chrome.storage.local.get = async () => {
-        if (phase === 'settings') { entered(); await gate; }
-        return read();
-      };
-      chrome.scripting.executeScript = async () => {
-        if (phase === 'prepare') { entered(); await gate; }
-      };
-      const messages = [];
-      const send = chrome.tabs.sendMessage;
-      chrome.tabs.sendMessage = async (tabId, message, options) => {
-        messages.push({ type: message.type, documentId: options.documentId });
-        if (phase === 'extract' && message.type === 'EXTRACT_ARTICLE') { entered(); await gate; }
-        return send(tabId, message);
-      };
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: () => assert.fail('departed document cannot send') });
-      const pending = collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 42, documentId: currentDocument }]);
-      await ready;
-      currentDocument = 'replacement-42';
-      worker.handlers.onNavigationCommitted({ tabId: 42, frameId: 0, documentId: currentDocument });
-      release();
-      await pending;
-      assert.equal(messages.every(message => message.documentId === 'document-42'), true);
-      assert.equal(messages.filter(message => message.type === 'EXTRACT_ARTICLE').length, phase === 'extract' ? 1 : 0);
-      const [state] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, documentId: currentDocument }]);
-      assert.equal(state.state.status, 'idle');
-      assert.equal(state.state.documentId, currentDocument);
     },
   })),
   ...['command', 'control'].map(trigger => ({
@@ -798,79 +566,6 @@ exports.tests = [
       assert.equal(requests, 1);
     },
   })),
-  ...['service', 'model'].map(changed => ({
-    name: `a saved ${changed} change during extraction requires another provider confirmation`,
-    async fn() {
-      const settings = { apiKey: 'synthetic', service: 'openai', model: 'shown-model' };
-      const chrome = createTabTranslationChrome({ settings,
-        extract: () => {
-          if (changed === 'service') settings.service = 'openrouter';
-          else settings.model = 'changed-model';
-          return { title: 'A', url: 'https://example.test', langHint: 'en', contentMarkdown: 'A',
-            translationDocument: createPlainTranslationDocument('A') };
-        } });
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: () => assert.fail('provider change cannot send') });
-      const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 42,
-        documentId: 'document-42', displayedProvider: { service: 'openai', model: 'shown-model' } }]);
-      assert.deepEqual(response, { ok: true, skipped: true, reason: 'provider_changed' });
-      const [state] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, documentId: 'document-42' }]);
-      assert.equal(state.state.status, 'idle');
-      assert.equal(state.state.extracted, null);
-    },
-  })),
-  {
-    name: 'an explicit OpenAI model override stays fixed across subsequent saved provider changes',
-    async fn() {
-      const settings = { apiKey: 'synthetic', service: 'openai', model: 'saved-model', chunkMaxChars: 2000 };
-      const chrome = createTabTranslationChrome({ settings, extract: () => ({ title: 'A', url: 'https://example.test',
-        langHint: 'en', contentMarkdown: 'A', translationDocument: THREE_CHUNK_DOCUMENT }) });
-      const requests = [];
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (url, options) => {
-        requests.push({ url, model: JSON.parse(options.body).model });
-        settings.service = 'openrouter'; settings.model = 'newly-saved-model';
-        return { ok: true, async json() { return createCompletedResponse('번역 결과'); } };
-      } });
-      const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 42,
-        documentId: 'document-42', settingsOverride: { model: 'typed-model' },
-        displayedProvider: { service: 'openai', model: 'typed-model' } }]);
-      assert.deepEqual(response, { ok: true });
-      assert.deepEqual(requests, [1, 2, 3].map(() => ({ url: 'https://api.openai.com/v1/responses', model: 'typed-model' })));
-    },
-  },
-  {
-    name: 'omits acknowledged bodies across 60 polls and returns full bodies for every mismatch',
-    async fn() {
-      const { worker } = await runTabTranslation(42, [
-        createCompletedResponse('첫째 문단 번역.'),
-        createCompletedResponse('둘째 문단 번역.'),
-        createCompletedResponse('셋째 문단 번역.'),
-      ]);
-      const [full] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42 }]);
-      const knownBody = { workerEpoch: full.state.workerEpoch, bodyVersion: full.state.bodyVersion };
-      let deliveredBodyChars = 0;
-      for (let index = 0; index < 60; index += 1) {
-        const [polled] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, knownBody }]);
-        deliveredBodyChars += (polled.state.extracted?.contentMarkdown?.length || 0) +
-          (polled.state.translated?.length || 0);
-        assert.equal(Object.hasOwn(polled.state, 'extracted'), false);
-        assert.equal(Object.hasOwn(polled.state, 'translated'), false);
-        assert.equal(polled.state.status, 'done');
-        assert.equal(polled.state.stateSequence, full.state.stateSequence);
-        assert.equal(polled.state.bodyVersion, knownBody.bodyVersion);
-      }
-      assert.equal(deliveredBodyChars, 0);
-      for (const ack of [undefined, {}, { ...knownBody, workerEpoch: 'previous-worker' },
-        { ...knownBody, bodyVersion: knownBody.bodyVersion - 1 }]) {
-        const [response] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 42, knownBody: ack }]);
-        assert.deepEqual(response, full);
-      }
-      const restarted = helpers.createBackgroundWorker();
-      const [idle] = await collectWorkerResponses(restarted, [{ type: 'GET_STATE', tabId: 42, knownBody }]);
-      assert.equal(idle.state.extracted, null);
-      assert.equal(idle.state.translated, null);
-      assert.notEqual(idle.state.workerEpoch, knownBody.workerEpoch);
-    },
-  },
   {
     name: 'full initial state distinguishes restarted worker epochs without retaining article bodies',
     async fn() {
@@ -880,26 +575,8 @@ exports.tests = [
       const [b] = await collectWorkerResponses(restarted, [{ type: 'GET_STATE', tabId: 42 }]);
       assert.notEqual(a.state.workerEpoch, b.state.workerEpoch);
       assert.deepEqual({ ...a.state, workerEpoch: '' }, {
-        status: 'idle', extracted: null, translated: null, workerEpoch: '', stateSequence: 0, bodyVersion: 0,
+        workerEpoch: '', stateSequence: 0,
       });
-    },
-  },
-  {
-    name: 'versions full state while progress broadcasts omit unchanged article bodies',
-    async fn() {
-      const { states } = await runTabTranslation(42, [
-        createCompletedResponse('첫째 문단 번역.'),
-        createCompletedResponse('둘째 문단 번역.'),
-        createCompletedResponse('셋째 문단 번역.'),
-      ]);
-      const progress = states.filter(state => state.status === 'translating');
-      assert.equal(progress.length, 4);
-      assert.deepEqual(progress.map(state => state.extracted?.contentMarkdown?.length || 0), [26, 0, 0, 0]);
-      assert.equal(typeof states[0].workerEpoch, 'string');
-      assert.ok(states[0].workerEpoch);
-      assert.deepEqual(states.map(state => state.stateSequence), [1, 2, 3, 4, 5, 6]);
-      assert.deepEqual(states.map(state => state.bodyVersion), [1, 2, 2, 2, 2, 3]);
-      assert.equal(states.every(state => state.workerEpoch === states[0].workerEpoch), true);
     },
   },
   {
@@ -942,42 +619,6 @@ exports.tests = [
       assert.equal(calls.some(call => call[0] === 'message'), false);
     },
   },
-  {
-    name: 'closing one tab leaves another in-flight translation able to publish its result',
-    async fn() {
-      let release;
-      let entered;
-      const gate = new Promise(resolve => { release = resolve; });
-      const ready = new Promise(resolve => { entered = resolve; });
-      let requests = 0;
-      const chrome = createTabTranslationChrome({
-        settings: { apiKey: 'synthetic-key' },
-        extract: tabId => ({ title: 'Article', url: 'https://example.test', langHint: 'en',
-          contentMarkdown: `Article ${tabId}`, translationDocument: createPlainTranslationDocument(`Article ${tabId}`) }),
-      });
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => {
-        if (++requests === 2) entered();
-        await gate;
-        return { ok: true, async json() { return createCompletedResponse('번역 결과'); } };
-      } });
-      const pending = [20, 21].map(tabId => new Promise(resolve =>
-        worker.handlers.onMessage({ type: 'TRANSLATE_TAB', tabId, documentId: `document-${tabId}`,
-          displayedProvider: { service: 'openai', model: 'gpt-5.6-luna' } }, {}, resolve)));
-      await ready;
-      assert.equal(typeof worker.handlers.onTabRemoved, 'function');
-      worker.handlers.onTabRemoved(20);
-      const [other] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]);
-      assert.equal(other.state.status, 'translating');
-      assert.equal(other.state.extracted.contentMarkdown, 'Article 21');
-      release();
-      await Promise.all(pending);
-      const states = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }, { type: 'GET_STATE', tabId: 21 }]);
-      assertIdleResponse(states[0]);
-      assert.equal(states[1].state.status, 'done');
-      assert.equal(states[1].state.translated, '번역 결과');
-      assert.equal(requests, 2);
-    },
-  },
   ...['action', 'command'].map(trigger => ({
     name: `does not restore a closed tab error after a late ${trigger} invocation failure`,
     async fn() {
@@ -1009,92 +650,6 @@ exports.tests = [
       assert.deepEqual(broadcasts, []);
     },
   })),
-  ...['settings', 'prepare', 'extract', 'model'].flatMap(phase => ['success', 'failure'].map(outcome => ({
-    name: `does not recreate a closed tab after late ${phase} ${outcome}`,
-    async fn() {
-      let release;
-      let entered;
-      const gate = new Promise(resolve => { release = resolve; });
-      const ready = new Promise(resolve => { entered = resolve; });
-      let blocked = false;
-      async function pause() {
-        if (blocked) return;
-        blocked = true;
-        entered();
-        await gate;
-        if (outcome === 'failure') throw new Error('late failure');
-      }
-      const broadcasts = [];
-      const requests = [];
-      const chrome = createTabTranslationChrome({
-        settings: { apiKey: 'synthetic-key', chunkMaxChars: 2000 },
-        extract: tabId => ({ title: 'Article', url: 'https://example.test', langHint: 'en',
-          contentMarkdown: tabId === 20 ? 'Closed article' : 'Other tab',
-          translationDocument: tabId === 20 ? THREE_CHUNK_DOCUMENT : createPlainTranslationDocument('Other tab') }),
-        onStateMessage: message => broadcasts.push(message),
-      });
-      const get = chrome.storage.local.get;
-      chrome.storage.local.get = async (...args) => {
-        if (phase === 'settings') await pause();
-        return get(...args);
-      };
-      chrome.scripting.executeScript = async ({ target }) => {
-        if (phase === 'prepare' && target.tabId === 20) await pause();
-      };
-      const send = chrome.tabs.sendMessage;
-      chrome.tabs.sendMessage = async (tabId, message) => {
-        if (phase === 'extract' && tabId === 20 && message.type === 'EXTRACT_ARTICLE') await pause();
-        return send(tabId, message);
-      };
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (_url, options) => {
-        const input = JSON.parse(options.body).input;
-        requests.push(input);
-        if (phase === 'model' && input !== 'Other tab') await pause();
-        return { ok: true, async json() { return createCompletedResponse('번역 결과'); } };
-      } });
-      const pending = new Promise(resolve => worker.handlers.onMessage({ type: 'TRANSLATE_TAB', tabId: 20,
-        documentId: 'document-20', displayedProvider: { service: 'openai', model: 'gpt-5.6-luna' } }, {}, resolve));
-      await ready;
-      assert.equal(typeof worker.handlers.onTabRemoved, 'function');
-      worker.handlers.onTabRemoved(20);
-      const closedBroadcasts = broadcasts.filter(message => message.tabId === 20).length;
-      assertIdleResponse((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]))[0]);
-      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 21 }]);
-      const [other] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]);
-      assert.equal(other.state.status, 'done');
-      release();
-      await pending;
-      assertIdleResponse((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]))[0]);
-      assert.equal(broadcasts.filter(message => message.tabId === 20).length, closedBroadcasts);
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]), [other]);
-      assert.equal(requests.filter(input => input !== 'Other tab').length, phase === 'model' ? 1 : 0);
-    },
-  }))),
-  {
-    name: 'releases a closed tab result through the public removal event and preserves other tabs',
-    async fn() {
-      const broadcasts = [];
-      const chrome = createTabTranslationChrome({
-        settings: { apiKey: 'synthetic-key' },
-        extract: () => ({ title: 'Article', url: 'https://example.test', langHint: 'en',
-          contentMarkdown: 'Hello world.', translationDocument: createPlainTranslationDocument('Hello world.') }),
-        onStateMessage: message => broadcasts.push(message),
-      });
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => ({
-        ok: true, async json() { return createCompletedResponse('번역 결과'); },
-      }) });
-      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 20 }, { type: 'TRANSLATE_TAB', tabId: 21 }]);
-      const [kept] = await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]);
-      assert.equal(kept.state.status, 'done');
-      assert.equal(kept.state.translated, '번역 결과');
-      assert.equal(typeof worker.handlers.onTabRemoved, 'function');
-      const beforeClose = broadcasts.length;
-      worker.handlers.onTabRemoved(20);
-      assertIdleResponse((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 20 }]))[0]);
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 21 }]), [kept]);
-      assert.equal(broadcasts.length, beforeClose);
-    },
-  },
   {
     name: 'an unsupported explicit service refuses settings and translation before HTTP',
     async fn() {
@@ -1105,51 +660,7 @@ exports.tests = [
       assert.equal(JSON.stringify(saved).includes('unsupported-synthetic'), false);
       assert.equal((await send({ type: 'CLEAR_API_KEY', service: 'unsupported-synthetic' })).ok, false);
       assert.equal(snapshot().settings.apiKey, 'sk-openai-synthetic');
-      const worker = helpers.createBackgroundWorker({ chrome: createTabTranslationChrome({
-        settings: { apiKey: 'sk-openai-synthetic' }, extract: () => assert.fail('unsupported service cannot extract'),
-      }), fetch: () => assert.fail('unsupported service cannot send HTTP') });
-      const [response] = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 99,
-        settingsOverride: { service: 'unsupported-synthetic' },
-      }]);
-      assert.equal(response.ok, false);
-      assert.equal(response.error.code, 'settings.override_invalid');
-      assert.equal(JSON.stringify(response).includes('unsupported-synthetic'), false);
-    },
-  },
-  ...[
-    [null, 'response.not_completed'], [createCompletedResponse(''), 'response.output_missing'],
-    [{ status: 'failed', output: [] }, 'response.failed'],
-    [{ status: 'incomplete', incomplete_details: { reason: 'other' }, output: [] }, 'response.incomplete.other'],
-  ].map(([answer, code]) => ({
-    name: `OpenRouter ${code} output refuses the whole Side Panel result without another request`,
-    async fn() {
-      const result = await runTabTranslation(99, [answer], createPlainTranslationDocument('Original'),
-        { service: 'openrouter', openrouterApiKey: 'sk-or-synthetic' });
-      assert.equal(result.states.at(-1).status, 'error');
-      assert.equal(result.states.at(-1).translated, null);
-      assert.equal(result.states.at(-1).error.code, code);
-      assert.match(result.states.at(-1).error.message, /OpenRouter/);
-      assert.deepEqual(result.requestUrls, ['https://openrouter.ai/api/v1/responses']);
-    },
-  })),
-  {
-    name: 'OpenRouter protected Markdown repairs once and rehydrates links and code',
-    async fn() {
-      const { chunk, link, code } = createProtectedFullPageChunk();
-      const document = { namespace: chunk.contract.namespace, entries: chunk.contract.entries, blocks: chunk.blocks };
-      const result = await runTabTranslation(99, [createCompletedResponse('번역'), createCompletedResponse(chunk.template)],
-        document, { service: 'openrouter', openrouterApiKey: 'sk-or-synthetic' });
-      assert.equal(result.states.at(-1).status, 'done');
-      assert.ok(result.states.at(-1).translated.includes(link.destination));
-      assert.ok(result.states.at(-1).translated.includes(code.value));
-      assert.equal(result.requestInputs.length, 2);
-      assert.ok(result.requestUrls.every(url => url === 'https://openrouter.ai/api/v1/responses'));
-      const refused = await runTabTranslation(99, [createCompletedResponse('번역'), createCompletedResponse('번역')],
-        document, { service: 'openrouter', openrouterApiKey: 'sk-or-synthetic' });
-      assert.equal(refused.requestInputs.length, 2);
-      assert.equal(refused.states.at(-1).status, 'error');
-      assert.equal(refused.states.at(-1).translated, null);
-      assert.equal(refused.states.at(-1).error.code, 'markdown.token_missing');
+
     },
   },
   {
@@ -1256,83 +767,24 @@ exports.tests = [
     [401, 'authentication'], [402, 'credits'], [403, 'access'], [404, 'model'],
     [429, 'rate_limit'], [503, 'unavailable'], [400, 'request'], ['network', 'transport'],
   ].map(([status, code]) => ({
-    name: `OpenRouter ${code} failure is attributed and redacted without fallback`,
+    name: 'OpenRouter ' + code + ' failure is attributed and redacted without fallback',
     async fn() {
-      const states = [];
       const requests = [];
-      const chrome = createTabTranslationChrome({ settings: {
-        service: 'openrouter', apiKey: 'sk-openai-synthetic', openrouterApiKey: 'sk-or-synthetic',
-      }, extract: () => ({ title: 'Article', url: 'https://example.test', langHint: 'en',
-        contentMarkdown: 'Original', translationDocument: createPlainTranslationDocument('source-private-payload'),
-      }), onStateMessage: message => states.push(message.state) });
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (url) => {
+      const worker = helpers.createBackgroundWorker({ fetch: async (url) => {
         requests.push(url);
-        if (status === 'network') throw new Error('sk-or-synthetic source-private-payload response-private-payload');
-        return { ok: false, status, async json() { return {
-          error: { message: 'sk-or-synthetic source-private-payload response-private-payload' },
-        }; } };
+        if (status === 'network') throw new Error('synthetic private-payload');
+        return { ok: false, status, async json() { return { error: { message: 'synthetic private-payload' } }; } };
       } });
-      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 99,
-        displayedProvider: { service: 'openrouter', model: 'deepseek/deepseek-v4.1-flash-1017' } }]);
-      const failure = states.at(-1);
-      assert.equal(failure.status, 'error');
-      assert.equal(failure.translated, null);
-      assert.equal(failure.error.code, `openrouter.${code}`);
-      assert.match(failure.error.message, /OpenRouter/);
-      assert.doesNotMatch(JSON.stringify(failure.error), /synthetic|private-payload/);
+      await assert.rejects(worker.requestTranslation({ service: 'openrouter', apiKey: 'synthetic',
+        model: 'ignored', input: 'source-private-payload' }), error => {
+        assert.equal(error.code, 'openrouter.' + code);
+        assert.match(error.message, /OpenRouter/);
+        assert.doesNotMatch(error.message, /synthetic|private-payload/);
+        return true;
+      });
       assert.deepEqual(requests, ['https://openrouter.ai/api/v1/responses']);
     },
   })),
-  {
-    name: 'OpenRouter missing credential refuses Side Panel before extraction or network',
-    async fn() {
-      const states = [];
-      const chrome = createTabTranslationChrome({ settings: { service: 'openrouter', apiKey: 'sk-openai-synthetic' },
-        extract: () => assert.fail('missing selected key must prevent extraction'),
-        onStateMessage: message => states.push(message.state) });
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: () => assert.fail('missing selected key must prevent network') });
-      await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 99,
-        displayedProvider: { service: 'openrouter', model: 'deepseek/deepseek-v4.1-flash-1017' } }]);
-      assert.equal(states.at(-1).status, 'error');
-      assert.match(states.at(-1).error.message, /OpenRouter.*key/);
-    },
-  },
-  {
-    name: 'OpenRouter Side Panel snapshots service credentials and policy across chunks',
-    async fn() {
-      const settings = { service: 'openrouter', apiKey: 'sk-openai-synthetic',
-        openrouterApiKey: 'sk-or-synthetic', model: 'custom-openai', reasoningEffort: 'high', chunkMaxChars: 2000 };
-      const requests = [];
-      const states = [];
-      const chrome = createTabTranslationChrome({ settings, extract: () => ({
-        title: 'Article', url: 'https://example.test', langHint: 'en', contentMarkdown: 'Original',
-        translationDocument: THREE_CHUNK_DOCUMENT,
-      }), onStateMessage: message => states.push(message.state) });
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async (url, options) => {
-        const body = JSON.parse(options.body);
-        requests.push({ url, authorization: options.headers.Authorization, body });
-        settings.service = 'openai';
-        settings.openrouterApiKey = 'changed-after-start';
-        return { ok: true, async json() { return createCompletedResponse('번역 결과'); } };
-      } });
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 99,
-        displayedProvider: { service: 'openrouter', model: 'deepseek/deepseek-v4.1-flash-1017' } }]), [{ ok: true }]);
-      assert.equal(requests.length, 3);
-      for (const request of requests) {
-        assert.equal(request.url, 'https://openrouter.ai/api/v1/responses');
-        assert.equal(request.authorization, 'Bearer sk-or-synthetic');
-        assert.equal(request.body.model, 'deepseek/deepseek-v4.1-flash-1017');
-        assert.deepEqual(request.body.reasoning, { effort: 'none' });
-        assert.deepEqual(request.body.provider, { require_parameters: true, data_collection: 'deny', zdr: true });
-        assert.equal(request.body.max_output_tokens, 8192);
-        assert.equal(request.body.store, false);
-      }
-      assert.equal(states.at(-1).status, 'done');
-      assert.equal(states.at(-1).settingsUsed.service, 'openrouter');
-      assert.equal(states.at(-1).settingsUsed.model, 'deepseek/deepseek-v4.1-flash-1017');
-      assert.equal(JSON.stringify(states).includes('sk-'), false);
-    },
-  },
   {
     name: 'service settings preserve and clear independent credentials without exposing them',
     async fn() {
@@ -1365,7 +817,7 @@ exports.tests = [
     async fn() {
       const calls = [];
       let releaseSettings;
-      const chrome = createTabTranslationChrome({ settings: {} });
+      const chrome = createPageChrome({ settings: {} });
       chrome.sidePanel.open = async (options) => calls.push(['open', options]);
       chrome.sidePanel.setOptions = async (options) => calls.push(['options', options]);
       chrome.storage.local.get = () => {
@@ -1419,34 +871,11 @@ exports.tests = [
     },
   },
   {
-    name: 'Side Panel preparation preserves an unrelated shortcut start error',
-    async fn() {
-      const { worker, chrome, broadcasts, invoke } = createInvocationWorker({ apiKey: 'synthetic-test-key' });
-      const answer = chrome.tabs.sendMessage;
-      chrome.tabs.sendMessage = async (tabId, message) => {
-        if (message.instruction === 'startInlineTranslation') {
-          return { ok: false, error: { message: 'Shortcut could not start' } };
-        }
-        if (message.type === 'EXTRACT_ARTICLE') return { ok: true, data: {
-          title: 'Empty', url: 'https://example.test/', langHint: 'en', contentMarkdown: '',
-          translationDocument: { namespace: 'EMPTY', entries: [], blocks: [] },
-        } };
-        return answer(tabId, message);
-      };
-      await invoke('command');
-      const failure = broadcasts.at(-1).state.inlineTranslationError;
-      assert.equal(failure.message, 'Shortcut could not start');
-      assert.deepEqual(await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 4201 }]), [{ ok: true }]);
-      assert.equal(broadcasts.at(-1).state.status, 'done');
-      assert.deepEqual(broadcasts.at(-1).state.inlineTranslationError, failure);
-    },
-  },
-  {
     name: 'toolbar reports unsuccessful content initialization after script injection',
     async fn() {
       const broadcasts = [];
       const pageMessages = [];
-      const chrome = createTabTranslationChrome({
+      const chrome = createPageChrome({
         settings: { buttonVisibility: 'never' },
         onStateMessage: (message) => broadcasts.push(message),
       });
@@ -1472,7 +901,7 @@ exports.tests = [
     async fn() {
       const broadcasts = [];
       const pageMessages = [];
-      const chrome = createTabTranslationChrome({
+      const chrome = createPageChrome({
         settings: { buttonVisibility: 'never' },
         onStateMessage: (message) => broadcasts.push(message),
       });
@@ -1507,80 +936,6 @@ exports.tests = [
         { tabId: 4201, type: 'RUN_INLINE_INSTRUCTION', instruction: 'grantInlineTranslationAuthorization' },
         { tabId: 4201, type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation' },
       ]);
-    },
-  },
-  {
-    name: 'Side Panel Translation stops before extraction or model calls when content initialization fails',
-    async fn() {
-      const broadcasts = [];
-      const pageMessages = [];
-      const chrome = createTabTranslationChrome({
-        settings: { apiKey: 'synthetic-test-key' },
-        onStateMessage: (message) => broadcasts.push(message),
-      });
-      chrome.tabs.sendMessage = async (tabId, message) => {
-        pageMessages.push({ tabId, ...message });
-        throw new Error('Could not establish connection. Receiving end does not exist.');
-      };
-      let modelCalls = 0;
-      const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => {
-        modelCalls += 1;
-        throw new Error('Unexpected model call');
-      } });
-
-      const responses = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 4201 }]);
-
-      assert.deepEqual(responses, [{ ok: true, skipped: true, reason: 'content_script_unavailable' }]);
-      assert.equal(modelCalls, 0);
-      assert.deepEqual(pageMessages, [{ tabId: 4201, type: 'GET_INLINE_TRANSLATION_STATE' }]);
-      assert.equal(broadcasts.at(-1).state.status, 'error');
-      assert.match(broadcasts.at(-1).state.error.message, /Reload the extension.*reload this page/);
-    },
-  },
-  {
-    name: 'successful Side Panel preparation clears an earlier Inline initialization failure',
-    async fn() {
-      const broadcasts = [];
-      const chrome = createTabTranslationChrome({
-        settings: { apiKey: 'synthetic-test-key', buttonVisibility: 'never' },
-        extract: () => ({ title: 'Empty article', url: 'https://example.test/',
-          langHint: 'en', contentMarkdown: '',
-          translationDocument: { namespace: 'EMPTY', entries: [], blocks: [] } }),
-        onStateMessage: (message) => broadcasts.push(message),
-      });
-      const answer = chrome.tabs.sendMessage;
-      let initialized = false;
-      chrome.tabs.sendMessage = async (tabId, message) =>
-        !initialized && message.type === 'GET_INLINE_TRANSLATION_STATE'
-          ? undefined : answer(tabId, message);
-      const worker = helpers.createBackgroundWorker({ chrome });
-      worker.handlers.onActionClicked({ id: 4201 });
-      await require('./inline-translation-operation.test').flushMicrotasks();
-      assert.equal(broadcasts.at(-1)?.state.inlineTranslationError?.code,
-        'content_script_not_ready');
-
-      initialized = true;
-      const responses = await collectWorkerResponses(worker, [{ type: 'TRANSLATE_TAB', tabId: 4201 }]);
-
-      assert.deepEqual(responses, [{ ok: true }]);
-      assert.equal(broadcasts.at(-1).state.status, 'done');
-      assert.equal(broadcasts.at(-1).state.inlineTranslationError, null);
-    },
-  },
-  {
-    name: 'publishes extracted metadata and completes an empty document without model requests',
-    async fn() {
-      const { responses, states, requestInputs } = await runTabTranslation(55, [], {
-        namespace: 'EMPTY', entries: [], blocks: [],
-      });
-      assert.deepEqual(responses, [{ ok: true }]);
-      assert.deepEqual(requestInputs, []);
-      assert.deepEqual(states.map((state) => state.status), ['extracting', 'translating', 'done']);
-      assert.equal(states[1].extracted.title, 'Article');
-      assert.equal(states[1].settingsUsed.targetLanguage, 'Korean');
-      assert.equal(states[1].translated, null);
-      assert.equal(states.at(-1).translated, '');
-      assert.equal(states.at(-1).progress, null);
     },
   },
   {
@@ -1718,8 +1073,8 @@ exports.tests = [
       assert.equal(settings.tone, 'formal');
       assert.equal(settings.targetLanguage, 'Japanese');
       assert.equal(settings.buttonVisibility, 'onInvocation');
-      assert.equal(settings.chunkMaxChars, 9000);
-      assert.equal(settings.viewMode, 'bilingual');
+      assert.equal(Object.hasOwn(settings, 'chunkMaxChars'), false);
+      assert.equal(Object.hasOwn(settings, 'viewMode'), false);
       const translated = await send({ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH', operationId: 'after-delete',
         records: [createTestPlainBlockRecord('b1')] });
       assert.equal(translated.ok, false);
@@ -1846,432 +1201,20 @@ exports.tests = [
     },
   },
   {
-    name: 'keeps extraction contracts out of tab state while translating protected Markdown',
-    async fn() {
-      const { chunk, link, code } = createProtectedFullPageChunk();
-      const stateMessages = [];
-      const requestBodies = [];
-
-      const worker = helpers.createBackgroundWorker({
-        fetch: async (_url, options) => {
-          requestBodies.push(JSON.parse(options.body));
-          return {
-            ok: true,
-            async json() {
-              return createCompletedResponse(
-                `읽기 ${link.openToken}안내${link.closeToken}.\n\n지금 ${code.token} 실행.`
-              );
-            },
-          };
-        },
-        chrome: createTabTranslationChrome({
-          settings: {
-            apiKey: 'sk-test',
-            chunkMaxChars: 2000,
-            arbitraryStoredSibling: 'stored-state-secret',
-          },
-          extract: () => ({
-            title: 'Article',
-            url: 'https://example.test',
-            langHint: 'en',
-            contentMarkdown: 'Read the guide and run the command.',
-            translationDocument: {
-              namespace: chunk.contract.namespace,
-              entries: chunk.contract.entries,
-              blocks: chunk.blocks,
-            },
-            contract: 'unexpected-contract-sentinel',
-            destination: 'https://unexpected.test/private-destination',
-            body: 'unexpected-body-sentinel',
-            apiKey: 'unexpected-key-sentinel',
-          }),
-          onStateMessage: (message) => stateMessages.push(message),
-        }),
-      });
-
-      const responses = await collectWorkerResponses(worker, [
-        { type: 'TRANSLATE_TAB', tabId: 20 },
-      ]);
-
-      assert.deepEqual(responses, [{ ok: true }]);
-      assert.equal(stateMessages.at(-1)?.state?.status, 'done');
-      const publicStateKeys = new Set([
-        'workerEpoch',
-        'stateSequence',
-        'bodyVersion',
-        'documentId',
-        'status',
-        'error',
-        'extracted',
-        'translated',
-        'progress',
-        'settingsUsed',
-        'updatedAt',
-      ]);
-      const settingsUsedKeys = [
-        'service',
-        'model',
-        'reasoningEffort',
-        'targetLanguage',
-        'tone',
-        'viewMode',
-        'chunkMaxChars',
-      ];
-      for (const message of stateMessages) {
-        const serialized = JSON.stringify(message);
-        assert.equal(
-          Object.keys(message.state).every((key) => publicStateKeys.has(key)),
-          true
-        );
-        if (message.state.settingsUsed) {
-          assert.deepEqual(
-            Object.keys(message.state.settingsUsed),
-            settingsUsedKeys
-          );
-        }
-        assert.equal(serialized.includes('translationDocument'), false);
-        assert.equal(
-          serialized.includes('unexpected-contract-sentinel'),
-          false
-        );
-        assert.equal(serialized.includes('private-destination'), false);
-        assert.equal(serialized.includes('unexpected-body-sentinel'), false);
-        assert.equal(serialized.includes('unexpected-key-sentinel'), false);
-        if (message.state.status !== 'done') {
-          assert.equal(serialized.includes('token=secret'), false);
-          assert.equal(serialized.includes('private-command --secret'), false);
-        }
-      }
-
-      // The same worker, asked for the state it just recorded: the panel reads it back
-      // through GET_STATE, and what comes out has to be as bounded as what was broadcast.
-      const stateResponses = await collectWorkerResponses(worker, [
-        { type: 'GET_STATE', tabId: 20 },
-      ]);
-      assert.equal(
-        Object.keys(stateResponses[0].state).every((key) =>
-          publicStateKeys.has(key)
-        ),
-        true
-      );
-      assert.equal(
-        JSON.stringify(stateResponses[0]).includes('stored-state-secret'),
-        false
-      );
-      assert.equal(requestBodies.length, 1);
-      assert.equal(
-        JSON.stringify(requestBodies).includes('token=secret'),
-        false
-      );
-      assert.equal(
-        JSON.stringify(requestBodies).includes('private-command --secret'),
-        false
-      );
-    },
-  },
-  {
-    // Three blocks that do fit one Translation Chunk, so the chunk overruns the output
-    // limit and is split; the second child overruns too, and one recovery is all a chunk
-    // gets (ADR-0005). Nothing is published, as ADR-0006 has it.
-    name: 'does not publish done when a real tab translation recovery child is incomplete',
-    async fn() {
-      const blocks = [1, 2, 3].map((index) => {
-        const template = `Paragraph ${index} ${'word '.repeat(115)}`.trim();
-        return {
-          id: `m${index}`,
-          kind: 'paragraph',
-          template,
-          originalMarkdown: template,
-          entries: [],
-        };
-      });
-      const { responses, states, requestInputs } = await runTabTranslation(
-        21,
-        [
-          createIncompleteResponse(),
-          createCompletedResponse(blocks[0].template),
-          createIncompleteResponse(),
-        ],
-        { namespace: 'CAT_TAB_RECOVERY', entries: [], blocks }
-      );
-
-      assert.deepEqual(responses, [{
-        ok: true,
-        skipped: true,
-        reason: 'translate_failed',
-      }]);
-      assert.equal(states.some((state) => state.status === 'done'), false);
-      assert.equal(states.at(-1)?.status, 'error');
-      assert.equal(states.at(-1)?.translated, null);
-      assert.equal(states.at(-1)?.progress, null);
-      assert.equal(requestInputs.length, 3);
-    },
-  },
-  {
-    // ADR-0006. The discard is the decision, so it is checked rather than left to the
-    // comment beside the loop: the two answers already paid for are gone from every state
-    // the panel could render, and the reader is left with the failure alone.
-    name: 'discards the Translation Chunks already paid for when a later one fails',
-    async fn() {
-      const { responses, states, requestInputs } = await runTabTranslation(41, [
-        createCompletedResponse('첫째 문단 번역.'),
-        createCompletedResponse('둘째 문단 번역.'),
-        createApiErrorResponse('The service refused the third request.'),
-      ]);
-
-      assert.deepEqual(responses, [{
-        ok: true,
-        skipped: true,
-        reason: 'translate_failed',
-      }]);
-      // Three requests, one per chunk: the failure is the third chunk's own, and the two
-      // before it were answered rather than skipped.
-      assert.equal(requestInputs.length, 3);
-      assert.deepEqual(
-        states
-          .filter((state) => state.progress)
-          .map((state) => `${state.progress.current}/${state.progress.total}`),
-        ['1/3', '2/3', '3/3']
-      );
-      assert.equal(states.some((state) => state.status === 'done'), false);
-      assert.equal(states.at(-1)?.status, 'error');
-      assert.equal(states.at(-1)?.translated, null);
-      assert.equal(states.at(-1)?.progress, null);
-      assert.equal(
-        states.at(-1)?.error?.message,
-        'OpenAI request failed. Try again later.'
-      );
-      for (const state of states) {
-        const serialized = JSON.stringify(state);
-        assert.equal(serialized.includes('첫째 문단 번역'), false);
-        assert.equal(serialized.includes('둘째 문단 번역'), false);
-      }
-    },
-  },
-  {
-    // The failure #27 was deferred for, end to end: a token contract broken twice. The
-    // third chunk carries a protected link, loses it, buys the one further attempt #26
-    // gave it, loses it again, and has no recovery left (ADR-0005). The discard is the
-    // same discard — four requests billed to tell the reader nothing.
-    name: 'discards the earlier answers when a token contract fails twice',
-    async fn() {
-      const namespace = 'CAT_TAB_TOKENS';
-      const link = {
-        id: 'L9',
-        kind: 'link',
-        openToken: `⟦${namespace}:LINK_OPEN:L9⟧`,
-        closeToken: `⟦${namespace}:LINK_CLOSE:L9⟧`,
-        destination: 'https://example.test/guide?token=secret',
-      };
-      const blocks = THREE_CHUNK_BLOCKS.map((block, index) =>
-        index < 2
-          ? block
-          : {
-              ...block,
-              template: `Read ${link.openToken}the guide${link.closeToken}. ${block.template}`,
-              entries: [link.id],
-            }
-      );
-      const { responses, states, requestInputs } = await runTabTranslation(
-        43,
-        [
-          createCompletedResponse('첫째 문단 번역.'),
-          createCompletedResponse('둘째 문단 번역.'),
-          createCompletedResponse('안내를 읽으세요.'),
-          createCompletedResponse('안내를 다시 읽으세요.'),
-        ],
-        { namespace, entries: [link], blocks }
-      );
-
-      // Four requests: three chunks and the third chunk's one repair, which fails on the
-      // same code and ends the chunk rather than starting the over-long recovery.
-      assert.equal(requestInputs.length, 4);
-      assert.equal(requestInputs[2], requestInputs[3]);
-      assert.deepEqual(responses, [{
-        ok: true,
-        skipped: true,
-        reason: 'translate_failed',
-      }]);
-      assert.equal(states.at(-1)?.status, 'error');
-      assert.equal(states.at(-1)?.error?.code, 'markdown.token_missing');
-      assert.equal(states.at(-1)?.translated, null);
-      for (const state of states) {
-        const serialized = JSON.stringify(state);
-        assert.equal(serialized.includes('첫째 문단 번역'), false);
-        assert.equal(serialized.includes('둘째 문단 번역'), false);
-        assert.equal(serialized.includes('token=secret'), false);
-      }
-    },
-  },
-  {
-    // The other half of the check above: the same fixture, answered throughout, does cut
-    // into three chunks and does publish all three. Without this, a fixture that quietly
-    // stopped producing three chunks would leave the discard checked against nothing.
-    name: 'joins every Translation Chunk in order when none of them fails',
-    async fn() {
-      const { responses, states, requestInputs } = await runTabTranslation(42, [
-        createCompletedResponse('첫째 문단 번역.'),
-        createCompletedResponse('둘째 문단 번역.'),
-        createCompletedResponse('셋째 문단 번역.'),
-      ]);
-
-      assert.deepEqual(responses, [{ ok: true }]);
-      assert.deepEqual(
-        requestInputs,
-        THREE_CHUNK_BLOCKS.map((block) => block.template)
-      );
-      assert.equal(states.at(-1)?.status, 'done');
-      assert.equal(
-        states.at(-1)?.translated,
-        '첫째 문단 번역.\n\n둘째 문단 번역.\n\n셋째 문단 번역.'
-      );
-      assert.equal(states.at(-1)?.progress, null);
-      assert.equal(states.at(-1)?.error, null);
-    },
-  },
-  {
-    name: 'owns malformed and oversized extraction failures without publishing display state',
-    async fn() {
-      const extractionByTab = new Map([
-        [30, null],
-        [31, undefined],
-        [32, 'malformed extraction'],
-        [
-          33,
-          {
-            title: 'Missing document',
-            url: 'https://example.test/missing',
-            langHint: 'en',
-            contentMarkdown: 'Visible but invalid.',
-          },
-        ],
-        [
-          34,
-          {
-            title: 'Malformed document',
-            url: 'https://example.test/malformed',
-            langHint: 'en',
-            contentMarkdown: 'Visible but invalid.',
-            translationDocument: { blocks: null },
-          },
-        ],
-        [
-          35,
-          {
-            title: 'Oversized',
-            url: 'https://example.test/oversized',
-            langHint: 'en',
-            contentMarkdown: `oversized-display-sentinel${'x'.repeat(60000)}`,
-            translationDocument:
-              createPlainTranslationDocument('safe template'),
-          },
-        ],
-      ]);
-      const statesByTab = new Map();
-      let requestCount = 0;
-
-      // One worker for all six tabs, because the per-tab state is this instance's and each
-      // tab keeps its own entry in it. Six of them would say nothing the six entries do not.
-      const worker = helpers.createBackgroundWorker({
-        fetch: async () => {
-          requestCount += 1;
-          throw new Error('model request must not run');
-        },
-        chrome: createTabTranslationChrome({
-          settings: { apiKey: 'sk-test', chunkMaxChars: 2000 },
-          extract: (tabId) => extractionByTab.get(tabId),
-          onStateMessage: (message) => {
-            const states = statesByTab.get(message.tabId) || [];
-            states.push(message.state);
-            statesByTab.set(message.tabId, states);
-          },
-        }),
-      });
-
-      for (const tabId of extractionByTab.keys()) {
-        const responses = await collectWorkerResponses(worker, [
-          { type: 'TRANSLATE_TAB', tabId },
-        ]);
-        assert.deepEqual(responses, [{
-          ok: true,
-          skipped: true,
-          reason: 'extract_failed',
-        }]);
-      }
-
-      assert.equal(requestCount, 0);
-      assert.equal(statesByTab.size, extractionByTab.size);
-      for (const states of statesByTab.values()) {
-        assert.equal(states.at(-1)?.status, 'error');
-        assert.equal(states.at(-1)?.progress, null);
-        assert.equal(states.at(-1)?.translated, null);
-        assert.equal(
-          states.some((state) => Boolean(state.extracted)),
-          false
-        );
-        assert.equal(
-          JSON.stringify(states).includes('oversized-display-sentinel'),
-          false
-        );
-      }
-    },
-  },
-  {
-    name: 'exact-allowlists public tab state and settings used fields',
+    name: 'public tab state exposes sanitized Inline errors and freshness metadata only',
     fn() {
       const state = helpers.sanitizePublicTabState({
-        status: 'done',
-        error: { message: 'bounded', name: 'Error', secret: 'error-secret' },
-        extracted: {
-          title: 'Article',
-          url: 'https://example.test',
-          langHint: 'en',
-          contentMarkdown: '# Article',
-          contract: 'private-contract',
-        },
-        translated: '# 번역',
-        progress: { current: 1, total: 1, privateCounter: 99 },
-        settingsUsed: {
-          model: 'gpt-5.4-mini',
-          reasoningEffort: 'none',
-          targetLanguage: 'Korean',
-          tone: 'technical',
-          viewMode: 'translation',
-          chunkMaxChars: 12000,
-          apiKey: 'sk-private',
-          arbitraryStoredSibling: 'settings-secret',
-        },
-        updatedAt: '2026-07-13T00:00:00.000Z',
-        arbitraryPatchSibling: 'state-secret',
+        inlineTranslationError: { message: 'bounded', code: 'document.unavailable', secret: 'secret' },
+        documentId: 'document-42', workerEpoch: 'worker-fixture', stateSequence: 3, updatedAt: 'fixture-time',
+        extracted: { contentMarkdown: 'private source' }, translated: 'private answer',
+        settingsUsed: { apiKey: 'secret' }, progress: { current: 1, total: 2 },
+        error: { message: 'removed article error' }, bodyVersion: 4, arbitraryPatchSibling: 'secret',
       });
-
-      assert.deepEqual(Object.keys(state), [
-        'status',
-        'error',
-        'extracted',
-        'translated',
-        'progress',
-        'settingsUsed',
-        'updatedAt',
-      ]);
-      assert.deepEqual(Object.keys(state.settingsUsed), [
-        'model',
-        'reasoningEffort',
-        'targetLanguage',
-        'tone',
-        'viewMode',
-        'chunkMaxChars',
-      ]);
-      assert.deepEqual(Object.keys(state.error), ['message', 'name']);
-      assert.deepEqual(Object.keys(state.extracted), [
-        'title',
-        'url',
-        'langHint',
-        'contentMarkdown',
-      ]);
-      assert.deepEqual(Object.keys(state.progress), ['current', 'total']);
-      assert.equal(JSON.stringify(state).includes('secret'), false);
-      assert.equal(JSON.stringify(state).includes('private-contract'), false);
+      assert.deepEqual(state, {
+        inlineTranslationError: { message: 'bounded', code: 'document.unavailable' },
+        updatedAt: 'fixture-time', workerEpoch: 'worker-fixture', stateSequence: 3, documentId: 'document-42',
+      });
+      assert.doesNotMatch(JSON.stringify(state), /secret|private|article/);
     },
   },
   {
@@ -2301,9 +1244,9 @@ exports.tests = [
       );
 
       assert.equal(settings.apiKey, 'sk-current');
-      assert.equal(settings.chunkMaxChars, 9000);
+      assert.equal(Object.hasOwn(settings, 'chunkMaxChars'), false);
       assert.equal(settings.buttonVisibility, 'allPages');
-      assert.equal(settings.viewMode, 'translation');
+      assert.equal(Object.hasOwn(settings, 'viewMode'), false);
       assert.equal(settings.targetLanguage, 'Japanese');
       assert.equal(settings.tone, 'natural');
       assert.equal(settings.model, 'gpt-5.4');
@@ -2681,104 +1624,8 @@ exports.tests = [
         'inline-local-diagnostic-transport.js',
         'inline-translation-operation.js',
         'inline-translation-controls.js',
-        'markdown-entries.js',
-        'markdown-document.js',
         'content.js',
       ]);
-    },
-  },
-  {
-    name: 'skips duplicate full-tab translations while one is running',
-    async fn() {
-      // Both messages go in before either is waited on, so the second one really does
-      // arrive while the first is mid-flight — which is the only condition under which
-      // the worker has a running translation to recognize.
-      let requestCount = 0;
-
-      const worker = helpers.createBackgroundWorker({
-        fetch: async () => {
-          requestCount += 1;
-          await Promise.resolve();
-          return {
-            ok: true,
-            async json() {
-              return createCompletedResponse('번역 결과');
-            },
-          };
-        },
-        chrome: createTabTranslationChrome({
-          settings: {
-            apiKey: 'sk-test',
-            model: 'ft:gpt_custom/model',
-            targetLanguage: 'Japanese',
-            tone: 'technical',
-            chunkMaxChars: 12000,
-          },
-          extract: () => ({
-            title: 'Article',
-            url: 'https://example.test',
-            langHint: 'en',
-            contentMarkdown: 'Hello world.',
-            translationDocument:
-              createPlainTranslationDocument('Hello world.'),
-          }),
-        }),
-      });
-
-      const responses = await collectWorkerResponses(worker, [
-        { type: 'TRANSLATE_TAB', tabId: 10, displayedProvider: { service: 'openai', model: 'ft:gpt_custom/model' } },
-        { type: 'TRANSLATE_TAB', tabId: 10, displayedProvider: { service: 'openai', model: 'ft:gpt_custom/model' } },
-      ]);
-
-      assert.equal(requestCount, 1);
-      assert.deepEqual(responses.find((response) => response.skipped), {
-        ok: true,
-        skipped: true,
-        reason: 'already_running',
-      });
-    },
-  },
-  {
-    name: 'uses a full-page output token cap scaled to the chunk size',
-    async fn() {
-      const requestBodies = [];
-      const markdown = 'A'.repeat(20000);
-
-      const worker = helpers.createBackgroundWorker({
-        fetch: async (_url, options) => {
-          requestBodies.push(JSON.parse(options.body));
-          return {
-            ok: true,
-            async json() {
-              return createCompletedResponse('번역 결과');
-            },
-          };
-        },
-        chrome: createTabTranslationChrome({
-          settings: {
-            apiKey: 'sk-test',
-            model: 'gpt-5.4-mini',
-            targetLanguage: 'Korean',
-            tone: 'technical',
-            chunkMaxChars: 60000,
-          },
-          extract: () => ({
-            title: 'Article',
-            url: 'https://example.test',
-            langHint: 'en',
-            contentMarkdown: markdown,
-            translationDocument: createPlainTranslationDocument(markdown),
-          }),
-        }),
-      });
-
-      const responses = await collectWorkerResponses(worker, [
-        { type: 'TRANSLATE_TAB', tabId: 11, displayedProvider: { service: 'openai', model: 'gpt-5.4-mini' } },
-      ]);
-
-      assert.deepEqual(responses, [{ ok: true }]);
-      assert.equal(requestBodies.length, 1);
-      assert.equal(requestBodies[0].max_output_tokens, markdown.length);
     },
   },
   {
@@ -3481,7 +2328,6 @@ exports.tests = [
       assert.equal(runWrites.at(-1).modelRequestAttempts, 1);
     },
   },
-
   ...['never', 'onInvocation', 'allPages'].flatMap((buttonVisibility) =>
     ['action', 'command', 'pageLoad'].map((trigger) => ({
       name: `${trigger} honors ${buttonVisibility} Button Visibility through the worker entry`,
@@ -3584,7 +2430,7 @@ exports.tests = [
       // the authorization did not land, carrying on would run it unauthorized, and the
       // reader has to be told their click did nothing.
       const sent = [];
-      const worker = helpers.createBackgroundWorker({ chrome: createTabTranslationChrome({ settings: {} }) });
+      const worker = helpers.createBackgroundWorker({ chrome: createPageChrome({ settings: {} }) });
       await assert.rejects(
         worker.runInlineTranslationControl(9, 'start', async (tabId, step) => {
           sent.push(`${step}:${tabId}`);
@@ -3703,7 +2549,7 @@ exports.tests = [
       assert.match(broadcasts[0].state.inlineTranslationError.message, /Click the extension icon on this tab/);
       assert.equal(broadcasts[0].state.error, undefined);
       assert.deepEqual((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]))[0].state,
-        { ...broadcasts[0].state, extracted: null, translated: null });
+        broadcasts[0].state);
       broadcasts.length = 0;
       await invoke('action');
       assert.deepEqual(broadcasts, []);
@@ -3775,30 +2621,6 @@ exports.tests = [
         { type: 'RUN_INLINE_INSTRUCTION', instruction: 'startInlineTranslation' }]);
       assert.equal((await collectWorkerResponses(worker, [{ type: 'GET_STATE', tabId: 4201 }]))[0]
         .state.inlineTranslationError, null);
-    },
-  },
-  {
-    name: 'keeps the two translations’ failures in separate fields',
-    fn() {
-      // GLOSSARY.md spends half its vocabulary keeping the two translations apart. An error
-      // box that merged them would undo that for the one moment the reader most needs to
-      // know which feature is talking.
-      const state = helpers.sanitizePublicTabState({
-        status: 'error',
-        error: { message: 'Side Panel Translation failed', name: 'Error', stack: 'x' },
-        inlineTranslationError: {
-          message: 'Inline Translation could not start',
-          stack: 'x',
-        },
-      });
-
-      assert.equal(state.error.message, 'Side Panel Translation failed');
-      assert.equal(state.error.stack, undefined);
-      assert.equal(
-        state.inlineTranslationError.message,
-        'Inline Translation could not start'
-      );
-      assert.equal(state.inlineTranslationError.stack, undefined);
     },
   },
   {

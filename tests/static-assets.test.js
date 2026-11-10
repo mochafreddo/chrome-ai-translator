@@ -107,25 +107,6 @@ exports.tests = [
       ));
       assert.equal(JSON.stringify(startup), '{"ok":true,"instructions":[]}');
       assert.equal((await worker.translateVisibleBlockBatch([])).length, 0);
-      const execution = workerScope.ChromeAiTranslatorSidePanelTranslationExecution;
-      assert.equal(JSON.stringify(Object.keys(execution)), '["execute"]');
-      const requests = [];
-      const translated = await execution.execute({
-        title: 'Article', url: 'https://example.test/', langHint: 'en',
-        contentMarkdown: 'Read this.',
-        translationDocument: { namespace: 'STATIC', entries: [], blocks: [
-          { id: 'p1', template: 'Read this.', entries: [] },
-        ] },
-      }, { targetLanguage: 'Korean', tone: 'technical', model: 'test',
-        reasoningEffort: 'none', chunkMaxChars: 2000 }, async (request) => {
-        requests.push(request);
-        return '읽으세요.';
-      });
-      assert.equal(translated, '읽으세요.');
-      assert.equal(requests.length, 1);
-      assert.equal('apiKey' in requests[0], false);
-
-
       const optionsScope = vm.createContext({});
       const optionsHtml = fs.readFileSync(path.join(EXTENSION_DIR, 'options.html'), 'utf8');
       for (const [, file] of optionsHtml.matchAll(/<script src="([^"]+)"/g)) {
@@ -253,7 +234,6 @@ exports.tests = [
 
       assert.match(css, /input,\nselect\s*\{[^}]*min-height:\s*44px/s);
       assert.match(css, /\.btn\s*\{[^}]*min-height:\s*44px/s);
-      assert.match(css, /\.tab\s*\{[^}]*min-height:\s*44px/s);
       assert.match(contentJs, /button\s*\{[^}]*min-height:\s*44px/s);
     },
   },
@@ -365,7 +345,7 @@ exports.tests = [
 
       for (const [page, pageScript] of [
         ['options.html', 'options.js'],
-        ['sidepanel.html', 'sidepanel.js'],
+        ['text-translation.html', 'text-translation.js'],
       ]) {
         const html = fs.readFileSync(
           path.join(__dirname, '..', 'extension', page),
@@ -377,33 +357,6 @@ exports.tests = [
           html.indexOf('src="default-model.js"') <
             html.indexOf(`src="${pageScript}"`),
           true
-        );
-      }
-    },
-  },
-  {
-    name: 'leaves both model placeholders to the shared default',
-    fn() {
-      // A placeholder still naming the model the extension defaulted to yesterday is the
-      // same quiet lie as a stale fallback, so the markup carries no model name of its own.
-      for (const [page, pageScript] of [
-        ['options.html', 'options.js'],
-        ['sidepanel.html', 'sidepanel.js'],
-      ]) {
-        const html = fs.readFileSync(
-          path.join(__dirname, '..', 'extension', page),
-          'utf8'
-        );
-        const input = html.match(/<input id="model"[^>]*>/);
-
-        assert.ok(input);
-        assert.equal(/placeholder=/.test(input[0]), false);
-        assert.match(
-          fs.readFileSync(
-            path.join(__dirname, '..', 'extension', pageScript),
-            'utf8'
-          ),
-          /elModel\.placeholder = DEFAULT_MODEL/
         );
       }
     },
@@ -556,10 +509,6 @@ exports.tests = [
         ['button-visibility.js', 'worker-invocation.js', ['worker']],
         ['placeholder-tokens.js', 'inline-template.js', ['worker', 'page']],
         ['inline-template.js', 'inline-block.js', ['page']],
-        ['placeholder-tokens.js', 'markdown-rehydration.js', ['worker']],
-        ['markdown-entries.js', 'markdown-rehydration.js', ['worker']],
-        ['markdown-entries.js', 'translation-chunks.js', ['worker']],
-        ['markdown-entries.js', 'markdown-document.js', ['page']],
         ['inline-template.js', 'inline-request.js', ['worker', 'page']],
         ['inline-request.js', 'inline-translation-session.js', ['page']],
         ['inline-request.js', 'inline-model-execution.js', ['worker']],
@@ -623,41 +572,6 @@ exports.tests = [
         backgroundJs,
         /onCommand\.addListener[\s\S]{0,200}INLINE_TRANSLATION_SHORTCUT_COMMAND/
       );
-    },
-  },
-  {
-    name: 'loads the Markdown document model codec before the content script',
-    fn() {
-      // The page runs one of the codec's three parts and is given nothing else from it: the
-      // chunker and the rehydration half are the worker's, and listing either here would ship
-      // the page code it never calls.
-      const backgroundJs = fs.readFileSync(
-        path.join(__dirname, '..', 'extension', 'background.js'),
-        'utf8'
-      );
-      const filesMatch = backgroundJs.match(
-        /function getInlineContentScriptFiles\(\) \{\s*return \[([^\]]+)\]/s
-      );
-
-      assert.equal(
-        fs.existsSync(
-          path.join(__dirname, '..', 'extension', 'markdown-document.js')
-        ),
-        true
-      );
-      assert.ok(filesMatch);
-      assert.notEqual(filesMatch[1].indexOf("'markdown-document.js'"), -1);
-      assert.equal(
-        filesMatch[1].indexOf("'markdown-document.js'") <
-          filesMatch[1].indexOf("'content.js'"),
-        true
-      );
-      for (const workerOnly of [
-        'translation-chunks.js',
-        'markdown-rehydration.js',
-      ]) {
-        assert.equal(filesMatch[1].indexOf(`'${workerOnly}'`), -1, workerOnly);
-      }
     },
   },
 ];
