@@ -432,6 +432,18 @@ function createBackgroundWorker(platform = {}) {
   const pendingByTab = new Map();
   const documentLifetimes = new Map();
   const textTranslations = new Map();
+  const textRetention = new Map();
+
+  function textOwner(tabId, documentId) {
+    if (!textRetention.has(tabId)) textRetention.set(tabId, { documentId, revision: 0, queue: Promise.resolve() });
+    return textRetention.get(tabId);
+  }
+
+  function enqueueTextState(owner, task) {
+    const result = owner.queue.then(task);
+    owner.queue = result.catch(() => {});
+    return result;
+  }
 
   function documentEnded() {
     return Object.assign(new Error('The original document is no longer open.'), { code: 'document.departed' });
@@ -445,10 +457,19 @@ function createBackgroundWorker(platform = {}) {
     return frame.documentId;
   }
 
-  async function captureDocument(tabId, expectedDocumentId) {
+  async function getTextDocumentId(tabId) {
+    const url = getChrome().runtime.getURL('text-translation.html');
+    const contexts = await getChrome().runtime.getContexts({ contextTypes: ['TAB'], tabIds: [tabId] });
+    const matches = contexts.filter(context => context.tabId === tabId && context.frameId === 0 &&
+      context.documentUrl === url && typeof context.documentId === 'string' && context.documentId);
+    if (matches.length !== 1) throw documentEnded();
+    return matches[0].documentId;
+  }
+
+  async function captureDocument(tabId, expectedDocumentId, readDocumentId = getDocumentId) {
     const lifetime = documentLifetimes.get(tabId) || {};
     documentLifetimes.set(tabId, lifetime);
-    const documentId = await getDocumentId(tabId);
+    const documentId = await readDocumentId(tabId);
     if (documentLifetimes.get(tabId) !== lifetime ||
         (expectedDocumentId && documentId !== expectedDocumentId)) throw documentEnded();
     const previous = documentsByTab.get(tabId);
@@ -920,6 +941,12 @@ function createBackgroundWorker(platform = {}) {
 
   function onTabRemoved(tabId) {
     stopTextTranslationsForTab(tabId);
+    const owner = textOwner(tabId, null);
+    owner.closed = true;
+    void enqueueTextState(owner, async () => {
+      await getChrome().storage.session.remove(`text-translation:${tabId}`);
+      if (textRetention.get(tabId) === owner) textRetention.delete(tabId);
+    }).catch(() => {});
     invalidateDocument(tabId);
   }
 
@@ -935,6 +962,11 @@ function createBackgroundWorker(platform = {}) {
   function onNavigationCommitted(details) {
     if (details.frameId !== 0) return;
     stopTextTranslationsForTab(details.tabId, details.documentId);
+    const owner = textRetention.get(details.tabId);
+    if (owner) {
+      owner.documentId = details.documentId;
+      owner.revision = 0;
+    }
     if (!documentLifetimes.has(details.tabId) && !stateByTab.has(details.tabId)) return;
     if (details.documentId && documentsByTab.get(details.tabId) === details.documentId) return;
     invalidateDocument(details.tabId, details.documentId);
@@ -967,6 +999,46 @@ function createBackgroundWorker(platform = {}) {
   function onMessage(msg, sender, sendResponse) {
     (async () => {
       try {
+        if (['GET_TEXT_TRANSLATION_STATE', 'SAVE_TEXT_TRANSLATION_STATE', 'CLEAR_TEXT_TRANSLATION_STATE'].includes(msg?.type)) {
+          if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId ||
+              sender.url !== getChrome().runtime.getURL('text-translation.html')) {
+            throw new Error('Text Translation requires its own extension page.');
+          }
+          const tabId = sender.tab.id;
+          await captureDocument(tabId, sender.documentId, getTextDocumentId);
+          const owner = textOwner(tabId, sender.documentId);
+          if (!owner.closed && msg.type === 'GET_TEXT_TRANSLATION_STATE' && owner.documentId !== sender.documentId) {
+            owner.documentId = sender.documentId;
+            owner.revision = 0;
+          }
+          if (owner.closed || owner.documentId !== sender.documentId) throw documentEnded();
+          const key = `text-translation:${tabId}`;
+          if (msg.type === 'GET_TEXT_TRANSLATION_STATE') {
+            stopTextTranslationsForTab(tabId, sender.documentId);
+            const state = await enqueueTextState(owner, async () => {
+              const saved = (await getChrome().storage.session.get(key))[key];
+              if (!saved) return null;
+              const state = textTranslationRequest.retainedState(saved);
+              if (state.job?.status === 'running') state.job.status =
+                state.job.results.length === state.job.units.length ? 'complete' : 'stopped';
+              return state;
+            });
+            if (owner.closed || owner.documentId !== sender.documentId) throw documentEnded();
+            sendResponse({ ok: true, state });
+          } else {
+            if (!Number.isSafeInteger(msg.revision) || msg.revision < 1) throw documentEnded();
+            if (msg.revision <= owner.revision) { sendResponse({ ok: true }); return; }
+            const state = msg.type === 'SAVE_TEXT_TRANSLATION_STATE' ? textTranslationRequest.retainedState(msg.state) : null;
+            owner.revision = msg.revision;
+            await enqueueTextState(owner, async () => {
+              if (owner.closed || (owner.documentId === sender.documentId && owner.revision !== msg.revision)) return;
+              if (state) await getChrome().storage.session.set({ [key]: state });
+              else await getChrome().storage.session.remove(key);
+            });
+            sendResponse({ ok: true });
+          }
+          return;
+        }
         if (['TRANSLATE_TEXT', 'STOP_TEXT_TRANSLATION'].includes(msg?.type)) {
           if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId ||
               sender.url !== getChrome().runtime.getURL('text-translation.html') ||
@@ -974,6 +1046,8 @@ function createBackgroundWorker(platform = {}) {
             throw new Error('Text Translation requires its own extension page.');
           }
           const owner = `${sender.tab.id}:${sender.documentId}`;
+          const retained = textRetention.get(sender.tab.id);
+          if (retained && (retained.closed || retained.documentId !== sender.documentId)) throw documentEnded();
           const current = textTranslations.get(owner);
           if (msg.type === 'STOP_TEXT_TRANSLATION') {
             if (current?.operationId === msg.operationId) {
@@ -988,7 +1062,9 @@ function createBackgroundWorker(platform = {}) {
           const operation = { operationId: msg.operationId, controller: new AbortController() };
           textTranslations.set(owner, operation);
           try {
+            if (await getTextDocumentId(sender.tab.id) !== sender.documentId) throw documentEnded();
             const stored = await settingsLifecycle.read();
+            if (textTranslations.get(owner) !== operation || operation.controller.signal.aborted) throw documentEnded();
             const apiKey = prepared.service === 'openrouter' ? stored.openrouterApiKey : stored.apiKey;
             if (!apiKey) throw new Error(`${prepared.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`);
             const output = await requestTranslation({ ...prepared, apiKey, signal: operation.controller.signal });

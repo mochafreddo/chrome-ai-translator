@@ -9,6 +9,22 @@
   let openaiModel = '';
   let openaiReasoningEffort = 'none';
   let selectedService = 'openai';
+  let revision = 0;
+  let departed = false;
+
+  async function retain(clear = false) {
+    if (!ready || departed) return;
+    rememberOpenai();
+    const settings = Object.fromEntries(['service', 'model', 'reasoningEffort', 'sourceLanguage', 'targetLanguage', 'tone']
+      .map(key => [key, get(key).value]));
+    const response = await chrome.runtime.sendMessage({
+      type: clear ? 'CLEAR_TEXT_TRANSLATION_STATE' : 'SAVE_TEXT_TRANSLATION_STATE', revision: ++revision,
+      ...(clear ? {} : { state: { source: get('sourceText').value, settings, openaiModel, openaiReasoningEffort, job } }),
+    });
+    if (!response?.ok) throw new Error('Could not retain this translation. Keep this tab open and try again.');
+  }
+
+  function retainEdits() { void retain().catch(showError); }
 
   function showError(error) {
     get('errorBox').textContent = error?.message || 'Text Translation failed. Try again.';
@@ -51,6 +67,7 @@
     get('errorBox').hidden = true;
     get('inputHint').textContent = `${Array.from(get('sourceText').value).length.toLocaleString('en-US')} / ${contract.MAX_SOURCE_CHARACTERS.toLocaleString('en-US')} Unicode characters (code points). Plain text only.`;
     renderBusy();
+    retainEdits();
   }
 
   function rememberOpenai() {
@@ -84,6 +101,7 @@
       get('status').textContent = 'Stopped.';
     }
     renderJob();
+    retainEdits();
   }
 
   async function translate(resume = false) {
@@ -109,7 +127,9 @@
     get('status').textContent = 'Translating…';
     renderJob();
     try {
+      await retain();
       while (job.results.length < job.units.length) {
+        if (active !== operation) return;
         const unit = job.units[job.results.length];
         let result = { translation: unit, sourceLanguage: null };
         if (unit.trim()) {
@@ -121,7 +141,9 @@
         if (active !== operation) return;
         job.results.push(result);
         renderJob();
+        await retain();
       }
+      if (active !== operation) return;
       job.status = 'complete';
       get('status').textContent = 'Translation complete.';
     } catch (error) {
@@ -134,6 +156,7 @@
       if (active === operation) {
         active = null;
         renderJob();
+        retainEdits();
       }
     }
   }
@@ -154,6 +177,7 @@
     rememberOpenai();
     selectedService = get('service').value;
     displayService();
+    retainEdits();
   });
   get('sourceText').addEventListener('input', inputChanged);
   get('translationSettings').addEventListener('input', inputChanged);
@@ -168,7 +192,8 @@
     get('languageStatus').textContent = '';
     get('status').textContent = '';
     get('errorBox').hidden = true;
-    inputChanged();
+    get('inputHint').textContent = `0 / ${contract.MAX_SOURCE_CHARACTERS.toLocaleString('en-US')} Unicode characters (code points). Plain text only.`;
+    void retain(true).catch(showError);
     renderJob();
     get('sourceText').focus();
   });
@@ -194,7 +219,7 @@
       get('status').textContent = 'Defaults saved.';
     } catch (error) { showError(error); }
   });
-  window.addEventListener('pagehide', stop);
+  window.addEventListener('pagehide', () => { departed = true; stop(); });
   inputChanged();
   void (async () => {
     try {
@@ -208,8 +233,21 @@
       get('targetLanguage').value = settings.targetLanguage;
       get('tone').value = settings.tone;
       displayService();
+      const retained = await chrome.runtime.sendMessage({ type: 'GET_TEXT_TRANSLATION_STATE' });
+      if (!retained?.ok) throw new Error('Could not restore this translation. Reload this page to try again.');
+      if (retained.state) {
+        const state = contract.retainedState(retained.state);
+        for (const [key, value] of Object.entries(state.settings)) get(key).value = value;
+        get('sourceText').value = state.source;
+        selectedService = state.settings.service;
+        openaiModel = state.openaiModel;
+        openaiReasoningEffort = state.openaiReasoningEffort;
+        job = state.job;
+        displayService();
+      }
+      inputChanged();
       ready = true;
-      renderBusy();
+      renderJob();
     } catch (error) { showError(error); }
   })();
 })();

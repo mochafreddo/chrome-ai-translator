@@ -62,7 +62,7 @@ export async function launchTextTranslationBrowser() {
       targetLanguage: 'Korean', tone: 'technical' } })`);
     if (!saved?.ok) throw new Error('Synthetic settings unavailable');
     return {
-      ctx, page: ctx.page, requests, errors,
+      ctx, worker, page: ctx.page, requests, errors,
       url: `chrome-extension://${ctx.extension.id}/text-translation.html`,
       setOutput(value, status = 'completed') { output = value; completionStatus = status; },
       hold(value = true) { holding = value; },
