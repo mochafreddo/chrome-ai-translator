@@ -86,7 +86,44 @@
       sourceLanguage: result.sourceLanguage };
   }
 
-  const api = { MAX_SOURCE_CHARACTERS, normalizeSettings, validateSource, splitSource, prepare, parseResult };
+  function retainedState(value) {
+    if (!value || typeof value.source !== 'string') throw new Error('Invalid retained translation.');
+    const settings = {};
+    for (const key of SETTINGS_KEYS) {
+      if (typeof value.settings?.[key] !== 'string' || value.settings[key].length > 200) {
+        throw new Error('Invalid retained settings.');
+      }
+      settings[key] = value.settings[key];
+    }
+    if (typeof value.openaiModel !== 'string' || value.openaiModel.length > 200 ||
+        typeof value.openaiReasoningEffort !== 'string' || value.openaiReasoningEffort.length > 200) {
+      throw new Error('Invalid retained preferences.');
+    }
+    let job = null;
+    if (value.job) {
+      const saved = value.job;
+      const source = validateSource(saved.source);
+      const units = splitSource(source);
+      if (!Array.isArray(saved.units) || JSON.stringify(saved.units) !== JSON.stringify(units) ||
+          !Array.isArray(saved.results) || saved.results.length > units.length ||
+          !['running', 'stopped', 'failed', 'complete'].includes(saved.status) ||
+          (saved.status === 'complete' && saved.results.length !== units.length)) {
+        throw new Error('Invalid retained progress.');
+      }
+      const results = saved.results.map(result => {
+        if (typeof result?.translation !== 'string' || !(result.sourceLanguage === null ||
+            (typeof result.sourceLanguage === 'string' && result.sourceLanguage.length <= 200))) {
+          throw new Error('Invalid retained result.');
+        }
+        return { translation: result.translation, sourceLanguage: result.sourceLanguage };
+      });
+      job = { source, settings: normalizeSettings(saved.settings), units, results, status: saved.status };
+    }
+    return { source: value.source, settings, openaiModel: value.openaiModel,
+      openaiReasoningEffort: value.openaiReasoningEffort, job };
+  }
+
+  const api = { MAX_SOURCE_CHARACTERS, normalizeSettings, validateSource, splitSource, prepare, parseResult, retainedState };
   globalScope.ChromeAiTranslatorTextTranslationRequest = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

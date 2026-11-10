@@ -12,6 +12,7 @@
     "test:integration:ui": "node tests/integration/ui-polish.test.mjs",
     "test:integration:text": "node tests/integration/text-translation.test.mjs",
     "test:integration:text-long": "node tests/integration/text-translation-long.test.mjs",
+    "test:integration:text-retention": "node tests/integration/text-translation-retention.test.mjs",
     "test:integration:inline-consent": "node tests/integration/inline-consent.test.mjs",
     "test:integration:routing-pilot": "node tests/integration/routing-pilot.mock.mjs",
     "test:integration:model-quality": "node tests/integration/model-quality.mock.mjs",
