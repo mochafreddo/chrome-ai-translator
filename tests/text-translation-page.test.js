@@ -22,11 +22,14 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
   const frames = previous?.frames || new Map();
   frames.set(tabId, documentId);
   const storage = previous?.storage || { writes: [], held: [] };
-  const worker = previous?.worker || createBackgroundWorker({ chrome: {
+  const platform = previous?.platform || { chrome: {
     runtime: { getURL: path => `chrome-extension://test/${path}`, async sendMessage() {},
       async getContexts({ tabIds: [tabId] }) {
       const documentId = frames.get(tabId);
-      if (frames.hold) await new Promise(resolve => { frames.release = resolve; });
+      if (frames.hold) await new Promise(resolve => {
+        frames.release = resolve;
+        (frames.pending ||= []).push(resolve);
+      });
       return documentId ? [{ tabId, frameId: 0, documentId,
         documentUrl: 'chrome-extension://test/text-translation.html' }] : [];
     } },
@@ -46,10 +49,11 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
         resolve({ ok: true, json: async () => ({ status, output: [{ type: 'message',
           content: [{ type: 'output_text', text: JSON.stringify({ translation, sourceLanguage }) }] }] }) });
       } });
-  }) });
+  }) };
+  const workerRef = previous?.workerRef || { current: createBackgroundWorker(platform) };
   const chrome = { runtime: { sendMessage(message) {
     messages.push(message);
-    return new Promise(resolve => worker.handlers.onMessage(message,
+    return new Promise(resolve => workerRef.current.handlers.onMessage(message,
       { tab: { id: tabId }, frameId: 0, documentId, url: 'chrome-extension://test/text-translation.html' },
       response => {
         if (holdDelivery && message.type === 'TRANSLATE_TEXT') deliveries.push(() => resolve(response));
@@ -63,14 +67,16 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
     ChromeAiTranslatorTextTranslationRequest: require('../extension/text-translation-request.js'),
     ChromeAiTranslatorDefaultModel: require('../extension/default-model.js') });
   vm.runInContext(fs.readFileSync(require.resolve('../extension/text-translation.js'), 'utf8'), context);
-  await beforeReady?.();
+  await beforeReady?.({ element, event, flush });
   async function flush() { for (let i = 0; i < 64; i += 1) await Promise.resolve(); }
   function event(id, type) { element(id).listeners[type]?.({ preventDefault() {} }); }
   await flush();
   assert.equal(element('btnTranslate').disabled, false);
-  return { element, event, requests, messages, flush, worker, session, frames, storage,
+  return { element, event, requests, messages, flush, session, frames, storage, platform, workerRef,
+    get worker() { return workerRef.current; },
+    replaceWorker() { workerRef.current = createBackgroundWorker(platform); },
     send: chrome.runtime.sendMessage,
-    async close() { windowEvents.pagehide?.(); frames.delete(tabId); worker.handlers.onTabRemoved(tabId); await flush(); },
+    async close() { windowEvents.pagehide?.(); frames.delete(tabId); workerRef.current.handlers.onTabRemoved(tabId); await flush(); },
     async reload(options = {}) {
       windowEvents.pagehide?.();
       return openPage({ previous: this, tabId, documentId: documentId + '-reload', ...options });
@@ -86,6 +92,18 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
 
 exports.name = 'Text Translation page';
 exports.tests = [{
+  name: 'Clear stays disabled until restoration finishes and stays available during an active job',
+  async fn() {
+    const page = await openPage({ beforeReady: async ({ element, event }) => {
+      assert.equal(element('btnClear').disabled, true);
+      event('btnClear', 'click');
+    } });
+    assert.equal(page.messages.some(message => message.type === 'CLEAR_TEXT_TRANSLATION_STATE'), false);
+    page.source('Original');
+    await page.start();
+    assert.equal(page.element('btnClear').disabled, false);
+  },
+}, {
   name: 'uncertain language requires a manual choice and incomplete work cannot be swapped',
   async fn() {
     const page = await openPage();
@@ -167,6 +185,78 @@ exports.tests = [{
     assert.equal(restored.element('sourceText').value, 'Retained draft');
     assert.equal(restored.element('targetLanguage').value, 'Japanese');
     assert.equal(restored.requests.length, 0);
+  },
+}, {
+  name: 'worker replacement cannot let immediate reload overtake Clear or replay an older save',
+  async fn() {
+    const page = await openPage();
+    page.source('Delete after worker replacement');
+    await page.flush();
+    const oldSave = structuredClone(page.messages.find(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE'));
+    page.replaceWorker();
+    page.frames.hold = true;
+    page.event('btnClear', 'click');
+    await page.flush();
+    page.frames.hold = false;
+    const restored = await page.reload({ beforeReady: async () => {
+      await page.flush();
+      page.frames.pending?.splice(0).forEach(release => release());
+    } });
+    assert.equal(restored.element('sourceText').value, '');
+    assert.equal(restored.element('translatedText').value, '');
+    restored.replaceWorker();
+    await page.send(oldSave);
+    const again = await restored.reload();
+    assert.equal(again.element('sourceText').value, '');
+  },
+}, {
+  name: 'old document Clear cannot delete a new document draft after ownership changes',
+  async fn() {
+    const page = await openPage();
+    page.source('Old draft');
+    page.event('btnClear', 'click');
+    await page.flush();
+    const oldClear = structuredClone(page.messages.find(message => message.type === 'CLEAR_TEXT_TRANSLATION_STATE'));
+    const restored = await page.reload();
+    restored.source('New document draft');
+    await restored.flush();
+    restored.replaceWorker();
+    assert.equal((await page.send({ ...oldClear, revision: oldClear.revision + 100 })).ok, false);
+    const again = await restored.reload();
+    assert.equal(again.element('sourceText').value, 'New document draft');
+  },
+}, {
+  name: 'Clear revision survives worker replacement and refuses an older save from the same document',
+  async fn() {
+    const page = await openPage();
+    page.source('Deleted old draft');
+    await page.flush();
+    const oldSave = structuredClone(page.messages.find(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE'));
+    page.event('btnClear', 'click');
+    await page.flush();
+    page.replaceWorker();
+    await page.send(oldSave);
+    const restored = await page.reload();
+    assert.equal(restored.element('sourceText').value, '');
+    assert.equal(restored.element('translatedText').value, '');
+  },
+}, {
+  name: 'Clear accepted before reload deletes the draft even when its native context lookup is delayed',
+  async fn() {
+    const page = await openPage();
+    page.source('Delete before immediate reload');
+    await page.flush();
+    page.frames.hold = true;
+    page.event('btnClear', 'click');
+    await page.flush();
+    page.frames.hold = false;
+    const pending = page.reload({ beforeReady: async () => {
+      await page.flush();
+      page.frames.pending.splice(0).forEach(release => release());
+    } });
+    const restored = await pending;
+    assert.equal(restored.element('sourceText').value, '');
+    assert.equal(restored.element('translatedText').value, '');
   },
 }, {
   name: 'reload preserves the newest accepted draft queued behind an earlier storage write',
@@ -265,11 +355,16 @@ exports.tests = [{
       page.storage.hold = false;
       page.storage.held.splice(0).forEach(release => release());
       await page.flush();
-      assert.equal(Object.hasOwn(page.session, 'text-translation:90'), false, action);
+      const checkpoint = { documentId: 'test-document',
+        revision: page.messages.filter(message => message.type === 'CLEAR_TEXT_TRANSLATION_STATE').at(-1)?.revision,
+        state: null };
+      if (action === 'clear') assert.deepEqual(page.session['text-translation:90'], checkpoint);
+      else assert.equal(Object.hasOwn(page.session, 'text-translation:90'), false, action);
       const stale = await page.send(oldSave);
       if (action === 'close') assert.equal(stale.ok, false);
       await page.flush();
-      assert.equal(Object.hasOwn(page.session, 'text-translation:90'), false, action);
+      if (action === 'clear') assert.deepEqual(page.session['text-translation:90'], checkpoint);
+      else assert.equal(Object.hasOwn(page.session, 'text-translation:90'), false, action);
       const restored = action === 'clear' ? await page.reload() :
         await openPage({ previous: page, tabId: 91, documentId: 'new-tab' });
       assert.equal(restored.element('sourceText').value, '', action);
