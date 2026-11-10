@@ -30,32 +30,9 @@ const openAiResponse =
   (typeof module !== 'undefined' && module.exports
     ? require('./openai-response.js')
     : null);
-// Side Panel Translation's execution dependencies load before its module. The document
-// serializer runs in the content script and is not imported here.
-if (
-  typeof importScripts === 'function' &&
-  !globalThis.ChromeAiTranslatorMarkdownEntries
-) {
-  importScripts('markdown-entries.js');
-}
-if (
-  typeof importScripts === 'function' &&
-  !globalThis.ChromeAiTranslatorMarkdownRehydration
-) {
-  importScripts('markdown-rehydration.js');
-}
-if (
-  typeof importScripts === 'function' &&
-  !globalThis.ChromeAiTranslatorTranslationChunks
-) {
-  importScripts('translation-chunks.js');
-}
 if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorTranslationSettings) {
     importScripts('translation-settings.js');
-  }
-  if (!globalThis.ChromeAiTranslatorSidePanelTranslationExecution) {
-    importScripts('sidepanel-translation-execution.js');
   }
   if (!globalThis.ChromeAiTranslatorInlineModelExecution) {
     importScripts('inline-model-execution.js');
@@ -94,9 +71,6 @@ if (typeof importScripts === 'function') {
 const textTranslationRequest = globalThis.ChromeAiTranslatorTextTranslationRequest || require('./text-translation-request.js');
 const { getTargetLanguageCode } =
   globalThis.ChromeAiTranslatorTranslationSettings || require('./translation-settings.js');
-const sidePanelTranslationExecution =
-  globalThis.ChromeAiTranslatorSidePanelTranslationExecution ||
-  require('./sidepanel-translation-execution.js');
 const inlineModelExecution =
   globalThis.ChromeAiTranslatorInlineModelExecution || require('./inline-model-execution.js');
 const {
@@ -119,31 +93,11 @@ const workerInvocation = globalThis.ChromeAiTranslatorWorkerInvocation ||
 const { createSettingsLifecycle, DEFAULT_SETTINGS, mergeSettings } =
   globalThis.ChromeAiTranslatorSettingsLifecycle || require('./settings-lifecycle.js');
 
-const PUBLIC_SETTINGS_USED_KEYS = Object.freeze([
-  'service',
-  'model',
-  'reasoningEffort',
-  'targetLanguage',
-  'tone',
-  'viewMode',
-  'chunkMaxChars',
-]);
-// Everything the panel is allowed to see of a tab's state. The two translations keep
-// separate failures here on purpose: `error` is Side Panel Translation's, and merging
-// Inline Translation's into it would tell the reader the wrong feature is talking at the
-// one moment they most need to know which.
 const PUBLIC_TAB_STATE_KEYS = Object.freeze([
-  'status',
-  'error',
   'inlineTranslationError',
-  'extracted',
-  'translated',
-  'progress',
-  'settingsUsed',
   'updatedAt',
   'workerEpoch',
   'stateSequence',
-  'bodyVersion',
   'documentId',
 ]);
 
@@ -195,45 +149,13 @@ function copyAllowedFields(value, keys) {
 
 function sanitizePublicTabState(state) {
   const publicState = copyAllowedFields(state, PUBLIC_TAB_STATE_KEYS);
-  if (publicState.error != null) {
-    // The code is the panel's to read, so it travels; see safeError below for why.
-    publicState.error = copyAllowedFields(publicState.error, [
-      'message',
-      'name',
-      'code',
-    ]);
-  }
   if (publicState.inlineTranslationError != null) {
     publicState.inlineTranslationError = copyAllowedFields(
       publicState.inlineTranslationError,
       ['message', 'code']
     );
   }
-  if (publicState.extracted != null) {
-    publicState.extracted = copyAllowedFields(publicState.extracted, [
-      'title',
-      'url',
-      'langHint',
-      'contentMarkdown',
-    ]);
-  }
-  if (publicState.progress != null) {
-    publicState.progress = copyAllowedFields(publicState.progress, [
-      'current',
-      'total',
-    ]);
-  }
-  if (publicState.settingsUsed != null) {
-    publicState.settingsUsed = copyAllowedFields(
-      publicState.settingsUsed,
-      PUBLIC_SETTINGS_USED_KEYS
-    );
-  }
   return publicState;
-}
-
-function createPublicSettingsUsed(settings) {
-  return copyAllowedFields(settings, PUBLIC_SETTINGS_USED_KEYS);
 }
 
 function safeError(err) {
@@ -243,8 +165,6 @@ function safeError(err) {
     message: err.message || String(err),
     name: err.name,
   };
-  // The code is kept beside the message rather than folded into it: what the reader reads is
-  // the panel's to decide, and only the panel has the words. See extension/sidepanel-failure.js.
   if (typeof err.code === 'string' && err.code) safe.code = err.code;
   return safe;
 }
@@ -262,8 +182,6 @@ function getInlineContentScriptFiles() {
     'inline-local-diagnostic-transport.js',
     'inline-translation-operation.js',
     'inline-translation-controls.js',
-    'markdown-entries.js',
-    'markdown-document.js',
     'content.js',
   ];
 }
@@ -424,8 +342,6 @@ function createBackgroundWorker(platform = {}) {
   const stateByTab = new Map();
   const workerEpoch = inlineDiagnosticsProtocol.createUuidV4(givenCrypto || globalThis.crypto);
   let stateSequence = 0;
-  let bodyVersion = 0;
-  const activeTranslationsByTab = new Map();
   const inlineControlsByTab = new Map();
   const activeInvocationsByTab = new Map();
   const documentsByTab = new Map();
@@ -510,7 +426,6 @@ function createBackgroundWorker(platform = {}) {
     else documentLifetimes.delete(tabId);
     for (const controller of pendingByTab.get(tabId) || []) controller.abort();
     pendingByTab.delete(tabId);
-    activeTranslationsByTab.delete(tabId);
     inlineControlsByTab.delete(tabId);
     activeInvocationsByTab.delete(tabId);
     stateByTab.delete(tabId);
@@ -524,28 +439,17 @@ function createBackgroundWorker(platform = {}) {
 
   function setTabState(tabId, patch) {
     const chrome = getChrome();
-    const prev = stateByTab.get(tabId) || {
-      status: 'idle', extracted: null, translated: null, bodyVersion: 0,
-    };
-    const bodyChanged = ['extracted', 'translated'].some(key =>
-      Object.prototype.hasOwnProperty.call(patch, key));
     const next = sanitizePublicTabState({
-      ...prev,
+      ...(stateByTab.get(tabId) || {}),
       ...patch,
       ...(documentsByTab.has(tabId) ? { documentId: documentsByTab.get(tabId) } : {}),
       updatedAt: nowIso(),
       workerEpoch,
       stateSequence: ++stateSequence,
-      bodyVersion: bodyChanged ? ++bodyVersion : prev.bodyVersion,
     });
     stateByTab.set(tabId, next);
-    const notification = { ...next };
-    if (!bodyChanged) {
-      delete notification.extracted;
-      delete notification.translated;
-    }
     chrome.runtime
-      .sendMessage({ type: 'STATE_UPDATED', tabId, state: notification })
+      .sendMessage({ type: 'STATE_UPDATED', tabId, state: next })
       .catch(() => {});
   }
 
@@ -555,16 +459,6 @@ function createBackgroundWorker(platform = {}) {
     try {
       await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
     } catch {}
-  }
-
-  async function getTabUrl(tabId) {
-    const chrome = getChrome();
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      return typeof tab?.url === 'string' ? tab.url : '';
-    } catch {
-      return '';
-    }
   }
 
   const invocationOptions = {
@@ -595,7 +489,7 @@ function createBackgroundWorker(platform = {}) {
           ? classifyContentScriptFailure(new Error('Cannot access contents of this page.'), url).message
           : 'The extension could not identify this page’s document. Reload the page and try again.';
         invalidateDocument(tabId);
-        setTabState(tabId, { status: 'idle', documentId: null, extracted: null, translated: null,
+        setTabState(tabId, { documentId: null,
           inlineTranslationError: { code: 'document.unavailable', message } });
       },
       inlineErrors: {
@@ -645,17 +539,6 @@ function createBackgroundWorker(platform = {}) {
     } finally {
       if (inlineControlsByTab.get(tabId) === requestedControl) inlineControlsByTab.delete(tabId);
     }
-  }
-
-  async function extractArticle(tabId, documentId) {
-    const chrome = getChrome();
-    const resp = await chrome.tabs.sendMessage(tabId, {
-      type: 'EXTRACT_ARTICLE',
-    }, { documentId });
-    if (!resp || !resp.ok) {
-      throw new Error(resp?.error?.message || 'Failed to extract article');
-    }
-    return resp.data;
   }
 
   async function requestTranslation({
@@ -796,138 +679,6 @@ function createBackgroundWorker(platform = {}) {
     }
   }
 
-  async function translateTab(tabId, overrideSettings = null, expectedDocumentId = null, displayedProvider = null) {
-    if (activeTranslationsByTab.has(tabId)) {
-      return { skipped: true, reason: 'already_running' };
-    }
-
-    const operationToken = Symbol(`translate-tab-${tabId}`);
-    activeTranslationsByTab.set(tabId, operationToken);
-    const isCurrent = () => activeTranslationsByTab.get(tabId) === operationToken;
-    let documentRequest = null;
-
-    try {
-      const documentId = await captureDocument(tabId, expectedDocumentId);
-      if (!isCurrent()) return { skipped: true, reason: 'document_changed' };
-      documentRequest = createDocumentRequest(tabId, documentId);
-      const saved = mergeSettings({
-        ...(await settingsLifecycle.read()),
-        ...(overrideSettings || {}),
-      });
-      if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
-      const settings = { ...saved, ...getEffectiveModelSettings(saved) };
-      if (displayedProvider && (displayedProvider.service !== settings.service || displayedProvider.model !== settings.model)) {
-        return { skipped: true, reason: 'provider_changed' };
-      }
-
-      const apiKey = settings.service === 'openrouter' ? settings.openrouterApiKey : settings.apiKey;
-      if (!apiKey) {
-        setTabState(tabId, {
-          status: 'error',
-          error: {
-            message: `${settings.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`,
-          },
-        });
-        return { skipped: true, reason: 'missing_api_key' };
-      }
-
-      setTabState(tabId, {
-        status: 'extracting',
-        error: null,
-        extracted: null,
-        translated: null,
-        progress: null,
-      });
-      try {
-        await invocation.preparePage(tabId, documentId, documentRequest.assertCurrent);
-      } catch (e) {
-        const failure = classifyContentScriptFailure(e, await getTabUrl(tabId));
-        if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
-        setTabState(tabId, {
-          status: 'error',
-          error: { message: failure.message },
-        });
-        return { skipped: true, reason: 'content_script_unavailable' };
-      }
-      if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
-
-      let translationStarted = false;
-      let providerConfirmed = false;
-      try {
-        const extraction = await extractArticle(tabId, documentId);
-        if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
-        const translated = await sidePanelTranslationExecution.execute(
-          extraction,
-          createPublicSettingsUsed(settings),
-          (request) => requestTranslation({ ...request, service: settings.service, apiKey,
-            signal: documentRequest.signal, beforeRequest: async () => {
-              await documentRequest.beforeRequest();
-              if (!providerConfirmed && displayedProvider) {
-                const latest = getEffectiveModelSettings({ ...(await settingsLifecycle.read()), ...(overrideSettings || {}) });
-                documentRequest.assertCurrent();
-                if (latest.service !== displayedProvider.service || latest.model !== displayedProvider.model) {
-                  throw Object.assign(new Error('The selected service or model changed. Review it and translate again.'),
-                    { code: 'provider.changed' });
-                }
-              }
-              providerConfirmed = true;
-            } }),
-          ({ progress }) => {
-            if (!isCurrent()) return;
-            if (!translationStarted) {
-              translationStarted = true;
-              setTabState(tabId, {
-                status: 'translating',
-                extracted: extraction,
-                translated: null,
-                settingsUsed: createPublicSettingsUsed(settings),
-                progress,
-              });
-              return;
-            }
-            setTabState(tabId, { status: 'translating', progress });
-          }
-        );
-        if (isCurrent()) setTabState(tabId, {
-          status: 'done',
-          translated,
-          progress: null,
-        });
-        return { skipped: false };
-      } catch (e) {
-        if (!isCurrent()) return { skipped: true, reason: 'tab_closed' };
-        if (e?.code === 'provider.changed') {
-          setTabState(tabId, { status: 'idle', error: null, extracted: null, translated: null,
-            progress: null, settingsUsed: null });
-          return { skipped: true, reason: 'provider_changed' };
-        }
-        const failureState = {
-          status: 'error',
-          error: safeError(e),
-          translated: null,
-          progress: null,
-        };
-        if (!translationStarted) failureState.extracted = null;
-        setTabState(tabId, failureState);
-        return {
-          skipped: true,
-          reason: translationStarted ? 'translate_failed' : 'extract_failed',
-        };
-      }
-    } finally {
-      documentRequest?.release();
-      if (activeTranslationsByTab.get(tabId) === operationToken) {
-        activeTranslationsByTab.delete(tabId);
-      }
-    }
-  }
-
-  // What the browser calls this worker with, and the only way in for a caller holding
-  // nothing but this instance. Registering them is the entry point's, at the foot of this
-  // file, so each one names the event it serves: that name is all that still links a handler
-  // to its registration now that the two are apart.
-
-  // chrome.runtime.onInstalled.
   async function onInstalled() {
     await settingsLifecycle.save({});
     await releaseActionClickToExtension();
@@ -970,8 +721,7 @@ function createBackgroundWorker(platform = {}) {
     if (!documentLifetimes.has(details.tabId) && !stateByTab.has(details.tabId)) return;
     if (details.documentId && documentsByTab.get(details.tabId) === details.documentId) return;
     invalidateDocument(details.tabId, details.documentId);
-    setTabState(details.tabId, { status: 'idle', extracted: null, translated: null,
-      error: null, inlineTranslationError: null, progress: null, settingsUsed: null });
+    setTabState(details.tabId, { inlineTranslationError: null });
   }
 
   // chrome.action.onClicked. Deliberately not async: the first step opens the side panel,
@@ -1090,44 +840,17 @@ function createBackgroundWorker(platform = {}) {
           const stored = stateByTab.get(tabId);
           const state = sanitizePublicTabState(
             (msg.documentId === null ? {
-              status: 'idle', documentId: null, extracted: null, translated: null,
-              workerEpoch, stateSequence: stored?.stateSequence || 0, bodyVersion: 0,
+              documentId: null,
+              workerEpoch, stateSequence: stored?.stateSequence || 0,
               ...(stored?.documentId === null ? { inlineTranslationError: stored.inlineTranslationError } : {}),
             } : msg.documentId && stored?.documentId !== msg.documentId ? null : stored) || {
-              status: 'idle', extracted: null, translated: null,
-              workerEpoch, stateSequence: 0, bodyVersion: 0,
+              workerEpoch, stateSequence: 0,
               ...(msg.documentId ? { documentId: msg.documentId } : {}),
             }
           );
-          if (msg.knownBody?.workerEpoch === state.workerEpoch &&
-            msg.knownBody.bodyVersion === state.bodyVersion) {
-            delete state.extracted;
-            delete state.translated;
-          }
           sendResponse({
             ok: true,
             state,
-          });
-          return;
-        }
-        if (msg?.type === 'TRANSLATE_TAB') {
-          const { tabId, settingsOverride } = msg;
-          if (sender?.tab || typeof msg.documentId !== 'string' || !msg.documentId ||
-              !['openai', 'openrouter'].includes(msg.displayedProvider?.service) ||
-              typeof msg.displayedProvider?.model !== 'string' || !msg.displayedProvider.model) {
-            throw Object.assign(new Error('Translation requires the displayed document, service and model.'),
-              { code: 'translation.context_required' });
-          }
-          if (settingsOverride != null && (typeof settingsOverride !== 'object' || Array.isArray(settingsOverride) ||
-              Object.keys(settingsOverride).some(key => key === 'service' || !PUBLIC_SETTINGS_USED_KEYS.includes(key)))) {
-            throw Object.assign(new Error('Unsupported translation settings override.'), { code: 'settings.override_invalid' });
-          }
-          const result = await translateTab(tabId, settingsOverride || null, msg.documentId, msg.displayedProvider);
-          sendResponse({
-            ok: true,
-            ...(result?.skipped
-              ? { skipped: true, reason: result.reason }
-              : {}),
           });
           return;
         }

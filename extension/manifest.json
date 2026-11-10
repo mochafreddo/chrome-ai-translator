@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Chrome AI Translator (Personal)",
   "version": "0.3.0.0",
-  "description": "Personal article translator using OpenAI or OpenRouter.",
+  "description": "Personal text and inline translator using OpenAI or OpenRouter.",
   "minimum_chrome_version": "116",
 
   "permissions": ["storage", "activeTab", "scripting", "sidePanel", "webNavigation"],

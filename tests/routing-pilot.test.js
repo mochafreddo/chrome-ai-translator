@@ -28,16 +28,16 @@ function makeRecords() {
 
 exports.name = 'routing pilot';
 exports.tests = [{
-  name: 'builds the confirmed 36-run plan with alternating routing order',
+  name: 'builds the inline-only 18-run plan with alternating routing order',
   fn() {
     const plan = buildPlan();
-    assert.equal(plan.length, 36);
+    assert.equal(plan.length, 18);
     assert.deepEqual([...new Set(plan.map((run) => run.page))], ['technical', 'github', 'article']);
-    assert.deepEqual([...new Set(plan.map((run) => run.flow))], ['inline', 'sidepanel']);
+    assert.deepEqual([...new Set(plan.map((run) => run.flow))], ['inline']);
     assert.deepEqual(plan.slice(0, 4).map(({ policy, repetition }) => [policy, repetition]), [
       ['default', 1], ['throughput', 1], ['throughput', 2], ['default', 2],
     ]);
-    assert.equal(new Set(plan.map((run) => run.id)).size, 36);
+    assert.equal(new Set(plan.map((run) => run.id)).size, 18);
   },
 }, {
   name: 'adds only throughput sorting to a validated copy of the request',
@@ -164,7 +164,7 @@ exports.tests = [{
     assert.equal(defaultInline.failures, 1);
     assert.ok(Math.abs(defaultInline.totalCost - 0.11) < Number.EPSILON);
     assert.ok(Math.abs(defaultInline.costPerSuccess - 0.01375) < Number.EPSILON);
-    assert.equal(defaultInline.medianElapsedMs, 1650);
+    assert.equal(defaultInline.medianElapsedMs, 1050);
     assert.equal(Object.hasOwn(defaultInline, 'p95ElapsedMs'), false);
 
     const unknown = makeRecords();
@@ -187,7 +187,7 @@ exports.tests.push({
     const command = 'tests/integration/routing-pilot.mock.mjs';
     const plan = JSON.parse(execFileSync(process.execPath, [command, '--plan'], { cwd: root, encoding: 'utf8' }));
     assert.equal(plan.mode, 'plan-only');
-    assert.equal(plan.runs.length, 36);
+    assert.equal(plan.runs.length, 18);
     assert.deepEqual(plan.corpus.pages.map(page => page.id).sort(), ['article', 'github', 'technical']);
     for (const page of plan.corpus.pages) {
       const bytes = fs.readFileSync(path.join(root, 'tests/integration/fixtures/routing-pilot', `${page.id}.html`));

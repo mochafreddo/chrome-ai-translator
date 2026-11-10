@@ -107,98 +107,21 @@ async function main() {
   console.log('PASS UI polish - responsive Options and service switching');
 
   await ctx.page.navigate(`chrome-extension://${ctx.extension.id}/sidepanel.html`);
-  await ctx.page.evaluate(`(() => {
-    globalThis.uiTestState = { status: 'done', workerEpoch: 'ui-fixture', stateSequence: 1, bodyVersion: 1,
-      extracted: { contentMarkdown: '<b>Bonjour.</b>', langHint: 'fr' },
-      translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } };
-    const send = chrome.runtime.sendMessage.bind(chrome.runtime);
-    globalThis.uiStateReads = 0;
-    globalThis.uiOmittedReads = 0;
-    chrome.runtime.sendMessage = message => {
-      if (message.type !== 'GET_STATE') return send(message);
-      globalThis.uiStateReads += 1;
-      const state = { ...globalThis.uiTestState };
-      if (message.knownBody?.workerEpoch === state.workerEpoch &&
-          message.knownBody.bodyVersion === state.bodyVersion) {
-        delete state.extracted; delete state.translated;
-        globalThis.uiOmittedReads += 1;
-      }
-      return Promise.resolve({ ok: true, state });
-    };
-    document.getElementById('targetLanguage').value = 'Japanese';
-  })()`);
-  assert.ok(await until(() => ctx.page.evaluate(`document.getElementById('translated').textContent === '안녕하세요.'`), 10000));
-  assert.deepEqual(await ctx.page.evaluate(`({
-    source: document.getElementById('original').lang,
-    translation: document.getElementById('translated').lang,
-    safe: document.querySelector('#original b') === null,
-  })`), { source: 'fr', translation: 'ko', safe: true });
-  await ctx.page.evaluate(`(() => {
-    document.getElementById('viewMode').value = 'bilingual';
-    document.getElementById('viewMode').dispatchEvent(new Event('change'));
-  })()`);
-  assert.ok(await until(() => ctx.page.evaluate(`document.getElementById('translated').textContent.startsWith('Original')`), 10000));
   assert.deepEqual(await ctx.page.evaluate(`(() => {
-    const output = document.getElementById('translated');
-    return { text: output.textContent,
-      source: output.querySelector('[lang="fr"]')?.textContent,
-      translation: output.querySelector('[lang="ko"]')?.textContent,
-      labels: Array.from(output.querySelectorAll('[lang="en"]')).map(node => node.textContent),
-      safe: output.querySelector('b') === null };
-  })()`), { text: 'Original\n\n<b>Bonjour.</b>\n\nTranslation\n\n안녕하세요.',
-    source: '<b>Bonjour.</b>', translation: '안녕하세요.', labels: ['Original\n\n', '\n\nTranslation\n\n'], safe: true });
-  console.log('PASS UI polish - content language boundaries and safe bilingual text');
-  await ctx.page.evaluate(`(() => {
-    const output = document.getElementById('translated');
-    globalThis.uiSelectedNode = output.lastChild.firstChild;
-    globalThis.uiOriginalNode = document.getElementById('original').firstChild;
-    const range = document.createRange();
-    range.setStart(globalThis.uiSelectedNode, 0);
-    range.setEnd(globalThis.uiSelectedNode, 2);
-    getSelection().removeAllRanges();
-    getSelection().addRange(range);
-    globalThis.uiReadTarget = globalThis.uiStateReads + 2;
-  })()`);
-  assert.ok(await until(() => ctx.page.evaluate(`globalThis.uiStateReads >= globalThis.uiReadTarget`), 10000, 100));
-  assert.deepEqual(await ctx.page.evaluate(`({
-    original: document.getElementById('original').firstChild === globalThis.uiOriginalNode,
-    translated: document.getElementById('translated').lastChild.firstChild === globalThis.uiSelectedNode,
-    selected: getSelection().toString(),
-    anchor: getSelection().anchorNode === globalThis.uiSelectedNode,
-    focus: getSelection().focusNode === globalThis.uiSelectedNode,
-  })`), { original: true, translated: true, selected: '안녕', anchor: true, focus: true });
-  console.log('PASS UI polish - repeated panel polling preserves text nodes and selection');
-  assert.ok(await ctx.page.evaluate('uiOmittedReads > 0'), 'Unchanged polls acknowledge and omit owned bodies');
-  await ctx.page.evaluate("document.getElementById('translated').textContent = 'external change'");
-  assert.ok(await until(() => ctx.page.evaluate(`document.getElementById('translated').textContent ===
-    'Original\\n\\n<b>Bonjour.</b>\\n\\nTranslation\\n\\n안녕하세요.'`), 5000, 100));
-  assert.deepEqual(await ctx.page.evaluate(`({ source: document.getElementById('original').lang,
-    translated: document.querySelector('#translated [lang="ko"]')?.textContent })`),
-    { source: 'fr', translated: '안녕하세요.' });
-  console.log('PASS UI polish - omitted bodies retain bilingual rendering and repair externally changed DOM');
+    const link = document.getElementById('openTextTranslation');
+    return { target: link.target, path: new URL(link.href).pathname,
+      retired: ['btnTranslate', 'viewMode', 'original', 'translated'].some(id => document.getElementById(id)) };
+  })()`), { target: '_blank', path: '/text-translation.html', retired: false });
   for (const width of [240, 320, 460, 768]) {
     await resize(width);
     assert.equal(await ctx.page.evaluate(`(() => {
-      document.getElementById('errorBox').hidden = false;
-      document.getElementById('errorBox').textContent = 'error'.repeat(200);
-      document.getElementById('translated').textContent = '번역문'.repeat(500);
+      const error = document.getElementById('inlineError');
+      error.hidden = false;
+      error.textContent = 'error'.repeat(200);
       return document.documentElement.scrollWidth > innerWidth;
-    })()`), false, `Panel fits at ${width}px with long content and error`);
+    })()`), false, `Inline panel fits at ${width}px with a long error`);
   }
-  await ctx.page.evaluate(`document.getElementById('tab-translated').focus()`);
-  for (const [key, selected] of [['ArrowRight', 'original'], ['ArrowRight', 'translated'],
-    ['ArrowLeft', 'original'], ['Home', 'translated'], ['End', 'original']]) {
-    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key }, ctx.page.sessionId);
-    const state = await ctx.page.evaluate(`(() => {
-      const active = document.querySelector('[role="tab"][aria-selected="true"]');
-      const panel = document.getElementById(active.getAttribute('aria-controls'));
-      return { selected: active.dataset.tab, focused: document.activeElement === active,
-        visible: !panel.hidden, stops: document.querySelectorAll('[role="tab"][tabindex="0"]').length };
-    })()`);
-    assert.deepEqual(state, { selected, focused: true, visible: true, stops: 1 });
-  }
-  console.log('PASS UI polish - panel overflow and keyboard tabs');
-
+  console.log('PASS UI polish - Inline panel layout and Text Translation entry');
   await ctx.page.navigate(optionsUrl);
   await ctx.page.evaluate(`(() => {
     document.querySelector('input[name="buttonVisibility"][value="onInvocation"]').click();
