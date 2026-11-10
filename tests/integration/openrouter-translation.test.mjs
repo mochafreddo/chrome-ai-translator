@@ -6,11 +6,7 @@ import { readStopBlockContract } from './fixture-stop-contract.mjs';
 import { inlinePanelControlsReady } from './inline-panel-readiness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const flowArguments = process.argv.slice(2);
-if (flowArguments.length !== 2 || flowArguments[0] !== '--flow' || !['inline', 'sidepanel'].includes(flowArguments[1])) {
-  throw new Error('Use --flow inline or --flow sidepanel');
-}
-const FLOW = flowArguments[1];
+const FLOW = 'inline';
 const SESSION = `openrouter-${FLOW}-${randomUUID().slice(0, 8)}`;
 const { check, failures, finish } = createChecks(`OpenRouter ${FLOW}`);
 let ctx;
@@ -22,23 +18,14 @@ let hold = false;
 const held = [];
 
 async function main() {
-  fixture = await serveFixture(join(HERE, 'fixtures', `${FLOW === 'inline' ? 'inline' : 'sidepanel'}-translation.html`));
+  fixture = await serveFixture(join(HERE, 'fixtures', 'inline-translation.html'));
   ctx = await launchExtensionBrowser({ session: SESSION, url: fixture.url,
     extensionDir: join(HERE, '..', '..', 'extension') });
   const workerTarget = await ctx.findTarget(target => target.type === 'service_worker' &&
     target.url.startsWith(`chrome-extension://${ctx.extension.id}/`));
   if (!check('worker is available for network interception', Boolean(workerTarget))) return;
   const worker = await ctx.attach(workerTarget.id, 'service_worker');
-  const failedNetworkRequests = new Set();
-  let heldNetworkId;
-  if (FLOW === 'sidepanel') {
-    await ctx.cdp.send('Network.enable', {}, worker.sessionId);
-    ctx.cdp.on('Network.loadingFailed', (event, sessionId) => {
-      if (sessionId === worker.sessionId && (event.canceled || event.errorText === 'net::ERR_ABORTED')) {
-        failedNetworkRequests.add(event.requestId);
-      }
-    });
-  }
+
   stopRequests = ctx.cdp.on('Fetch.requestPaused', (event, sessionId) => {
     if (sessionId !== worker.sessionId) return;
     void (async () => {
@@ -61,12 +48,10 @@ async function main() {
       const body = JSON.parse(request.postData || '{}');
       requests.push({ url: request.url, method: request.method, body,
         authorization: request.headers.Authorization || request.headers.authorization });
-      const outputText = FLOW === 'inline'
-        ? JSON.stringify({ translations: JSON.parse(body.input).records.map(record => ({ id: record.id,
+      const outputText = JSON.stringify({ translations: JSON.parse(body.input).records.map(record => ({ id: record.id,
           template: record.template.split(/(⟦[^⟧]+⟧)/).map(part =>
             part.startsWith('⟦') ? part : /[A-Za-z]/.test(part) ? '결정적인 번역입니다. ' : part).join(''),
-        })) })
-        : `결정적 번역\n${body.input}`;
+        })) });
       const fulfill = async () => {
         const response = await ctx.cdp.send('Fetch.fulfillRequest', {
           requestId: event.requestId, responseCode: 200,
@@ -77,7 +62,7 @@ async function main() {
         }, sessionId);
         if (response.__error || response.__timeout) interceptionErrors.push('fulfillment failed');
       };
-      if (hold) { held.push(fulfill); heldNetworkId = event.networkId; }
+      if (hold) { held.push(fulfill); }
       else await fulfill();
     })().catch(() => { interceptionErrors.push('interception failed'); });
   });
@@ -95,7 +80,6 @@ async function main() {
       document.getElementById('apiKey').value = ${JSON.stringify(key)};
       document.getElementById('model').value = 'custom-openai-browser';
       document.getElementById('reasoningEffort').value = 'high';
-      document.getElementById('chunkMaxChars').value = '2000';
       document.querySelector('input[name="buttonVisibility"][value="onInvocation"]').checked = true;
       document.getElementById('btnSave').click();
     })()`);
@@ -130,7 +114,7 @@ async function main() {
   const panelTarget = await ctx.findTarget(target => target.url === `chrome-extension://${ctx.extension.id}/sidepanel.html`);
   if (!check('side panel is available', Boolean(panelTarget))) return;
   const panel = await ctx.attach(panelTarget.id);
-  if (FLOW === 'inline') {
+  {
     let delayedScript;
     const stopDelay = ctx.cdp.on('Fetch.requestPaused', (event, sessionId) => {
       if (sessionId === panel.sessionId) delayedScript = event.requestId;
@@ -160,115 +144,7 @@ async function main() {
     if (!check('Inline controls become ready after the delayed script initializes', await until(
       () => inlinePanelControlsReady(panel), 10000, 100))) return;
   }
-  const panelReady = await until(() => panel.evaluate(
-    "document.getElementById('model').disabled && document.getElementById('model').value === 'deepseek/deepseek-v4.1-flash-1017'"), 5000, 100);
-  check('panel displays the pinned model without an editable model choice', panelReady);
-  if (!panelReady) console.log('  panel readiness:', JSON.stringify(await panel.evaluate(`({
-    model: document.getElementById('model').value, disabled: document.getElementById('model').disabled,
-    status: document.getElementById('status').textContent,
-    hasEffectiveModelSettings: typeof ChromeAiTranslatorDefaultModel.getEffectiveModelSettings === 'function'
-  })`)));
-  if (FLOW === 'sidepanel') {
-    const articleTarget = await ctx.findTarget(target => target.type === 'page' && target.url === fixture.url);
-    const article = await ctx.attach(articleTarget.id);
-    await ctx.cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: 1280, height: 900, deviceScaleFactor: 1, mobile: false,
-    }, article.sessionId);
-    await options.evaluate(`globalThis.bodyTelemetry = [];
-      chrome.runtime.onMessage.addListener(message => {
-        if (message.type === 'STATE_UPDATED' && message.tabId === ${tabId}) {
-          bodyTelemetry.push({ status: message.state.status,
-            originalChars: message.state.extracted?.contentMarkdown?.length || 0,
-            translatedChars: message.state.translated?.length || 0 });
-        }
-      });`);
-    await panel.evaluate("document.getElementById('btnTranslate').click()");
-    const done = await until(() => panel.evaluate("document.getElementById('status').textContent === 'Done'"), 15000, 100);
-    if (!done || requests.length < 2) console.log('  translation readiness:', JSON.stringify({ requests: requests.length,
-      requestMetadata: requests.map(request => ({ method: request.method, model: request.body.model,
-        inputType: typeof request.body.input, inputChars: typeof request.body.input === 'string' ? request.body.input.length : null,
-        reasoning: request.body.reasoning, provider: request.body.provider,
-        selectedCredential: request.authorization === 'Bearer sk-or-browser-synthetic' })),
-      panel: await panel.evaluate(`({ status: document.getElementById('status').textContent,
-        hasError: !document.getElementById('errorBox').hidden,
-        errorCode: document.getElementById('errorBox').textContent.match(/(?:response|markdown|openrouter)\\.[a-z_.]+/)?.[0] || '',
-        hasOutput: Boolean(document.getElementById('translated').textContent.trim()) })`) }));
-    check('Side Panel renders deterministic output across chunks', done && requests.length > 1 &&
-      await panel.evaluate("document.getElementById('translated').textContent.includes('결정적 번역')"));
-    check('only the chosen credential reaches its fixed endpoint and required policy', requests.length > 1 && requests.every(request =>
-      request.url === 'https://openrouter.ai/api/v1/responses' && request.authorization === 'Bearer sk-or-browser-synthetic' &&
-      request.body.model === 'deepseek/deepseek-v4.1-flash-1017' && request.body.reasoning?.effort === 'none' &&
-      request.body.provider?.require_parameters === true && request.body.provider?.data_collection === 'deny' &&
-      request.body.provider?.zdr === true && request.body.store === false));
-    const transfer = await options.evaluate(`(async () => {
-      const full = (await chrome.runtime.sendMessage({ type: 'GET_STATE', tabId: ${tabId} })).state;
-      let pollBodyChars = 0, omitted = 0;
-      for (let index = 0; index < 60; index++) {
-        const reply = (await chrome.runtime.sendMessage({ type: 'GET_STATE', tabId: ${tabId},
-          knownBody: { workerEpoch: full.workerEpoch, bodyVersion: full.bodyVersion } })).state;
-        pollBodyChars += (reply.extracted?.contentMarkdown?.length || 0) + (reply.translated?.length || 0);
-        if (!Object.hasOwn(reply, 'extracted') && !Object.hasOwn(reply, 'translated')) omitted++;
-      }
-      return { originalChars: full.extracted?.contentMarkdown?.length || 0,
-        translatedChars: full.translated?.length || 0, polls: 60, pollBodyChars, omitted,
-        progress: bodyTelemetry.filter(update => update.status === 'translating') };
-    })()`);
-    console.log('  body transfer:', JSON.stringify({ browser: ctx.browserVersion, viewport: [1280, 900], ...transfer }));
-    check('progress notifications transfer the source body only once', transfer.originalChars > 0 &&
-      transfer.progress.length > 1 && transfer.progress[0].originalChars === transfer.originalChars &&
-      transfer.progress.slice(1).every(update => update.originalChars === 0 && update.translatedChars === 0));
-    check('acknowledged unchanged polls omit retained bodies', transfer.omitted === 60 && transfer.pollBodyChars === 0);
-    await options.evaluate(`globalThis.closedTabUpdates = [];
-      chrome.runtime.onMessage.addListener(message => {
-        if (message.type === 'STATE_UPDATED' && message.tabId === ${tabId}) closedTabUpdates.push(message.state);
-      });`);
-    const startHeld = async documentId => {
-      hold = true;
-      await panel.evaluate(`(() => {
-        globalThis.closedTabTranslation = { settled: false, response: null };
-        chrome.runtime.sendMessage({ type: 'TRANSLATE_TAB', tabId: ${tabId},
-          documentId: ${JSON.stringify(documentId)}, displayedProvider: { service: 'openrouter', model: 'deepseek/deepseek-v4.1-flash-1017' } })
-          .then(response => { closedTabTranslation.response = response; closedTabTranslation.settled = true; });
-        return true;
-      })()`);
-      return until(() => held.length > 0, 5000, 100);
-    };
-    const readDocumentId = () => options.evaluate(`chrome.webNavigation.getFrame({tabId:${tabId},frameId:0}).then(frame=>frame.documentId)`);
-    const oldId = await readDocumentId();
-    if (!check('first chunk is pending before same-URL reload', await startHeld(oldId))) return;
-    const beforeReload = requests.length;
-    await ctx.cdp.send('Page.reload', {}, article.sessionId);
-    if (!check('reload creates a different document', await until(async () => {
-      const id = await readDocumentId();
-      return id && id !== oldId;
-    }, 5000, 100))) return;
-    if (!check('navigation aborts the held request before a response arrives',
-      await until(() => panel.evaluate('closedTabTranslation.settled'), 5000, 100),
-      'held fetch still pending after document replacement')) return;
-    held.length = 0;
-    const afterReload = await options.evaluate(`chrome.runtime.sendMessage({type:'GET_STATE',tabId:${tabId}})`);
-    check('replacement receives no previous article and no follow-up request', !afterReload.state.translated &&
-      !afterReload.state.extracted && requests.length === beforeReload);
-    const stale = await panel.evaluate(`chrome.runtime.sendMessage({type:'TRANSLATE_TAB',tabId:${tabId},
-      documentId:${JSON.stringify(oldId)},displayedProvider:{service:'openrouter',model:'deepseek/deepseek-v4.1-flash-1017'}})`);
-    check('a stale click cannot submit replacement content', stale?.error?.code === 'document.departed' && requests.length === beforeReload);
-    await ctx.cdp.send('Extensions.triggerAction', { id: ctx.extension.id, targetId: tabTarget.targetId });
-    if (!check('a Side Panel request is pending before tab closure', await startHeld(await readDocumentId()))) return;
-    const callsAtClose = requests.length;
-    const closingRequestId = heldNetworkId;
-    await options.evaluate(`chrome.tabs.remove(${tabId})`);
-    const closedState = () => options.evaluate(`chrome.runtime.sendMessage({ type: 'GET_STATE', tabId: ${tabId} })`);
-    const absent = response => response?.ok && response.state?.status === 'idle' &&
-      !response.state.extracted && !response.state.translated;
-    check('tab closure releases retained Side Panel bodies', await until(async () => absent(await closedState()), 5000, 100));
-    const updatesAtClose = await options.evaluate('closedTabUpdates.length');
-    check('tab closure cancels the in-flight worker network request',
-      await until(() => failedNetworkRequests.has(closingRequestId), 5000, 100));
-    hold = false;
-    held.length = 0;
-    check('closure stops further requests and cannot restore closed-tab state',
-      absent(await closedState()) && requests.length === callsAtClose && await options.evaluate('closedTabUpdates.length') === updatesAtClose);
-  } else {
+  {
     const pageTarget = await ctx.findTarget(target => target.type === 'page' && target.url === fixture.url);
     const page = await ctx.attach(pageTarget.id);
     const stopContract = await readStopBlockContract(page);

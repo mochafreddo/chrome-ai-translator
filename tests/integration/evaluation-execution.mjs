@@ -72,13 +72,10 @@ export async function runEvaluation({ output, experiment, adapter, budget }) {
       const run = current;
       const task = (async () => {
         if (!run?.acceptingRequests || halted || budget.snapshot().frozen) throw new Error('Unexpected worker request.');
-        const repair = run.flow === 'inline' ? JSON.parse(body.input).records.some(record => record.repair)
-          : body.instructions.includes('The previous answer to this same input was refused:') ||
-            run.initialInputs.some(input => input !== body.input && input.includes(body.input));
+        const repair = JSON.parse(body.input).records.some(record => record.repair);
         const record = { model: body.model, reasoning: body.reasoning, provider: body.provider, store: body.store,
           phase: repair ? 'repair' : 'initial', inputHash: hash(JSON.stringify({ instructions: body.instructions, input: body.input, text: body.text })),
           maxOutputTokens: body.max_output_tokens, inputBytes: Buffer.byteLength(JSON.stringify(body)), cost: null };
-        if (!repair && run.flow === 'sidepanel') run.initialInputs.push(body.input);
         run.requests.push(record);
         experiment.validateRequest(body, run, record);
         if (!networkId) throw new Error('Live accounting unavailable.');
@@ -127,12 +124,11 @@ export async function runEvaluation({ output, experiment, adapter, budget }) {
         interceptionErrors, records, settleRequests: drain });
       for (const entry of experiment.plan) {
         if (halted || budget.snapshot().frozen) break;
-        current = { ...entry, success: false, cacheHit: false, requests: [], initialInputs: [], elapsedMs: 0, acceptingRequests: false };
+        current = { ...entry, success: false, cacheHit: false, requests: [], elapsedMs: 0, acceptingRequests: false };
         current.acceptingRequests = true;
         const observation = await adapter.execute(entry, current);
         current.acceptingRequests = false;
         await drain();
-        delete current.initialInputs;
         current.cacheHit = current.requests.length === 0;
         current.qualityAccepted = null;
         experiment.qualify(current, { live });
@@ -159,8 +155,8 @@ export async function runEvaluation({ output, experiment, adapter, budget }) {
       save('summary.json', { mode: live ? 'live' : 'mock-only', meaning: live ? 'Structural outcomes; semantic quality pending blinded review.' : 'No live latency, translation quality, provider selection or billing measured.',
         completePlan, syntheticBudget: !live, budget: budget.snapshot(), reportedReasoningTokens: live ? observer.reasoningTokens : null,
         corpus: experiment.corpus, ...summary, records, interceptionErrors,
-        partialBlocks: records.filter(record => record.flow === 'inline').reduce((sum, record) => sum + record.outcomes.partial, 0),
-        finalFailedBlocks: records.filter(record => record.flow === 'inline').reduce((sum, record) => sum + record.outcomes.failed, 0),
+        partialBlocks: records.reduce((sum, record) => sum + record.outcomes.partial, 0),
+        finalFailedBlocks: records.reduce((sum, record) => sum + record.outcomes.failed, 0),
         requestInputBytes: records.flatMap(run => run.requests).reduce((sum, record) => sum + record.inputBytes, 0),
         requestedOutputTokenCaps: records.flatMap(run => run.requests).reduce((sum, record) => sum + record.maxOutputTokens, 0) });
       save('blinded-review.json', reviews.sort((a, b) => a.reviewId.localeCompare(b.reviewId)));

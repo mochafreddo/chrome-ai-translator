@@ -1,7 +1,3 @@
-import { createRequire } from 'node:module';
-
-const { renderCode, renderDestination, escapeMarkdownLinkLabel } = createRequire(import.meta.url)('../../extension/markdown-entries.js');
-
 export function readProtectedPage(root) {
   if (!root) return null;
   return {
@@ -15,7 +11,7 @@ export function readProtectedPage(root) {
 }
 
 export async function prepareQualityPage() {
-  if (typeof pickArticleRoot !== 'function' || typeof buildArticleExtraction !== 'function' ||
+  if (typeof pickArticleRoot !== 'function' ||
       !globalThis.ChromeAiTranslatorInlineViewport || !globalThis.ChromeAiTranslatorInlineBlock) return null;
   const root = pickArticleRoot();
   const codec = globalThis.ChromeAiTranslatorInlineBlock;
@@ -50,29 +46,11 @@ export async function prepareQualityPage() {
     const timer = setTimeout(() => { scanner.stop(); reject(new Error('Source census timed out.')); }, 10000);
     scanner.start(root);
   });
-  const extraction = buildArticleExtraction(root, { title: document.title, url: location.href,
-    langHint: document.documentElement.lang || '' });
   const normalize = value => String(value).replace(/⟦[^⟧]+⟧/g, '').replace(/\\([\\`*{}[\]()#+\-.!_>])/g, '$1').replace(/\s+/g, ' ').trim();
-  const markdown = normalize(extraction.contentMarkdown);
   const inventory = document.createTreeWalker(frozenRoot, NodeFilter.SHOW_TEXT);
-  const protectedSource = readProtectedPage(frozenRoot);
-  const entries = extraction.translationDocument.entries;
-  const extractedLinks = entries.filter(entry => entry.destination).map(entry => entry.destination).sort();
-  const extractedCode = entries.filter(entry => entry.kind === 'code').map(entry => JSON.stringify({
-    value: entry.display === 'block' ? entry.value.replace(/\r\n/g, '\n').trimEnd() : entry.value,
-    display: entry.display })).sort();
-  const codeRemaining = [...extractedCode];
-  const codeMinted = protectedSource.codeEntries.every(value => {
-    const index = codeRemaining.indexOf(value);
-    if (index < 0) return false;
-    codeRemaining.splice(index, 1);
-    return true;
-  });
-  const census = { proseNodes: 0, prosePieces: [], protectedNodes: 0, sourceSyntaxNodes: 0, inlineMissing: [], sidepanelMissing: [],
-    protectedMinted: codeMinted && JSON.stringify(protectedSource.links) === JSON.stringify(extractedLinks),
+  const census = { proseNodes: 0, prosePieces: [], protectedNodes: 0, sourceSyntaxNodes: 0, inlineMissing: [],
     rejectedBlocks: [...admitted].filter(([, value]) => !value.ok).map(([node, value]) => ({ tag: node.tagName, error: value.error })) };
   const positions = new Map();
-  let markdownPosition = 0;
   while (inventory.nextNode()) {
     const node = inventory.currentNode;
     const value = normalize(node.nodeValue);
@@ -89,21 +67,15 @@ export async function prepareQualityPage() {
       if (position >= 0) positions.set(block, position + value.length);
       else if (!serialized?.atoms?.some(atom => atom.preserveText && normalize(atom.label).includes(value))) census.inlineMissing.push(value);
     }
-    const markdownIndex = markdown.indexOf(value, markdownPosition);
-    if (markdownIndex < 0) census.sidepanelMissing.push(value);
-    else markdownPosition = markdownIndex + value.length;
   }
   globalThis.modelQualityExpectedNodes = [...blocks.keys()];
-  return { blocks: [...blocks.values()], protected: readProtectedPage(root), extraction, census, textNodes, scansNeeded };
+  return { blocks: [...blocks.values()], protected: readProtectedPage(root), census, textNodes, scansNeeded };
 }
 
 export function coverageMatches(record) {
   const census = record.expected?.census;
-  if (census && (record.flow === 'inline' ? census.inlineMissing.length || census.rejectedBlocks.length :
-      census.sidepanelMissing.length || census.protectedMinted === false)) return false;
+  if (census && (census.inlineMissing.length || census.rejectedBlocks.length)) return false;
   const initial = record.requests.filter(request => request.phase === 'initial');
-  if (record.flow === 'sidepanel') return record.expectedChunks.length > 0 &&
-    JSON.stringify(initial.map(request => request.input)) === JSON.stringify(record.expectedChunks);
   const expected = record.expected.blocks.map(block => JSON.stringify({ template: block.template, atoms: block.atoms })).sort();
   const observed = initial.flatMap(request => request.blockKeys || []).sort();
   return expected.length > 0 && JSON.stringify(expected) === JSON.stringify(observed);
@@ -124,7 +96,6 @@ export async function probeQualityCensus() {
   const root = document.querySelector('article') || document.querySelector('main');
   const codec = globalThis.ChromeAiTranslatorInlineBlock;
   const originalSerialize = codec.serializeBlock;
-  const originalExtract = buildArticleExtraction;
   const node = document.createElement('p');
   const repeated = 'Census repeated source sentence.';
   node.append(document.createTextNode(repeated), document.createTextNode(repeated));
@@ -132,7 +103,7 @@ export async function probeQualityCensus() {
   const checks = {};
   try {
     const baseline = await prepareQualityPage();
-    if (baseline.census.inlineMissing.length || baseline.census.sidepanelMissing.length || !baseline.census.protectedMinted) {
+    if (baseline.census.inlineMissing.length || baseline.census.rejectedBlocks.length) {
       throw new Error(`Census negative-control baseline failed: ${JSON.stringify(baseline.census)}`);
     }
     codec.serializeBlock = element => {
@@ -141,50 +112,12 @@ export async function probeQualityCensus() {
     };
     checks.inlineDuplicate = (await prepareQualityPage()).census.inlineMissing.includes(repeated);
     codec.serializeBlock = originalSerialize;
-    buildArticleExtraction = (...args) => {
-      const value = originalExtract(...args);
-      value.contentMarkdown = value.contentMarkdown.replace(repeated, '');
-      return value;
-    };
-    checks.sidepanelDuplicate = (await prepareQualityPage()).census.sidepanelMissing.includes(repeated);
-    buildArticleExtraction = originalExtract;
-    node.replaceChildren();
-    const code = document.createElement('code'); code.textContent = 'uniqueCensusCode()';
-    const link = document.createElement('a'); link.href = 'https://example.invalid/census-source'; link.textContent = 'Census link';
-    node.append(code, document.createTextNode(' and '), link);
-    if (!(await prepareQualityPage()).census.protectedMinted) throw new Error('Protected census baseline failed.');
-    buildArticleExtraction = (...args) => {
-      const value = originalExtract(...args);
-      value.translationDocument.entries = value.translationDocument.entries.filter(entry => entry.value !== code.textContent);
-      return value;
-    };
-    checks.missingCode = !(await prepareQualityPage()).census.protectedMinted;
-    buildArticleExtraction = (...args) => {
-      const value = originalExtract(...args);
-      value.translationDocument.entries = value.translationDocument.entries.filter(entry => entry.destination !== link.href);
-      return value;
-    };
-    checks.missingLink = !(await prepareQualityPage()).census.protectedMinted;
     if (Object.values(checks).some(value => value !== true)) throw new Error('A source census negative control survived.');
     return checks;
   } finally {
     codec.serializeBlock = originalSerialize;
-    buildArticleExtraction = originalExtract;
     node.remove();
   }
-}
-
-export function protectedMarkdownMatches(extraction, output) {
-  const fragments = extraction.translationDocument.entries.flatMap(entry =>
-    entry.kind === 'code' ? [Object.hasOwn(entry, 'destination') ?
-      `[${escapeMarkdownLinkLabel(entry.value)}](${renderDestination(entry.destination)})` : renderCode(entry)] :
-      entry.destination ? [renderDestination(entry.destination)] : []);
-  const snippets = new Set([...fragments, ...extraction.translationDocument.entries.filter(entry => entry.destination)
-    .map(entry => renderDestination(entry.destination))]);
-  return [...snippets].every(value => {
-    const count = text => text.split(value).length - 1;
-    return Math.max(count(extraction.contentMarkdown), fragments.reduce((sum, fragment) => sum + count(fragment), 0)) === count(output);
-  });
 }
 
 export function mockDisplayedProseMatches(pieces, output) {

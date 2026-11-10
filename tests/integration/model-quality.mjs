@@ -8,7 +8,7 @@ const { parseCompletedResponse } = require('../../extension/openai-response.js')
 export function compatibleProfiles(records) {
   return PROFILES.filter(profile => {
     const runs = records.filter(run => run.profileKey === profile.key);
-    return runs.length === 2 && ['inline', 'sidepanel'].every(flow => runs.some(run => run.flow === flow)) &&
+    return runs.length === 1 && runs[0].flow === 'inline' &&
       runs.every(run => run.success && run.requests.length > 0 && run.requests.every(request =>
         request.accounted && Number.isFinite(request.cost) && request.reasoningAccepted === true && request.contractAccepted !== false));
   }).map(profile => profile.key);
@@ -23,16 +23,13 @@ export function createQualityExperiment({ corpus, profileKeys, planIds } = {}) {
     validateRequest(body, run, record) {
       validateQualityRequest(body, run.profileKey);
       record.input = body.input;
-      if (run.flow === 'inline') {
-        record.blockKeys = JSON.parse(body.input).records.map(input => {
+      record.blockKeys = JSON.parse(body.input).records.map(input => {
           if (!run.expected.blocks.some(block => block.template === input.template &&
               JSON.stringify(block.atoms) === JSON.stringify(input.atoms))) throw new Error('Uncensused source before transport.');
           return JSON.stringify({ template: input.template, atoms: input.atoms });
-        });
-      }
+      });
     },
     validateResponse(data, body, run, record, { live }) {
-      if (run.flow !== 'inline') return;
       const validate = () => validateQualityOutput(parseCompletedResponse(data), JSON.parse(body.input).records.map(input => {
         const source = run.expected.blocks.find(block => block.template === input.template &&
           JSON.stringify(block.atoms) === JSON.stringify(input.atoms));
@@ -50,8 +47,7 @@ export function createQualityExperiment({ corpus, profileKeys, planIds } = {}) {
     qualify(record, { live }) {
       if (!record.coverage.matched || !record.protectedContent || !live && !record.displayedProse) record.success = false;
       if (live && record.requests.some(request => request.reasoningAccepted !== true || request.contractAccepted === false)) record.success = false;
-      if (record.flow === 'inline' && !inlineQualityCompleted(record.outcomes, record.coverage.expectedBlocks, record.appliedAllBlocks)) record.success = false;
-      if (record.flow === 'sidepanel') record.outcomes.documentDisplayed = record.success;
+      if (!inlineQualityCompleted(record.outcomes, record.coverage.expectedBlocks, record.appliedAllBlocks)) record.success = false;
       if (live && !record.targetLanguagePresent) record.success = false;
     },
     summarize(records, observer, { live, completePlan }) {
@@ -244,7 +240,7 @@ export function buildQualityPlan(pageIds, profileKeys = PROFILES.map(profile => 
   if (!Array.isArray(profileKeys) || !profileKeys.length || new Set(profileKeys).size !== profileKeys.length) fail('Profile keys must be unique and nonempty.');
   const profiles = profileKeys.map(resolveProfile);
   for (const page of pageIds) {
-    for (const flow of ['inline', 'sidepanel']) {
+    for (const flow of ['inline']) {
       for (const profile of profiles) {
         runs.push({
           id: `${encodeURIComponent(page)}|${flow}|${profile.key}`,
@@ -310,9 +306,8 @@ export function adaptQualityRequest(body, profile) {
       reject('Original inline schema fields are invalid.');
     }
   }
-  const inline = Boolean(body && typeof body === 'object' && Object.hasOwn(body, 'text'));
   const bodyKeys = ['model', 'reasoning', 'provider', 'store', 'input', 'instructions', 'max_output_tokens',
-    ...(inline ? ['text'] : [])];
+    'text'];
   if (!body || typeof body !== 'object' || Array.isArray(body) || !keys(body, bodyKeys)) {
     reject('Original request contains unsupported configuration.');
   }
@@ -325,7 +320,7 @@ export function adaptQualityRequest(body, profile) {
       !Number.isSafeInteger(body.max_output_tokens) || body.max_output_tokens <= 0) {
     reject('Original request fields are invalid.');
   }
-  if (inline) {
+  {
     const count = inputCount(body.input);
     if (!keys(body.text, ['format']) || !keys(body.text.format, ['type', 'name', 'strict', 'schema']) ||
         body.text.format.type !== 'json_schema' || body.text.format.name !== 'inline_block_translations' ||
@@ -358,19 +353,16 @@ export function adaptQualityRequest(body, profile) {
       request: 0,
     },
   };
-  if (inline) {
-    delete adapted.text.format.schema.properties.translations.minItems;
-    delete adapted.text.format.schema.properties.translations.maxItems;
-  }
+  delete adapted.text.format.schema.properties.translations.minItems;
+  delete adapted.text.format.schema.properties.translations.maxItems;
   return adapted;
 }
 
 export function validateQualityRequest(body, profileKeyOrProfile) {
   const profile = resolveProfile(profileKeyOrProfile);
   assertProfileValues(profile);
-  const inline = Boolean(body && typeof body === 'object' && Object.hasOwn(body, 'text'));
   const bodyKeys = ['model', 'reasoning', 'provider', 'store', 'input', 'instructions', 'max_output_tokens',
-    ...(inline ? ['text'] : [])];
+    'text'];
   if (!sameKeys(body, bodyKeys) ||
       body.model !== profile.model || !sameValue(body.reasoning, profile.reasoning) || body.store !== false) {
     fail('Observed request does not match the selected model profile.');
@@ -380,12 +372,8 @@ export function validateQualityRequest(body, profileKeyOrProfile) {
       body.provider.zdr !== true || !sameValue(body.provider.max_price, profile.priceCap)) {
     fail('Observed request privacy or price cap is invalid.');
   }
-  if (inline) {
-    const count = inputRecordCount(body);
-    assertFormat(body, count, false);
-  } else if (typeof body.input !== 'string' || !body.input) {
-    fail('Observed Side Panel input is missing.');
-  }
+  const count = inputRecordCount(body);
+  assertFormat(body, count, false);
   assertContext(body, profile);
   return true;
 }

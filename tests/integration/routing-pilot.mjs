@@ -43,7 +43,7 @@ export function createRoutingExperiment() {
 }
 
 const PAGES = Object.freeze(['technical', 'github', 'article']);
-const FLOWS = Object.freeze(['inline', 'sidepanel']);
+const FLOWS = Object.freeze(['inline']);
 const POLICIES = Object.freeze(['default', 'throughput']);
 const REQUIRED_PROVIDER = Object.freeze({
   require_parameters: true,
