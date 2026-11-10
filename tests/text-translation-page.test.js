@@ -25,11 +25,12 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
   const platform = previous?.platform || { chrome: {
     runtime: { getURL: path => `chrome-extension://test/${path}`, async sendMessage() {},
       async getContexts({ tabIds: [tabId] }) {
-      const documentId = frames.get(tabId);
+      let documentId = frames.get(tabId);
       if (frames.hold) await new Promise(resolve => {
         frames.release = resolve;
         (frames.pending ||= []).push(resolve);
       });
+      if (frames.observeAfterHold) documentId = frames.get(tabId);
       return documentId ? [{ tabId, frameId: 0, documentId,
         documentUrl: 'chrome-extension://test/text-translation.html' }] : [];
     } },
@@ -92,6 +93,227 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
 
 exports.name = 'Text Translation page';
 exports.tests = [{
+  name: 'the newer document becomes ready when an earlier native GET finishes first',
+  async fn() {
+    const old = await openPage();
+    old.source('Draft before ordered native completion');
+    await old.flush();
+    old.replaceWorker();
+    old.frames.hold = true;
+    const oldProof = old.send({ type: 'GET_TEXT_TRANSLATION_STATE' });
+    await old.flush();
+    const current = await old.reload({ beforeReady: async ({ element }) => {
+      await old.flush();
+      const [releaseOld, releaseCurrent] = old.frames.pending.splice(0);
+      old.frames.hold = false;
+      releaseOld();
+      await old.flush();
+      releaseCurrent?.();
+      await old.flush();
+      assert.equal(element('btnTranslate').disabled, false, 'newer document must become ready');
+    } });
+    await oldProof;
+    assert.equal(current.element('sourceText').value, 'Draft before ordered native completion');
+    current.source('Current edit after earlier proof');
+    await current.start();
+    assert.equal(current.requests.length, 1);
+    assert.equal(current.requests[0].body.input, 'Current edit after earlier proof');
+  },
+}, {
+  name: 'queued native GETs preserve the newer page after navigation while an old proof is delayed',
+  async fn() {
+    const old = await openPage();
+    old.source('Draft retained through out-of-order native proofs');
+    await old.flush();
+    const stale = structuredClone(old.messages.filter(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE').at(-1));
+    stale.revision += 100;
+    old.replaceWorker();
+    old.frames.hold = true;
+    const oldProof = old.send({ type: 'GET_TEXT_TRANSLATION_STATE' });
+    await old.flush();
+    const current = await old.reload({ beforeReady: async () => {
+      await old.flush();
+      const [releaseOld, releaseCurrent] = old.frames.pending.splice(0);
+      old.worker.handlers.onNavigationCommitted({ tabId: 90, frameId: 0, documentId: 'test-document-reload' });
+      old.frames.hold = false;
+      releaseCurrent?.();
+      await old.flush();
+      releaseOld();
+      await old.flush();
+      assert.equal((await oldProof).ok, false);
+    } });
+    assert.equal(current.element('sourceText').value, 'Draft retained through out-of-order native proofs');
+    assert.equal((await old.send(stale)).ok, false);
+    assert.equal((await old.send({ type: 'TRANSLATE_TEXT', operationId: 'late-old', source: 'Old source',
+      settings: stale.state.settings })).ok, false);
+    assert.equal(current.requests.length, 0);
+    current.source('Current draft after newer native proof');
+    await current.start();
+    assert.equal(current.requests.length, 1);
+    assert.equal(current.requests[0].body.input, 'Current draft after newer native proof');
+  },
+}, {
+  name: 'GET completion cannot roll back a native navigation observed during its storage write',
+  async fn() {
+    const page = await openPage();
+    page.source('Draft before GET write');
+    await page.flush();
+    const stale = structuredClone(page.messages.filter(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE').at(-1));
+    stale.revision += 100;
+    page.storage.hold = true;
+    const pending = page.send({ type: 'GET_TEXT_TRANSLATION_STATE' });
+    await page.flush();
+    page.frames.set(90, 'test-document-reload');
+    page.worker.handlers.onNavigationCommitted({ tabId: 90, frameId: 0, documentId: 'test-document-reload' });
+    page.storage.hold = false;
+    page.storage.held.splice(0).forEach(release => release());
+    assert.equal((await pending).ok, false);
+    assert.equal((await page.send(stale)).ok, false);
+    assert.equal((await page.reload()).element('sourceText').value, 'Draft before GET write');
+  },
+}, {
+  name: 'accepted drafts survive navigation while later old-document writes are refused',
+  async fn() {
+    for (const observeAfterHold of [false, true]) {
+      const page = await openPage();
+      page.source('Earlier retained draft');
+      await page.flush();
+      page.frames.hold = true;
+      page.frames.observeAfterHold = observeAfterHold;
+      page.storage.hold = true;
+      page.source('Accepted draft before navigation');
+      await page.flush();
+      page.frames.set(90, 'test-document-reload');
+      page.worker.handlers.onNavigationCommitted({ tabId: 90, frameId: 0, documentId: 'test-document-reload' });
+      page.frames.hold = false;
+      page.frames.pending?.splice(0).forEach(release => release());
+      page.storage.hold = false;
+      page.storage.held.splice(0).forEach(release => release());
+      await page.flush();
+      const stale = structuredClone(page.messages.filter(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE').at(-1));
+      stale.revision += 100;
+      assert.equal((await page.send(stale)).ok, false);
+      const restored = await page.reload();
+      assert.equal(restored.element('sourceText').value, 'Accepted draft before navigation', String(observeAfterHold));
+      restored.replaceWorker();
+      assert.equal((await page.send(stale)).ok, false);
+      assert.equal((await restored.reload()).element('sourceText').value, 'Accepted draft before navigation');
+    }
+  },
+}, {
+  name: 'a removed tab record cannot be recreated by a stale save after worker replacement',
+  async fn() {
+    const page = await openPage();
+    page.source('Closed draft must stay absent');
+    await page.flush();
+    const stale = structuredClone(page.messages.find(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE'));
+    await page.close();
+    page.replaceWorker();
+    assert.equal((await page.send(stale)).ok, false);
+    assert.equal(JSON.stringify(page.session).includes('Closed draft must stay absent'), false);
+  },
+}, {
+  name: 'an uncertain completed result cannot swap with an invalid manual source language',
+  async fn() {
+    const page = await openPage();
+    page.source('Unknown source');
+    await page.start();
+    page.requests[0].respond('완료한 결과', 'completed', null);
+    await page.flush();
+    for (const language of ['   ', 'x'.repeat(201)]) {
+      page.element('sourceLanguage').value = language;
+      page.event('btnSwap', 'click');
+      assert.equal(page.element('sourceText').value, 'Unknown source');
+      assert.equal(page.element('targetLanguage').value, 'Korean');
+      assert.equal(page.element('translatedText').value, '완료한 결과');
+      assert.equal(page.element('errorBox').hidden, false);
+      assert.equal(page.requests.length, 1);
+    }
+  },
+}, {
+  name: 'tab closure retries one transient cleanup failure without deleting another tab or unrelated storage',
+  async fn() {
+    const page = await openPage();
+    page.source('Unique closed-tab source');
+    await page.start();
+    page.requests[0].respond('고유한 닫힌 탭 결과');
+    await page.flush();
+    const second = await openPage({ previous: page, tabId: 91, documentId: 'other-document' });
+    second.source('Unique surviving-tab draft');
+    await second.flush();
+    page.session.unrelated = { sentinel: 'Keep nonfeature state' };
+    const removed = [];
+    const remove = page.platform.chrome.storage.session.remove;
+    page.platform.chrome.storage.session.remove = async key => {
+      removed.push(key);
+      if (removed.length === 1) throw new Error('Transient storage failure');
+      return remove(key);
+    };
+    await page.close();
+    assert.deepEqual(removed, ['text-translation:90', 'text-translation:90']);
+    assert.equal(JSON.stringify(page.session).includes('Unique closed-tab source'), false);
+    assert.equal(JSON.stringify(page.session).includes('고유한 닫힌 탭 결과'), false);
+    assert.deepEqual(page.session.unrelated, { sentinel: 'Keep nonfeature state' });
+    second.replaceWorker();
+    const restored = await second.reload();
+    assert.equal(restored.element('sourceText').value, 'Unique surviving-tab draft');
+    const reopened = await openPage({ previous: restored, tabId: 90, documentId: 'newly-opened' });
+    assert.equal(reopened.element('sourceText').value, '');
+    assert.equal(reopened.element('translatedText').value, '');
+  },
+}, {
+  name: 'document replacement during a settings read prevents provider dispatch',
+  async fn() {
+    const page = await openPage();
+    const read = page.platform.chrome.storage.local.get;
+    let release;
+    page.platform.chrome.storage.local.get = async (...args) => {
+      await new Promise(resolve => { release = resolve; });
+      return read(...args);
+    };
+    page.source('Must never leave the departed document');
+    await page.start();
+    assert.equal(typeof release, 'function');
+    page.frames.set(90, 'replacement-document');
+    release();
+    await page.flush();
+    assert.equal(page.requests.length, 0);
+    assert.equal(page.element('translatedText').value, '');
+    assert.equal(page.element('errorBox').hidden, false);
+  },
+}, {
+  name: 'immediate reload preserves the latest draft accepted at message ingress',
+  async fn() {
+    const page = await openPage();
+    page.source('Earlier accepted draft');
+    await page.flush();
+    page.source('Newest accepted draft');
+    const restored = await page.reload();
+    assert.equal(restored.element('sourceText').value, 'Newest accepted draft');
+    const stale = structuredClone(page.messages.filter(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE').at(-1));
+    stale.revision += 100;
+    assert.equal((await page.send(stale)).ok, false);
+    assert.equal((await restored.reload()).element('sourceText').value, 'Newest accepted draft');
+    assert.equal(page.requests.length, 0);
+  },
+}, {
+  name: 'a populated line cannot replace an empty paragraph in a completed response',
+  async fn() {
+    const page = await openPage();
+    page.source('A\n\nB');
+    await page.start();
+    page.requests[0].respond('가\n나\n다');
+    await page.flush();
+    assert.equal(page.element('translatedText').value, '');
+    assert.equal(page.element('errorBox').hidden, false);
+    assert.equal(page.element('btnResume').disabled, false);
+    await page.resume();
+    assert.deepEqual(page.requests.map(request => request.body.input), ['A\n\nB', 'A\n\nB']);
+    page.requests[1].respond('가\n\n나');
+    await page.flush();
+    assert.equal(page.element('translatedText').value, '가\n\n나');
+  },
+}, {
   name: 'Clear stays disabled until restoration finishes and stays available during an active job',
   async fn() {
     const page = await openPage({ beforeReady: async ({ element, event }) => {
@@ -194,13 +416,13 @@ exports.tests = [{
     await page.flush();
     const oldSave = structuredClone(page.messages.find(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE'));
     page.replaceWorker();
-    page.frames.hold = true;
+    page.storage.hold = true;
     page.event('btnClear', 'click');
     await page.flush();
-    page.frames.hold = false;
     const restored = await page.reload({ beforeReady: async () => {
       await page.flush();
-      page.frames.pending?.splice(0).forEach(release => release());
+      page.storage.hold = false;
+      page.storage.held.splice(0).forEach(release => release());
     } });
     assert.equal(restored.element('sourceText').value, '');
     assert.equal(restored.element('translatedText').value, '');
@@ -241,12 +463,14 @@ exports.tests = [{
     assert.equal(restored.element('translatedText').value, '');
   },
 }, {
-  name: 'Clear accepted before reload deletes the draft even when its native context lookup is delayed',
+  name: 'Clear accepted behind a delayed native restore still deletes the draft before reload',
   async fn() {
     const page = await openPage();
     page.source('Delete before immediate reload');
     await page.flush();
     page.frames.hold = true;
+    const lookup = page.send({ type: 'GET_TEXT_TRANSLATION_STATE' });
+    await page.flush();
     page.event('btnClear', 'click');
     await page.flush();
     page.frames.hold = false;
@@ -255,6 +479,7 @@ exports.tests = [{
       page.frames.pending.splice(0).forEach(release => release());
     } });
     const restored = await pending;
+    await lookup;
     assert.equal(restored.element('sourceText').value, '');
     assert.equal(restored.element('translatedText').value, '');
   },
@@ -279,12 +504,15 @@ exports.tests = [{
   name: 'tab closure during deferred frame lookup cannot recreate deleted retained state',
   async fn() {
     const page = await openPage();
-    page.frames.hold = true;
     page.source('Late draft');
+    await page.flush();
+    page.frames.hold = true;
+    const lookup = page.send({ type: 'GET_TEXT_TRANSLATION_STATE' });
     await page.flush();
     await page.close();
     page.frames.hold = false;
     page.frames.release();
+    assert.equal((await lookup).ok, false);
     await page.flush();
     assert.equal(Object.hasOwn(page.session, 'text-translation:90'), false);
   },
@@ -345,26 +573,29 @@ exports.tests = [{
   async fn() {
     for (const action of ['clear', 'close']) {
       const page = await openPage();
+      page.source('Unique source to delete');
+      await page.start();
+      page.requests[0].respond('고유한 삭제 대상 결과');
+      await page.flush();
       page.storage.hold = true;
       page.source('Delete this draft');
       await page.flush();
       assert.equal(page.storage.held.length, 1);
-      const oldSave = structuredClone(page.messages.find(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE'));
+      const oldSave = structuredClone(page.messages.filter(message => message.type === 'SAVE_TEXT_TRANSLATION_STATE').at(-1));
       if (action === 'clear') page.event('btnClear', 'click');
       else await page.close();
       page.storage.hold = false;
       page.storage.held.splice(0).forEach(release => release());
       await page.flush();
-      const checkpoint = { documentId: 'test-document',
-        revision: page.messages.filter(message => message.type === 'CLEAR_TEXT_TRANSLATION_STATE').at(-1)?.revision,
-        state: null };
-      if (action === 'clear') assert.deepEqual(page.session['text-translation:90'], checkpoint);
-      else assert.equal(Object.hasOwn(page.session, 'text-translation:90'), false, action);
+      for (const value of ['Unique source to delete', '고유한 삭제 대상 결과', 'Delete this draft']) {
+        assert.equal(JSON.stringify(page.session).includes(value), false, action);
+      }
       const stale = await page.send(oldSave);
       if (action === 'close') assert.equal(stale.ok, false);
       await page.flush();
-      if (action === 'clear') assert.deepEqual(page.session['text-translation:90'], checkpoint);
-      else assert.equal(Object.hasOwn(page.session, 'text-translation:90'), false, action);
+      for (const value of ['Unique source to delete', '고유한 삭제 대상 결과', 'Delete this draft']) {
+        assert.equal(JSON.stringify(page.session).includes(value), false, action);
+      }
       const restored = action === 'clear' ? await page.reload() :
         await openPage({ previous: page, tabId: 91, documentId: 'new-tab' });
       assert.equal(restored.element('sourceText').value, '', action);
@@ -580,3 +811,80 @@ exports.tests = [{
     assert.equal(page.element('translatedText').value, ' '.repeat(12000) + '안녕\n\n세상\n');
   },
 }];
+
+exports.tests.push(...['SAVE_TEXT_TRANSLATION_STATE', 'CLEAR_TEXT_TRANSLATION_STATE'].map(type => ({
+  name: `a cold worker refuses stale ${type} without poisoning the current document`,
+  async fn() {
+    const old = await openPage();
+    old.source('Old document draft');
+    old.event('btnClear', 'click');
+    await old.flush();
+    old.source('Old document draft');
+    await old.flush();
+    const stale = structuredClone(old.messages.filter(message => message.type === type).at(-1));
+    stale.revision += 100;
+    const current = await old.reload();
+    current.source('Current document draft');
+    await current.flush();
+    current.replaceWorker();
+    assert.equal((await old.send(stale)).ok, false);
+    current.source('Current edit after stale refusal');
+    await current.start();
+    assert.equal(current.requests.length, 1);
+    assert.equal(current.requests[0].body.input, 'Current edit after stale refusal');
+    current.requests[0].respond('현재 문서의 결과');
+    await current.flush();
+    const restored = await current.reload();
+    assert.equal(restored.element('sourceText').value, 'Current edit after stale refusal');
+    assert.equal(restored.element('translatedText').value, '현재 문서의 결과');
+  },
+})));
+
+exports.tests.push(...['auto', 'Swahili'].map(language => ({
+  name: `padded ${language} source language has one request, resume and swap meaning`,
+  async fn() {
+    const page = await openPage();
+    const first = 'A'.repeat(8000) + '\n\n';
+    const second = 'B'.repeat(8000);
+    page.element('sourceLanguage').value = ` ${language} `;
+    page.source(first + second);
+    await page.start();
+    const instruction = language === 'auto' ? 'Detect the source language in this same request.' :
+      'The source language is Swahili.';
+    assert.ok(page.requests[0].body.instructions.includes(instruction));
+    page.requests[0].respond('앞부분');
+    await page.flush();
+    await page.stop();
+    page.element('sourceLanguage').value = language;
+    page.event('translationSettings', 'input');
+    assert.equal(page.element('btnResume').disabled, false);
+    await page.resume();
+    assert.deepEqual(page.requests.map(request => request.body.input), [first, second, second]);
+    assert.ok(page.requests[2].body.instructions.includes(instruction));
+    page.requests[2].respond('뒷부분');
+    await page.flush();
+    page.event('btnSwap', 'click');
+    assert.equal(page.element('sourceText').value, '앞부분\n\n뒷부분');
+    assert.equal(page.element('targetLanguage').value, language === 'auto' ? 'English' : 'Swahili');
+    assert.equal(page.requests.length, 3);
+  },
+})));
+
+exports.tests.push(...['SAVE_TEXT_TRANSLATION_STATE', 'CLEAR_TEXT_TRANSLATION_STATE'].map(type => ({
+  name: `a cold worker records navigation before refusing old ${type} without a new GET`,
+  async fn() {
+    const old = await openPage();
+    old.event('btnClear', 'click');
+    await old.flush();
+    old.source('Preserve draft across cold navigation');
+    await old.flush();
+    const stale = structuredClone(old.messages.filter(message => message.type === type).at(-1));
+    stale.revision += 100;
+    old.replaceWorker();
+    old.frames.set(90, 'test-document-reload');
+    old.worker.handlers.onNavigationCommitted({ tabId: 90, frameId: 0, documentId: 'test-document-reload' });
+    assert.equal((await old.send(stale)).ok, false);
+    const current = await old.reload();
+    assert.equal(current.element('sourceText').value, 'Preserve draft across cold navigation');
+  },
+})));

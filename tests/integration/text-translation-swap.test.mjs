@@ -40,24 +40,31 @@ try {
 
     browser.setOutput({ translation: '결과', sourceLanguage: null });
     await page.evaluate(`(() => {
-      document.getElementById('sourceLanguage').value = 'auto';
+      document.getElementById('sourceLanguage').value = ' auto ';
       document.getElementById('targetLanguage').value = 'Swahili';
       document.getElementById('sourceText').value = 'Unknown';
       document.getElementById('btnTranslate').click();
     })()`);
-    check('uncertain result completes', await until(() => page.evaluate("document.getElementById('translatedText').value === '결과' && !document.getElementById('btnSwap').disabled"), 5000, 100));
+    check('padded automatic detection uses the same request and completes an uncertain result', await until(() => page.evaluate("document.getElementById('translatedText').value === '결과' && !document.getElementById('btnSwap').disabled"), 5000, 100) &&
+      requests[2].body.instructions.includes('Detect the source language in this same request.'));
     await browser.click('btnSwap');
     check('uncertain detection asks for selection without sending', await page.evaluate("!document.getElementById('errorBox').hidden && document.activeElement.id === 'sourceLanguage' && document.getElementById('sourceText').value === 'Unknown'") && requests.length === 3);
+    for (const language of ['   ', 'x'.repeat(201)]) {
+      await page.evaluate(`document.getElementById('sourceLanguage').value = ${JSON.stringify(language)}`);
+      await browser.click('btnSwap');
+      check(`invalid manual source of length ${language.length} leaves both texts and target unchanged`,
+        await page.evaluate("document.getElementById('sourceText').value === 'Unknown' && document.getElementById('translatedText').value === '결과' && document.getElementById('targetLanguage').value === 'Swahili' && !document.getElementById('errorBox').hidden && document.activeElement.id === 'sourceLanguage'") && requests.length === 3);
+    }
     await page.evaluate(`(() => {
       const source = document.getElementById('sourceLanguage');
-      source.value = 'English'; source.dispatchEvent(new Event('change', { bubbles: true }));
+      source.value = ' Swahili '; source.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await browser.click('btnSwap');
-    check('manual choice permits swap without a detection request', await page.evaluate("document.getElementById('sourceText').value === '결과' && document.getElementById('sourceLanguage').value === 'Swahili' && document.getElementById('targetLanguage').value === 'English'") && requests.length === 3);
+    check('an arbitrary manual source choice permits swap without a detection request', await page.evaluate("document.getElementById('sourceText').value === '결과' && document.getElementById('sourceLanguage').value === 'Swahili' && document.getElementById('targetLanguage').value === 'Swahili'") && requests.length === 3);
     await wait(200);
     await page.navigate(browser.url);
     check('swapped language and result relationship survive reload', await browser.ready() && await page.evaluate("document.getElementById('sourceText').value === '결과' && document.getElementById('sourceLanguage').value === 'Swahili' && Boolean(document.getElementById('resultRelationship').textContent)") && requests.length === 3);
-    for (const field of ['targetLanguage', 'model']) {
+    for (const field of ['sourceLanguage', 'targetLanguage', 'model']) {
       const before = requests.length;
       const contents = await page.evaluate(`(() => {
         const input = document.getElementById(${JSON.stringify(field)});

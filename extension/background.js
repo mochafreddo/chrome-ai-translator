@@ -350,18 +350,13 @@ function createBackgroundWorker(platform = {}) {
   const textTranslations = new Map();
   const textRetention = new Map();
 
-  function textOwner(tabId, documentId) {
-    if (!textRetention.has(tabId)) textRetention.set(tabId, { documentId, queue: Promise.resolve() });
+  function textOwner(tabId) {
+    if (!textRetention.has(tabId)) textRetention.set(tabId, { documentId: null, queue: Promise.resolve() });
     return textRetention.get(tabId);
   }
 
-  function enqueueTextState(owner, task, prepare) {
-    const preparation = Promise.resolve().then(() => prepare?.()).then(() => null, error => error);
-    const result = owner.queue.then(async () => {
-      const error = await preparation;
-      if (error) throw error;
-      return task();
-    });
+  function enqueueTextState(owner, task) {
+    const result = owner.queue.then(task);
     owner.queue = result.catch(() => {});
     return result;
   }
@@ -387,10 +382,10 @@ function createBackgroundWorker(platform = {}) {
     return matches[0].documentId;
   }
 
-  async function captureDocument(tabId, expectedDocumentId, readDocumentId = getDocumentId) {
+  async function captureDocument(tabId, expectedDocumentId) {
     const lifetime = documentLifetimes.get(tabId) || {};
     documentLifetimes.set(tabId, lifetime);
-    const documentId = await readDocumentId(tabId);
+    const documentId = await getDocumentId(tabId);
     if (documentLifetimes.get(tabId) !== lifetime ||
         (expectedDocumentId && documentId !== expectedDocumentId)) throw documentEnded();
     const previous = documentsByTab.get(tabId);
@@ -697,10 +692,12 @@ function createBackgroundWorker(platform = {}) {
 
   function onTabRemoved(tabId) {
     stopTextTranslationsForTab(tabId);
-    const owner = textOwner(tabId, null);
+    const owner = textOwner(tabId);
     owner.closed = true;
     void enqueueTextState(owner, async () => {
-      await getChrome().storage.session.remove(`text-translation:${tabId}`);
+      const key = `text-translation:${tabId}`;
+      try { await getChrome().storage.session.remove(key); }
+      catch { await getChrome().storage.session.remove(key); }
       if (textRetention.get(tabId) === owner) textRetention.delete(tabId);
     }).catch(() => {});
     invalidateDocument(tabId);
@@ -718,8 +715,8 @@ function createBackgroundWorker(platform = {}) {
   function onNavigationCommitted(details) {
     if (details.frameId !== 0) return;
     stopTextTranslationsForTab(details.tabId, details.documentId);
-    const owner = textRetention.get(details.tabId);
-    if (owner) {
+    if (details.documentId) {
+      const owner = textOwner(details.tabId);
       owner.documentId = details.documentId;
     }
     if (!documentLifetimes.has(details.tabId) && !stateByTab.has(details.tabId)) return;
@@ -753,53 +750,60 @@ function createBackgroundWorker(platform = {}) {
   function onMessage(msg, sender, sendResponse) {
     (async () => {
       try {
+        if (['GET_TEXT_TRANSLATION_STATE', 'SAVE_TEXT_TRANSLATION_STATE', 'CLEAR_TEXT_TRANSLATION_STATE',
+          'TRANSLATE_TEXT', 'STOP_TEXT_TRANSLATION'].includes(msg?.type) &&
+            (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId ||
+              sender.url !== getChrome().runtime.getURL('text-translation.html'))) {
+          throw new Error('Text Translation requires its own extension page.');
+        }
         if (['GET_TEXT_TRANSLATION_STATE', 'SAVE_TEXT_TRANSLATION_STATE', 'CLEAR_TEXT_TRANSLATION_STATE'].includes(msg?.type)) {
-          if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId ||
-              sender.url !== getChrome().runtime.getURL('text-translation.html')) {
-            throw new Error('Text Translation requires its own extension page.');
-          }
           const tabId = sender.tab.id;
-          const owner = textOwner(tabId, sender.documentId);
+          const owner = textOwner(tabId);
+          if (msg.type !== 'GET_TEXT_TRANSLATION_STATE' && owner.documentId &&
+              owner.documentId !== sender.documentId) throw documentEnded();
           const key = `text-translation:${tabId}`;
           const response = await enqueueTextState(owner, async () => {
             if (owner.closed) throw documentEnded();
+            if (msg.type === 'GET_TEXT_TRANSLATION_STATE') {
+              const knownDocumentId = owner.documentId;
+              if (await getTextDocumentId(tabId) !== sender.documentId || owner.closed ||
+                  (owner.documentId !== knownDocumentId && owner.documentId !== sender.documentId)) throw documentEnded();
+              owner.documentId = sender.documentId;
+              stopTextTranslationsForTab(tabId, sender.documentId);
+            }
             const saved = (await getChrome().storage.session.get(key))[key];
             if (owner.closed) throw documentEnded();
             if (saved && (typeof saved.documentId !== 'string' || !saved.documentId ||
                 !Number.isSafeInteger(saved.revision) || saved.revision < 0)) throw documentEnded();
+            if (!owner.documentId && saved) owner.documentId = saved.documentId;
             if (msg.type === 'GET_TEXT_TRANSLATION_STATE') {
-              stopTextTranslationsForTab(tabId, sender.documentId);
+              if (owner.documentId !== sender.documentId) throw documentEnded();
               const state = saved ? saved.state === null ? null : textTranslationRequest.retainedState(saved.state) : null;
               if (state?.job?.status === 'running') state.job.status =
                 state.job.results.length === state.job.units.length ? 'complete' : 'stopped';
               await getChrome().storage.session.set({ [key]: { documentId: sender.documentId,
                 revision: saved?.documentId === sender.documentId ? saved.revision : 0, state } });
-              owner.documentId = sender.documentId;
+              if (owner.documentId !== sender.documentId) throw documentEnded();
               return { ok: true, state };
             }
-            if (saved && saved.documentId !== sender.documentId) throw documentEnded();
-            if (!saved && msg.type === 'CLEAR_TEXT_TRANSLATION_STATE') throw documentEnded();
+            if (!saved || saved.documentId !== sender.documentId) throw documentEnded();
             if (!Number.isSafeInteger(msg.revision) || msg.revision < 1) throw documentEnded();
             if (msg.revision <= (saved?.revision || 0)) return { ok: true };
             const state = msg.type === 'SAVE_TEXT_TRANSLATION_STATE' ? textTranslationRequest.retainedState(msg.state) : null;
             await getChrome().storage.session.set({ [key]: { documentId: sender.documentId, revision: msg.revision, state } });
-            owner.documentId = sender.documentId;
             return { ok: true };
-          }, msg.type === 'CLEAR_TEXT_TRANSLATION_STATE' ? null :
-            () => captureDocument(tabId, sender.documentId, getTextDocumentId));
+          });
           if (owner.closed) throw documentEnded();
           sendResponse(response);
           return;
         }
         if (['TRANSLATE_TEXT', 'STOP_TEXT_TRANSLATION'].includes(msg?.type)) {
-          if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId ||
-              sender.url !== getChrome().runtime.getURL('text-translation.html') ||
-              typeof msg.operationId !== 'string' || !msg.operationId || msg.operationId.length > 100) {
+          if (typeof msg.operationId !== 'string' || !msg.operationId || msg.operationId.length > 100) {
             throw new Error('Text Translation requires its own extension page.');
           }
           const owner = `${sender.tab.id}:${sender.documentId}`;
           const retained = textRetention.get(sender.tab.id);
-          if (retained && (retained.closed || retained.documentId !== sender.documentId)) throw documentEnded();
+          if (retained && (retained.closed || (retained.documentId && retained.documentId !== sender.documentId))) throw documentEnded();
           const current = textTranslations.get(owner);
           if (msg.type === 'STOP_TEXT_TRANSLATION') {
             if (current?.operationId === msg.operationId) {
@@ -819,7 +823,11 @@ function createBackgroundWorker(platform = {}) {
             if (textTranslations.get(owner) !== operation || operation.controller.signal.aborted) throw documentEnded();
             const apiKey = prepared.service === 'openrouter' ? stored.openrouterApiKey : stored.apiKey;
             if (!apiKey) throw new Error(`${prepared.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`);
-            const output = await requestTranslation({ ...prepared, apiKey, signal: operation.controller.signal });
+            const output = await requestTranslation({ ...prepared, apiKey, signal: operation.controller.signal,
+              beforeRequest: async () => {
+                if (await getTextDocumentId(sender.tab.id) !== sender.documentId ||
+                    textTranslations.get(owner) !== operation) throw documentEnded();
+              } });
             if (textTranslations.get(owner) !== operation || operation.controller.signal.aborted) {
               throw new Error('Text Translation stopped.');
             }

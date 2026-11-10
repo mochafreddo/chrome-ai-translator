@@ -43,7 +43,7 @@ The extension cannot translate restricted pages such as `chrome://` pages. If In
 ## Translate supplied text
 
 1. Open the side panel and choose **Text Translation**. You can bookmark the independent extension page.
-2. Enter or paste plain text, choose a source language or automatic detection, and review the target language, tone and service.
+2. Enter or paste plain text, type a source language or keep `auto` for automatic detection, and review the target language, tone and service.
 3. Choose **Translate**, or press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux. Input, settings changes and opening the page send no translation request.
 4. Compare the source and result, and choose **Copy translation** to copy plain text.
 

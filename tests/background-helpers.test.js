@@ -2811,6 +2811,7 @@ exports.tests.push({
       job: { source: first + second, settings, units: [first, second],
         results: [{ translation: '완료\n\n', sourceLanguage: 'English' }], status: 'running' } };
     const original = helpers.createBackgroundWorker(platform);
+    assert.equal((await sendTextMessage(original, { type: 'GET_TEXT_TRANSLATION_STATE' })).ok, true);
     assert.equal((await sendTextMessage(original, { type: 'SAVE_TEXT_TRANSLATION_STATE', revision: 1, state })).ok, true);
     const replacement = helpers.createBackgroundWorker(platform);
     const restored = await sendTextMessage(replacement, { type: 'GET_TEXT_TRANSLATION_STATE' });
@@ -2824,7 +2825,7 @@ exports.tests.push({
 });
 
 exports.tests.push({
-  name: 'fresh Text Translation worker refuses stale or closed document messages before storage or transport',
+  name: 'fresh Text Translation worker refuses stale or unregistered documents without storage writes or transport',
   async fn() {
     let current = 'new-document';
     const chrome = createBlockBatchChrome({ settings: { openrouterApiKey: 'sk-test-synthetic' } });
@@ -2832,20 +2833,23 @@ exports.tests.push({
     chrome.webNavigation.getFrame = async () => current ? { documentId: current } : null;
     chrome.runtime.getContexts = async () => current ? [{ tabId: 90, frameId: 0, documentId: current,
       documentUrl: 'chrome-extension://test/text-translation.html' }] : [];
-    let storageAccesses = 0;
-    chrome.storage.session = { async get() { storageAccesses += 1; return {}; },
-      async set() { storageAccesses += 1; } };
+    let storageReads = 0;
+    let storageWrites = 0;
+    chrome.storage.session = { async get() { storageReads += 1; return {}; },
+      async set() { storageWrites += 1; } };
     let requests = 0;
     for (const live of ['new-document', null]) {
       current = live;
       for (const type of ['SAVE_TEXT_TRANSLATION_STATE', 'GET_TEXT_TRANSLATION_STATE', 'TRANSLATE_TEXT']) {
+        storageReads = 0;
         const worker = helpers.createBackgroundWorker({ chrome, fetch() { requests += 1; throw new Error('Unexpected transport'); } });
         const response = await sendTextMessage(worker, { type, operationId: 'stale', revision: 1,
           source: 'Original', settings: TEXT_SETTINGS, state: { source: 'Draft', settings: TEXT_SETTINGS,
             openaiModel: 'test-model', openaiReasoningEffort: 'low', job: null } });
         assert.equal(response.ok, false, `${type}:${live}`);
         assert.equal(requests, 0, `${type}:${live}`);
-        assert.equal(storageAccesses, 0, `${type}:${live}`);
+        assert.equal(storageReads, type === 'SAVE_TEXT_TRANSLATION_STATE' ? 1 : 0, `${type}:${live}`);
+        assert.equal(storageWrites, 0, `${type}:${live}`);
       }
     }
   },
@@ -2879,6 +2883,46 @@ exports.tests.push({
     assert.match(requests[0].body.instructions, /Korean/);
     assert.match(requests[0].body.instructions, /natural/);
     assert.equal(JSON.stringify(response).includes('sk-'), false);
+  },
+});
+
+exports.tests.push({
+  name: 'all Text Translation messages share the top-level extension sender boundary',
+  async fn() {
+    const chrome = createBlockBatchChrome();
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const calls = [];
+    const readLocal = chrome.storage.local.get;
+    chrome.storage.local.get = async keys => {
+      calls.push({ type: 'local.get', keys });
+      return readLocal(keys);
+    };
+    chrome.storage.session = {
+      async get(key) { calls.push({ type: 'get', key }); return {}; },
+      async set(value) { calls.push({ type: 'set', value }); },
+    };
+    const worker = helpers.createBackgroundWorker({ chrome, async fetch(url, options) {
+      calls.push({ type: 'fetch', url, options });
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({ translation: '결과', sourceLanguage: null })) };
+    } });
+    for (const type of ['GET_TEXT_TRANSLATION_STATE', 'SAVE_TEXT_TRANSLATION_STATE',
+      'CLEAR_TEXT_TRANSLATION_STATE', 'TRANSLATE_TEXT', 'STOP_TEXT_TRANSLATION']) {
+      for (const sender of [{ ...TEXT_SENDER, tab: undefined }, { ...TEXT_SENDER, frameId: 1 },
+        { ...TEXT_SENDER, documentId: undefined }, { ...TEXT_SENDER, url: 'https://example.test/text-translation.html' }]) {
+        const response = await sendTextMessage(worker, { type, operationId: 'untrusted', revision: 1,
+          source: 'Original', settings: TEXT_SETTINGS }, sender);
+        assert.deepEqual(calls, [], type);
+        assert.equal(response.ok, false, type);
+      }
+    }
+    for (const type of ['TRANSLATE_TEXT', 'STOP_TEXT_TRANSLATION']) {
+      for (const operationId of [null, '', 'x'.repeat(101)]) {
+        const response = await sendTextMessage(worker, { type, operationId, source: 'Original',
+          settings: TEXT_SETTINGS });
+        assert.deepEqual(calls, [], type);
+        assert.equal(response.ok, false, type);
+      }
+    }
   },
 });
 
