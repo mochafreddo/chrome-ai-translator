@@ -36,6 +36,7 @@
     get('sourceText').disabled = !ready || Boolean(active);
     get('btnTranslate').disabled = !ready || Boolean(active);
     get('btnStop').disabled = !active;
+    get('btnClear').disabled = !ready;
     get('btnResume').disabled = !ready || Boolean(active) ||
       !job || !['stopped', 'failed'].includes(job.status) || !sameInput();
     get('btnCopy').disabled = !get('translatedText').value;
@@ -185,6 +186,7 @@
   get('btnStop').addEventListener('click', stop);
   get('btnResume').addEventListener('click', () => { void translate(true); });
   get('btnClear').addEventListener('click', () => {
+    if (!ready) return;
     stop();
     job = null;
     get('sourceText').value = '';
