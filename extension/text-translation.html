@@ -62,11 +62,14 @@
         <div class="row">
           <button id="btnTranslate" type="submit" class="btn primary" disabled>Translate</button>
           <button id="btnStop" type="button" class="btn" disabled>Stop</button>
+          <button id="btnResume" type="button" class="btn" disabled>Resume translation</button>
           <button id="btnClear" type="button" class="btn">Clear all</button>
           <button id="btnCopy" type="button" class="btn" disabled>Copy translation</button>
         </div>
         <p class="muted">Translate with Cmd/Ctrl+Enter. Changes stay on this page until you save defaults.</p>
+        <p class="muted">Stop cancels further parts and requests cancellation of the current request. Requests already received by the service may still be billed.</p>
         <div id="status" role="status" aria-live="polite"></div>
+        <div id="progressStatus" role="status" aria-live="polite"></div>
         <div id="languageStatus" class="muted"></div>
         <div id="errorBox" class="error" role="alert" hidden></div>
       </form>

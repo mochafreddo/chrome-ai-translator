@@ -11,6 +11,7 @@ export async function launchTextTranslationBrowser() {
   const held = [];
   let holding = false;
   let output = { translation: '<b>안녕하세요</b>\n\n두 번째 문단', sourceLanguage: 'English' };
+  let completionStatus = 'completed';
   let unsubscribe;
   try {
     const target = await ctx.findTarget(value => value.type === 'service_worker' &&
@@ -37,10 +38,11 @@ export async function launchTextTranslationBrowser() {
         requests.push({ url: event.request.url, body: JSON.parse(event.request.postData),
           authorization: event.request.headers.Authorization || event.request.headers.authorization });
         const answer = { ...output };
+        const status = completionStatus;
         const fulfill = async () => {
           const result = await ctx.cdp.send('Fetch.fulfillRequest', { requestId: event.requestId,
             responseCode: 200, responseHeaders: [...headers, { name: 'Content-Type', value: 'application/json' }],
-            body: Buffer.from(JSON.stringify({ status: 'completed', output: [{ type: 'message',
+            body: Buffer.from(JSON.stringify({ status, output: [{ type: 'message',
               content: [{ type: 'output_text', text: JSON.stringify(answer) }] }] })).toString('base64'),
           }, sessionId);
           return !result.__error && !result.__timeout;
@@ -62,10 +64,13 @@ export async function launchTextTranslationBrowser() {
     return {
       ctx, page: ctx.page, requests, errors,
       url: `chrome-extension://${ctx.extension.id}/text-translation.html`,
-      setOutput(value) { output = value; },
+      setOutput(value, status = 'completed') { output = value; completionStatus = status; },
       hold(value = true) { holding = value; },
       async press(key) { await browser(['--session', session, 'press', key]); },
-      async release() { holding = false; for (const fulfill of held.splice(0)) await fulfill(); },
+      async release({ keepHolding = false } = {}) {
+        holding = keepHolding;
+        for (const fulfill of held.splice(0)) await fulfill();
+      },
       async ready(page = ctx.page) {
         return until(() => page.evaluate("Boolean(document.getElementById('btnTranslate') && !document.getElementById('btnTranslate').disabled)"), 5000, 100);
       },

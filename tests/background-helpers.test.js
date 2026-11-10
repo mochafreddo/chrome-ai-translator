@@ -4095,6 +4095,27 @@ exports.tests.push({
 });
 
 exports.tests.push({
+  name: 'Text Translation refuses completed output that loses internal line boundaries without retrying',
+  async fn() {
+    const requests = [];
+    const chrome = createBlockBatchChrome({ settings: { openrouterApiKey: 'sk-text-synthetic' } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translation: '첫 줄과 두 번째 줄', sourceLanguage: 'English',
+      })) };
+    } });
+    const response = await sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'lost-lines',
+      source: 'First line\n\nSecond line', settings: TEXT_SETTINGS });
+    assert.equal(response.ok, false);
+    assert.equal(Object.hasOwn(response, 'result'), false);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].input, 'First line\n\nSecond line');
+  },
+});
+
+exports.tests.push({
   name: 'controls on separate tabs retain their Authorization and execution order',
   async fn() {
     const sent = [];

@@ -995,7 +995,7 @@ function createBackgroundWorker(platform = {}) {
             if (textTranslations.get(owner) !== operation || operation.controller.signal.aborted) {
               throw new Error('Text Translation stopped.');
             }
-            sendResponse({ ok: true, result: textTranslationRequest.parseResult(output) });
+            sendResponse({ ok: true, result: textTranslationRequest.parseResult(output, prepared.input) });
           } finally {
             if (textTranslations.get(owner) === operation) textTranslations.delete(owner);
           }
