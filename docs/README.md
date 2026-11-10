@@ -34,6 +34,7 @@ All ADRs below retain their existing numbers and accepted status. They are descr
 | [0012](adr/0012-translate-through-a-sole-generic-div-wrapper.md) | Translate own prose through a sole generic DIV wrapper |
 | [0013](adr/0013-recognize-mise-recipe-layout-explicitly.md) | Recognize the mise recipe layout as an explicit site boundary |
 | [0014](adr/0014-bind-translation-to-the-readers-document-and-provider.md) | Bind translation to the reader's document and provider choice |
+| [0015](adr/0015-preserve-completed-text-translation-on-interruption.md) | Preserve completed Text Translation on interruption; accepted design, implementation pending |
 
 ## Agent procedures
 
@@ -50,6 +51,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [텍스트 번역 페이지 설계 인터뷰](design/text-translation-page-2026-11-10.md) | 독립 탭의 Text Translation 추가와 기존 기사 Side Panel Translation 제거에 관한 Q1–Q13 합의와 명세 이슈 #112 게시; 구현 전 |
 | [mise 형제 컨테이너 설계 인터뷰](design/mise-sibling-containers-2026-11-01.md) | #110의 mise 홈페이지 한정 지원 설계·후속 구현과 무료 공개 페이지·fixture 관측 |
 | [GitHub 릴리스 Partial Translation 설계 인터뷰](design/github-release-partial-translation-2026-10-30.md) | v1.3.2 릴리스의 계정 이름 오탐 재현과 Q1–Q5 설계 확정; 계정 링크 보호, 최대 1회 보정, 공개 테스트 접점과 무료 검증 범위 합의; 구현·새 워크트리 커밋 요청 |
 | [lint 구성 설계 인터뷰](design/lint-configuration-2026-10-29.md) | ESLint flat config, recommended 규칙, 기존 위반 정리, 로컬 검증·CI 연결, 설치된 의존성 비교를 통한 검증 기록 재사용과 검증 범위 확정; 구현·현재 브랜치 커밋 승인 |

@@ -1,8 +1,12 @@
 # Chrome AI Translator
 
-Vocabulary for the extension's two translation experiences. Placeholder Token is shared by both; the other terms distinguish their content, controls, and lifetimes. Current behavior and implementation responsibilities are described in the [architecture reference](docs/architecture.md).
+Vocabulary for the extension's translation experiences, including Text Translation agreed during design. Current behavior and implementation responsibilities are described in the [architecture reference](docs/architecture.md).
 
 ## Language
+
+**Text Translation**:
+Translation of text supplied directly by the reader, with the source and translated text available for comparison and copying.
+_Avoid_: manual translation, paste mode, Side Panel Translation
 
 **Side Panel Translation**:
 Translation of a page's article body into Markdown, presented in Chrome's side panel beside the unchanged page.
