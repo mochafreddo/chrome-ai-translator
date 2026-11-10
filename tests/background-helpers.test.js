@@ -4,7 +4,7 @@ const helpers = require('../extension/background.js');
 const contentHelpers = require('../extension/content.js');
 const { createReasoningFixture } = require('./inline-block.test');
 
-const TEXT_SENDER = { tab: { id: 90 }, frameId: 0, documentId: 'text-document',
+const TEXT_SENDER = { tab: { id: 90 }, frameId: 0, documentId: 'document-90',
   url: 'chrome-extension://test/text-translation.html' };
 const TEXT_SETTINGS = { service: 'openrouter', model: 'ignored', reasoningEffort: 'high',
   sourceLanguage: 'auto', targetLanguage: 'Korean', tone: 'natural' };
@@ -118,7 +118,10 @@ function createBlockBatchChrome({
 } = {}) {
   return {
     webNavigation: { async getFrame({ tabId }) { return { documentId: `document-${tabId}` }; } },
-    runtime: { getManifest() { return { version: 'test' }; } },
+    runtime: { getManifest() { return { version: 'test' }; }, async getContexts({ tabIds: [tabId] }) {
+      return [{ tabId, frameId: 0, documentId: `document-${tabId}`,
+        documentUrl: 'chrome-extension://test/text-translation.html' }];
+    } },
     storage: {
       ...(session ? { session } : {}),
       local: {
@@ -2789,6 +2792,66 @@ exports.tests.push(...['stop', 'restore', 'start'].map((control) => ({
 })));
 
 exports.tests.push({
+  name: 'Text Translation survives worker replacement with only allowlisted state and no automatic transport',
+  async fn() {
+    const values = {};
+    const chrome = createBlockBatchChrome({ session: {
+      async get(key) { return { [key]: structuredClone(values[key]) }; },
+      async set(value) { Object.assign(values, structuredClone(value)); },
+    } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    let requests = 0;
+    const platform = { chrome, fetch() { requests += 1; throw new Error('Unexpected request'); } };
+    const settings = { service: 'openai', model: 'retained-model', reasoningEffort: 'low',
+      sourceLanguage: 'auto', targetLanguage: 'Korean', tone: 'natural' };
+    const first = 'A'.repeat(8000) + '\n\n';
+    const second = 'B'.repeat(8000);
+    const state = { source: first + second, settings: { ...settings, apiKey: 'sk-forbidden' },
+      openaiModel: 'retained-model', openaiReasoningEffort: 'low', apiKey: 'sk-forbidden',
+      job: { source: first + second, settings, units: [first, second],
+        results: [{ translation: '완료\n\n', sourceLanguage: 'English' }], status: 'running' } };
+    const original = helpers.createBackgroundWorker(platform);
+    assert.equal((await sendTextMessage(original, { type: 'SAVE_TEXT_TRANSLATION_STATE', revision: 1, state })).ok, true);
+    const replacement = helpers.createBackgroundWorker(platform);
+    const restored = await sendTextMessage(replacement, { type: 'GET_TEXT_TRANSLATION_STATE' });
+    assert.equal(restored.ok, true);
+    assert.equal(restored.state.source, first + second);
+    assert.equal(restored.state.job.status, 'stopped');
+    assert.deepEqual(restored.state.job.results, [{ translation: '완료\n\n', sourceLanguage: 'English' }]);
+    assert.equal(JSON.stringify(values).includes('sk-'), false);
+    assert.equal(requests, 0);
+  },
+});
+
+exports.tests.push({
+  name: 'fresh Text Translation worker refuses stale or closed document messages before storage or transport',
+  async fn() {
+    let current = 'new-document';
+    const chrome = createBlockBatchChrome({ settings: { openrouterApiKey: 'sk-test-synthetic' } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    chrome.webNavigation.getFrame = async () => current ? { documentId: current } : null;
+    chrome.runtime.getContexts = async () => current ? [{ tabId: 90, frameId: 0, documentId: current,
+      documentUrl: 'chrome-extension://test/text-translation.html' }] : [];
+    let storageAccesses = 0;
+    chrome.storage.session = { async get() { storageAccesses += 1; return {}; },
+      async set() { storageAccesses += 1; } };
+    let requests = 0;
+    for (const live of ['new-document', null]) {
+      current = live;
+      for (const type of ['SAVE_TEXT_TRANSLATION_STATE', 'GET_TEXT_TRANSLATION_STATE', 'TRANSLATE_TEXT']) {
+        const worker = helpers.createBackgroundWorker({ chrome, fetch() { requests += 1; throw new Error('Unexpected transport'); } });
+        const response = await sendTextMessage(worker, { type, operationId: 'stale', revision: 1,
+          source: 'Original', settings: TEXT_SETTINGS, state: { source: 'Draft', settings: TEXT_SETTINGS,
+            openaiModel: 'test-model', openaiReasoningEffort: 'low', job: null } });
+        assert.equal(response.ok, false, `${type}:${live}`);
+        assert.equal(requests, 0, `${type}:${live}`);
+        assert.equal(storageAccesses, 0, `${type}:${live}`);
+      }
+    }
+  },
+});
+
+exports.tests.push({
   name: 'Text Translation sends the explicit snapshot through the selected fixed transport',
   async fn() {
     const requests = [];
@@ -2913,6 +2976,27 @@ exports.tests.push({
     assert.equal(response.ok, false);
     assert.equal(requests, 1);
     assert.equal(Object.hasOwn(response, 'result'), false);
+  },
+});
+
+exports.tests.push({
+  name: 'Text Translation refuses completed output that loses internal line boundaries without retrying',
+  async fn() {
+    const requests = [];
+    const chrome = createBlockBatchChrome({ settings: { openrouterApiKey: 'sk-text-synthetic' } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translation: '첫 줄과 두 번째 줄', sourceLanguage: 'English',
+      })) };
+    } });
+    const response = await sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'lost-lines',
+      source: 'First line\n\nSecond line', settings: TEXT_SETTINGS });
+    assert.equal(response.ok, false);
+    assert.equal(Object.hasOwn(response, 'result'), false);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].input, 'First line\n\nSecond line');
   },
 });
 
