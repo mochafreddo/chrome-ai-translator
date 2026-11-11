@@ -51,6 +51,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [언어 예문과 Partial Translation 설계 인터뷰](design/language-examples-partial-translation-2026-11-11.md) | unslop 문서의 영어 잔류 진단 조사와 Q1–Q4 설계 확정; 예문 원문·한국어 뜻 병기, 보수적 인정 범위, 동일 번역 응답 내 메타데이터 검증과 무료 로컬 검증 범위 합의; 명세 이슈 #118 게시, 구현 전 |
 | [텍스트 번역 페이지 설계 인터뷰](design/text-translation-page-2026-11-10.md) | 독립 탭의 Text Translation 추가와 기존 기사 Side Panel Translation 제거에 관한 Q1–Q13 합의와 명세 이슈 #112 게시; 구현 전 |
 | [mise 형제 컨테이너 설계 인터뷰](design/mise-sibling-containers-2026-11-01.md) | #110의 mise 홈페이지 한정 지원 설계·후속 구현과 무료 공개 페이지·fixture 관측 |
 | [GitHub 릴리스 Partial Translation 설계 인터뷰](design/github-release-partial-translation-2026-10-30.md) | v1.3.2 릴리스의 계정 이름 오탐 재현과 Q1–Q5 설계 확정; 계정 링크 보호, 최대 1회 보정, 공개 테스트 접점과 무료 검증 범위 합의; 구현·새 워크트리 커밋 요청 |

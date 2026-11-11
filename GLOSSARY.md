@@ -1,6 +1,6 @@
 # Chrome AI Translator
 
-Vocabulary for the extension's translation experiences, including Text Translation agreed during design. Current behavior and implementation responsibilities are described in the [architecture reference](docs/architecture.md).
+Vocabulary for the extension's translation experiences, including concepts agreed during design. Current behavior and implementation responsibilities are described in the [architecture reference](docs/architecture.md).
 
 ## Language
 
@@ -25,8 +25,12 @@ A Semantic Block for which no acceptable Inline Translation could be safely appl
 _Avoid_: failed translation, rejected result, request failure
 
 **Partial Translation**:
-An applied Inline Translation that still contains a material amount of source-language prose after its allowed repair. Isolated technical names, including each item of a punctuated list of names, and Source Syntax do not make a translation partial.
+An applied Inline Translation that still contains a material amount of source-language prose after its allowed repair. Isolated technical names, including each item of a punctuated list of names, Source Syntax, and Language Examples accompanied by their target-language meanings do not make a translation partial.
 _Avoid_: warning, degraded translation, incomplete result
+
+**Language Example**:
+A source-language expression presented to explain its own wording, grammar, or style, whose original form remains available alongside its meaning in the target language. Quotation or emphasis alone does not make prose a Language Example.
+_Avoid_: protected quote, untranslated example, Source Syntax
 
 **Semantic Block**:
 The own prose of one paragraph, heading, list item, quotation, caption, disclosure summary, term or definition, or table cell, taken whole by Inline Translation and excluding any Block Child.
