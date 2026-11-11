@@ -11,7 +11,7 @@ Use this guide to choose verification by what it requires. The [package scripts]
 | `npm run verify:local` | Lint, syntax, documentation and unit checks with private logs and a completion record | Node, Git and installed development tools; no browser, network, or API key |
 | `npm run verify:local -- --check-reuse <summary.json>` | Validate an existing successful local verification record against current inputs and log integrity | Same checkout, source files, tool versions and recorded execution conditions; no checks are executed |
 | `npm run check:syntax` | Discover and parse regular `.js` files immediately inside `extension/`, sorted by path; fail on syntax errors or empty input | Node; no browser or model |
-| `npm run check:docs` | Check Git-tracked Markdown links and heading anchors, and `docs/README.md` coverage of other tracked Markdown under `docs/` | Node and Git; no network |
+| `npm run check:docs` | Check Git-tracked and optionally selected Markdown links, anchors, and documentation index coverage | Node and Git; no network |
 | `npm run check:docs:history -- --base <full-commit-sha>` | Compare historical tracked Markdown with a fixed baseline | Node and Git; explicit full 40-character SHA-1 commit required |
 | `npm run check:commits -- <base> <head>` | Commit subject/body format | Node and Git; no browser or model |
 | `npm run test:integration:routing-pilot -- --plan` | Print the frozen corpus and 36-run comparison plan | Node only; no browser, credential, or model request |
@@ -69,7 +69,7 @@ Browser checks, reported public pages, billed model checks, commit-format checks
 
 ## Documentation checks
 
-`npm run check:docs` checks Git-tracked `*.md` and `*.markdown` files for local inline links and heading anchors. It skips fenced and inline code and makes no network requests. By default it reads the working-tree content of tracked files. It also requires `docs/README.md` to cover every other tracked Markdown file under `docs/`, excluding `docs/README.md` itself. New files must be added to Git's index before the checker includes them; linking an untracked file in the documentation index is not enough. Tests registered in the existing unit suite cover checker behavior.
+`npm run check:docs` checks Git-tracked `*.md` and `*.markdown` files for local inline links and heading anchors. It skips fenced and inline code and makes no network requests. It reads working-tree content and requires `docs/README.md` to cover every other checked Markdown file under `docs/`, excluding `docs/README.md` itself. To include specific untracked files without staging them, pass `--file` for each path, for example `npm run check:docs -- --file docs/design/draft.md`. Paths are relative to the repository root, or absolute paths inside it. Linking an untracked file in the documentation index alone does not select it. Explicit files cannot be combined with the history check. Tests registered in the existing unit suite cover checker behavior.
 
 `npm run check:docs:history` is an opt-in comparison against an explicit, fixed commit; it is not an immutable-history CI check. Supply the repository's full lowercase 40-character SHA-1 commit hash with `--base`, for example:
 

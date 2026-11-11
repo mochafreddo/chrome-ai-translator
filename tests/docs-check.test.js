@@ -27,6 +27,60 @@ function repository(fn) {
 exports.name = 'documentation checks';
 exports.tests = [
   {
+    name: 'checks explicitly selected Markdown without changing the index',
+    fn() {
+      repository(({ root, git, write, run }) => {
+        write('docs/README.md', '# Docs\n[New](new.md#new)\n');
+        git('add', '.');
+        write('docs/new.md', '# New\n[Home](../docs/README.md#docs)\n');
+        const index = git('ls-files', '-s');
+        assert.equal(run().status, 0);
+        const result = run('--file', 'docs/new.md', '--file', './docs/new.md', '--file', path.join(root, 'docs/new.md'));
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.stdout, /2 .*Markdown files/);
+        assert.equal(git('ls-files', '-s'), index);
+        assert.deepEqual(checkDocs(root, ['docs/new.md']).errors, []);
+        const fromDocs = spawnSync(process.execPath, [
+          path.join(__dirname, '../scripts/check-docs.js'), '--file', 'docs/new.md',
+        ], { cwd: path.join(root, 'docs'), encoding: 'utf8', timeout: 30000 });
+        assert.equal(fromDocs.status, 0, fromDocs.stderr);
+        write('docs/new.md', '# New\n[Broken](missing.md)\n');
+        assert.match(run('--file', 'docs/new.md').stderr, /target is missing/);
+        write('docs/new.md', '# New\n[Broken](../docs/README.md#missing)\n');
+        assert.match(run('--file', 'docs/new.md').stderr, /heading anchor is missing/);
+        write('docs/new.md', '# New\n');
+        write('docs/README.md', '# Docs\n');
+        assert.match(run('--file', 'docs/new.md').stderr, /document is not indexed/);
+      });
+    },
+  },
+  {
+    name: 'validates explicit paths and CLI combinations',
+    fn() {
+      repository(({ root, git, write, run }) => {
+        write('single.md', '# Single\n');
+        assert.equal(run('--file', 'single.md').status, 0);
+        git('add', 'single.md');
+        assert.match(run('--file', './single.md').stdout, /1 .*Markdown files/);
+        fs.symlinkSync(path.join(root, 'single.md'), path.join(root, 'alias.md'));
+        assert.equal(run('--file', 'alias.md').status, 0);
+        write('not-markdown.txt', 'text');
+        fs.mkdirSync(path.join(root, 'directory.md'));
+        const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'translator-docs-outside-'));
+        try {
+          fs.writeFileSync(path.join(outside, 'outside.md'), '# Outside\n');
+          fs.symlinkSync(path.join(outside, 'outside.md'), path.join(root, 'escape.md'));
+          for (const args of [
+            ['--file'], ['--file', '--history'], ['--file', 'missing.md'],
+            ['--file', 'not-markdown.txt'], ['--file', 'directory.md'],
+            ['--file', path.join(outside, 'outside.md')], ['--file', 'escape.md'],
+            ['--history', '--file', 'single.md'], ['--base', 'x', '--file', 'single.md'],
+          ]) assert.equal(run(...args).status, 1, JSON.stringify(args));
+        } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+      });
+    },
+  },
+  {
     name: 'rejects document and history symlinks outside the repository before reading their content',
     fn() {
       repository(({ root, git, write }) => {
