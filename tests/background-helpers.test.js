@@ -2929,9 +2929,24 @@ exports.tests.push({
 exports.tests.push({
   name: 'Text Translation rejects untrusted senders, empty and oversized input before sending',
   async fn() {
-    const chrome = createBlockBatchChrome();
+    const chrome = createBlockBatchChrome({ settings: { apiKey: 'sk-other-synthetic',
+      openrouterApiKey: 'sk-text-synthetic' } });
     chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
-    const worker = helpers.createBackgroundWorker({ chrome, fetch: () => assert.fail('invalid input cannot send') });
+    const requests = [];
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: async (url, options) => {
+      requests.push({ url, body: JSON.parse(options.body), authorization: options.headers.Authorization });
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translation: '번역', sourceLanguage: null,
+      })) };
+    } });
+    const valid = await sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'valid',
+      source: 'hello', settings: TEXT_SETTINGS });
+    assert.deepEqual(valid, { ok: true, result: { translation: '번역', sourceLanguage: null } });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, 'https://openrouter.ai/api/v1/responses');
+    assert.equal(requests[0].authorization, 'Bearer sk-text-synthetic');
+    assert.equal(requests[0].body.input, 'hello');
+    requests.length = 0;
     for (const [source, sender, settings] of [
       ['hello', { ...TEXT_SENDER, url: 'https://example.test/text-translation.html' }, TEXT_SETTINGS],
       ['hello', { ...TEXT_SENDER, frameId: 1 }, TEXT_SETTINGS],
@@ -2941,6 +2956,7 @@ exports.tests.push({
       ['hello', TEXT_SENDER, { ...TEXT_SETTINGS, service: 'other' }],
     ]) {
       const result = await sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'invalid', source, settings }, sender);
+      assert.equal(requests.length, 0, 'invalid input cannot send');
       assert.equal(result.ok, false);
     }
   },
