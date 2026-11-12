@@ -11,7 +11,7 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
   let holdDelivery = false;
   let serial = 0;
   const element = id => {
-    if (!elements.has(id)) elements.set(id, { value: '', textContent: '', hidden: true, disabled: false,
+    if (!elements.has(id)) elements.set(id, { value: '', textContent: '', hidden: true, disabled: false, lang: '',
       listeners: {}, addEventListener(type, callback) { this.listeners[type] = callback; }, focus() {} });
     return elements.get(id);
   };
@@ -66,7 +66,8 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
     window: { addEventListener(type, callback) { windowEvents[type] = callback; } }, crypto: { randomUUID: () => `operation-${++serial}` },
     navigator: { clipboard: { async writeText() {} } },
     ChromeAiTranslatorTextTranslationRequest: require('../extension/text-translation-request.js'),
-    ChromeAiTranslatorDefaultModel: require('../extension/default-model.js') });
+    ChromeAiTranslatorDefaultModel: require('../extension/default-model.js'),
+    ChromeAiTranslatorTranslationSettings: require('../extension/translation-settings.js') });
   vm.runInContext(fs.readFileSync(require.resolve('../extension/text-translation.js'), 'utf8'), context);
   await beforeReady?.({ element, event, flush });
   async function flush() { for (let i = 0; i < 64; i += 1) await Promise.resolve(); }
@@ -809,6 +810,138 @@ exports.tests = [{
     page.requests[1].respond('안녕\n\n세상');
     await page.flush();
     assert.equal(page.element('translatedText').value, ' '.repeat(12000) + '안녕\n\n세상\n');
+  },
+}, {
+  name: 'source and translation text declare their own language instead of inheriting English',
+  async fn() {
+    const page = await openPage();
+    assert.equal(page.element('sourceText').lang, '');
+    assert.equal(page.element('translatedText').lang, '');
+    page.element('sourceLanguage').value = 'English';
+    page.source('Hello');
+    assert.equal(page.element('sourceText').lang, 'en');
+    page.element('sourceLanguage').value = 'Korean';
+    page.event('translationSettings', 'input');
+    assert.equal(page.element('sourceText').lang, 'ko');
+    page.element('sourceLanguage').value = 'ko';
+    page.event('translationSettings', 'input');
+    assert.equal(page.element('sourceText').lang, 'ko');
+    page.element('sourceLanguage').value = 'en';
+    page.event('translationSettings', 'input');
+    assert.equal(page.element('sourceText').lang, 'en');
+    page.element('sourceLanguage').value = 'Japanese';
+    page.event('translationSettings', 'input');
+    assert.equal(page.element('sourceText').lang, '');
+    page.element('sourceLanguage').value = 'Korean';
+    page.element('targetLanguage').value = 'English';
+    page.source('안녕');
+    await page.start();
+    assert.equal(page.element('translatedText').value, '');
+    assert.equal(page.element('translatedText').lang, '');
+    page.requests[0].respond('Hello', 'completed', 'Korean');
+    await page.flush();
+    assert.equal(page.element('sourceText').lang, 'ko');
+    assert.equal(page.element('translatedText').lang, 'en');
+    page.element('targetLanguage').value = 'Korean';
+    page.element('sourceLanguage').value = 'French';
+    page.event('translationSettings', 'input');
+    assert.equal(page.element('sourceText').lang, '');
+    assert.equal(page.element('translatedText').value, 'Hello');
+    assert.equal(page.element('translatedText').lang, 'en');
+    page.source('Next');
+    await page.start();
+    assert.equal(page.element('translatedText').value, '');
+    assert.equal(page.element('translatedText').lang, '');
+  },
+}, {
+  name: 'source and translation fields declare an unknown language in the page markup',
+  fn() {
+    const html = fs.readFileSync(require.resolve('../extension/text-translation.html'), 'utf8');
+    for (const id of ['sourceText', 'translatedText']) {
+      const tag = html.match(new RegExp(`<textarea\\b[^>]*\\bid="${id}"[^>]*>`));
+      assert.equal(tag?.[0].match(/\blang="([^"]*)"/)?.[1], '');
+    }
+  },
+}, {
+  name: 'detected source language belongs only to that same unchanged source',
+  async fn() {
+    const page = await openPage();
+    page.source('Hello');
+    assert.equal(page.element('sourceText').lang, '');
+    await page.start();
+    page.requests[0].respond('안녕', 'completed', 'English');
+    await page.flush();
+    assert.equal(page.element('sourceText').lang, 'en');
+    assert.equal(page.element('translatedText').lang, 'ko');
+    page.element('targetLanguage').value = 'English';
+    page.event('translationSettings', 'input');
+    assert.equal(page.element('sourceText').lang, 'en');
+    assert.equal(page.element('translatedText').value, '안녕');
+    assert.equal(page.element('translatedText').lang, 'ko');
+    page.source('Hello!');
+    assert.equal(page.element('sourceText').lang, '');
+    assert.equal(page.element('translatedText').lang, 'ko');
+    page.source('Hello');
+    assert.equal(page.element('sourceText').lang, 'en');
+    await page.flush();
+    const restored = await page.reload();
+    assert.equal(restored.element('sourceText').value, 'Hello');
+    assert.equal(restored.element('translatedText').value, '안녕');
+    assert.equal(restored.element('targetLanguage').value, 'English');
+    assert.equal(restored.element('sourceText').lang, 'en');
+    assert.equal(restored.element('translatedText').lang, 'ko');
+    restored.element('sourceLanguage').value = ' auto ';
+    restored.event('translationSettings', 'input');
+    assert.equal(restored.element('sourceText').lang, 'en');
+  },
+}, {
+  name: 'unknown and uncertain source languages do not inherit English',
+  async fn() {
+    const page = await openPage();
+    page.source('Hello');
+    await page.start();
+    page.requests[0].respond('안녕', 'completed', null);
+    await page.flush();
+    assert.equal(page.element('sourceText').lang, '');
+    assert.equal(page.element('translatedText').lang, 'ko');
+    page.element('targetLanguage').value = 'Japanese';
+    page.source('Next');
+    await page.start();
+    page.requests[1].respond('結果', 'completed', 'Japanese');
+    await page.flush();
+    assert.equal(page.element('sourceText').lang, '');
+    assert.equal(page.element('translatedText').lang, '');
+  },
+}, {
+  name: 'swap, reload, and clear declare the language of the text left visible',
+  async fn() {
+    const page = await openPage();
+    page.element('sourceLanguage').value = 'English';
+    page.source('Hello');
+    await page.start();
+    page.requests[0].respond('안녕', 'completed', 'English');
+    await page.flush();
+    page.event('btnSwap', 'click');
+    await page.flush();
+    assert.equal(page.element('sourceText').value, '안녕');
+    assert.equal(page.element('sourceLanguage').value, 'Korean');
+    assert.equal(page.element('targetLanguage').value, 'English');
+    assert.equal(page.element('translatedText').value, '안녕');
+    assert.equal(page.element('sourceText').lang, 'ko');
+    assert.equal(page.element('translatedText').lang, 'ko');
+    const restored = await page.reload();
+    assert.equal(restored.element('sourceText').value, '안녕');
+    assert.equal(restored.element('translatedText').value, '안녕');
+    assert.equal(restored.element('sourceLanguage').value, 'Korean');
+    assert.equal(restored.element('targetLanguage').value, 'English');
+    assert.equal(restored.element('sourceText').lang, 'ko');
+    assert.equal(restored.element('translatedText').lang, 'ko');
+    restored.event('btnClear', 'click');
+    await restored.flush();
+    assert.equal(restored.element('sourceText').value, '');
+    assert.equal(restored.element('translatedText').value, '');
+    assert.equal(restored.element('sourceText').lang, '');
+    assert.equal(restored.element('translatedText').lang, '');
   },
 }];
 

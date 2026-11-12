@@ -1,6 +1,7 @@
 (function initTextTranslationPage() {
   const contract = globalThis.ChromeAiTranslatorTextTranslationRequest;
   const { OPENROUTER_MODEL } = globalThis.ChromeAiTranslatorDefaultModel;
+  const { getTargetLanguageCode } = globalThis.ChromeAiTranslatorTranslationSettings;
   const get = id => document.getElementById(id);
   let ready = false;
   let composing = false;
@@ -43,6 +44,7 @@
     get('btnCopy').disabled = !get('translatedText').value;
     get('resultRelationship').textContent = job?.results.length && !sameInput()
       ? 'This translation belongs to previous text or settings.' : '';
+    applyContentLanguages();
   }
 
   function sameInput() {
@@ -56,6 +58,22 @@
   function detectedSourceLanguage() {
     const languages = job.results.filter((_result, index) => job.units[index].trim()).map(result => result.sourceLanguage);
     return languages.length && languages[0] && languages.every(language => language === languages[0]) ? languages[0] : null;
+  }
+
+  function applyContentLanguages() {
+    const choice = get('sourceLanguage').value.trim();
+    let sourceLanguage = '';
+    if (get('sourceText').value) {
+      if (choice === 'auto') {
+        if (job && get('sourceText').value === job.source) {
+          const detected = detectedSourceLanguage();
+          if (detected) sourceLanguage = getTargetLanguageCode(detected);
+        }
+      } else sourceLanguage = getTargetLanguageCode(choice);
+    }
+    get('sourceText').lang = sourceLanguage;
+    get('translatedText').lang = job && get('translatedText').value
+      ? getTargetLanguageCode(job.settings.targetLanguage) : '';
   }
 
   function renderJob() {
