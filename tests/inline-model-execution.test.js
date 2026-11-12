@@ -25,6 +25,134 @@ function translatedReasoning(record) {
 exports.name = 'inline model execution';
 exports.tests = [
   {
+    name: 'keeps emphasized example metadata behind token, protected-content and meaning checks',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      const sentence = 'The report was written by Maya.';
+      const emphasis = element('em', text(sentence));
+      const block = element('p', text('Before: "'), emphasis, text('"'));
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const source = serialized.template;
+      const raw = source.slice('Before: "'.length, -1);
+      const meaning = '마야가 보고서를 작성했다.';
+      const output = source.replace('Before:', '이전:') + `(${meaning})`;
+      for (const partial of [raw.slice(1), raw.slice(0, -1)]) {
+        assert.deepEqual(assessTranslationQuality(source, output, 'ko', serialized.contract,
+          [example(source, output, partial, meaning)]).codes, ['quality.english_residue']);
+      }
+      const englishMeaning = `마야가 ${sentence}`;
+      const outputWithEnglish = output.replace(meaning, englishMeaning);
+      assert.deepEqual(assessTranslationQuality(source, outputWithEnglish, 'ko', serialized.contract,
+        [example(source, outputWithEnglish, raw, englishMeaning)]).codes, ['quality.english_residue']);
+      const record = { id: 'unsafe-emphasis', template: source, atoms: serialized.atoms,
+        contract: serialized.contract, repair: null };
+      const { openToken, closeToken } = serialized.contract.entries[0];
+      for (const [template, code] of [
+        [output.replace(closeToken, ''), 'structure.token_missing'],
+        [output.replace(closeToken, openToken), 'structure.token_duplicate'],
+        [output.replace(openToken, `${openToken}⟦UNKNOWN:OPEN:W9⟧`), 'structure.token_unknown'],
+      ]) {
+        assert.deepEqual(assessTranslationQuality(source, template, 'ko', serialized.contract,
+          [example(source, template, sentence, meaning)]).codes, ['quality.english_residue']);
+        const requests = [];
+        const [result] = await execute([record], SETTINGS, async request => {
+          requests.push(request);
+          return response([{ id: record.id, template, languageExamples: [example(source, template, sentence, meaning)] }]);
+        });
+        assert.equal(result.disposition, 'reject');
+        assert.equal(result.terminalCode, code);
+        assert.equal(requests.length, 2);
+      }
+      for (const protectedNode of [element('code', text('literal')), text(' ./docs/guide.md'), text(' ⟦LITERAL:ATOM:A1⟧')]) {
+        const protectedBlock = element('p', text('Before: "'), element('em', text(sentence), protectedNode), text('"'));
+        document.body.appendChild(protectedBlock);
+        const protectedRecord = codec.serializeBlock(protectedBlock);
+        assert.equal(protectedRecord.ok, true);
+        const protectedSource = protectedRecord.template;
+        const protectedOutput = protectedSource.replace('Before:', '이전:') + `(${meaning})`;
+        const original = protectedSource.slice('Before: "'.length, -1);
+        assert.deepEqual(assessTranslationQuality(protectedSource, protectedOutput, 'ko', protectedRecord.contract,
+          [example(protectedSource, protectedOutput, original, meaning)]).codes, ['quality.english_residue']);
+      }
+    },
+  },
+  {
+    name: 'applies and restores internally emphasized bilingual examples on initial and repaired responses',
+    async fn() {
+      for (const placement of ['internal', 'whole', 'boundary']) {
+        for (const repair of [false, true]) {
+          const { document, element, text } = createTestDocument();
+          const sentence = 'The report was written by Maya.';
+          const emphasis = element('em', text(placement === 'internal' ? 'report' : placement === 'whole' ? sentence : 'The'));
+          const children = placement === 'internal' ? [text('The '), emphasis, text(' was written by Maya.')]
+            : placement === 'whole' ? [emphasis] : [emphasis, text(' report was written by Maya.')];
+          const block = element('p', text('Prefer active voice. Before: "'), ...children, text('"'));
+          document.body.appendChild(block);
+          const originalChildren = [...block.childNodes];
+          const originalEmphasisChildren = [...emphasis.childNodes];
+          const serialized = codec.serializeBlock(block);
+          assert.equal(serialized.ok, true);
+          const source = serialized.template;
+          const raw = placement === 'whole' ? sentence : source.slice(source.indexOf('The'), -1);
+          const meaning = '마야가 보고서를 작성했다.';
+          const corrected = source.replace('Prefer active voice. Before:', '능동태를 쓰세요. 이전:') + `(${meaning})`;
+          const initial = corrected.replace('능동태를 쓰세요.', 'Prefer active voice.');
+          const requests = [];
+          const record = { id: 'emphasized-example', template: source, atoms: serialized.atoms,
+            contract: serialized.contract, repair: null };
+          const [result] = await execute([record], SETTINGS, async request => {
+            requests.push(request);
+            const template = repair && requests.length === 1 ? initial : corrected;
+            return response([{ id: record.id, template, languageExamples: [example(source, template, raw, meaning)] }]);
+          });
+          assert.equal(result.disposition, 'apply', `${placement}: ${repair}`);
+          assert.equal(result.attemptCount, repair ? 2 : 1);
+          assert.equal(requests.length, repair ? 2 : 1);
+          assert.equal(result.diagnostic.quality.status, 'complete');
+          if (repair) assert.deepEqual(JSON.parse(requests[1].input).records[0].repair.untranslatedPhrases, ['Prefer active voice']);
+          assert.equal(JSON.stringify(result).includes('languageExamples'), false);
+          assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, result.template).ok, true);
+          assert.equal(block.textContent, `능동태를 쓰세요. 이전: "${sentence}"(${meaning})`);
+          assert.equal(emphasis.parentNode, block);
+          assert.equal(emphasis.textContent, placement === 'internal' ? 'report' : placement === 'whole' ? sentence : 'The');
+          assert.equal(codec.restoreBlock(serialized.snapshot).ok, true);
+          assert.equal(block.childNodes.length, originalChildren.length);
+          originalChildren.forEach((node, index) => assert.equal(block.childNodes[index], node));
+          assert.equal(emphasis.childNodes.length, originalEmphasisChildren.length);
+          originalEmphasisChildren.forEach((node, index) => assert.equal(emphasis.childNodes[index], node));
+          assert.equal(block.textContent, `Prefer active voice. Before: "${sentence}"`);
+        }
+      }
+    },
+  },
+  {
+    name: 'rejects example spans splitting hyphenated and apostrophe words in either template',
+    fn() {
+      const meaning = '다시 쓴 문장.';
+      for (const word of ['re-written', "author's", 'author’s']) {
+        const full = `${word} prose. Use active voice.`;
+        for (const [original, complete] of [
+          [`${word.slice(word.search(/[-'’]/) + 1)} prose. Use active voice.`, full],
+          [`Use active voice. ${word.slice(0, word.search(/[-'’]/))}`, `Use active voice. ${word}`],
+        ]) {
+          for (const splitSource of [true, false]) {
+            const source = `Use ${splitSource ? complete : original}`;
+            const output = `${splitSource ? original : complete}(${meaning})`;
+            const metadata = [example(source, output, original, meaning)];
+            assert.deepEqual(assessTranslationQuality(source, output, 'ko', null, metadata).codes,
+              ['quality.english_residue'], `${word}: ${original}: ${splitSource ? 'source' : 'output'}`);
+          }
+        }
+        const source = `Use ${full}`;
+        const output = `${full}(${meaning})`;
+        assert.equal(assessTranslationQuality(source, output, 'ko', null,
+          [example(source, output, full, meaning)]).status, 'complete', word);
+      }
+    },
+  },
+  {
     name: 'repairs surrounding prose without targeting valid bilingual active-voice examples',
     async fn() {
       const fixture = activeVoiceFixture();

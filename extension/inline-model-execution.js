@@ -9,6 +9,7 @@
   const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
   const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
   const LANGUAGE_EXAMPLE_FIELDS = ['source', 'meaning', 'sourceStart', 'sourceEnd', 'outputStart', 'outputEnd', 'meaningStart', 'meaningEnd'];
+  const ENGLISH_WORD = /[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
 
   function buildBlockInstructions({ targetLanguage, tone }, records) {
     const instructions = [
@@ -35,7 +36,7 @@
       instructions.push(
         'For English-to-Korean language guidance, retain an English Language Example only when the expression explains its own wording, grammar or style, and put its Korean meaning immediately beside it. Translate all surrounding explanations. Quotation or emphasis alone never makes a heading, quotation or ordinary prose a Language Example.',
         'During repair, preserve qualifying English Language Examples with their Korean meanings while translating remaining ordinary English explanations. Return fresh languageExamples with offsets into the exact original source and repaired template; never reuse offsets from repair.previousTemplate.',
-        'Return languageExamples: [] when there are no qualifying English examples. Otherwise declare each occurrence with source, meaning, sourceStart, sourceEnd, outputStart, outputEnd, meaningStart and meaningEnd. Offsets are zero-based UTF-16 code units into the exact original template and returned template, with inclusive starts and exclusive ends. source must exactly equal both source and output slices; meaning must exactly equal its Korean output slice. Keep source and meaning adjacent, separated only by punctuation or whitespace, without tokens or protected Source Syntax inside either span. Never duplicate or overlap source occurrences or output spans.',
+        'Return languageExamples: [] when there are no qualifying English examples. Otherwise declare each occurrence with source, meaning, sourceStart, sourceEnd, outputStart, outputEnd, meaningStart and meaningEnd. Offsets are zero-based UTF-16 code units into the exact original template and returned template, with inclusive starts and exclusive ends. source must exactly equal both source and output slices; meaning must exactly equal its Korean output slice. Keep source and meaning adjacent, separated only by punctuation, whitespace or complete formatting-wrapper tokens. Spans may contain complete formatting-wrapper tokens, but must never split a token or contain atom tokens, literal Placeholder Tokens or protected Source Syntax. Never duplicate or overlap source occurrences or output spans.',
         'For Korean, translate descriptive labels and short words: “QUICK START GUIDE” → “빠른 시작 안내”, “Hosted session block” → “호스팅된 세션 블록”, “recommended” → “권장”, and the verb “echoed” → “출력됨”. Keep surrounding OPEN/CLOSE tokens and neighboring atom tokens unchanged.',
         'For Korean, place a preserved atom before the translated noun phrase when natural. Example: “Reasoning models like [GPT-5.5] use ...” becomes “[GPT-5.5]와 같은 추론 모델은 ...”; write “모델은”, never “모델는”, choose particles from the visible label, and never emit empty example parenthesis.',
         'For Korean, do not guess a particle after an opaque technical or model atom. Add an appropriate classifier and attach the particle there, such as “[gpt-5.4] 모델을 고려하세요,” never “[gpt-5.4]을 고려하세요,” or rewrite the sentence to avoid a direct particle.'
@@ -142,7 +143,7 @@
       : [];
     const proseOnly = inlineTemplate.stripSourceSyntax(value, sourceSyntax);
     return Array.from(
-      proseOnly.matchAll(/[A-Za-z]+(?:['’-][A-Za-z]+)*|[,&/·]/g),
+      proseOnly.matchAll(new RegExp(`${ENGLISH_WORD.source}|[,&/·]`, 'g')),
       (match) => match[0]
     ).filter((word) => includeListPunctuation || /[A-Za-z]/.test(word));
   }
@@ -201,10 +202,16 @@
     if (!Array.isArray(examples) || !examples.length) return output;
     const sourceRanges = [];
     const outputRanges = [];
+    const wrapperTokens = (contract?.entries || []).filter(entry => entry.kind === 'wrapper')
+      .flatMap(entry => [entry.openToken, entry.closeToken]).filter(value => typeof value === 'string' && value);
+    if (wrapperTokens.length && (!inlineTemplate.validateSourceTemplate(source, contract).ok ||
+        !inlineTemplate.validateTranslatedTemplate(output, contract).ok)) return output;
     const protectedValues = (contract?.entries || []).flatMap(entry =>
-      [entry.token, entry.openToken, entry.closeToken]).concat(
+      entry.kind === 'wrapper' ? [] : [entry.token, entry.openToken, entry.closeToken]).concat(
       (contract?.sourceSyntax || []).map(item => item.value),
-      (contract?.literalTokens || []).map(item => item.value)
+      (contract?.literalTokens || []).map(item => item.value),
+      [...inlineTemplate.getTokenLikeLiterals(source), ...inlineTemplate.getTokenLikeLiterals(output)]
+        .filter(value => !wrapperTokens.includes(value))
     ).filter(value => typeof value === 'string' && value);
     function validSpan(text, start, end, value) {
       if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= end || end > text.length ||
@@ -213,8 +220,15 @@
         if (/[\uD800-\uDBFF]/.test(text[boundary - 1] || '') && /[\uDC00-\uDFFF]/.test(text[boundary] || '')) return false;
         if (text[boundary - 1] === '\r' && text[boundary] === '\n') return false;
       }
-      if (/[A-Za-z]/.test(text[start - 1] || '') && /^[A-Za-z]/.test(value) ||
-          /[A-Za-z]$/.test(value) && /[A-Za-z]/.test(text[end] || '')) return false;
+      for (const match of text.matchAll(ENGLISH_WORD)) {
+        const wordEnd = match.index + match[0].length;
+        if (match.index < start && start < wordEnd || match.index < end && end < wordEnd) return false;
+      }
+      for (const token of wrapperTokens) {
+        const index = text.indexOf(token);
+        if (index !== -1 && start < index + token.length && index < end &&
+            (start > index || end < index + token.length)) return false;
+      }
       for (const protectedValue of protectedValues) {
         let index = text.indexOf(protectedValue);
         while (index !== -1) {
@@ -236,7 +250,8 @@
       const meaning = [item.meaningStart, item.meaningEnd];
       const gap = example[1] <= meaning[0] ? output.slice(example[1], meaning[0])
         : meaning[1] <= example[0] ? output.slice(meaning[1], example[0]) : null;
-      if (gap === null || !/^[\s\p{P}\p{S}]*$/u.test(gap)) return output;
+      if (gap === null || !/^[\s\p{P}\p{S}]*$/u.test(
+        wrapperTokens.reduce((text, token) => text.split(token).join(''), gap))) return output;
       sourceRanges.push(original);
       outputRanges.push(example, meaning);
     }
