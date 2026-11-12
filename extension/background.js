@@ -788,7 +788,7 @@ function createBackgroundWorker(platform = {}) {
             }
             if (!saved || saved.documentId !== sender.documentId) throw documentEnded();
             if (!Number.isSafeInteger(msg.revision) || msg.revision < 1) throw documentEnded();
-            if (msg.revision <= (saved?.revision || 0)) return { ok: true };
+            if (msg.revision <= saved.revision) return { ok: true };
             const state = msg.type === 'SAVE_TEXT_TRANSLATION_STATE' ? textTranslationRequest.retainedState(msg.state) : null;
             await getChrome().storage.session.set({ [key]: { documentId: sender.documentId, revision: msg.revision, state } });
             return { ok: true };

@@ -240,16 +240,14 @@ export function buildQualityPlan(pageIds, profileKeys = PROFILES.map(profile => 
   if (!Array.isArray(profileKeys) || !profileKeys.length || new Set(profileKeys).size !== profileKeys.length) fail('Profile keys must be unique and nonempty.');
   const profiles = profileKeys.map(resolveProfile);
   for (const page of pageIds) {
-    for (const flow of ['inline']) {
-      for (const profile of profiles) {
-        runs.push({
-          id: `${encodeURIComponent(page)}|${flow}|${profile.key}`,
-          page,
-          flow,
-          profileKey: profile.key,
-          profile,
-        });
-      }
+    for (const profile of profiles) {
+      runs.push({
+        id: `${encodeURIComponent(page)}|inline|${profile.key}`,
+        page,
+        flow: 'inline',
+        profileKey: profile.key,
+        profile,
+      });
     }
   }
   if (new Set(runs.map((run) => run.id)).size !== runs.length) fail('Quality plan ids must be unique.');

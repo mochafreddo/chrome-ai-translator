@@ -731,22 +731,19 @@ exports.tests.push({
 exports.tests.push({
   name: 'polling during a button tab query does not discard an action on the same tab',
   async fn() {
-    for (const action of ['control']) {
-      const panel = modulePanel();
-      await panel.controller.start(10);
-      const waiting = deferred();
-      panel.setQuery(() => waiting.promise);
-      panel.setSend(() => ({ ok: true }));
-      const button = panel.controller.runInlineControl('STOP');
-      panel.setQuery(async () => ({ id: 1 }));
-      await panel.controller.refresh();
-      waiting.resolve({ id: 1 });
-      await button;
-      const message = panel.sent.find((msg) => msg.type ===
-        ('RUN_INLINE_TRANSLATION_CONTROL'));
-      assert.ok(message, `${action} button action was lost during polling`);
-      assert.equal(message.tabId, 1);
-    }
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const waiting = deferred();
+    panel.setQuery(() => waiting.promise);
+    panel.setSend(() => ({ ok: true }));
+    const button = panel.controller.runInlineControl('STOP');
+    panel.setQuery(async () => ({ id: 1 }));
+    await panel.controller.refresh();
+    waiting.resolve({ id: 1 });
+    await button;
+    const message = panel.sent.find((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL');
+    assert.ok(message, 'control button action was lost during polling');
+    assert.equal(message.tabId, 1);
   },
 });
 
@@ -800,48 +797,47 @@ exports.tests.push({
   },
 });
 
-exports.tests.push(...['control'].flatMap((action) =>
-  ['failure', 'rejection'].flatMap((outcome) => [false, true].flatMap((actual) =>
-    [false, true].map((returnToA) => ({
-      name: `${actual ? 'actual button' : 'module'} ${action} ignores late ${outcome} after ${returnToA ? 'A to B to A' : 'A to B'}`,
-      async fn() {
-        const panel = actual ? domPanel() : modulePanel();
-        if (actual) await settle();
-        else await panel.controller.start(10);
-        const pending = deferred();
-        const actionType = 'RUN_INLINE_TRANSLATION_CONTROL';
-        panel.setSend((msg) => msg.type === actionType ? pending.promise
-          : response(msg.type, 'current'));
-        const running = actual
-          ? panel.element('btnInlineStop').listeners.click()
-          : panel.controller.runInlineControl('STOP');
-        await settle();
-        assert.equal(panel.sent.filter((msg) => msg.type === actionType).length, 1);
-        assert.equal(panel.sent.find((msg) => msg.type === actionType).tabId, 1);
-        await panel.activate(2);
-        await settle();
-        if (returnToA) { await panel.activate(1); await settle(); }
-        const readDisplay = () => actual
-          ? ['inlineStatus', 'inlineError',
-            'btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore']
-            .map((id) => {
-              const { textContent, hidden, disabled } = panel.element(id);
-              return { textContent, hidden, disabled };
-            })
-          : panel.display();
-        const before = readDisplay();
-        if (outcome === 'rejection') pending.reject(new Error('old action failed'));
-        else pending.resolve({ ok: false, error: { message: 'old action failed' } });
-        await running;
-        await settle();
-        assert.deepEqual(readDisplay(), before);
-        assert.equal(panel.sent.filter((msg) =>
-          ['RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
-      },
-    }))))));
+exports.tests.push(...['failure', 'rejection'].flatMap((outcome) => [false, true].flatMap((actual) =>
+  [false, true].map((returnToA) => ({
+    name: `${actual ? 'actual button' : 'module'} control ignores late ${outcome} after ${returnToA ? 'A to B to A' : 'A to B'}`,
+    async fn() {
+      const panel = actual ? domPanel() : modulePanel();
+      if (actual) await settle();
+      else await panel.controller.start(10);
+      const pending = deferred();
+      const actionType = 'RUN_INLINE_TRANSLATION_CONTROL';
+      panel.setSend((msg) => msg.type === actionType ? pending.promise
+        : response(msg.type, 'current'));
+      const running = actual
+        ? panel.element('btnInlineStop').listeners.click()
+        : panel.controller.runInlineControl('STOP');
+      await settle();
+      assert.equal(panel.sent.filter((msg) => msg.type === actionType).length, 1);
+      assert.equal(panel.sent.find((msg) => msg.type === actionType).tabId, 1);
+      await panel.activate(2);
+      await settle();
+      if (returnToA) { await panel.activate(1); await settle(); }
+      const readDisplay = () => actual
+        ? ['inlineStatus', 'inlineError',
+          'btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore']
+          .map((id) => {
+            const { textContent, hidden, disabled } = panel.element(id);
+            return { textContent, hidden, disabled };
+          })
+        : panel.display();
+      const before = readDisplay();
+      if (outcome === 'rejection') pending.reject(new Error('old action failed'));
+      else pending.resolve({ ok: false, error: { message: 'old action failed' } });
+      await running;
+      await settle();
+      assert.deepEqual(readDisplay(), before);
+      assert.equal(panel.sent.filter((msg) =>
+        ['RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
+    },
+  })))));
 
-exports.tests.push(...['control'].map((action) => ({
-  name: `${action} completion and its follow-up queries stay with the requesting visit`,
+exports.tests.push({
+  name: 'control completion and its follow-up queries stay with the requesting visit',
   async fn() {
     for (const switchDuringFollowUp of [false, true]) {
       const panel = modulePanel();
@@ -877,42 +873,36 @@ exports.tests.push(...['control'].map((action) => ({
         ['RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
     }
   },
+});
+
+exports.tests.push(...['failure', 'rejection', 'success'].map((outcome) => ({
+  name: `current control ${outcome} remains valid across repeated polling`,
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const pending = deferred();
+    const actionType = 'RUN_INLINE_TRANSLATION_CONTROL';
+    panel.setSend((msg) => msg.type === actionType ? pending.promise : response(msg.type, 'polled'));
+    const running = panel.controller.runInlineControl('STOP');
+    await settle();
+    for (let i = 0; i < 3; i += 1) await panel.controller.refresh();
+    if (outcome === 'success') {
+      panel.setSend((msg) => {
+        const result = response(msg.type, 'completed');
+        if (result.state) Object.assign(result.state, { stateSequence: 2 });
+        return result;
+      });
+      pending.resolve({ ok: true, skipped: false });
+    } else if (outcome === 'rejection') pending.reject(new Error('current action failed'));
+    else pending.resolve({ ok: false, error: { message: 'current action failed' } });
+    await running;
+    if (outcome === 'success') {
+      assert.equal(panel.display().inline.controlError, '');
+      assert.equal(panel.display().inline.snapshot.progress, 'inline completed');
+      assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut completed');
+    } else {
+      assert.equal(panel.display().inline.controlError,
+        'current action failed');
+    }
+  },
 })));
-
-exports.tests.push(...['control'].flatMap((action) =>
-  ['failure', 'rejection', 'success', ...([])].map((outcome) => ({
-    name: `current ${action} ${outcome} remains valid across repeated polling`,
-    async fn() {
-      const panel = modulePanel();
-      await panel.controller.start(10);
-      const pending = deferred();
-      const actionType = 'RUN_INLINE_TRANSLATION_CONTROL';
-      panel.setSend((msg) => msg.type === actionType ? pending.promise : response(msg.type, 'polled'));
-      const running = panel.controller.runInlineControl('STOP');
-      await settle();
-      for (let i = 0; i < 3; i += 1) await panel.controller.refresh();
-      if (outcome === 'success' || outcome === 'skipped') {
-        panel.setSend((msg) => {
-          const result = response(msg.type, 'completed');
-          if (result.state) Object.assign(result.state, { stateSequence: 2 });
-          return result;
-        });
-
-        pending.resolve({ ok: true, skipped: outcome === 'skipped' });
-      } else if (outcome === 'rejection') pending.reject(new Error('current action failed'));
-      else pending.resolve({ ok: false, error: { message: 'current action failed' } });
-      await running;
-      if (outcome === 'success' || outcome === 'skipped') {
-
-        assert.equal(panel.display().inline.controlError, '');
-        {
-          assert.equal(panel.display().inline.snapshot.progress, 'inline completed');
-          assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut completed');
-        }
-      } else {
-        assert.equal(panel.display().inline.controlError,
-          'current action failed');
-
-      }
-    },
-  }))));

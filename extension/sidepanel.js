@@ -112,8 +112,6 @@ function readInlineTranslationError(state) {
   return state?.inlineTranslationError?.message || '';
 }
 
-// One owner for the panel's tab selection and Inline Translation display. Adapters
-// supply Chrome queries and messages; rendering observes only the public display state.
 function createTabStateController({ queryActiveTab, readDocumentId, sendMessage: send, render }) {
   let tabId = null;
   let documentId;

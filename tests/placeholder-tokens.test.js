@@ -1,10 +1,10 @@
 // The Placeholder Token contract, checked once because it is decided once.
 //
-// Inline codec tests cover the reported validation codes; these exercise the token walk.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const placeholderTokens = require('../extension/placeholder-tokens.js');
 
@@ -201,19 +201,41 @@ exports.tests = [
   {
     name: 'Inline template validation uses the shared token walk',
     fn() {
-      for (const file of ['inline-template.js']) {
-        const source = readExtensionFile(file);
-        assert.match(source, /placeholderTokens\.enumerateExpectedTokens\(/, file);
-        assert.match(source, /placeholderTokens\.walkExpectedTokens\(/, file);
-        // Nothing outside the walk mints a node of the tree it returns. Reading one is fine —
-        // the inline codec rebuilds a block's children from it — so this looks for the shape
-        // of a node being built, which is what a second walk would have to do.
-        assert.equal(
-          /type: '(root|wrapper|atom|text)'/.test(source),
-          false,
-          `${file} builds a token tree of its own`
-        );
-      }
+      const calls = [];
+      const scope = { ChromeAiTranslatorPlaceholderTokens: {
+        ...placeholderTokens,
+        enumerateExpectedTokens(entries, classify) {
+          const tokens = placeholderTokens.enumerateExpectedTokens(entries, classify);
+          calls.push({ entries, tokens });
+          return tokens;
+        },
+        walkExpectedTokens(answer, tokens, options) {
+          const walked = placeholderTokens.walkExpectedTokens(answer, tokens, options);
+          calls.push({ answer, tokens, options, walked });
+          return walked;
+        },
+      } };
+      vm.runInNewContext(readExtensionFile('inline-template.js'), scope);
+      const contract = { namespace: NS, entries: INLINE_ENTRIES };
+      const [wrapper, atom] = INLINE_ENTRIES;
+      const template = `${wrapper.openToken}문서${wrapper.closeToken}${atom.token}`;
+      const result = scope.ChromeAiTranslatorInlineTemplate.validateTranslatedTemplate(template, contract);
+      assert.equal(result.ok, true);
+      assert.equal(calls.length, 2);
+      assert.deepEqual(calls[0].entries, INLINE_ENTRIES);
+      assert.equal(calls[1].tokens, calls[0].tokens);
+      assert.equal(calls[1].answer, template);
+      assert.equal(calls[1].options.trackParents, true);
+      assert.equal(result.tree, calls[1].walked.tree);
+      assert.deepEqual(result.tree, { type: 'root', id: 'ROOT', children: [
+        { type: 'wrapper', id: 'W1', children: [{ type: 'text', value: '문서' }] },
+        { type: 'atom', id: 'A1' },
+      ] });
+      const invalid = scope.ChromeAiTranslatorInlineTemplate.validateTranslatedTemplate(
+        `${wrapper.closeToken}문서${wrapper.openToken}${atom.token}`, contract
+      );
+      assert.equal(invalid.ok, false);
+      assert.equal(invalid.errorCode, 'token_nesting_invalid');
     },
   },
 ];
