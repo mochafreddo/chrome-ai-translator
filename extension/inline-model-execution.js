@@ -26,14 +26,15 @@
     ];
     if (records.some((record) => record.repair?.previousErrorCode === 'quality.english_residue')) {
       instructions.push(
-        'For quality.english_residue, translate every remaining ordinary English word and descriptive heading or reference, including emphasized adjectives and verbs next to atoms. Do not treat section names or quoted headings as identifiers; retain only actual code, path and identifier spellings and required placeholder tokens.',
+        'For quality.english_residue, translate every remaining ordinary English word and descriptive heading or reference, including emphasized adjectives and verbs next to atoms. Do not treat section names or quoted headings as identifiers; preserve actual code, path and identifier spellings and required placeholder tokens.',
         'When repair.previousTemplate is present, it is the previous incomplete translation, not authoritative source text. Compare it with the original template, correct all remaining descriptive English, and return a complete translation of the original without losing meaning or changing protected content.',
-        'repair.untranslatedPhrases identifies English wording that failed validation. Translate the descriptive words in those phrases, including uppercase labels and section references; only actual tool identifiers inside them may retain their spelling.'
+        'repair.untranslatedPhrases identifies English wording that failed validation. Translate the descriptive words in those phrases, including uppercase labels and section references; preserve actual tool identifiers inside them.'
       );
     }
     if (getTargetLanguageCode(targetLanguage) === 'ko') {
       instructions.push(
         'For English-to-Korean language guidance, retain an English Language Example only when the expression explains its own wording, grammar or style, and put its Korean meaning immediately beside it. Translate all surrounding explanations. Quotation or emphasis alone never makes a heading, quotation or ordinary prose a Language Example.',
+        'During repair, preserve qualifying English Language Examples with their Korean meanings while translating remaining ordinary English explanations. Return fresh languageExamples with offsets into the exact original source and repaired template; never reuse offsets from repair.previousTemplate.',
         'Return languageExamples: [] when there are no qualifying English examples. Otherwise declare each occurrence with source, meaning, sourceStart, sourceEnd, outputStart, outputEnd, meaningStart and meaningEnd. Offsets are zero-based UTF-16 code units into the exact original template and returned template, with inclusive starts and exclusive ends. source must exactly equal both source and output slices; meaning must exactly equal its Korean output slice. Keep source and meaning adjacent, separated only by punctuation or whitespace, without tokens or protected Source Syntax inside either span. Never duplicate or overlap source occurrences or output spans.',
         'For Korean, translate descriptive labels and short words: “QUICK START GUIDE” → “빠른 시작 안내”, “Hosted session block” → “호스팅된 세션 블록”, “recommended” → “권장”, and the verb “echoed” → “출력됨”. Keep surrounding OPEN/CLOSE tokens and neighboring atom tokens unchanged.',
         'For Korean, place a preserved atom before the translated noun phrase when natural. Example: “Reasoning models like [GPT-5.5] use ...” becomes “[GPT-5.5]와 같은 추론 모델은 ...”; write “모델은”, never “모델는”, choose particles from the visible label, and never emit empty example parenthesis.',
@@ -357,6 +358,7 @@
         return {
           id: record.id,
           template,
+          languageExamples,
           structure,
           quality: structureValidation.ok
             ? assessTranslationQuality(
@@ -449,7 +451,9 @@
         if (decision.terminalCode === 'quality.english_residue' && result.structure.status === 'safe') {
           const residue = sharedEnglishEvidence(
             removeContractTokens(source.template, source.contract),
-            removeContractTokens(result.template, source.contract),
+            removeContractTokens(getTargetLanguageCode(settings.targetLanguage) === 'ko'
+              ? maskLanguageExamples(source.template, result.template, source.contract, result.languageExamples)
+              : result.template, source.contract),
             source.contract
           );
           repairDetails.previousTemplate = result.template;

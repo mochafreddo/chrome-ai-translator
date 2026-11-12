@@ -25,6 +25,113 @@ function translatedReasoning(record) {
 exports.name = 'inline model execution';
 exports.tests = [
   {
+    name: 'repairs surrounding prose without targeting valid bilingual active-voice examples',
+    async fn() {
+      const fixture = activeVoiceFixture();
+      const source = `${fixture.source} Put the person performing the action first, so readers can immediately identify the subject and understand the sentence without having to reconstruct the relationship between the person and the action.`;
+      const initial = fixture.template.replace('능동태를 쓰세요.', 'Prefer active voice.');
+      const corrected = `다음 예문을 비교하세요. ${fixture.template}`;
+      const record = plainRecord('voice', source);
+      const requests = [];
+      const [result] = await execute([record], SETTINGS, async request => {
+        requests.push(request);
+        const template = requests.length === 1 ? initial : corrected;
+        return response([{ id: record.id, template, languageExamples: fixture.languageExamples.map(item =>
+          example(source, template, item.source, item.meaning)) }]);
+      });
+      assert.equal(requests.length, 2);
+      const repair = JSON.parse(requests[1].input).records[0];
+      assert.equal(repair.template, source);
+      assert.deepEqual(repair.repair, { attempt: 1, previousErrorCode: 'quality.english_residue',
+        previousTemplate: initial, untranslatedPhrases: ['Prefer active voice'] });
+      assert.match(requests[1].instructions, /repair.*Language Examples.*Korean meanings/i);
+      assert.match(requests[1].instructions, /fresh languageExamples.*repaired template/i);
+      assert.equal(result.disposition, 'apply');
+      assert.equal(result.template, corrected);
+      assert.equal(result.attemptCount, 2);
+      assert.equal(result.diagnostic.quality.status, 'complete');
+      assert.ok(Number.isSafeInteger(result.repairRecordCost));
+      assert.ok(result.repairRecordCost > requestPreparation.measureRecord(record).actualCost);
+      assert.equal(JSON.stringify(result).includes('languageExamples'), false);
+    },
+  },
+  {
+    name: 'revalidates each repaired example and warns once for invalid declarations or remaining prose',
+    async fn() {
+      const fixture = activeVoiceFixture();
+      const source = fixture.source;
+      const initial = fixture.template.replace('능동태를 쓰세요.', 'Prefer active voice.');
+      const corrected = `수정한 예문: ${fixture.template}`;
+      const fresh = fixture.languageExamples.map(item => example(source, corrected, item.source, item.meaning));
+      const first = fresh[0];
+      const stale = fixture.languageExamples.map(item => example(source, initial, item.source, item.meaning));
+      const overlap = example(source, corrected, 'report was written', first.meaning);
+      const meaningWithEnglish = corrected.replace(first.meaning, '마야가 The report was written by Maya.');
+      const cases = [
+        ['fresh', corrected, fresh, 'apply'],
+        ['stale offsets', corrected, stale],
+        ['source mismatch', corrected, [{ ...first, sourceStart: first.sourceStart + 1 }, fresh[1]]],
+        ['wrong original', corrected, [{ ...first, source: 'The report is written by Maya.' }, fresh[1]]],
+        ['missing meaning', corrected.replaceAll(first.meaning, ''), fresh],
+        ['wrong output range', corrected, [{ ...first, outputEnd: first.outputEnd - 1 }, fresh[1]]],
+        ['duplicate', corrected, [...fresh, first]],
+        ['overlap', corrected, [...fresh, overlap]],
+        ['ambiguous field', corrected, [{ ...first, alternativeOutputStart: first.outputStart }, fresh[1]]],
+        ['missing metadata', corrected, undefined],
+        ['missing occurrence', corrected, [first]],
+        ['other occurrence', `${corrected} The report was written by Maya.`, fresh],
+        ['remaining explanation', `${corrected} Prefer active voice.`, fresh],
+        ['English in meaning', meaningWithEnglish, [
+          example(source, meaningWithEnglish, first.source, '마야가 The report was written by Maya.'),
+          example(source, meaningWithEnglish, fresh[1].source, fresh[1].meaning),
+        ]],
+      ];
+      for (const [label, template, languageExamples, expected = 'apply_with_warning'] of cases) {
+        const requests = [];
+        const [result] = await execute([plainRecord('voice', source)], SETTINGS, async request => {
+          requests.push(request);
+          return response([{ id: 'voice', template: requests.length === 1 ? initial : template,
+            languageExamples: requests.length === 1 ? stale : languageExamples }]);
+        });
+        assert.equal(result.disposition, expected, label);
+        assert.equal(result.template, template, label);
+        assert.equal(result.attemptCount, 2, label);
+        assert.equal(requests.length, 2, label);
+        assert.equal(result.terminalCode, expected === 'apply' ? null : 'quality.english_residue', label);
+        assert.equal(result.diagnostic.quality.status, expected === 'apply' ? 'complete' : 'partial', label);
+        for (const request of requests) {
+          assert.equal(JSON.parse(request.input).records[0].template, source);
+          assert.ok(request.input.length <= 12000);
+          assert.equal(request.maxOutputTokens, 4096);
+        }
+      }
+    },
+  },
+  {
+    name: 'rejects unsafe or non-Korean repaired examples without a third request',
+    async fn() {
+      const fixture = activeVoiceFixture();
+      for (const unsafe of [false, true]) {
+        const record = reasoningRecord('voice');
+        record.template = `${fixture.source} ${record.template}`;
+        const initial = record.template.replace('Prefer active voice.', '능동태를 쓰세요.');
+        const template = unsafe ? fixture.template : record.template;
+        const requests = [];
+        const [result] = await execute([record], SETTINGS, async request => {
+          requests.push(request);
+          const output = requests.length === 1 ? initial : template;
+          return response([{ id: record.id, template: output, languageExamples: fixture.languageExamples.map(item =>
+            example(record.template, output, item.source, item.meaning)) }]);
+        });
+        assert.equal(requests.length, 2);
+        assert.equal(result.attemptCount, 2);
+        assert.equal(result.disposition, 'reject');
+        assert.equal(Object.hasOwn(result, 'template'), false);
+        assert.equal(result.terminalCode, unsafe ? 'structure.token_missing' : 'quality.target_language_missing');
+      }
+    },
+  },
+  {
     name: 'uses UTF-16 template bounds and preserves protected content and target-language rejection',
     async fn() {
       const source = '😀Use active voice.';
