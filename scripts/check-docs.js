@@ -140,14 +140,22 @@ function headings(text) {
   return result;
 }
 
-function checkDocs(root) {
+function checkDocs(root, extraFiles = []) {
   root = fs.realpathSync(root);
-  const files = listFiles(git(root, 'ls-files', '-z', '--', '*.md', '*.markdown'));
-  if (!files.length) throw new Error('No tracked Markdown files to check.');
+  const files = new Set(listFiles(git(root, 'ls-files', '-z', '--', '*.md', '*.markdown')));
+  for (const name of extraFiles) {
+    const input = path.resolve(root, name);
+    const source = path.join(fs.realpathSync(path.dirname(input)), path.basename(input));
+    localPath(root, source);
+    if (!isMarkdown(source) || !fs.statSync(source).isFile()) throw new Error(`${name}: expected a Markdown file`);
+    files.add(path.relative(root, source).split(path.sep).join('/'));
+  }
+  const names = [...files];
+  if (!names.length) throw new Error('No tracked Markdown files to check.');
   const errors = [];
   const indexed = new Set();
   let count = 0;
-  for (const name of files) {
+  for (const name of names) {
     const source = path.join(root, name);
     if (!fs.existsSync(source)) { errors.push(`${name}: tracked document is missing`); continue; }
     try { localPath(root, source); }
@@ -169,10 +177,10 @@ function checkDocs(root) {
       } catch (error) { errors.push(`${name}:${line}: ${link.target}: ${error.message}`); }
     }
   }
-  for (const name of files.filter((name) => name.startsWith('docs/') && name !== 'docs/README.md')) {
+  for (const name of names.filter((name) => name.startsWith('docs/') && name !== 'docs/README.md')) {
     if (!indexed.has(name)) errors.push(`docs/README.md: document is not indexed: ${name}`);
   }
-  return { errors, files: files.length, links: count };
+  return { errors, files: names.length, links: count };
 }
 
 function originalRecord(buffer) {
@@ -209,19 +217,22 @@ function checkHistory(root, base) {
 function main(args) {
   let history = false;
   let base;
+  const extraFiles = [];
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === '--history' && !history) history = true;
     else if (args[i] === '--base' && base === undefined && args[i + 1] && !args[i + 1].startsWith('--')) base = args[++i];
-    else throw new Error('Usage: check-docs.js [--history --base <full-commit-hash>]');
+    else if (args[i] === '--file' && args[i + 1] && !args[i + 1].startsWith('--')) extraFiles.push(args[++i]);
+    else throw new Error('Usage: check-docs.js [--file <path> ... | --history --base <full-commit-hash>]');
   }
   if (!history && base !== undefined) throw new Error('--base is only valid with --history.');
+  if (extraFiles.length && (history || base !== undefined)) throw new Error('--file cannot be used with --history or --base.');
   const root = git(process.cwd(), 'rev-parse', '--show-toplevel').toString('utf8').trim();
-  const result = history ? checkHistory(root, base) : checkDocs(root);
+  const result = history ? checkHistory(root, base) : checkDocs(root, extraFiles);
   for (const error of result.errors) console.error(`FAIL ${error}`);
   if (result.errors.length) process.exitCode = 1;
   else console.log(history
     ? `PASS historical titles and original bodies: ${result.files} records against ${base}`
-    : `PASS documentation: ${result.files} tracked Markdown files, ${result.links} local links; anchors and index coverage checked`);
+    : `PASS documentation: ${result.files} ${extraFiles.length ? 'tracked and explicitly selected' : 'tracked'} Markdown files, ${result.links} local links; anchors and index coverage checked`);
 }
 
 module.exports = { checkDocs, checkHistory, headings, links, originalRecord };
