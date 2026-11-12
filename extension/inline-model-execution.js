@@ -8,6 +8,7 @@
     (typeof module !== 'undefined' && module.exports ? require('./inline-request.js') : null);
   const INLINE_BLOCK_MIN_OUTPUT_TOKENS = 4096;
   const INLINE_BLOCK_MAX_OUTPUT_TOKENS = 16000;
+  const LANGUAGE_EXAMPLE_FIELDS = ['source', 'meaning', 'sourceStart', 'sourceEnd', 'outputStart', 'outputEnd', 'meaningStart', 'meaningEnd'];
 
   function buildBlockInstructions({ targetLanguage, tone }, records) {
     const instructions = [
@@ -32,6 +33,8 @@
     }
     if (getTargetLanguageCode(targetLanguage) === 'ko') {
       instructions.push(
+        'For English-to-Korean language guidance, retain an English Language Example only when the expression explains its own wording, grammar or style, and put its Korean meaning immediately beside it. Translate all surrounding explanations. Quotation or emphasis alone never makes a heading, quotation or ordinary prose a Language Example.',
+        'Return languageExamples: [] when there are no qualifying English examples. Otherwise declare each occurrence with source, meaning, sourceStart, sourceEnd, outputStart, outputEnd, meaningStart and meaningEnd. Offsets are zero-based UTF-16 code units into the exact original template and returned template, with inclusive starts and exclusive ends. source must exactly equal both source and output slices; meaning must exactly equal its Korean output slice. Keep source and meaning adjacent, separated only by punctuation or whitespace, without tokens or protected Source Syntax inside either span. Never duplicate or overlap source occurrences or output spans.',
         'For Korean, translate descriptive labels and short words: “QUICK START GUIDE” → “빠른 시작 안내”, “Hosted session block” → “호스팅된 세션 블록”, “recommended” → “권장”, and the verb “echoed” → “출력됨”. Keep surrounding OPEN/CLOSE tokens and neighboring atom tokens unchanged.',
         'For Korean, place a preserved atom before the translated noun phrase when natural. Example: “Reasoning models like [GPT-5.5] use ...” becomes “[GPT-5.5]와 같은 추론 모델은 ...”; write “모델은”, never “모델는”, choose particles from the visible label, and never emit empty example parenthesis.',
         'For Korean, do not guess a particle after an opaque technical or model atom. Add an appropriate classifier and attach the particle there, such as “[gpt-5.4] 모델을 고려하세요,” never “[gpt-5.4]을 고려하세요,” or rewrite the sentence to avoid a direct particle.'
@@ -44,10 +47,26 @@
     return instructions.join('\n');
   }
 
-  function buildBlockResponseFormat(recordCount) {
+  function buildBlockResponseFormat(recordCount, targetLanguage) {
     const count = Number(recordCount);
     if (!Number.isInteger(count) || count < 1) {
       throw new Error('Semantic Block response format needs a record count');
+    }
+    const properties = { id: { type: 'string' }, template: { type: 'string' } };
+    if (getTargetLanguageCode(targetLanguage) === 'ko') {
+      properties.languageExamples = {
+        type: 'array',
+        items: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            source: { type: 'string' }, meaning: { type: 'string' },
+            sourceStart: { type: 'integer' }, sourceEnd: { type: 'integer' },
+            outputStart: { type: 'integer' }, outputEnd: { type: 'integer' },
+            meaningStart: { type: 'integer' }, meaningEnd: { type: 'integer' },
+          },
+          required: [...LANGUAGE_EXAMPLE_FIELDS],
+        },
+      };
     }
     return {
       type: 'json_schema',
@@ -64,11 +83,8 @@
             items: {
               type: 'object',
               additionalProperties: false,
-              properties: {
-                id: { type: 'string' },
-                template: { type: 'string' },
-              },
-              required: ['id', 'template'],
+              properties,
+              required: Object.keys(properties),
             },
           },
         },
@@ -180,7 +196,61 @@
     return Array.from(String(value || '').matchAll(/[가-힣]/g)).length;
   }
 
-  function assessTranslationQuality(sourceText, translatedText, targetLanguage, contract = null) {
+  function maskLanguageExamples(source, output, contract, examples) {
+    if (!Array.isArray(examples) || !examples.length) return output;
+    const sourceRanges = [];
+    const outputRanges = [];
+    const protectedValues = (contract?.entries || []).flatMap(entry =>
+      [entry.token, entry.openToken, entry.closeToken]).concat(
+      (contract?.sourceSyntax || []).map(item => item.value),
+      (contract?.literalTokens || []).map(item => item.value)
+    ).filter(value => typeof value === 'string' && value);
+    function validSpan(text, start, end, value) {
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= end || end > text.length ||
+          typeof value !== 'string' || text.slice(start, end) !== value) return false;
+      for (const boundary of [start, end]) {
+        if (/[\uD800-\uDBFF]/.test(text[boundary - 1] || '') && /[\uDC00-\uDFFF]/.test(text[boundary] || '')) return false;
+        if (text[boundary - 1] === '\r' && text[boundary] === '\n') return false;
+      }
+      if (/[A-Za-z]/.test(text[start - 1] || '') && /^[A-Za-z]/.test(value) ||
+          /[A-Za-z]$/.test(value) && /[A-Za-z]/.test(text[end] || '')) return false;
+      for (const protectedValue of protectedValues) {
+        let index = text.indexOf(protectedValue);
+        while (index !== -1) {
+          if (start < index + protectedValue.length && index < end) return false;
+          index = text.indexOf(protectedValue, index + 1);
+        }
+      }
+      return true;
+    }
+    for (const item of examples) {
+      if (!item || Object.keys(item).length !== LANGUAGE_EXAMPLE_FIELDS.length ||
+          !LANGUAGE_EXAMPLE_FIELDS.every(key => Object.hasOwn(item, key)) ||
+          !validSpan(source, item.sourceStart, item.sourceEnd, item.source) ||
+          !validSpan(output, item.outputStart, item.outputEnd, item.source) ||
+          !validSpan(output, item.meaningStart, item.meaningEnd, item.meaning) ||
+          !words(item.source).length || !countHangulSyllables(item.meaning)) return output;
+      const original = [item.sourceStart, item.sourceEnd];
+      const example = [item.outputStart, item.outputEnd];
+      const meaning = [item.meaningStart, item.meaningEnd];
+      const gap = example[1] <= meaning[0] ? output.slice(example[1], meaning[0])
+        : meaning[1] <= example[0] ? output.slice(meaning[1], example[0]) : null;
+      if (gap === null || !/^[\s\p{P}\p{S}]*$/u.test(gap)) return output;
+      sourceRanges.push(original);
+      outputRanges.push(example, meaning);
+    }
+    for (const ranges of [sourceRanges, outputRanges]) {
+      ranges.sort((left, right) => left[0] - right[0]);
+      if (ranges.some(([start], index) => index > 0 && start < ranges[index - 1][1])) return output;
+    }
+    let masked = output;
+    for (const item of [...examples].sort((left, right) => right.outputStart - left.outputStart)) {
+      masked = masked.slice(0, item.outputStart) + '\n' + masked.slice(item.outputEnd);
+    }
+    return masked;
+  }
+
+  function assessTranslationQuality(sourceText, translatedText, targetLanguage, contract = null, languageExamples = []) {
     const targetLanguageCode = getTargetLanguageCode(targetLanguage);
     const source = removeContractTokens(sourceText, contract);
     const output = removeContractTokens(translatedText, contract);
@@ -216,7 +286,10 @@
       };
     }
     if (targetLanguageCode !== 'en') {
-      const shared = sharedEnglishEvidence(source, output, contract);
+      const residueOutput = targetLanguageCode === 'ko'
+        ? removeContractTokens(maskLanguageExamples(sourceText, translatedText, contract, languageExamples), contract)
+        : output;
+      const shared = sharedEnglishEvidence(source, residueOutput, contract);
       evidence.sharedEnglishSequenceLength = shared.longest;
       evidence.sharedEnglishSequenceCount = shared.count;
       if (shared.count) {
@@ -255,7 +328,7 @@
       if (typeof item.template !== 'string') {
         throw validationError(PROTOCOL_CODES.MISSING_TEMPLATE, 'Missing translation template');
       }
-      returned.set(item.id, item.template);
+      returned.set(item.id, item);
     }
     for (const record of records || []) {
       if (!returned.has(record.id)) {
@@ -265,7 +338,7 @@
     return {
       protocol: { status: 'valid', codes: [] },
       records: (records || []).map((record) => {
-        const template = returned.get(record.id);
+        const { template, languageExamples } = returned.get(record.id);
         const structureValidation = inlineTemplate.validateTranslatedTemplate(
           template,
           record.contract
@@ -290,7 +363,8 @@
                 record.template,
                 template,
                 options.targetLanguage,
-                record.contract
+                record.contract,
+                languageExamples
               )
             : { status: 'uncertain', codes: [], evidence: {} },
         };
@@ -352,7 +426,7 @@
         reasoningEffort: settings.reasoningEffort,
         instructions: buildBlockInstructions(settings, batch),
         input: prepared.input,
-        textFormat: buildBlockResponseFormat(batch.length),
+        textFormat: buildBlockResponseFormat(batch.length, settings.targetLanguage),
         maxOutputTokens: getBlockBatchMaxOutputTokens(
           prepared.actualCost
         ),

@@ -4,6 +4,8 @@ const { createBackgroundWorker } = require('../extension/background.js');
 const { createInlineTranslationSession } = require('../extension/inline-translation-session.js');
 const { createTestDocument, createReasoningFixture } = require('./inline-block.test.js');
 const protocol = require('../extension/inline-diagnostics-protocol.js');
+const diagnostics = require('../extension/translation-diagnostics.js');
+const { activeVoiceFixture, example } = require('./language-example-fixture.js');
 
 const SETTINGS = { service: 'openai', model: 'gpt-5.4-mini', reasoningEffort: 'none', targetLanguage: 'Korean', tone: 'technical' };
 
@@ -35,7 +37,8 @@ function createWorker(answer, storageOptions = {}) {
     async fetch(url, options) {
       const body = JSON.parse(options.body);
       requests.push({ url, options, body });
-      const translations = answer(JSON.parse(body.input).records, requests.length);
+      const translations = answer(JSON.parse(body.input).records, requests.length)
+        .map(item => ({ languageExamples: [], ...item }));
       return { ok: true, async json() {
         return { status: 'completed', output: [{ type: 'message', content: [
           { type: 'output_text', text: JSON.stringify({ translations }) },
@@ -68,6 +71,57 @@ async function translateBatch(visit, worker) {
 
 exports.name = 'inline request flow';
 exports.tests = [{
+  name: 'applies synthetic active-voice examples through worker, Session, codec, cache and diagnostic export',
+  async fn() {
+    const fixture = activeVoiceFixture();
+    const { document, element, text } = createTestDocument();
+    const emphasis = element('em', text('Prefer active voice.'));
+    const code = element('code', text('voiceMode'));
+    const block = element('p', emphasis, text(fixture.source.slice('Prefer active voice.'.length)), text(' '), code);
+    document.body.appendChild(block);
+    const originalText = block.textContent;
+    const originalNodes = [...block.childNodes];
+    const visit = createInlineTranslationSession();
+    visit.begin(SETTINGS);
+    visit.admit(block);
+    const worker = createWorker(records => records.map(record => {
+      const template = `${fixture.template} ${record.atoms.find(atom => atom.label === 'voiceMode').token}`;
+      return { id: record.id, template, languageExamples: fixture.languageExamples.map(item =>
+        example(record.template, template, item.source, item.meaning)) };
+    }));
+    const { response } = await translateBatch(visit, worker);
+    assert.equal(response.results[0].disposition, 'apply');
+    assert.equal(response.results[0].attemptCount, 1);
+    assert.equal(worker.requests.length, 1);
+    assert.equal(worker.requests[0].body.store, false);
+    assert.ok(worker.requests[0].body.input.length <= 12000);
+    assert.equal(worker.requests[0].body.max_output_tokens, 4096);
+    assert.equal(block.textContent, `${fixture.template} voiceMode`);
+    assert.equal(block.childNodes.includes(code), true);
+    assert.equal(code.textContent, 'voiceMode');
+    assert.deepEqual(visit.progress().counts, { translated: 1, partial: 0, pending: 0, changed: 0, failed: 0 });
+    const saved = worker.storageWrites.flatMap(values => Object.values(values)).filter(value => value?.schemaVersion === 3);
+    assert.equal(saved.at(-1).blocks.length, 1);
+    const exported = diagnostics.exportDiagnostics(saved);
+    for (const payload of [saved, exported]) {
+      const json = JSON.stringify(payload);
+      for (const privateValue of [fixture.source, fixture.template, 'The report was written by Maya.', '마야가 보고서를 작성했다.',
+        'languageExamples', 'sourceStart', 'outputStart', 'meaningStart']) assert.equal(json.includes(privateValue), false, privateValue);
+    }
+    visit.restore();
+    assert.equal(block.textContent, originalText);
+    assert.deepEqual([...block.childNodes], originalNodes);
+    visit.begin(SETTINGS);
+    visit.admit(block);
+    assert.deepEqual(visit.takeBatch(), []);
+    assert.equal(block.textContent, `${fixture.template} voiceMode`);
+    assert.equal(block.childNodes.includes(code), true);
+    assert.equal(worker.requests.length, 1);
+    visit.restore();
+    assert.equal(block.textContent, originalText);
+    assert.deepEqual([...block.childNodes], originalNodes);
+  },
+}, {
   name: 'persists diagnostics with selective or legacy storage through public batch messages',
   async fn() {
     for (const supported of [false, true]) {

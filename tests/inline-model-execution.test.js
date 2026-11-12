@@ -4,6 +4,7 @@ const { execute, assessTranslationQuality } = require('../extension/inline-model
 const codec = require('../extension/inline-block.js');
 const inlineTemplate = require('../extension/inline-template.js');
 const { createReasoningFixture, createTestDocument, LINGUISTIC_SLASH_PROSE } = require('./inline-block.test');
+const { activeVoiceFixture, example } = require('./language-example-fixture.js');
 
 const SETTINGS = { model: 'gpt-5.4-mini', reasoningEffort: 'none', targetLanguage: 'Korean', tone: 'technical' };
 function plainRecord(id = 'b1', template = 'This is source prose.') {
@@ -12,7 +13,7 @@ function plainRecord(id = 'b1', template = 'This is source prose.') {
     contract: { codecVersion: 1, namespace: 'CAT_PLAIN', entries: [], maxOutputChars: 48000, requiresText: true, literalTokens: [] },
   };
 }
-function response(translations) { return JSON.stringify({ translations }); }
+function response(translations) { return JSON.stringify({ translations: translations.map(item => ({ languageExamples: [], ...item })) }); }
 function reasoningRecord(id = 'reasoning') {
   const { serialized } = createReasoningFixture();
   return { id, template: serialized.template, atoms: serialized.atoms, contract: serialized.contract, repair: null };
@@ -23,6 +24,109 @@ function translatedReasoning(record) {
 
 exports.name = 'inline model execution';
 exports.tests = [
+  {
+    name: 'uses UTF-16 template bounds and preserves protected content and target-language rejection',
+    async fn() {
+      const source = '😀Use active voice.';
+      const output = '😀Use active voice.(능동태를 쓰세요.)';
+      const metadata = [example(source, output, 'Use active voice.', '능동태를 쓰세요.')];
+      assert.equal(metadata[0].sourceStart, 2);
+      assert.equal(assessTranslationQuality(source, output, 'ko', null, metadata).status, 'complete');
+      for (const [original, translated, declared] of [
+        ['Use active voice.\r\n', 'Use active voice.\r\n(능동태를 쓰세요.)', 'Use active voice.\r'],
+        ['Use active voice.', 'Use active voice.(능동태를 쓰세요.)', 'se active voice.'],
+      ]) {
+        assert.deepEqual(assessTranslationQuality(original, translated, 'ko', null,
+          [example(original, translated, declared, '능동태를 쓰세요.')]).codes, ['quality.english_residue']);
+      }
+      const split = { ...metadata[0], source: '\uDE00Use active voice.', sourceStart: 1, outputStart: 1 };
+      assert.deepEqual(assessTranslationQuality(source, output, 'ko', null, [split]).codes, ['quality.english_residue']);
+      const fixture = activeVoiceFixture();
+      for (const contract of [
+        { sourceSyntax: [{ value: 'The report was written by Maya.' }] },
+        { literalTokens: [{ value: 'The report was written by Maya.' }] },
+        { entries: [{ token: 'The report was written by Maya.' }] },
+      ]) {
+        const quality = assessTranslationQuality(fixture.source, fixture.template, 'ko', contract, fixture.languageExamples);
+        assert.deepEqual(quality.codes, ['quality.english_residue']);
+      }
+      const missingMeaning = fixture.template.replaceAll('마야가 보고서를 작성했다.', '');
+      const [missing] = await execute([plainRecord('voice', fixture.source)], SETTINGS, async () =>
+        response([{ id: 'voice', template: missingMeaning, languageExamples: fixture.languageExamples }]));
+      assert.equal(missing.disposition, 'apply_with_warning');
+      assert.equal(missing.terminalCode, 'quality.english_residue');
+      const [noKorean] = await execute([plainRecord('voice', fixture.source)], SETTINGS, async () =>
+        response([{ id: 'voice', template: fixture.source, languageExamples: fixture.languageExamples }]));
+      assert.equal(noKorean.disposition, 'reject');
+      const [undeclared] = await execute([plainRecord('voice', fixture.source)], SETTINGS, async () =>
+        JSON.stringify({ translations: [{ id: 'voice', template: fixture.template }] }));
+      assert.equal(undeclared.disposition, 'apply_with_warning');
+      assert.equal(undeclared.terminalCode, 'quality.english_residue');
+      const record = reasoningRecord();
+      const [unsafe] = await execute([record], SETTINGS, async () => response([{ id: record.id,
+        template: fixture.template, languageExamples: fixture.languageExamples }]));
+      assert.equal(unsafe.disposition, 'reject');
+      assert.match(unsafe.terminalCode, /^structure\./);
+      const requests = [];
+      await execute([plainRecord()], { ...SETTINGS, targetLanguage: 'Japanese' }, async request => {
+        requests.push(request);
+        return JSON.stringify({ translations: [{ id: 'b1', template: '翻訳です。' }] });
+      });
+      assert.deepEqual(requests[0].textFormat.schema.properties.translations.items.required, ['id', 'template']);
+      assert.equal(Object.hasOwn(requests[0].textFormat.schema.properties.translations.items.properties, 'languageExamples'), false);
+    },
+  },
+  {
+    name: 'validates example ranges conservatively without exempting other English occurrences',
+    fn() {
+      const fixture = activeVoiceFixture();
+      const assess = (metadata, output = fixture.template, source = fixture.source, target = 'ko') =>
+        assessTranslationQuality(source, output, target, null, metadata);
+      assert.equal(assess(fixture.languageExamples).status, 'complete');
+      const first = fixture.languageExamples[0];
+      for (const invalid of [
+        null, {}, { ...first, source: 'A different source sentence.' },
+        { ...first, sourceStart: first.sourceStart + 1 }, { ...first, sourceEnd: fixture.source.length + 1 },
+        { ...first, outputStart: -1 }, { ...first, outputStart: first.outputStart + 0.5 },
+        { ...first, outputEnd: first.outputEnd - 1 }, { ...first, meaning: '' },
+        { ...first, meaningStart: first.meaningStart + 1 }, { ...first, meaningEnd: first.meaningEnd - 1 },
+        { ...first, outputStart: '15' }, { ...first, extra: 'ambiguous declaration' },
+      ]) {
+        assert.deepEqual(assess([invalid, fixture.languageExamples[1]]).codes, ['quality.english_residue']);
+      }
+      assert.deepEqual(assess([...fixture.languageExamples, first]).codes, ['quality.english_residue']);
+      const overlap = { ...first, source: 'report was written', sourceStart: first.sourceStart + 4,
+        sourceEnd: first.sourceStart + 22, outputStart: first.outputStart + 4, outputEnd: first.outputStart + 22 };
+      assert.deepEqual(assess([...fixture.languageExamples, overlap]).codes, ['quality.english_residue']);
+      for (const output of [
+        `${fixture.template} The report was written by Maya.`,
+        `${fixture.template} Prefer active voice.`,
+      ]) assert.deepEqual(assess(fixture.languageExamples, output).codes, ['quality.english_residue']);
+      const meaningWithEnglish = fixture.template.replace('마야가 보고서를 작성했다.', '마야가 The report was written by Maya.');
+      const metadata = [example(fixture.source, meaningWithEnglish, first.source, '마야가 The report was written by Maya.'),
+        example(fixture.source, meaningWithEnglish, fixture.languageExamples[1].source, '마야가 보고서를 작성했다.')];
+      assert.deepEqual(assess(metadata, meaningWithEnglish).codes, ['quality.english_residue']);
+      assert.deepEqual(assess(fixture.languageExamples, fixture.template, fixture.source, 'Japanese').codes, ['quality.english_residue']);
+    },
+  },
+  {
+    name: 'accepts synthetic active-voice examples with Korean meanings on the initial response',
+    async fn() {
+      const fixture = activeVoiceFixture();
+      const requests = [];
+      const [result] = await execute([plainRecord('voice', fixture.source)], SETTINGS, async request => {
+        requests.push(request);
+        return response([{ id: 'voice', template: fixture.template, languageExamples: fixture.languageExamples }]);
+      });
+      assert.equal(result.disposition, 'apply');
+      assert.equal(result.attemptCount, 1);
+      assert.equal(result.template, fixture.template);
+      assert.equal(result.diagnostic.quality.status, 'complete');
+      assert.equal(requests.length, 1);
+      assert.deepEqual(requests[0].textFormat.schema.properties.translations.items.required, ['id', 'template', 'languageExamples']);
+      assert.equal(requests[0].textFormat.schema.properties.translations.items.properties.languageExamples.type, 'array');
+    },
+  },
   {
     name: 'breaks shared English sequences at list punctuation in either text',
     fn() {
@@ -450,7 +554,7 @@ exports.tests = [
         assert.equal(format.schema.properties.translations.minItems, 1);
         assert.equal(format.schema.properties.translations.maxItems, 1);
         assert.equal(format.schema.properties.translations.items.additionalProperties, false);
-        assert.deepEqual(format.schema.properties.translations.items.required, ['id', 'template']);
+        assert.deepEqual(format.schema.properties.translations.items.required, ['id', 'template', 'languageExamples']);
         assert.deepEqual(Object.keys(JSON.parse(request.input).records[0]).sort(), ['atoms', 'id', 'repair', 'template']);
         assert.deepEqual(JSON.parse(request.input).records[0].atoms, record.atoms);
         assert.equal(JSON.stringify(request).includes('must-not-leave-adapter'), false);

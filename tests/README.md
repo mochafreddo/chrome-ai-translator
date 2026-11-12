@@ -117,6 +117,8 @@ Use deterministic request adapters, fake Chrome interfaces, and local DOM fixtur
 
 Probe Session Budget behavior through admission of real paragraphs and subsequent requests rather than reading an internal counter. The Session reconstruction is a synthetic approximation of the page measured in [ADR-0007](../docs/adr/0007-charge-the-session-budget-in-actual-record-cost.md), not live-page validation. The [issue #70 report](../docs/qa/issue-70-session-checks.md) retains its interface checks and mutation evidence.
 
+The Inline model and worker-flow suites share [language-example-fixture.js](language-example-fixture.js), a synthetic active-voice before/after example with Korean meanings. The model suite checks occurrence-specific UTF-16 metadata, conservative invalidation, structure protection and other target languages through `execute` and `assessTranslationQuality`. The worker-flow suite carries a fixed initial answer through public messages, Session and the codec, then checks page-owned nodes, exact restoration, cache reuse and actual diagnostic storage/export. These checks establish deterministic initial-response behavior, not the reported user's past answer or live-model classification and translation quality. Repair preservation remains follow-up work.
+
 ## Unbilled Chrome checks
 
 Use [integration/harness.mjs](integration/harness.mjs) for CDP/browser wiring. Read its header before diagnosing driver failures or adding a browser check. Page-based collector checks use [viewport-harness.js](viewport-harness.js) without draining batches or requesting a model.
