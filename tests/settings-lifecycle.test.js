@@ -131,15 +131,6 @@ exports.tests = [
     },
   },
   {
-    name: 'clamps unsafe chunk sizes from saved settings',
-    async fn() {
-      for (const [chunkMaxChars, expected] of [[-1, 2000], [Infinity, 12000], [900000, 60000]]) {
-        const { lifecycle } = createLifecycle({ settings: { chunkMaxChars } });
-        assert.equal((await lifecycle.read()).chunkMaxChars, expected);
-      }
-    },
-  },
-  {
     name: 'merges partial settings and allowlists persisted values',
     async fn() {
       const { lifecycle, snapshot } = createLifecycle({ settings: {
@@ -151,12 +142,12 @@ exports.tests = [
         viewMode: 'bilingual', arbitraryPatchSibling: 'patch-secret' });
       const next = await lifecycle.read();
       assert.equal(next.apiKey, 'sk-existing');
-      assert.equal(next.chunkMaxChars, 9000);
+      assert.equal(Object.hasOwn(next, 'chunkMaxChars'), false);
       assert.equal(next.buttonVisibility, 'allPages');
       assert.equal(next.targetLanguage, 'Japanese');
       assert.equal(next.tone, 'formal');
       assert.equal(next.model, 'gpt-5');
-      assert.equal(next.viewMode, 'bilingual');
+      assert.equal(Object.hasOwn(next, 'viewMode'), false);
       assert.equal(Object.hasOwn(snapshot().settings, 'arbitraryStoredSibling'), false);
       assert.equal(Object.hasOwn(snapshot().settings, 'arbitraryPatchSibling'), false);
     },
@@ -240,7 +231,7 @@ exports.tests = [
       assert.equal(settings.apiKey, 'sk-legacy-synthetic');
       assert.equal(settings.openrouterApiKey, '');
       assert.equal(settings.buttonVisibility, 'allPages');
-      assert.equal(settings.chunkMaxChars, 2000);
+      assert.equal(Object.hasOwn(settings, 'chunkMaxChars'), false);
       assert.equal(settings.reasoningEffort, 'none');
       assert.equal(Object.hasOwn(settings, 'inlineAutoShow'), false);
       assert.equal(Object.hasOwn(settings, 'unknown'), false);

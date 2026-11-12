@@ -124,20 +124,17 @@ exports.tests = [{
     }
   },
 }, {
-  name: 'only profiles with exactly two successful, accounted, contract-safe flows qualify',
+  name: 'only profiles with one successful, accounted, contract-safe Inline run qualify',
   async fn() {
     const { PROFILES, compatibleProfiles } = await quality();
-    const all = PROFILES.flatMap(profile => [
-      compatibilityRun(profile.key, 'inline'),
-      compatibilityRun(profile.key, 'sidepanel'),
-    ]);
+    const all = PROFILES.map(profile => compatibilityRun(profile.key, 'inline'));
     assert.deepEqual(compatibleProfiles(all), PROFILES.map(profile => profile.key));
 
     const cases = [
       [all.filter(run => !(run.profileKey === PROFILES[0].key && run.flow === 'inline')), PROFILES[0].key],
       [all.map(run => run.profileKey === PROFILES[1].key ? { ...run, success: false } : run), PROFILES[1].key],
-      [all.map(run => run.profileKey === PROFILES[2].key && run.flow === 'sidepanel' ? { ...run, flow: 'inline' } : run), PROFILES[2].key],
-      [all.map(run => run.profileKey === PROFILES[0].key && run.flow === 'sidepanel' ? { ...run, flow: 'background' } : run), PROFILES[0].key],
+      [[...all, compatibilityRun(PROFILES[2].key, 'inline')], PROFILES[2].key],
+      [all.map(run => run.profileKey === PROFILES[0].key ? { ...run, flow: 'background' } : run), PROFILES[0].key],
       [all.map(run => run.profileKey === PROFILES[3].key ? { ...run, requests: [{ ...run.requests[0], cost: null }] } : run), PROFILES[3].key],
       [all.map(run => run.profileKey === PROFILES[4].key ? { ...run, requests: [{ ...run.requests[0], reasoningAccepted: false }] } : run), PROFILES[4].key],
       [all.map(run => run.profileKey === PROFILES[5].key ? { ...run, requests: [{ ...run.requests[0], contractAccepted: false }] } : run), PROFILES[5].key],
@@ -147,13 +144,13 @@ exports.tests = [{
     }
   },
 }, {
-  name: 'qualified profile subsets produce 24 runs each across twelve pages and reject invalid keys',
+  name: 'qualified profile subsets produce 12 runs each across twelve pages and reject invalid keys',
   async fn() {
     const { PROFILES, buildQualityPlan } = await quality();
     const keys = PROFILES.slice(0, 2).map(profile => profile.key);
     const plan = buildQualityPlan(Array.from({ length: 12 }, (_, index) => `page-${index + 1}`), keys);
-    assert.equal(plan.length, 48);
-    for (const key of keys) assert.equal(plan.filter(run => run.profileKey === key).length, 24);
+    assert.equal(plan.length, 24);
+    for (const key of keys) assert.equal(plan.filter(run => run.profileKey === key).length, 12);
     assert.throws(() => buildQualityPlan(['page-1'], ['unknown-profile']), /Unsupported model profile/);
     assert.throws(() => buildQualityPlan(['page-1'], [keys[0], keys[0]]), /unique and nonempty/);
   },

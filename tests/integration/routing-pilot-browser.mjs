@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,9 +6,8 @@ import { browser, launchExtensionBrowser, serveFixture, until } from './harness.
 import { observeModelRequests } from './model-request-evidence.mjs';
 import { inlinePanelControlsReady } from './inline-panel-readiness.mjs';
 import { readProtectedPage, prepareQualityPage, probeQualityCensus, coverageMatches,
-  inlineQualityCompleted, inlineQualityTerminal, protectedMarkdownMatches, mockDisplayedProseMatches } from './model-quality-observation.mjs';
+  inlineQualityCompleted, inlineQualityTerminal, mockDisplayedProseMatches } from './model-quality-observation.mjs';
 
-const { createTranslationChunks } = createRequire(import.meta.url)('../../extension/translation-chunks.js');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const CORPUS = join(ROOT, 'tests/integration/fixtures/routing-pilot');
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -160,33 +158,6 @@ export function createBrowserAdapter({ transport }) {
       const panelTarget = await ctx.findTarget(target => target.url === `chrome-extension://${ctx.extension.id}/sidepanel.html`);
       const panel = await ctx.attach(panelTarget.id);
       if (!await until(() => inlinePanelControlsReady(panel), 10000, 100)) throw new Error('Panel controls unavailable.');
-      if (entry.flow === 'sidepanel' || qualityCorpus) {
-        const fixedNamespace = await until(async () => {
-        for (const contextId of contexts) {
-          const result = await ctx.cdp.send('Runtime.evaluate', { contextId, returnByValue: true, expression: `(() => {
-          const codec = globalThis.ChromeAiTranslatorMarkdownDocument;
-          const namespace = 'CAT_00000000-0000-4000-8000-000000000000';
-          if (!codec || (document.querySelector('article') || document.querySelector('main')).textContent.includes(namespace)) return false;
-          const wrap = module => {
-            const original = module.serializeMarkdownDocument;
-            module.serializeMarkdownDocument = (root, metadata, options) =>
-              original(root, metadata, { ...options, namespace });
-            return module;
-          };
-          let currentCodec = wrap(codec);
-          Object.defineProperty(globalThis, 'ChromeAiTranslatorMarkdownDocument', {
-            configurable: true,
-            get: () => currentCodec,
-            set: module => { currentCodec = wrap(module); },
-          });
-          return true;
-        })()` }, page.sessionId);
-          if (result.result?.value === true) return true;
-        }
-        return false;
-        }, 10000, 50);
-        if (!fixedNamespace) throw new Error('Paired placeholder namespace could not be fixed safely.');
-      }
       let qualityContext;
       if (qualityCorpus) {
         const censusErrors = [];
@@ -212,7 +183,6 @@ export function createBrowserAdapter({ transport }) {
           save(`source-${sourceKey}.json`, current.expected);
           sourceEvidence.add(sourceKey);
         }
-        current.expectedChunks = createTranslationChunks(current.expected.extraction.translationDocument, 12000).map(chunk => chunk.template);
         const spy = await ctx.cdp.send('Runtime.evaluate', { contextId: qualityContext, returnByValue: true, expression: `(() => {
           const codec = globalThis.ChromeAiTranslatorInlineBlock;
           const apply = codec.applyTranslatedTemplate;
@@ -227,12 +197,9 @@ export function createBrowserAdapter({ transport }) {
         if (spy.result?.value !== true) throw new Error('Application evidence hook unavailable.');
       }
       const started = performance.now();
-      const button = entry.flow === 'inline' ? 'btnInlineTranslate' : 'btnTranslate';
       current.acceptingRequests = true;
-      await panel.evaluate(`document.getElementById(${JSON.stringify(button)}).click()`);
-      let complete;
-      if (entry.flow === 'inline') {
-        complete = await until(async () => {
+      await panel.evaluate("document.getElementById('btnInlineTranslate').click()");
+      let complete = await until(async () => {
           if (isHalted()) return true;
           await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
           return await panel.evaluate(`(() => {
@@ -242,14 +209,10 @@ export function createBrowserAdapter({ transport }) {
             (qualityCorpus ? coverageMatches(current) : await page.evaluate(`Array.from(document.querySelectorAll('article p, article h1, article h2, article li'))
               .filter(node => node.textContent.trim()).every(node => /[가-힣]/.test(node.textContent))`) ||
               (live && await panel.evaluate('/Failed [1-9]/.test(document.getElementById("inlineStatus").textContent)')));
-        }, live ? 240000 : 20000, 100);
-      } else {
-        await until(async () => isHalted() || await panel.evaluate("document.getElementById('status').textContent === 'Done' || !document.getElementById('errorBox').hidden"), live ? 240000 : 20000, 100);
-        complete = await panel.evaluate("document.getElementById('status').textContent === 'Done'");
-      }
+      }, live ? 240000 : 20000, 100);
       complete = complete && !isHalted();
       current.elapsedMs = performance.now() - started;
-      if (qualityCorpus && entry.flow === 'inline' && !await until(async () => {
+      if (qualityCorpus && !await until(async () => {
         const status = await panel.evaluate("document.getElementById('inlineStatus').textContent");
         const counts = Object.fromEntries(['translated', 'partial', 'pending', 'changed', 'failed'].map(label => {
           const match = new RegExp(`${label} (\\d+)`, 'i').exec(status);
@@ -259,7 +222,7 @@ export function createBrowserAdapter({ transport }) {
       }, 10000, 50)) complete = false;
       current.acceptingRequests = false;
       if (!complete) {
-        const terminalFailure = entry.flow === 'inline' && qualityCorpus
+        const terminalFailure = qualityCorpus
           ? inlineQualityTerminal(await panel.evaluate(`(() => {
               const status = document.getElementById('inlineStatus').textContent;
               return Object.fromEntries(['translated', 'partial', 'pending', 'changed', 'failed'].map(label => {
@@ -267,18 +230,17 @@ export function createBrowserAdapter({ transport }) {
                 return [label, match ? Number(match[1]) : null];
               }));
             })()`), current.expected.blocks.length)
-          : entry.flow === 'sidepanel' && await panel.evaluate("!document.getElementById('errorBox').hidden");
+          : false;
         if (!terminalFailure) halt();
-        if (entry.flow === 'inline') await panel.evaluate("document.getElementById('btnInlineStop').click()");
+        await panel.evaluate("document.getElementById('btnInlineStop').click()");
       }
       await settleRequests();
       current.success = Boolean(complete);
       current.documentId = documentId;
       if (qualityCorpus) {
-        current.coverage = { expectedBlocks: current.expected.blocks.length, expectedChunks: current.expectedChunks.length,
+        current.coverage = { expectedBlocks: current.expected.blocks.length,
           census: current.expected.census,
           matched: coverageMatches(current) };
-        if (entry.flow === 'inline') {
           const protectionResult = await ctx.cdp.send('Runtime.evaluate', { contextId: qualityContext, returnByValue: true,
             expression: `({ protected: (${readProtectedPage.toString()})(pickArticleRoot()),
               applied: globalThis.modelQualityExpectedNodes.every(node => node.isConnected &&
@@ -286,32 +248,23 @@ export function createBrowserAdapter({ transport }) {
                   globalThis.modelQualityApplied.get(node))) })` }, page.sessionId);
           current.protectedContent = JSON.stringify(protectionResult.result?.value?.protected) === JSON.stringify(current.expected.protected);
           current.appliedAllBlocks = protectionResult.result?.value?.applied === true;
-        } else {
-          const displayed = await panel.evaluate("document.getElementById('translated').textContent");
-          current.protectedContent = protectedMarkdownMatches(current.expected.extraction, displayed);
-          if (!current.protectedContent) save(`${entry.id}.protected-failure.json`, {
-            extraction: current.expected.extraction, displayed });
-        }
         current.displayedProse = qualityLive ? null : mockDisplayedProseMatches(current.expected.census.prosePieces,
-          entry.flow === 'inline' ? await page.evaluate('(document.querySelector("article") || document.querySelector("main")).innerText') :
-            await panel.evaluate("document.getElementById('translated').textContent"));
+          await page.evaluate('(document.querySelector("article") || document.querySelector("main")).innerText'));
         delete current.expected;
-        delete current.expectedChunks;
       }
       const status = await panel.evaluate('document.getElementById("inlineStatus").textContent');
-      current.outcomes = entry.flow === 'inline' ? Object.fromEntries(
+      current.outcomes = Object.fromEntries(
         ['Translated', 'Partial', 'Pending', 'Changed', 'Failed'].map(label => {
           const match = new RegExp(`${label} (\\d+)`).exec(status);
           return [label.toLowerCase(), match ? Number(match[1]) : null];
         })
-      ) : { documentDisplayed: current.success };
-      const translated = await (entry.flow === 'inline' ? page.evaluate('(document.querySelector("article") || document.querySelector("main")).innerText') : panel.evaluate('document.getElementById("translated").textContent'));
+      );
+      const translated = await page.evaluate('(document.querySelector("article") || document.querySelector("main")).innerText');
       if (qualityLive) {
         current.targetLanguagePresent = /[가-힣]/.test(translated);
       }
-      const failure = !complete || qualityCorpus ? await panel.evaluate(`({sidepanel:document.getElementById('status').textContent,
-        inline:document.getElementById('inlineStatus').textContent,inlineError:document.getElementById('inlineError').textContent,
-        panelError:document.getElementById('errorBox').textContent})`) : undefined;
+      const failure = !complete || qualityCorpus ? await panel.evaluate(`({
+        inline:document.getElementById('inlineStatus').textContent,inlineError:document.getElementById('inlineError').textContent})`) : undefined;
       return { complete, source: before, translated, failure };
     },
     async settle(isSettled) {

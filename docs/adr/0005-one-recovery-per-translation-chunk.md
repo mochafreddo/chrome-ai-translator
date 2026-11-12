@@ -1,5 +1,11 @@
 # One recovery per Translation Chunk, and the first failure owns it
 
+Status: retired with article Side Panel Translation
+
+Current applicability: the article execution and recovery paths have been removed. Text Translation follows [ADR-0015](0015-preserve-completed-text-translation-on-interruption.md) and does not inherit this recovery budget. The original accepted decision and its evidence are retained below.
+
+## Original record
+
 Status: accepted
 
 Current behavior and source ownership: [architecture reference](../architecture.md#side-panel-translation). Historical measurements and verification limitations below describe the recorded investigation.

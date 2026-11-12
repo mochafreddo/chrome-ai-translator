@@ -5,11 +5,6 @@ var inlineBlockCodec =
   (typeof module !== 'undefined' && module.exports
     ? require('./inline-block.js')
     : null);
-var markdownDocument =
-  globalThis.ChromeAiTranslatorMarkdownDocument ||
-  (typeof module !== 'undefined' && module.exports
-    ? require('./markdown-document.js')
-    : null);
 var inlineTranslationControls =
   globalThis.ChromeAiTranslatorInlineTranslationControls ||
   (typeof module !== 'undefined' && module.exports
@@ -189,9 +184,110 @@ async function toggleInlineTranslatorMenu(
   return state.menuOpen;
 }
 
+function getTagName(node) {
+  return String(node?.tagName || '').toUpperCase();
+}
+
+var EXCLUDED_TAGS = new Set([
+  'SCRIPT',
+  'STYLE',
+  'NOSCRIPT',
+  'SVG',
+  'CANVAS',
+  'IFRAME',
+  'NAV',
+  'HEADER',
+  'ASIDE',
+  'FOOTER',
+  'FORM',
+  'BUTTON',
+  'INPUT',
+  'TEXTAREA',
+  'SELECT',
+  'OPTION',
+]);
+var EXCLUDED_ROLES = new Set([
+  'navigation',
+  'banner',
+  'contentinfo',
+  'complementary',
+  'form',
+  'search',
+  'button',
+  'menu',
+  'menubar',
+  'tablist',
+  'toolbar',
+]);
+function hasAttribute(node, name) {
+  return Boolean(node?.hasAttribute?.(name));
+}
+
+function getAttribute(node, name) {
+  return String(node?.getAttribute?.(name) || '');
+}
+
+function isEffectivelyEditable(node) {
+  if (node?.isContentEditable === true) return true;
+  for (let current = node; current?.nodeType === 1; current = current.parentElement) {
+    if (!hasAttribute(current, 'contenteditable')) continue;
+    return getAttribute(current, 'contenteditable').toLowerCase() !== 'false';
+  }
+  return false;
+}
+
+function hasHiddenComputedStyle(node) {
+  const view = node?.ownerDocument?.defaultView;
+  if (typeof view?.getComputedStyle !== 'function') return false;
+  try {
+    const style = view.getComputedStyle(node);
+    const display = String(style?.display || '').toLowerCase();
+    const visibility = String(style?.visibility || '').toLowerCase();
+    const contentVisibility = String(
+      style?.contentVisibility ||
+        style?.getPropertyValue?.('content-visibility') ||
+        ''
+    ).toLowerCase();
+    return (
+      display === 'none' ||
+      visibility === 'hidden' ||
+      visibility === 'collapse' ||
+      contentVisibility === 'hidden' ||
+      Number.parseFloat(style?.opacity) === 0
+    );
+  } catch {
+    return true;
+  }
+}
+
+function isExcludedElement(node) {
+  if (!node || node.nodeType !== 1) return false;
+  if (EXCLUDED_TAGS.has(getTagName(node))) return true;
+  if (node.hidden === true || hasAttribute(node, 'hidden')) return true;
+  if (getAttribute(node, 'aria-hidden').toLowerCase() === 'true') return true;
+  if (EXCLUDED_ROLES.has(getAttribute(node, 'role').toLowerCase())) return true;
+  if (isEffectivelyEditable(node)) return true;
+  if (
+    hasAttribute(node, 'tabindex') &&
+    Number(getAttribute(node, 'tabindex')) >= 0
+  ) {
+    return true;
+  }
+  if (hasAttribute(node, 'onclick')) return true;
+  return hasHiddenComputedStyle(node);
+}
+
+function isEligibleRoot(node) {
+  if (!node) return false;
+  for (let current = node; current; current = current.parentElement) {
+    if (isExcludedElement(current)) return false;
+  }
+  return true;
+}
+
 function pickArticleRoot() {
   const candidateArticle = document.querySelector('article');
-  const article = markdownDocument.isEligibleRoot(candidateArticle) ? candidateArticle : null;
+  const article = isEligibleRoot(candidateArticle) ? candidateArticle : null;
   if (article && (article.innerText || '').trim().length > 400) return article;
 
   const candidates = [
@@ -199,7 +295,7 @@ function pickArticleRoot() {
     document.querySelector('main'),
     document.querySelector('[role="main"]'),
     document.body,
-  ].filter(markdownDocument.isEligibleRoot);
+  ].filter(isEligibleRoot);
 
   // Choose the candidate with the most text, but prefer article/main
   let best = candidates[0];
@@ -213,20 +309,6 @@ function pickArticleRoot() {
   }
 
   return best;
-}
-
-function buildArticleExtraction(root, metadata) {
-  const translationDocument = markdownDocument.serializeMarkdownDocument(
-    root,
-    metadata
-  );
-  return {
-    ...metadata,
-    contentMarkdown: markdownDocument.renderOriginalMarkdown(
-      translationDocument
-    ),
-    translationDocument,
-  };
 }
 
 function getInlineTranslationStatusSnapshot(state = inlineState) {
@@ -390,39 +472,11 @@ async function initInlineTranslator(state = inlineState) {
   } catch {}
 }
 
-function handleExtractArticle(sendResponse) {
-  try {
-    const root = pickArticleRoot();
-    const metadata = {
-      title: (document.title || '').trim(),
-      url: location.href,
-      langHint: document.documentElement?.lang || '',
-    };
-    const data = buildArticleExtraction(root, metadata);
-
-    // Basic sanity check: if too small, fall back to body
-    if ((data.contentMarkdown || '').length < 300 && root !== document.body) {
-      const data2 = buildArticleExtraction(document.body, metadata);
-      sendResponse({ ok: true, data: data2 });
-      return;
-    }
-
-    sendResponse({ ok: true, data });
-  } catch (e) {
-    sendResponse({ ok: false, error: { message: e?.message || String(e) } });
-  }
-}
-
 // Every message this script answers, in one place and against the state it is answering
 // for. Returning `true` holds the response channel open until `sendResponse` has run;
 // returning nothing says this script has no answer, which is how a message meant for
 // another listener passes through untouched.
 function handleInlineContentMessage(msg, sendResponse, state = inlineState) {
-  if (msg?.type === 'EXTRACT_ARTICLE') {
-    handleExtractArticle(sendResponse);
-    return true;
-  }
-
   if (msg?.type === 'RUN_INLINE_INSTRUCTION') {
     try {
       if (
@@ -470,7 +524,6 @@ if (
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     isCodeLikeInlineText: inlineBlockCodec.isCodeLikeInlineText,
-    buildArticleExtraction,
     isTrustedInlineUiEvent,
     getInlineShadowMode,
     getInlineHostStyleText,

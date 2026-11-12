@@ -49,12 +49,31 @@ if (process.env.HARNESS_SCENARIO === 'open-error' && args.includes('open')) proc
             scenario === 'missing-tab' ? [] : [{ targetId: 'tab-1', type: 'tab', url }] };
           if (method === 'Target.attachToTarget') result = { sessionId:
             params.targetId === 'worker-1' ? 'worker-session' : 'session-1' };
-          if (method === 'Runtime.evaluate') result = { result: { value: 2 } };
+          if (method === 'Runtime.evaluate') {
+            result = { result: { value: 2 } };
+            if (scenario === 'evaluate-unrelated-exception' && params.expression === '1 + 1') {
+              this.emit('message', { data: JSON.stringify({ method: 'Runtime.exceptionThrown',
+                params: { exceptionDetails: { text: url } } }) });
+            }
+            if (params.expression !== '1 + 1') {
+              if (scenario === 'evaluate-timeout') return;
+              if (scenario === 'evaluate-closed') { queueMicrotask(() => this.emit('close')); return; }
+              if (scenario === 'evaluate-runtime') result = { result: { value: url },
+                exceptionDetails: { text: url, exception: { description: 'private exception details' } } };
+              if (scenario === 'evaluate-undefined') result = { result: { type: 'undefined' } };
+              if (scenario === 'evaluate-false') result = { result: { value: false } };
+              if (scenario === 'evaluate-null') result = { result: { value: null } };
+            }
+          }
           const error = (scenario === 'listing-error' && method === 'Extensions.getExtensions') ||
             (scenario === 'attachment-error' && method === 'Target.attachToTarget') ||
-            ((scenario === 'page-enable-error' || sessionId === 'worker-session') && method === 'Page.enable');
+            ((scenario === 'page-enable-error' || sessionId === 'worker-session') && method === 'Page.enable') ||
+            (['evaluate-protocol', 'evaluate-empty-protocol', 'evaluate-missing-protocol'].includes(scenario) &&
+              method === 'Runtime.evaluate' && params.expression !== '1 + 1');
+          const errorMessage = scenario === 'evaluate-empty-protocol' ? '' :
+            scenario === 'evaluate-missing-protocol' ? undefined : url;
           queueMicrotask(() => this.emit('message', { data: JSON.stringify({ id,
-            ...(error ? { error: { code: -32602, message: url } } : { result }) }) }));
+            ...(error ? { error: { code: -32602, message: errorMessage } } : { result }) }) }));
         }
         close() { fs.appendFileSync(effects, JSON.stringify(['socket-close']) + '\\n'); this.emit('close'); }
       };
@@ -64,6 +83,15 @@ if (process.env.HARNESS_SCENARIO === 'open-error' && args.includes('open')) proc
         const ctx = await launchExtensionBrowser({ session: 'fixture-session', url,
           extensionDir: ${JSON.stringify(dir)}, ...(scenario === 'headed-permission' ? { headless: false } : {}) });
         check('page remains usable', await ctx.page?.evaluate('1 + 1') === 2);
+        if (scenario.startsWith('evaluate-')) {
+          if (scenario === 'evaluate-already-closed') ctx.close();
+          try {
+            const value = await ctx.page.evaluate(url + ' private evaluation expression', 5);
+            console.log('EVALUATION ' + JSON.stringify({ outcome: 'returned', type: typeof value, value }));
+          } catch (error) {
+            console.log('EVALUATION ' + JSON.stringify({ outcome: 'threw', name: error.name, message: error.message }));
+          }
+        }
         if (scenario === 'worker-attachment') {
           const worker = await ctx.attach('worker-1', 'service_worker');
           check('worker execution remains usable', await worker.evaluate('1 + 1') === 2);
@@ -111,6 +139,48 @@ async function fixture(open = true) {
 
 exports.name = 'integration harness';
 exports.tests = [
+  {
+    name: 'page evaluate throws sanitized errors for failed calls',
+    fn() {
+      const outcomes = [];
+      const cases = [
+        ['evaluate-protocol', 'Page evaluation failed: protocol error'],
+        ['evaluate-empty-protocol', 'Page evaluation failed: protocol error'],
+        ['evaluate-missing-protocol', 'Page evaluation failed: protocol error'],
+        ['evaluate-runtime', 'Page evaluation failed: runtime exception'],
+        ['evaluate-timeout', 'Page evaluation failed: timeout'],
+        ['evaluate-closed', 'Page evaluation failed: protocol error'],
+        ['evaluate-already-closed', 'Page evaluation failed: protocol error'],
+      ];
+      for (const [scenario] of cases) {
+        const result = launchFixture(scenario);
+        assert.equal(result.status, 0, result.stdout + result.stderr);
+        const line = result.stdout.split('\n').find(line => line.startsWith('EVALUATION '));
+        assert.ok(line, scenario);
+        outcomes.push(JSON.parse(line.slice('EVALUATION '.length)));
+        assert.doesNotMatch(result.stdout + result.stderr, /private\.invalid|private exception|private evaluation/);
+      }
+      assert.deepEqual(outcomes, cases.map(([, message]) => ({ outcome: 'threw', name: 'Error', message })));
+    },
+  },
+  {
+    name: 'page evaluate preserves normal values after unrelated runtime exceptions',
+    fn() {
+      for (const [scenario, expected] of [
+        ['evaluate-undefined', { outcome: 'returned', type: 'undefined' }],
+        ['evaluate-false', { outcome: 'returned', type: 'boolean', value: false }],
+        ['evaluate-null', { outcome: 'returned', type: 'object', value: null }],
+        ['evaluate-unrelated-exception', { outcome: 'returned', type: 'number', value: 2 }],
+      ]) {
+        const result = launchFixture(scenario);
+        assert.equal(result.status, 0, result.stdout + result.stderr);
+        const line = result.stdout.split('\n').find(line => line.startsWith('EVALUATION '));
+        assert.ok(line, scenario);
+        assert.deepEqual(JSON.parse(line.slice('EVALUATION '.length)), expected, scenario);
+        assert.doesNotMatch(result.stdout + result.stderr, /private\.invalid|private exception|private evaluation/);
+      }
+    },
+  },
   {
     name: 'explicit browser cleanup closes only its named session',
     fn() {

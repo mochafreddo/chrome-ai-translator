@@ -13,14 +13,12 @@ function deferred() {
 async function settle() {
   for (let i = 0; i < 64; i += 1) await Promise.resolve();
 }
-function wireState(value, stateSequence = 1, bodyVersion = stateSequence, workerEpoch = 'worker-fixture') {
-  return { workerEpoch, stateSequence, bodyVersion, extracted: null, translated: null, ...value };
+function wireState(value, stateSequence = 1, workerEpoch = 'worker-fixture') {
+  return { workerEpoch, stateSequence, ...value };
 }
 function state(label) {
-  return { workerEpoch: 'worker-fixture', stateSequence: 1, bodyVersion: 1,
-    status: 'error', extracted: { contentMarkdown: `original ${label}` },
-    translated: `translated ${label}`, progress: { current: 2, total: 3 },
-    error: { message: `panel ${label}` }, inlineTranslationError: { message: `shortcut ${label}` } };
+  return { workerEpoch: 'worker-fixture', stateSequence: 1,
+    inlineTranslationError: { message: 'shortcut ' + label } };
 }
 function response(type, label) {
   return type === 'GET_STATE' ? { ok: true, state: state(label) }
@@ -74,8 +72,7 @@ function domPanel() {
     ChromeAiTranslatorInlineTranslationControls: require('../extension/inline-translation-controls.js'),
     ChromeAiTranslatorPageAccess: require('../extension/page-access.js'),
     ChromeAiTranslatorDefaultModel: require('../extension/default-model.js'),
-    ChromeAiTranslatorTranslationSettings: require('../extension/translation-settings.js'),
-    ChromeAiTranslatorSidePanelFailure: require('../extension/sidepanel-failure.js') });
+ });
   vm.runInContext(fs.readFileSync(require.resolve('../extension/sidepanel.js'), 'utf8'), context);
   return { element, sent, focused: () => focused, setSend(fn) { send = fn; }, poll() { poll(); },
     activate(id, windowId = 10) { active = windowId === 10 ? id : active; activated?.({ tabId: id, windowId }); },
@@ -86,8 +83,8 @@ function domPanel() {
 }
 exports.name = 'sidepanel tab state';
 exports.tests = [
-  {
-    name: 'activation cannot publish an old article or forward a click while its document is unknown',
+{
+    name: 'activation cannot publish an old Inline error or forward a click while its document is unknown',
     async fn() {
       const panel = domPanel();
       await settle();
@@ -97,68 +94,34 @@ exports.tests = [
       panel.activate(2);
       panel.notify({ type: 'STATE_UPDATED', tabId: 2, state: { ...state('departed'), documentId: 'old-document' } });
       await settle();
-      assert.doesNotMatch(panel.element('translated').textContent, /departed/);
-      panel.element('btnTranslate').listeners.click();
+      assert.doesNotMatch(panel.element('inlineError').textContent, /departed/);
+      panel.element('btnInlineTranslate').listeners.click();
       panel.element('btnInlineTranslate').listeners.click();
       await settle();
-      assert.equal(panel.sent.some(msg => ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)), false);
+      assert.equal(panel.sent.some(msg => ['RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)), false);
       activation.resolve({ documentId: 'replacement' });
       await settle();
-      panel.element('btnTranslate').listeners.click();
+      panel.element('btnInlineTranslate').listeners.click();
       await settle();
-      assert.equal(panel.sent.find(msg => msg.type === 'TRANSLATE_TAB').documentId, 'replacement');
+      assert.equal(panel.sent.find(msg => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL').documentId, 'replacement');
     },
   },
-  {
-    name: 'panel refreshes a mismatched provider and requires a second click',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      panel.changeSettings({ service: 'openrouter' }, false);
-      panel.setSend(message => message.type === 'TRANSLATE_TAB'
-        ? { ok: true, skipped: true, reason: 'provider_changed' }
-        : response(message.type, '1'));
-      await panel.element('btnTranslate').listeners.click();
-      await settle();
-      assert.equal(panel.element('providerName').textContent, 'OpenRouter');
-      assert.equal(panel.sent.filter(message => message.type === 'TRANSLATE_TAB').length, 1);
-      assert.match(panel.element('errorBox').textContent, /click Translate again/i);
-    },
-  },
-  {
-    name: 'same-tab document replacement clears the old body and ignores old document notifications',
+{
+    name: 'same-tab document replacement clears the old Inline error and ignores old document notifications',
     async fn() {
       const panel = domPanel();
       await settle();
       const next = deferred();
       panel.setSend(() => next.promise);
       panel.navigate('doc-2');
-      assert.doesNotMatch(panel.element('translated').textContent, /translated 1/);
+      assert.doesNotMatch(panel.element('inlineError').textContent, /shortcut 1/);
       panel.notify({ type: 'STATE_UPDATED', tabId: 1, state: { ...state('departed'), documentId: 'doc-1' } });
-      assert.doesNotMatch(panel.element('translated').textContent, /departed/);
+      assert.doesNotMatch(panel.element('inlineError').textContent, /departed/);
       next.resolve({ ok: false });
       await settle();
     },
   },
-  {
-    name: 'a provider switch refreshes the model before the next click and preserves language edits',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      panel.element('targetLanguage').value = 'French';
-      panel.changeSettings({ service: 'openrouter' });
-      await settle();
-      assert.equal(panel.element('model').disabled, true);
-      assert.equal(panel.element('targetLanguage').value, 'French');
-      panel.element('btnTranslate').listeners.click();
-      await settle();
-      const request = panel.sent.find(message => message.type === 'TRANSLATE_TAB');
-      assert.equal(request.displayedProvider.service, 'openrouter');
-      assert.equal(request.displayedProvider.model, 'deepseek/deepseek-v4.1-flash-1017');
-      assert.equal(request.documentId, 'doc-1');
-    },
-  },
-  {
+{
     name: 'a poll preserves both inline live region text nodes when their messages are unchanged',
     async fn() {
       const panel = domPanel();
@@ -171,194 +134,7 @@ exports.tests = [
       ids.forEach((id, index) => assert.equal(panel.element(id).childNodes[0], nodes[index]));
     },
   },
-  {
-    name: 'actual panel uses result language snapshots instead of edited settings',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      panel.element('targetLanguage').value = 'Japanese';
-      panel.setSend((message) => message.type === 'GET_STATE' ? { ok: true, state: wireState({
-        status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
-        translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' },
-      }) } : response(message.type, '1'));
-      panel.poll();
-      await settle();
-      assert.equal(panel.element('original').lang, 'fr');
-      assert.equal(panel.element('translated').lang, 'ko');
-      assert.equal(panel.element('translated').textContent, '안녕하세요.');
-      panel.activate(2);
-      assert.equal(panel.element('original').lang, 'en');
-      assert.equal(panel.element('translated').lang, 'en');
-    },
-  },
-  {
-    name: 'polling preserves unchanged panel text while updating independent controls',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      const writes = [];
-      for (const id of ['original', 'translated']) {
-        const output = panel.element(id);
-        let text = output.textContent;
-        Object.defineProperty(output, 'textContent', {
-          get: () => text,
-          set(value) { writes.push(id); text = value; },
-        });
-      }
-      panel.setSend(message => message.type === 'GET_STATE'
-        ? { ok: true, state: { ...state('1'), progress: { current: 3, total: 3 } } }
-        : { ok: true, snapshot: { status: 'stopped', progress: 'inline stopped', error: '' } });
-      panel.poll();
-      await settle();
-      assert.deepEqual(writes, []);
-      assert.equal(panel.element('progress').textContent, 'Chunk 3/3');
-      assert.equal(panel.element('inlineStatus').textContent, 'inline stopped');
-    },
-  },
-  {
-    name: 'polling preserves unchanged bilingual nodes and restores externally changed text',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      panel.element('viewMode').value = 'bilingual';
-      panel.poll();
-      await settle();
-      const output = panel.element('translated');
-      const children = [...output.childNodes];
-      assert.equal(children.length, 4);
-      panel.poll();
-      await settle();
-      children.forEach((node, index) => assert.equal(output.childNodes[index], node));
-      output.textContent = 'externally changed';
-      panel.poll();
-      await settle();
-      assert.equal(output.textContent, 'Original\n\noriginal 1\n\nTranslation\n\ntranslated 1');
-      assert.equal(output.childNodes.length, 4);
-      Reflect.set(output, 'textContent', output.textContent);
-      panel.poll();
-      await settle();
-      assert.equal(output.childNodes.length, 4);
-      output.lang = 'en';
-      output.childNodes[3].lang = 'ja';
-      panel.poll();
-      await settle();
-      assert.equal(output.lang, '');
-      assert.equal(output.childNodes[3].lang, '');
-    },
-  },
-  {
-    name: 'characterizes panel language view and placeholder changes with identical source text',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      let current = wireState({ status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
-        translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } });
-      panel.setSend(message => message.type === 'GET_STATE'
-        ? { ok: true, state: current } : response(message.type, '1'));
-      const original = panel.element('original');
-      const output = panel.element('translated');
-      panel.poll();
-      await settle();
-      const originalText = original.childNodes[0];
-      const translatedText = output.childNodes[0];
-      current = { ...current, extracted: { ...current.extracted, langHint: 'de' },
-        settingsUsed: { targetLanguage: 'en' } };
-      panel.poll();
-      await settle();
-      assert.equal(original.lang, 'de');
-      assert.equal(output.lang, 'en');
-      assert.equal(original.childNodes[0], originalText);
-      assert.equal(output.childNodes[0], translatedText);
-      panel.element('viewMode').value = 'bilingual';
-      panel.poll();
-      await settle();
-      assert.equal(output.lang, '');
-      assert.deepEqual(output.childNodes.map(node => [node.textContent, node.lang]), [
-        ['Original\n\n', 'en'], ['Bonjour.', 'de'], ['\n\nTranslation\n\n', 'en'], ['안녕하세요.', 'en'],
-      ]);
-      current = { ...current, settingsUsed: { targetLanguage: 'Korean' } };
-      panel.poll();
-      await settle();
-      assert.equal(output.childNodes[3].lang, 'ko');
-      panel.element('viewMode').value = 'translation';
-      panel.poll();
-      await settle();
-      assert.equal(output.childNodes.length, 1);
-      assert.equal(output.childNodes[0].nodeType, 3);
-      assert.equal(output.textContent, '안녕하세요.');
-      assert.equal(output.lang, 'ko');
-      panel.activate(2);
-      assert.equal(output.textContent, 'No translation yet.\n\nUse Translate current tab to translate the active article.');
-      await settle();
-      assert.equal(output.textContent, '안녕하세요.');
-      current = wireState({ status: 'extracting' }, 2);
-      panel.poll();
-      await settle();
-      assert.equal(original.textContent, 'Extracting article text...');
-      assert.equal(output.textContent, 'Translating current tab...\n\nThe translation appears here when the last chunk is back. A failure before then leaves nothing here.');
-    },
-  },
-  {
-    name: 'polling leaves an unchanged announced error untouched',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      const error = panel.element('errorBox');
-      let text = error.textContent;
-      let writes = 0;
-      Object.defineProperty(error, 'textContent', {
-        get() { return text; },
-        set(value) { text = value; writes += 1; },
-      });
-      panel.poll();
-      await settle();
-      assert.equal(text, 'panel 1');
-      assert.equal(writes, 0);
-      panel.setSend((message) => response(message.type, 'updated'));
-      panel.poll();
-      await settle();
-      assert.equal(text, 'panel updated');
-      assert.equal(writes, 1);
-    },
-  },
-  {
-    name: 'actual result tabs keep keyboard focus selection and visible content together',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      const original = panel.element('tab-original');
-      const translated = panel.element('tab-translated');
-      let prevented = 0;
-      const press = (tab, key) => {
-        assert.equal(typeof tab.listeners.keydown, 'function', 'Result tabs support keyboard navigation');
-        tab.listeners.keydown({ key, preventDefault() { prevented += 1; } });
-      };
-      const selected = (name) => {
-        for (const [value, tab] of [['original', original], ['translated', translated]]) {
-          assert.equal(tab.attributes['aria-selected'], String(value === name));
-          assert.equal(tab.tabIndex, value === name ? 0 : -1);
-          assert.equal(panel.element(`panel-${value}`).hidden, value !== name);
-        }
-      };
-      press(translated, 'ArrowRight');
-      selected('original');
-      assert.equal(panel.focused(), 'tab-original');
-      press(original, 'ArrowRight');
-      selected('translated');
-      press(translated, 'ArrowLeft');
-      selected('original');
-      press(original, 'Home');
-      selected('translated');
-      press(translated, 'End');
-      selected('original');
-      press(original, 'Tab');
-      assert.equal(prevented, 5);
-      selected('original');
-      translated.listeners.click();
-      selected('translated');
-    },
-  },
-  {
+{
     name: 'actual panel shows initialization recovery instead of asking for page access',
     async fn() {
       const panel = domPanel();
@@ -376,7 +152,6 @@ exports.tests = [
       assert.equal(panel.element('inlineError').textContent, message);
       assert.equal(panel.element('inlineStatus').textContent, '');
       assert.equal(panel.element('btnInlineTranslate').disabled, true);
-      assert.equal(panel.element('errorBox').textContent, '');
 
       panel.setSend((request) => request.type === 'GET_STATE'
         ? { ok: true, state: wireState({ status: 'idle', inlineTranslationError: null }) }
@@ -387,7 +162,7 @@ exports.tests = [
       assert.equal(panel.element('btnInlineTranslate').disabled, false);
     },
   },
-  ...['GET_STATE', 'GET_INLINE_TRANSLATION_STATE'].map((type) => ({
+...['GET_STATE', 'GET_INLINE_TRANSLATION_STATE'].map((type) => ({
     name: `actual panel rejects delayed ${type} from the previous tab`,
     async fn() {
       const panel = domPanel();
@@ -402,13 +177,12 @@ exports.tests = [
       await settle();
       old.resolve(response(type, 'old A'));
       await settle();
-      assert.equal(panel.element('original').textContent, 'original 2');
-      assert.equal(panel.element('translated').textContent, 'translated 2');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut 2');
       assert.equal(panel.element('inlineStatus').textContent, 'inline 2');
       assert.equal(panel.element('inlineError').textContent, 'shortcut 2');
-      assert.equal(panel.element('errorBox').textContent, 'panel 2');
+
     },
-  })),
+  }))
 ];
 
 function modulePanel() {
@@ -452,224 +226,22 @@ exports.tests.push({
   },
 });
 
-exports.tests.push({
-  name: 'Translate requires another click when its query discovers a different tab',
-  async fn() {
-    const panel = modulePanel();
-    await panel.controller.start(10);
-    panel.setQuery(async () => ({ id: 2 }));
-    panel.setSend(msg => msg.type === 'TRANSLATE_TAB'
-      ? { ok: false, error: { message: 'new tab translation failed' } }
-      : response(msg.type, '2'));
-    await panel.controller.translate({ targetLanguage: 'Korean' });
-    assert.deepEqual(panel.sent.filter(msg => msg.type === 'TRANSLATE_TAB'), []);
-    await panel.controller.translate({ targetLanguage: 'Korean' });
-    assert.equal(panel.sent.find(msg => msg.type === 'TRANSLATE_TAB').documentId, 'doc-2');
-    assert.equal(panel.display().tabId, 2);
-    assert.equal(panel.display().panelError, 'new tab translation failed');
-  },
-});
+;
 
-exports.tests.push({
+exports.tests.push(
+{
   name: 'an accepted same-worker notification renders the panel once',
   async fn() {
     const panel = modulePanel();
     await panel.controller.start(10);
     const before = panel.renderCount();
     panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
-      state: wireState({ status: 'done', translated: 'current result' }, 2) });
+      state: wireState({ status: 'done', inlineTranslationError: { message: 'current result' } }, 2) });
     assert.equal(panel.renderCount() - before, 1);
-    assert.equal(panel.display().state.translated, 'current result');
+    assert.equal(panel.display().state.inlineTranslationError?.message, 'current result');
   },
-}, {
-  name: 'current Translate failures survive unrelated Inline state updates and release prior body invalidation',
-  async fn() {
-    for (const actual of [false, true]) {
-      const panel = actual ? domPanel() : modulePanel();
-      if (actual) await settle();
-      else await panel.controller.start(10);
-      let current = wireState({ status: 'done', extracted: { contentMarkdown: 'retained source' },
-        translated: 'retained translation' }, 10, 3);
-      panel.setSend(msg => msg.type === 'GET_STATE' ? { ok: true, state: current }
-        : response(msg.type, 'independent'));
-      if (actual) { panel.poll(); await settle(); }
-      else await panel.controller.refresh();
-      const action = deferred();
-      panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? action.promise
-        : msg.type === 'GET_STATE' ? { ok: true, state: current } : response(msg.type, 'independent'));
-      const running = actual ? panel.element('btnTranslate').listeners.click() : panel.controller.translate({});
-      await settle();
-      current = { ...current, stateSequence: 11, inlineTranslationError: null };
-      const notification = { ...current };
-      delete notification.extracted;
-      delete notification.translated;
-      if (actual) panel.notify({ type: 'STATE_UPDATED', tabId: 1, state: notification });
-      else panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1, state: notification });
-      action.reject(new Error('Settings unavailable.'));
-      await running;
-      await settle();
-      assert.equal(actual ? panel.element('errorBox').textContent : panel.display().panelError,
-        'Settings unavailable.');
-      if (actual) { panel.poll(); await settle(); }
-      else await panel.controller.refresh();
-      assert.equal(actual ? panel.element('translated').textContent : panel.display().state.translated,
-        'retained translation');
-      const last = panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1);
-      assert.equal(last.knownBody, undefined);
-    }
-  },
-}, {
-  name: 'polls without acknowledgement while the required body is still being recovered',
-  async fn() {
-    const panel = modulePanel();
-    await panel.controller.start(10);
-    const body = deferred();
-    panel.setSend(msg => msg.type === 'GET_STATE' ? body.promise : response(msg.type, 'independent'));
-    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1, state: {
-      workerEpoch: 'worker-fixture', stateSequence: 2, bodyVersion: 2,
-      status: 'translating', progress: { current: 1, total: 3 },
-    } });
-    const refresh = panel.controller.refresh();
-    await settle();
-    assert.equal(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody, undefined);
-    body.resolve({ ok: true, state: wireState({ status: 'translating',
-      extracted: { contentMarkdown: 'new source' } }, 2) });
-    await refresh;
-    assert.equal(panel.display().state.extracted.contentMarkdown, 'new source');
-  },
-}, {
-  name: 'actual omitted polling preserves language and view changes and repairs page-owned panel DOM',
-  async fn() {
-    const panel = domPanel();
-    await settle();
-    const current = wireState({ status: 'done', extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
-      translated: '안녕하세요.', settingsUsed: { targetLanguage: 'Korean' } }, 2);
-    let bodyChars = 0;
-    panel.setSend(msg => {
-      if (msg.type !== 'GET_STATE') return response(msg.type, 'independent');
-      const outgoing = { ...current };
-      if (msg.knownBody?.workerEpoch === current.workerEpoch && msg.knownBody.bodyVersion === current.bodyVersion) {
-        delete outgoing.extracted;
-        delete outgoing.translated;
-      }
-      bodyChars += (outgoing.extracted?.contentMarkdown?.length || 0) + (outgoing.translated?.length || 0);
-      return { ok: true, state: outgoing };
-    });
-    panel.poll();
-    await settle();
-    assert.equal(panel.element('translated').textContent, '안녕하세요.');
-    bodyChars = 0;
-    for (const view of ['bilingual', 'translation']) {
-      panel.element('viewMode').value = view;
-      panel.poll();
-      await settle();
-      assert.equal(panel.element('original').textContent, 'Bonjour.');
-      assert.equal(panel.element('original').lang, 'fr');
-      assert.equal(panel.element('translated').lang, view === 'bilingual' ? '' : 'ko');
-      if (view === 'bilingual') assert.match(panel.element('translated').textContent, /Bonjour\./);
-      panel.element('original').textContent = 'external change';
-      panel.element('translated').textContent = 'external change';
-      panel.poll();
-      await settle();
-      assert.equal(panel.element('original').textContent, 'Bonjour.');
-      assert.match(panel.element('translated').textContent, /안녕하세요\./);
-    }
-    assert.equal(bodyChars, 0);
-    assert.equal(panel.element('inlineStatus').textContent, 'inline independent');
-  },
-}, {
-  name: 'body recovery and new visits omit acknowledgement while an owned null body is acknowledged',
-  async fn() {
-    const panel = modulePanel();
-    await panel.controller.start(10);
-    panel.setSend(msg => msg.type === 'GET_STATE'
-      ? { ok: true, state: wireState({ status: 'idle' }, 0, 0, 'worker-new') }
-      : response(msg.type, 'independent'));
-    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
-      state: { workerEpoch: 'worker-new', stateSequence: 0, bodyVersion: 0, status: 'idle' } });
-    await settle();
-    assert.equal(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody, undefined);
-    await panel.controller.refresh();
-    assert.deepEqual(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody,
-      { workerEpoch: 'worker-new', bodyVersion: 0 });
-    for (const tab of [2, 1]) {
-      await panel.activate(tab);
-      assert.equal(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody, undefined);
-    }
-    const reopened = modulePanel();
-    await reopened.controller.start(10);
-    assert.equal(reopened.sent.find(msg => msg.type === 'GET_STATE').knownBody, undefined);
-  },
-}, {
-  name: 'acknowledges only an owned body and retains it through omitted polling responses',
-  async fn() {
-    const panel = modulePanel();
-    await panel.controller.start(10);
-    assert.equal(panel.sent.find(msg => msg.type === 'GET_STATE').knownBody, undefined);
-    panel.setSend(msg => {
-      if (msg.type !== 'GET_STATE') return response(msg.type, 'independent');
-      return { ok: true, state: { workerEpoch: 'worker-fixture', stateSequence: 2, bodyVersion: 1,
-        status: 'translating', progress: { current: 2, total: 3 } } };
-    });
-    await panel.controller.refresh();
-    assert.deepEqual(panel.sent.filter(msg => msg.type === 'GET_STATE').at(-1).knownBody,
-      { workerEpoch: 'worker-fixture', bodyVersion: 1 });
-    assert.equal(panel.display().state.status, 'translating');
-    assert.equal(panel.display().state.extracted.contentMarkdown, 'original 1');
-    assert.equal(panel.display().state.translated, 'translated 1');
-    assert.equal(panel.display().state.progress.current, 2);
-    assert.equal(panel.display().inline.snapshot.progress, 'inline independent');
-  },
-}, {
-  name: 'actual panel immediately recovers omitted article text while retaining newer progress',
-  async fn() {
-    const panel = domPanel();
-    await settle();
-    const body = deferred();
-    panel.setSend(msg => msg.type === 'GET_STATE' ? body.promise : response(msg.type, 'inline'));
-    const before = panel.sent.length;
-    panel.notify({ type: 'STATE_UPDATED', tabId: 1, state: {
-      workerEpoch: 'worker-fixture', stateSequence: 4, bodyVersion: 2, status: 'translating',
-      progress: { current: 2, total: 3 }, settingsUsed: { targetLanguage: 'Korean' },
-    } });
-    await settle();
-    assert.deepEqual(JSON.parse(JSON.stringify(panel.sent.slice(before))), [{ type: 'GET_STATE', tabId: 1, documentId: 'doc-1' }]);
-    assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
-    assert.equal(panel.element('original').textContent, 'Extracting article text...');
-    body.resolve({ ok: true, state: wireState({ status: 'translating',
-      progress: { current: 1, total: 3 }, extracted: { contentMarkdown: 'Bonjour.', langHint: 'fr' },
-      translated: '안녕하세요.' }, 3, 2) });
-    await settle();
-    assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
-    assert.equal(panel.element('original').textContent, 'Bonjour.');
-    assert.equal(panel.element('original').lang, 'fr');
-    assert.equal(panel.element('translated').textContent, '안녕하세요.');
-    assert.equal(panel.element('translated').lang, 'ko');
-  },
-}, {
-  name: 'a delayed Translate error cannot overwrite a newer worker result or Translate action',
-  async fn() {
-    for (const newerAction of [false, true]) {
-      const panel = modulePanel();
-      await panel.controller.start(10);
-      const old = deferred();
-      panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? old.promise : response(msg.type, 'current'));
-      const first = panel.controller.translate({});
-      await settle();
-      if (newerAction) {
-        panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? { ok: true } : response(msg.type, 'current'));
-        await panel.controller.translate({});
-      }
-      panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
-        state: wireState({ status: 'done', translated: 'current result' }, 3) });
-      old.resolve({ ok: false, error: { message: 'old action failed' } });
-      await first;
-      assert.equal(panel.display().state.translated, 'current result');
-      assert.equal(panel.display().state.status, 'done');
-      assert.equal(panel.display().panelError, '');
-    }
-  },
-}, {
+},
+{
   name: 'uses worker sequence for same-epoch replies even when requests started in reverse order',
   async fn() {
     const panel = modulePanel();
@@ -679,52 +251,14 @@ exports.tests.push({
     const pending = panel.controller.refresh();
     await settle();
     panel.setSend(msg => msg.type === 'GET_STATE'
-      ? { ok: true, state: wireState({ status: 'done', translated: 'third' }, 3) } : response(msg.type, 'inline'));
+      ? { ok: true, state: wireState({ status: 'done', inlineTranslationError: { message: 'third' } }, 3) } : response(msg.type, 'inline'));
     await panel.controller.refresh();
-    old.resolve({ ok: true, state: wireState({ status: 'done', translated: 'fourth' }, 4) });
+    old.resolve({ ok: true, state: wireState({ status: 'done', inlineTranslationError: { message: 'fourth' } }, 4) });
     await pending;
-    assert.equal(panel.display().state.translated, 'fourth');
+    assert.equal(panel.display().state.inlineTranslationError?.message, 'fourth');
   },
-}, {
-  name: 'a skipped translation confirms and recovers the current same-version body',
-  async fn() {
-    for (const reason of ['already_running', 'missing_api_key']) {
-      const panel = modulePanel();
-      await panel.controller.start(10);
-      panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? { ok: true, skipped: true, reason }
-        : response(msg.type, 'still current'));
-      await panel.controller.translate({});
-      assert.equal(panel.display().state.translated, 'translated still current');
-    }
-  },
-}, {
-  name: 'recovers a progress body before the first full query and accepts an older useful body only',
-  async fn() {
-    const panel = modulePanel();
-    const initial = deferred();
-    const recovery = deferred();
-    let calls = 0;
-    panel.setSend(msg => msg.type === 'GET_STATE'
-      ? (++calls === 1 ? initial.promise : recovery.promise) : response(msg.type, 'independent'));
-    const start = panel.controller.start(10);
-    await settle();
-    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1, state: {
-      workerEpoch: 'worker-fixture', stateSequence: 3, bodyVersion: 2,
-      status: 'translating', progress: { current: 2, total: 3 },
-    } });
-    await settle();
-    assert.equal(calls, 2);
-    recovery.resolve({ ok: true, state: wireState({ status: 'translating',
-      progress: { current: 1, total: 3 }, extracted: { contentMarkdown: 'recovered source' } }, 2, 2) });
-    await settle();
-    initial.resolve({ ok: true, state: wireState({ status: 'done', translated: 'old translation' }, 1, 1) });
-    await start;
-    assert.equal(panel.display().state.stateSequence, 3);
-    assert.equal(panel.display().state.progress.current, 2);
-    assert.equal(panel.display().state.extracted.contentMarkdown, 'recovered source');
-    assert.equal(panel.display().inline.snapshot.progress, 'inline independent');
-  },
-}, {
+},
+{
   name: 'confirms an unseen worker epoch and never readmits retired worker replies or notifications',
   async fn() {
     const panel = modulePanel();
@@ -737,68 +271,29 @@ exports.tests.push({
     const poll = panel.controller.refresh();
     await settle();
     panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
-      state: { status: 'translating', workerEpoch: 'worker-new', stateSequence: 1, bodyVersion: 1 } });
+      state: { status: 'translating', workerEpoch: 'worker-new', stateSequence: 1 } });
     await settle();
     assert.equal(calls, 2);
     assert.equal(panel.display().state.workerEpoch, 'worker-fixture');
-    fresh.resolve({ ok: true, state: wireState({ status: 'done', translated: 'new worker result' }, 2, 1, 'worker-new') });
+    fresh.resolve({ ok: true, state: wireState({ status: 'done', inlineTranslationError: { message: 'new worker result' } }, 2, 'worker-new') });
     await settle();
-    old.resolve({ ok: true, state: wireState({ status: 'done', translated: 'late old reply' }, 999, 99) });
+    old.resolve({ ok: true, state: wireState({ status: 'done', inlineTranslationError: { message: 'late old reply' } }, 999) });
     await poll;
     panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
-      state: wireState({ status: 'done', translated: 'late old notification' }, 1000, 100) });
+      state: wireState({ status: 'done', inlineTranslationError: { message: 'late old notification' } }, 1000) });
     assert.equal(calls, 2);
-    assert.equal(panel.display().state.translated, 'new worker result');
+    assert.equal(panel.display().state.inlineTranslationError?.message, 'new worker result');
     panel.setSend(msg => msg.type === 'GET_STATE'
-      ? { ok: true, state: wireState({ status: 'done', translated: 'new worker result' }, 2, 1, 'worker-new') }
+      ? { ok: true, state: wireState({ status: 'done', inlineTranslationError: { message: 'new worker result' } }, 2, 'worker-new') }
       : response(msg.type, 'independent'));
     panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
-      state: wireState({ status: 'done', translated: 'unseen old notification' }, 9000, 9000, 'worker-unseen') });
+      state: wireState({ status: 'done', inlineTranslationError: { message: 'unseen old notification' } }, 9000, 'worker-unseen') });
     await settle();
     assert.equal(panel.display().state.workerEpoch, 'worker-new');
-    assert.equal(panel.display().state.translated, 'new worker result');
+    assert.equal(panel.display().state.inlineTranslationError?.message, 'new worker result');
   },
-}, {
-  name: 'new translation invalidates the previous body even when an old full query returns',
-  async fn() {
-    const panel = modulePanel();
-    await panel.controller.start(10);
-    const action = deferred();
-    panel.setSend(msg => msg.type === 'TRANSLATE_TAB' ? action.promise : response(msg.type, 'old body'));
-    const translating = panel.controller.translate({});
-    await settle();
-    await panel.controller.refresh();
-    assert.equal(panel.display().state.translated, null);
-    assert.equal(panel.display().state.status, 'translating');
-    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1,
-      state: wireState({ status: 'done', translated: 'fresh translation' }, 2) });
-    action.resolve({ ok: true });
-    await translating;
-    assert.equal(panel.display().state.translated, 'fresh translation');
-  },
-}, {
-  name: 'fetches a missing progress body immediately without regressing newer status',
-  async fn() {
-    const panel = modulePanel();
-    await panel.controller.start(10);
-    const old = deferred();
-    panel.setSend(msg => msg.type === 'GET_STATE' ? old.promise : response(msg.type, 'inline'));
-    const before = panel.sent.filter(msg => msg.type === 'GET_STATE').length;
-    panel.controller.receive({ type: 'STATE_UPDATED', tabId: 1, state: {
-      workerEpoch: 'worker-fixture', stateSequence: 4, bodyVersion: 2,
-      status: 'translating', progress: { current: 2, total: 3 },
-    } });
-    await settle();
-    assert.equal(panel.sent.filter(msg => msg.type === 'GET_STATE').length, before + 1);
-    assert.equal(panel.display().state.extracted, null);
-    old.resolve({ ok: true, state: { ...state('recovered'), stateSequence: 3, bodyVersion: 2,
-      status: 'translating', progress: { current: 1, total: 3 } } });
-    await settle();
-    assert.equal(panel.display().state.extracted.contentMarkdown, 'original recovered');
-    assert.equal(panel.display().state.progress.current, 2);
-    assert.equal(panel.display().state.stateSequence, 4);
-  },
-}, {
+},
+{
   name: 'new control clears its predecessor error before its tab query answers',
   async fn() {
     const panel = modulePanel();
@@ -813,7 +308,8 @@ exports.tests.push({
     query.resolve({ id: 1 });
     await next;
   },
-});
+}
+);
 
 exports.tests.push(...['failure', 'rejection'].flatMap((outcome) =>
   ['tab query', 'response', 'success'].map((waiting) => ({
@@ -963,36 +459,29 @@ exports.tests.push({
 });
 
 exports.tests.push(
-  {
-    name: 'actual activation immediately clears both displays while access is unconfirmed',
+{
+    name: 'actual activation clears Inline errors and disables controls while access is unconfirmed',
     async fn() {
       const panel = domPanel();
       await settle();
-      panel.element('targetLanguage').value = 'French';
-      panel.element('saveStatus').textContent = 'Saved.';
-      panel.element('saveError').textContent = 'save feedback';
       const pending = deferred();
       panel.setSend(() => pending.promise);
       panel.activate(2);
-      assert.doesNotMatch(panel.element('original').textContent, /original 1/);
-      assert.doesNotMatch(panel.element('translated').textContent, /translated 1/);
-      assert.equal(panel.element('progress').textContent, '');
-      assert.equal(panel.element('errorBox').textContent, '');
+      assert.doesNotMatch(panel.element('inlineError').textContent, /shortcut 1/);
+
       assert.equal(panel.element('inlineError').textContent, '');
       assert.equal(panel.element('inlineStatus').textContent, 'Checking access to this tab...');
       for (const id of ['btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore']) {
         assert.equal(panel.element(id).disabled, true);
       }
-      assert.equal(panel.element('targetLanguage').value, 'French');
-      assert.equal(panel.element('saveStatus').textContent, 'Saved.');
-      assert.equal(panel.element('saveError').textContent, 'save feedback');
-      assert.equal(panel.sent.some((msg) => ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)), false);
+
+      assert.equal(panel.sent.some((msg) => ['RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)), false);
       pending.resolve({ ok: false });
       await settle();
       assert.match(panel.element('inlineStatus').textContent, /Click the extension icon/);
     },
   },
-  ...['GET_STATE', 'GET_INLINE_TRANSLATION_STATE'].map((type) => ({
+...['GET_STATE', 'GET_INLINE_TRANSLATION_STATE'].map((type) => ({
     name: `module rejects first A visit ${type} after A to B to A`,
     async fn() {
       const panel = modulePanel();
@@ -1009,11 +498,11 @@ exports.tests.push(
       old.resolve(response(type, 'old A'));
       await first;
       assert.equal(panel.display().tabId, 1);
-      assert.equal(panel.display().state.translated, 'translated new A');
+      assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut new A');
       assert.equal(panel.display().inline.snapshot.progress, 'inline new A');
     },
   })),
-  {
+{
     name: 'actual panel rejects first A visit after activation through B back to A',
     async fn() {
       const panel = domPanel();
@@ -1030,11 +519,11 @@ exports.tests.push(
       await settle();
       old.resolve({ ok: true, state: state('old A'), snapshot: { status: 'active', progress: 'old A' } });
       await settle();
-      assert.equal(panel.element('translated').textContent, 'translated new A');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut new A');
       assert.equal(panel.element('inlineStatus').textContent, 'inline new A');
     },
   },
-  {
+{
     name: 'older active tab queries cannot undo a newer query or activation',
     async fn() {
       const panel = modulePanel();
@@ -1047,7 +536,7 @@ exports.tests.push(
       old.resolve({ id: 1 });
       await first;
       assert.equal(panel.display().tabId, 2);
-      assert.equal(panel.display().state.translated, 'translated 2');
+      assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut 2');
       const beforeActivation = deferred();
       panel.setQuery(() => beforeActivation.promise);
       const second = panel.controller.refresh();
@@ -1055,10 +544,10 @@ exports.tests.push(
       beforeActivation.resolve({ id: 2 });
       await second;
       assert.equal(panel.display().tabId, 3);
-      assert.equal(panel.display().state.translated, 'translated 3');
+      assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut 3');
     },
   },
-  {
+{
     name: 'actual panel ignores other windows and other tabs notifications',
     async fn() {
       const panel = domPanel();
@@ -1068,17 +557,17 @@ exports.tests.push(
       await settle();
       assert.equal(panel.sent.length, before);
       panel.notify({ type: 'STATE_UPDATED', tabId: 9, state: state('other') });
-      assert.equal(panel.element('translated').textContent, 'translated 1');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut 1');
       panel.notify({ type: 'STATE_UPDATED', tabId: 1, state: state('notified') });
-      assert.equal(panel.element('translated').textContent, 'translated notified');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut notified');
     },
   },
-  {
-    name: 'normal module responses render both translations and preserve controls and recovery',
+{
+    name: 'normal module responses render Inline feedback and preserve controls and recovery',
     async fn() {
       const panel = modulePanel();
       await panel.controller.start(10);
-      assert.equal(panel.display().state.translated, 'translated 1');
+      assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut 1');
       assert.equal(panel.display().inline.snapshot.progress, 'inline 1');
       let model = helpers.getInlineTranslationPanelViewModel(panel.display().inline);
       assert.equal(model.stopDisabled, false);
@@ -1094,30 +583,8 @@ exports.tests.push(
       await panel.controller.refresh();
       assert.equal(panel.display().inline.controlError, '');
       assert.equal(helpers.getInlineTranslationPanelViewModel(panel.display().inline).startDisabled, false);
-      panel.setSend(() => ({ ok: false, error: { code: 'markdown.token_missing', message: 'markdown.token_missing' } }));
-      await panel.controller.translate({ targetLanguage: 'Korean' });
-      assert.match(panel.display().panelError, /lost a link or code marker/);
       const control = panel.sent.find((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL');
       assert.deepEqual(control, { type: 'RUN_INLINE_TRANSLATION_CONTROL', tabId: 1, documentId: 'doc-1', control: 'STOP' });
-      const translation = panel.sent.find((msg) => msg.type === 'TRANSLATE_TAB');
-      assert.deepEqual(translation, { type: 'TRANSLATE_TAB', tabId: 1, documentId: 'doc-1', settingsOverride: { targetLanguage: 'Korean' } });
-    },
-  },
-  {
-    name: 'actual polling refreshes both states and Translate button uses settings',
-    async fn() {
-      const panel = domPanel();
-      await settle();
-      panel.setSend((msg) => msg.type === 'TRANSLATE_TAB' ? { ok: false, error: { message: 'cannot translate' } } : response(msg.type, 'polled'));
-      panel.poll();
-      await settle();
-      assert.equal(panel.element('translated').textContent, 'translated polled');
-      assert.equal(panel.element('inlineStatus').textContent, 'inline polled');
-      panel.element('targetLanguage').value = 'French';
-      panel.element('btnTranslate').listeners.click();
-      await settle();
-      assert.equal(panel.sent.find((msg) => msg.type === 'TRANSLATE_TAB').settingsOverride.targetLanguage, 'French');
-      assert.equal(panel.element('errorBox').textContent, 'cannot translate');
     },
   }
 );
@@ -1140,10 +607,9 @@ exports.tests.push(...[false, true].map((actual) => ({
     if (actual) await settle();
     else await first;
     if (actual) {
-      assert.equal(panel.element('original').textContent, 'original notified');
-      assert.equal(panel.element('translated').textContent, 'translated notified');
-      assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
-      assert.equal(panel.element('errorBox').textContent, 'panel notified');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut notified');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut notified');
+
       assert.equal(panel.element('inlineError').textContent, 'shortcut notified');
       assert.equal(panel.element('inlineStatus').textContent, 'inline valid inline');
     } else {
@@ -1154,8 +620,8 @@ exports.tests.push(...[false, true].map((actual) => ({
     panel.setSend((msg) => response(msg.type, 'after notification'));
     if (actual) { panel.poll(); await settle(); }
     else await panel.controller.refresh();
-    assert.equal(actual ? panel.element('translated').textContent : panel.display().state.translated,
-      'translated after notification');
+    assert.equal(actual ? panel.element('inlineError').textContent : panel.display().state.inlineTranslationError?.message,
+      'shortcut after notification');
   },
 })));
 
@@ -1205,10 +671,9 @@ exports.tests.push(...[false, true].map((actual) => ({
     if (actual) await settle();
     else await first;
     if (actual) {
-      assert.equal(panel.element('original').textContent, 'original current');
-      assert.equal(panel.element('translated').textContent, 'translated current');
-      assert.equal(panel.element('progress').textContent, 'Chunk 2/3');
-      assert.equal(panel.element('errorBox').textContent, 'panel current');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut current');
+      assert.equal(panel.element('inlineError').textContent, 'shortcut current');
+
       assert.equal(panel.element('inlineError').textContent, 'shortcut current');
     } else {
       assert.deepEqual(panel.display().state, { ...state('current'), updatedAt: 100 });
@@ -1233,60 +698,52 @@ exports.tests.push({
       await settle();
       if (waitingType === 'GET_STATE') {
         assert.equal(panel.display().inline.snapshot.progress, 'inline second');
-        assert.equal(panel.display().state.translated, 'translated 1');
+        assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut 1');
       } else {
-        assert.equal(panel.display().state.translated, 'translated second');
+        assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut second');
         assert.equal(panel.display().inline.snapshot.progress, 'inline 1');
       }
       next.resolve(response(waitingType, 'second'));
       await second;
       pending.resolve(response(waitingType, 'first'));
       await first;
-      assert.equal(panel.display().state.translated, 'translated second');
+      assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut second');
       assert.equal(panel.display().inline.snapshot.progress, 'inline second');
     }
   },
 }, {
   name: 'same-tab polling does not invalidate a delayed user action failure',
   async fn() {
-    for (const action of ['translate', 'control']) {
-      const panel = modulePanel();
-      await panel.controller.start(10);
-      const pending = deferred();
-      panel.setSend((msg) => ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)
-        ? pending.promise : response(msg.type, 'polled'));
-      const button = action === 'translate' ? panel.controller.translate({}) : panel.controller.runInlineControl('STOP');
-      await settle();
-      await panel.controller.refresh();
-      pending.resolve({ ok: false, error: { message: 'action failed' } });
-      await button;
-      assert.equal(action === 'translate' ? panel.display().panelError : panel.display().inline.controlError,
-        'action failed');
-    }
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const pending = deferred();
+    panel.setSend((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL'
+      ? pending.promise : response(msg.type, 'polled'));
+    const button = panel.controller.runInlineControl('STOP');
+    await settle();
+    await panel.controller.refresh();
+    pending.resolve({ ok: false, error: { message: 'action failed' } });
+    await button;
+    assert.equal(panel.display().inline.controlError, 'action failed');
   },
 });
 
 exports.tests.push({
   name: 'polling during a button tab query does not discard an action on the same tab',
   async fn() {
-    for (const action of ['translate', 'control']) {
-      const panel = modulePanel();
-      await panel.controller.start(10);
-      const waiting = deferred();
-      panel.setQuery(() => waiting.promise);
-      panel.setSend(() => ({ ok: true }));
-      const button = action === 'translate'
-        ? panel.controller.translate({ targetLanguage: 'French' })
-        : panel.controller.runInlineControl('STOP');
-      panel.setQuery(async () => ({ id: 1 }));
-      await panel.controller.refresh();
-      waiting.resolve({ id: 1 });
-      await button;
-      const message = panel.sent.find((msg) => msg.type ===
-        (action === 'translate' ? 'TRANSLATE_TAB' : 'RUN_INLINE_TRANSLATION_CONTROL'));
-      assert.ok(message, `${action} button action was lost during polling`);
-      assert.equal(message.tabId, 1);
-    }
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const waiting = deferred();
+    panel.setQuery(() => waiting.promise);
+    panel.setSend(() => ({ ok: true }));
+    const button = panel.controller.runInlineControl('STOP');
+    panel.setQuery(async () => ({ id: 1 }));
+    await panel.controller.refresh();
+    waiting.resolve({ id: 1 });
+    await button;
+    const message = panel.sent.find((msg) => msg.type === 'RUN_INLINE_TRANSLATION_CONTROL');
+    assert.ok(message, 'control button action was lost during polling');
+    assert.equal(message.tabId, 1);
   },
 });
 
@@ -1340,68 +797,64 @@ exports.tests.push({
   },
 });
 
-exports.tests.push(...['control', 'translate'].flatMap((action) =>
-  ['failure', 'rejection'].flatMap((outcome) => [false, true].flatMap((actual) =>
-    [false, true].map((returnToA) => ({
-      name: `${actual ? 'actual button' : 'module'} ${action} ignores late ${outcome} after ${returnToA ? 'A to B to A' : 'A to B'}`,
-      async fn() {
-        const panel = actual ? domPanel() : modulePanel();
-        if (actual) await settle();
-        else await panel.controller.start(10);
-        const pending = deferred();
-        const actionType = action === 'control' ? 'RUN_INLINE_TRANSLATION_CONTROL' : 'TRANSLATE_TAB';
-        panel.setSend((msg) => msg.type === actionType ? pending.promise
-          : response(msg.type, 'current'));
-        const running = actual
-          ? panel.element(action === 'control' ? 'btnInlineStop' : 'btnTranslate').listeners.click()
-          : action === 'control' ? panel.controller.runInlineControl('STOP')
-            : panel.controller.translate({ targetLanguage: 'French' });
-        await settle();
-        assert.equal(panel.sent.filter((msg) => msg.type === actionType).length, 1);
-        assert.equal(panel.sent.find((msg) => msg.type === actionType).tabId, 1);
-        await panel.activate(2);
-        await settle();
-        if (returnToA) { await panel.activate(1); await settle(); }
-        const readDisplay = () => actual
-          ? ['original', 'translated', 'progress', 'errorBox', 'inlineStatus', 'inlineError',
-            'btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore', 'btnTranslate']
-            .map((id) => {
-              const { textContent, hidden, disabled } = panel.element(id);
-              return { textContent, hidden, disabled };
-            })
-          : panel.display();
-        const before = readDisplay();
-        if (outcome === 'rejection') pending.reject(new Error('old action failed'));
-        else pending.resolve({ ok: false, error: { message: 'old action failed' } });
-        await running;
-        await settle();
-        assert.deepEqual(readDisplay(), before);
-        assert.equal(panel.sent.filter((msg) =>
-          ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
-      },
-    }))))));
+exports.tests.push(...['failure', 'rejection'].flatMap((outcome) => [false, true].flatMap((actual) =>
+  [false, true].map((returnToA) => ({
+    name: `${actual ? 'actual button' : 'module'} control ignores late ${outcome} after ${returnToA ? 'A to B to A' : 'A to B'}`,
+    async fn() {
+      const panel = actual ? domPanel() : modulePanel();
+      if (actual) await settle();
+      else await panel.controller.start(10);
+      const pending = deferred();
+      const actionType = 'RUN_INLINE_TRANSLATION_CONTROL';
+      panel.setSend((msg) => msg.type === actionType ? pending.promise
+        : response(msg.type, 'current'));
+      const running = actual
+        ? panel.element('btnInlineStop').listeners.click()
+        : panel.controller.runInlineControl('STOP');
+      await settle();
+      assert.equal(panel.sent.filter((msg) => msg.type === actionType).length, 1);
+      assert.equal(panel.sent.find((msg) => msg.type === actionType).tabId, 1);
+      await panel.activate(2);
+      await settle();
+      if (returnToA) { await panel.activate(1); await settle(); }
+      const readDisplay = () => actual
+        ? ['inlineStatus', 'inlineError',
+          'btnInlineTranslate', 'btnInlineStop', 'btnInlineRestore']
+          .map((id) => {
+            const { textContent, hidden, disabled } = panel.element(id);
+            return { textContent, hidden, disabled };
+          })
+        : panel.display();
+      const before = readDisplay();
+      if (outcome === 'rejection') pending.reject(new Error('old action failed'));
+      else pending.resolve({ ok: false, error: { message: 'old action failed' } });
+      await running;
+      await settle();
+      assert.deepEqual(readDisplay(), before);
+      assert.equal(panel.sent.filter((msg) =>
+        ['RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
+    },
+  })))));
 
-exports.tests.push(...['control', 'translate'].map((action) => ({
-  name: `${action} completion and its follow-up queries stay with the requesting visit`,
+exports.tests.push({
+  name: 'control completion and its follow-up queries stay with the requesting visit',
   async fn() {
     for (const switchDuringFollowUp of [false, true]) {
       const panel = modulePanel();
       await panel.controller.start(10);
       const pending = deferred();
       const followUp = deferred();
-      const actionType = action === 'control' ? 'RUN_INLINE_TRANSLATION_CONTROL' : 'TRANSLATE_TAB';
+      const actionType = 'RUN_INLINE_TRANSLATION_CONTROL';
       panel.setSend((msg) => msg.type === actionType ? pending.promise
         : followUp.promise);
-      const running = action === 'control' ? panel.controller.runInlineControl('START')
-        : panel.controller.translate({});
+      const running = panel.controller.runInlineControl('START');
       await settle();
       const before = panel.sent.length;
       if (switchDuringFollowUp) {
         pending.resolve({ ok: true, skipped: true });
         await settle();
         assert.deepEqual(panel.sent.slice(before), [
-          { type: 'GET_STATE', tabId: 1, documentId: 'doc-1', ...(action === 'control'
-            ? { knownBody: { workerEpoch: 'worker-fixture', bodyVersion: 1 } } : {}) },
+          { type: 'GET_STATE', tabId: 1, documentId: 'doc-1',  },
           { type: 'GET_INLINE_TRANSLATION_STATE', tabId: 1, documentId: 'doc-1' },
         ]);
       }
@@ -1417,50 +870,39 @@ exports.tests.push(...['control', 'translate'].map((action) => ({
       assert.deepEqual(panel.display(), display);
       assert.equal(panel.sent.length, afterSwitch);
       assert.equal(panel.sent.filter((msg) =>
-        ['TRANSLATE_TAB', 'RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
+        ['RUN_INLINE_TRANSLATION_CONTROL'].includes(msg.type)).length, 1);
+    }
+  },
+});
+
+exports.tests.push(...['failure', 'rejection', 'success'].map((outcome) => ({
+  name: `current control ${outcome} remains valid across repeated polling`,
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const pending = deferred();
+    const actionType = 'RUN_INLINE_TRANSLATION_CONTROL';
+    panel.setSend((msg) => msg.type === actionType ? pending.promise : response(msg.type, 'polled'));
+    const running = panel.controller.runInlineControl('STOP');
+    await settle();
+    for (let i = 0; i < 3; i += 1) await panel.controller.refresh();
+    if (outcome === 'success') {
+      panel.setSend((msg) => {
+        const result = response(msg.type, 'completed');
+        if (result.state) Object.assign(result.state, { stateSequence: 2 });
+        return result;
+      });
+      pending.resolve({ ok: true, skipped: false });
+    } else if (outcome === 'rejection') pending.reject(new Error('current action failed'));
+    else pending.resolve({ ok: false, error: { message: 'current action failed' } });
+    await running;
+    if (outcome === 'success') {
+      assert.equal(panel.display().inline.controlError, '');
+      assert.equal(panel.display().inline.snapshot.progress, 'inline completed');
+      assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut completed');
+    } else {
+      assert.equal(panel.display().inline.controlError,
+        'current action failed');
     }
   },
 })));
-
-exports.tests.push(...['control', 'translate'].flatMap((action) =>
-  ['failure', 'rejection', 'success', ...(action === 'translate' ? ['skipped'] : [])].map((outcome) => ({
-    name: `current ${action} ${outcome} remains valid across repeated polling`,
-    async fn() {
-      const panel = modulePanel();
-      await panel.controller.start(10);
-      const pending = deferred();
-      const actionType = action === 'control' ? 'RUN_INLINE_TRANSLATION_CONTROL' : 'TRANSLATE_TAB';
-      panel.setSend((msg) => msg.type === actionType ? pending.promise : response(msg.type, 'polled'));
-      const running = action === 'control' ? panel.controller.runInlineControl('STOP')
-        : panel.controller.translate({});
-      await settle();
-      for (let i = 0; i < 3; i += 1) await panel.controller.refresh();
-      if (outcome === 'success' || outcome === 'skipped') {
-        panel.setSend((msg) => {
-          const result = response(msg.type, 'completed');
-          if (result.state) Object.assign(result.state, { stateSequence: 2, bodyVersion: 2 });
-          return result;
-        });
-        if (action === 'translate' && outcome === 'success') panel.controller.receive({ type: 'STATE_UPDATED',
-          tabId: 1, state: wireState({ status: 'done', translated: 'completed translation' }, 2) });
-        pending.resolve({ ok: true, skipped: outcome === 'skipped' });
-      } else if (outcome === 'rejection') pending.reject(new Error('current action failed'));
-      else pending.resolve({ ok: false, error: { message: 'current action failed' } });
-      await running;
-      if (outcome === 'success' || outcome === 'skipped') {
-        assert.equal(panel.display().panelError, '');
-        assert.equal(panel.display().inline.controlError, '');
-        if (action === 'control' || outcome === 'skipped') {
-          assert.equal(panel.display().inline.snapshot.progress, 'inline completed');
-          assert.equal(panel.display().state.translated, 'translated completed');
-        } else {
-          assert.equal(panel.display().state.status, 'done');
-          assert.equal(panel.display().state.translated, 'completed translation');
-        }
-      } else {
-        assert.equal(action === 'control' ? panel.display().inline.controlError : panel.display().panelError,
-          'current action failed');
-        if (action === 'translate') assert.equal(panel.display().state.status, 'idle');
-      }
-    },
-  }))));

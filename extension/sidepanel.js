@@ -8,41 +8,7 @@ const { MISSING_PAGE_ACCESS_MESSAGES } =
   (typeof module !== 'undefined' && module.exports
     ? require('./page-access.js')
     : {});
-const { DEFAULT_MODEL, getEffectiveModelSettings } =
-  globalThis.ChromeAiTranslatorDefaultModel ||
-  (typeof module !== 'undefined' && module.exports
-    ? require('./default-model.js')
-    : {});
-const { describeSidePanelFailure } =
-  globalThis.ChromeAiTranslatorSidePanelFailure ||
-  (typeof module !== 'undefined' && module.exports
-    ? require('./sidepanel-failure.js')
-    : {});
-const { getTargetLanguageCode } =
-  globalThis.ChromeAiTranslatorTranslationSettings ||
-  (typeof module !== 'undefined' && module.exports
-    ? require('./translation-settings.js')
-    : {});
-
 const hasDocument = typeof document !== 'undefined';
-
-const elStatus = hasDocument ? document.getElementById('status') : null;
-const elError = hasDocument ? document.getElementById('errorBox') : null;
-const elProgress = hasDocument ? document.getElementById('progress') : null;
-const elSaveStatus = hasDocument ? document.getElementById('saveStatus') : null;
-const elSaveError = hasDocument ? document.getElementById('saveError') : null;
-const btnTranslate = hasDocument ? document.getElementById('btnTranslate') : null;
-const btnSave = hasDocument ? document.getElementById('btnSave') : null;
-
-const elTargetLanguage = hasDocument
-  ? document.getElementById('targetLanguage')
-  : null;
-const elTone = hasDocument ? document.getElementById('tone') : null;
-const elModel = hasDocument ? document.getElementById('model') : null;
-const elViewMode = hasDocument ? document.getElementById('viewMode') : null;
-
-const elOriginal = hasDocument ? document.getElementById('original') : null;
-const elTranslated = hasDocument ? document.getElementById('translated') : null;
 
 const btnInlineTranslate = hasDocument
   ? document.getElementById('btnInlineTranslate')
@@ -59,121 +25,6 @@ const elInlineStatus = hasDocument
 const elInlineError = hasDocument
   ? document.getElementById('inlineError')
   : null;
-
-function setStatus(text) {
-  elStatus.textContent = text;
-}
-
-function setError(message) {
-  if (!message) {
-    elError.hidden = true;
-    elError.textContent = '';
-    return;
-  }
-  elError.hidden = false;
-  if (elError.textContent !== message) elError.textContent = message;
-}
-
-function setSaveError(message) {
-  if (!message) {
-    elSaveError.hidden = true;
-    elSaveError.textContent = '';
-    return;
-  }
-  elSaveError.hidden = false;
-  elSaveError.textContent = message;
-}
-
-function setProgress(p) {
-  elProgress.textContent = p || '';
-}
-
-function trimPanelText(value) {
-  return String(value || '').trim();
-}
-
-function getTranslatedPanelParts(state, viewMode = 'translation') {
-  const translated = trimPanelText(state?.translated);
-  if (!translated) return [];
-
-  const original = trimPanelText(state?.extracted?.contentMarkdown);
-  const language = getContentLanguage(state?.settingsUsed?.targetLanguage);
-  if (viewMode === 'bilingual' && original) {
-    return [
-      ['Original\n\n', 'en'],
-      [original, getContentLanguage(state.extracted?.langHint)],
-      ['\n\nTranslation\n\n', 'en'],
-      [translated, language],
-    ];
-  }
-
-  return [[translated, language]];
-}
-
-function formatTranslatedPanelText(state, viewMode = 'translation') {
-  return getTranslatedPanelParts(state, viewMode).map(([text]) => text).join('');
-}
-
-function formatOriginalPanelText(state) {
-  return state?.extracted?.contentMarkdown || '';
-}
-
-function formatStatusText(status) {
-  const safe = String(status || 'idle');
-  return safe.charAt(0).toUpperCase() + safe.slice(1);
-}
-
-function getContentLanguage(value) {
-  const language = String(value || '').normalize('NFKC').trim();
-  if (/^[a-z]{2,3}(?:-|$)/i.test(language)) {
-    try {
-      return Intl.getCanonicalLocales(language)[0] || '';
-    } catch {
-      return '';
-    }
-  }
-  return getTargetLanguageCode(language);
-}
-
-function getSidepanelDisplayState(state = {}, viewMode = 'translation') {
-  const status = state?.status || 'idle';
-  const busy = status === 'extracting' || status === 'translating';
-  const translatedParts = getTranslatedPanelParts(state, viewMode);
-  const translatedText = translatedParts.map(([text]) => text).join('');
-  const originalText = formatOriginalPanelText(state);
-  const progressText = state?.progress?.total
-    ? `Chunk ${state.progress.current}/${state.progress.total}`
-    : '';
-
-  // What a failure means is chosen from its code rather than its message — see
-  // sidepanel-failure.js. A failed tab is owed a sentence whether or not it said anything
-  // about the failure, which is why the status counts on its own; a tab that has not failed
-  // is owed silence, because the general sentence would announce a failure of its own.
-  const hasFailure =
-    status === 'error' || Boolean(state?.error?.message || state?.error?.code);
-
-  return {
-    translatedParts,
-    originalLanguage: originalText ? getContentLanguage(state.extracted?.langHint) : 'en',
-    translatedLanguage: trimPanelText(state.translated)
-      ? getContentLanguage(state.settingsUsed?.targetLanguage) : 'en',
-    statusText: formatStatusText(status),
-    translateButtonText: busy ? 'Translating...' : 'Translate current tab',
-    translateDisabled: busy,
-    errorText: hasFailure ? describeSidePanelFailure(state.error) : '',
-    progressText,
-    translatedText:
-      translatedText ||
-      (busy
-        ? 'Translating current tab...\n\nThe translation appears here when the last chunk is back. A failure before then leaves nothing here.'
-        : 'No translation yet.\n\nUse Translate current tab to translate the active article.'),
-    originalText:
-      originalText ||
-      (busy
-        ? 'Extracting article text...'
-        : 'No original text yet.\n\nRun Translate current tab to extract the source article.'),
-  };
-}
 
 // Inline Translation runs in the tab, and the tab keeps its own state; this decides what
 // the Inline Translation Section makes of it. Everything it needs is an argument, so the
@@ -257,15 +108,11 @@ function getInlineTranslationPanelViewModel({
   };
 }
 
-// What the Inline Translation Section takes from an update to the tab's state, and what it
-// leaves alone. Side Panel Translation's failure is in `error` and stays there.
 function readInlineTranslationError(state) {
   return state?.inlineTranslationError?.message || '';
 }
 
-// One owner for the panel's tab selection and both Translation displays. Adapters
-// supply Chrome queries and messages; rendering observes only the public display state.
-function createTabStateController({ queryActiveTab, readDocumentId, sendMessage: send, render, refreshProvider }) {
+function createTabStateController({ queryActiveTab, readDocumentId, sendMessage: send, render }) {
   let tabId = null;
   let documentId;
   const sendMessage = (message) => send({ ...message, ...(documentId ? { documentId } : {}) });
@@ -274,47 +121,26 @@ function createTabStateController({ queryActiveTab, readDocumentId, sendMessage:
   let stateRequest = null;
   let inlineRequest = null;
   let inlineControl = null;
-  let translationRequest = null;
   let windowId = null;
-  let state = { status: 'idle' };
-  let panelError = '';
+  let state = {};
   let snapshot = null;
   let controlError = '';
   let hasPageAccess = null;
-  let hasBody = false;
-  let bodyRecovery = null;
-  let invalidatedBody = null;
-  let minimumStateSequence = 0;
   let pendingNotification = null;
   const retiredEpochs = new Set();
 
   function acceptState(incoming, currentRequest = true) {
     if (!incoming || typeof incoming.workerEpoch !== 'string' || !incoming.workerEpoch ||
       !Number.isSafeInteger(incoming.stateSequence) || incoming.stateSequence < 0 ||
-      !Number.isSafeInteger(incoming.bodyVersion) || incoming.bodyVersion < 0 ||
       retiredEpochs.has(incoming.workerEpoch)) return;
     if (incoming.workerEpoch !== state.workerEpoch) {
       if (!currentRequest) return;
       if (state.workerEpoch) retiredEpochs.add(state.workerEpoch);
-      state = { status: 'idle' };
-      hasBody = false;
-      invalidatedBody = null;
-      minimumStateSequence = 0;
+      state = {};
     }
-    const bodyMatches = incoming.bodyVersion === state.bodyVersion;
-    const fullBody = Object.prototype.hasOwnProperty.call(incoming, 'extracted') &&
-      Object.prototype.hasOwnProperty.call(incoming, 'translated') &&
-      invalidatedBody !== `${incoming.workerEpoch}/${incoming.bodyVersion}`;
-    if ((currentRequest || incoming.stateSequence > (state.stateSequence ?? 0)) &&
-      incoming.stateSequence >= minimumStateSequence &&
-      incoming.stateSequence >= (state.stateSequence ?? 0)) {
-      const body = fullBody ? incoming : bodyMatches && hasBody ? state : null;
-      state = { ...incoming, extracted: body?.extracted ?? null, translated: body?.translated ?? null };
-      hasBody = Boolean(body);
-    } else if (fullBody && bodyMatches && !hasBody) {
-      state = { ...state, extracted: incoming.extracted, translated: incoming.translated };
-      hasBody = true;
-    } else return;
+    if (incoming.stateSequence < (state.stateSequence ?? 0) ||
+        (!currentRequest && incoming.stateSequence === state.stateSequence)) return;
+    state = incoming;
     paint();
     if (pendingNotification?.workerEpoch === state.workerEpoch) {
       const notification = pendingNotification;
@@ -323,35 +149,17 @@ function createTabStateController({ queryActiveTab, readDocumentId, sendMessage:
     }
   }
 
-  async function refreshState(requestedSelection, requestedControl = null, requireBody = false) {
+  async function refreshState(requestedSelection, requestedControl = null) {
     const request = stateRequest = {};
-    const response = await sendMessage({ type: 'GET_STATE', tabId,
-      ...(hasBody && !requireBody ? { knownBody: {
-        workerEpoch: state.workerEpoch, bodyVersion: state.bodyVersion,
-      } } : {}),
-    });
+    const response = await sendMessage({ type: 'GET_STATE', tabId });
     if (selection !== requestedSelection ||
       (requestedControl && inlineControl !== requestedControl) || !response?.ok) return;
     acceptState(response.state, stateRequest === request);
   }
 
-  function recoverBody(epoch, version) {
-    if (retiredEpochs.has(epoch)) return;
-    if (bodyRecovery?.epoch === epoch && bodyRecovery.version === version) return;
-    const recovery = bodyRecovery = { epoch, version };
-    const requestedSelection = selection;
-    refreshState(requestedSelection, null, true).catch(() => {}).finally(() => {
-      if (bodyRecovery !== recovery || selection !== requestedSelection) return;
-      bodyRecovery = null;
-      if (!hasBody && state.workerEpoch === epoch && state.bodyVersion !== version) {
-        recoverBody(state.workerEpoch, state.bodyVersion);
-      }
-    });
-  }
-
   function paint() {
     render({
-      tabId, state, panelError,
+      tabId, state,
       inline: { snapshot, controlError, invocationError: readInlineTranslationError(state), hasPageAccess,
         invocationErrorCode: state.inlineTranslationError?.code || '' },
     });
@@ -363,19 +171,13 @@ function createTabStateController({ queryActiveTab, readDocumentId, sendMessage:
     if (tabId === nextTabId && documentId === nextDocumentId) return;
     if (tabId !== null) {
       inlineControl = null;
-      translationRequest = null;
     }
     tabId = nextTabId;
     documentId = nextDocumentId;
     selection = {};
-    state = { status: 'idle' };
-    hasBody = false;
-    bodyRecovery = null;
-    invalidatedBody = null;
-    minimumStateSequence = 0;
+    state = {};
     pendingNotification = null;
     retiredEpochs.clear();
-    panelError = '';
     snapshot = null;
     forgetControlError();
     hasPageAccess = null;
@@ -444,61 +246,6 @@ function createTabStateController({ queryActiveTab, readDocumentId, sendMessage:
       paint();
     }
   }
-  async function translate(settingsOverride, displayedProvider) {
-    if (!documentId) return;
-    const request = translationRequest = {};
-    let requestedSelection = selection;
-    let startingState = null;
-    try {
-      if (!(await resolveTab())) return;
-      if (translationRequest !== request && tabId !== null) return;
-      const requestedTab = tabId;
-      requestedSelection = selection;
-      startingState = state;
-      panelError = '';
-      stateRequest = null;
-      bodyRecovery = null;
-      hasBody = false;
-      invalidatedBody = `${state.workerEpoch}/${state.bodyVersion}`;
-      minimumStateSequence = (state.stateSequence || 0) + 1;
-      state = { ...state, status: 'translating', extracted: null, translated: null };
-      paint();
-      const response = await sendMessage({
-        type: 'TRANSLATE_TAB', tabId: requestedTab, settingsOverride, ...(displayedProvider ? { displayedProvider } : {}),
-      });
-      // The worker can answer after translation finishes. Only this visit to the
-      // requested tab may display its result; polling does not end that visit.
-      if (selection !== requestedSelection || translationRequest !== request) return;
-      if (!response?.ok) {
-        const failure = new Error(
-          response?.error?.message || 'Failed to start translation'
-        );
-        if (typeof response?.error?.code === 'string') failure.code = response.error.code;
-        throw failure;
-      }
-      if (response.reason === 'provider_changed') {
-        await refreshProvider();
-        if (selection !== requestedSelection) return;
-        panelError = 'The translation service or model changed. Check the model and click Translate again.';
-      }
-      if (response.skipped) {
-        invalidatedBody = null;
-        minimumStateSequence = 0;
-        await refreshSelected();
-      }
-    } catch (error) {
-      if (selection !== requestedSelection || translationRequest !== request ||
-        (startingState && (state.workerEpoch !== startingState.workerEpoch ||
-          state.bodyVersion !== startingState.bodyVersion))) return;
-      panelError = describeSidePanelFailure({
-        message: error?.message || String(error), code: error?.code,
-      });
-      invalidatedBody = null;
-      minimumStateSequence = 0;
-      state = { ...state, status: 'idle', error: { message: panelError } };
-      paint();
-    }
-  }
   paint();
   return {
     start(ownWindowId) {
@@ -530,15 +277,13 @@ function createTabStateController({ queryActiveTab, readDocumentId, sendMessage:
       if (incoming.workerEpoch !== state.workerEpoch) {
         if (pendingNotification?.workerEpoch !== incoming.workerEpoch ||
           incoming.stateSequence > pendingNotification.stateSequence) pendingNotification = incoming;
-        recoverBody(incoming.workerEpoch, incoming.bodyVersion);
+        refreshState(selection).catch(() => {});
         return;
       }
       stateRequest = null;
       acceptState(incoming);
-      if (!hasBody) recoverBody(state.workerEpoch, state.bodyVersion);
     },
     runInlineControl,
-    translate,
   };
 }
 
@@ -551,171 +296,6 @@ function renderInlineTranslation(input) {
   if (elInlineStatus.textContent !== model.statusText) elInlineStatus.textContent = model.statusText;
   elInlineError.hidden = !model.errorText;
   if (elInlineError.textContent !== model.errorText) elInlineError.textContent = model.errorText;
-}
-
-let savedProvider = null;
-let settingsVersion = 0;
-
-async function loadSettings() {
-  const version = ++settingsVersion;
-  const resp = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
-  if (version !== settingsVersion || !resp?.ok) return;
-  const s = resp.settings;
-  const firstRead = savedProvider === null;
-  const effective = getEffectiveModelSettings(s);
-  if (!savedProvider || savedProvider.service !== effective.service || savedProvider.model !== effective.model) {
-    elModel.value = effective.model;
-    elModel.disabled = effective.service === 'openrouter';
-    document.getElementById('providerName').textContent = effective.service === 'openrouter' ? 'OpenRouter' : 'OpenAI';
-    savedProvider = effective;
-  }
-  if (!firstRead) return;
-
-  elTargetLanguage.value = s.targetLanguage || 'Korean';
-  elTone.value = s.tone || 'technical';
-  elViewMode.value = s.viewMode || 'translation';
-}
-
-function createSettingsSaveController({ sendMessage, readSettings, render }) {
-  let inFlight = null;
-
-  return {
-    isSaving() {
-      return Boolean(inFlight);
-    },
-    save() {
-      if (inFlight) return inFlight;
-
-      render({ saving: true, status: 'Saving...', error: '' });
-      inFlight = Promise.resolve()
-        .then(() =>
-          sendMessage({
-            type: 'SAVE_SETTINGS',
-            settings: readSettings(),
-          })
-        )
-        .then((response) => {
-          if (!response?.ok) {
-            throw new Error('Settings save failed');
-          }
-          render({ saving: false, status: 'Saved.', error: '' });
-          return true;
-        })
-        .catch(() => {
-          render({
-            saving: false,
-            status: '',
-            error: 'Failed to save settings.',
-          });
-          return false;
-        })
-        .finally(() => {
-          inFlight = null;
-        });
-      return inFlight;
-    },
-  };
-}
-
-function readSettings() {
-  return {
-    targetLanguage: elTargetLanguage.value.trim() || 'Korean',
-    tone: elTone.value,
-    ...(!elModel.disabled ? { model: elModel.value.trim() || DEFAULT_MODEL } : {}),
-    viewMode: elViewMode.value,
-  };
-}
-
-function renderSettingsSave({ saving, status, error }) {
-  btnSave.disabled = saving;
-  elSaveStatus.textContent = status;
-  setSaveError(error);
-}
-
-const settingsSaveController = hasDocument
-  ? createSettingsSaveController({
-      sendMessage: message => chrome.runtime.sendMessage(message),
-      readSettings,
-      render: renderSettingsSave,
-    })
-  : null;
-
-function setPanelText(element, text) {
-  if (element.childNodes.length !== 1 || element.childNodes[0].nodeType !== 3 || element.textContent !== text) {
-    element.textContent = text;
-  }
-}
-
-function renderState(state, panelErrorMessage) {
-  const viewMode = elViewMode.value || state?.settingsUsed?.viewMode || 'translation';
-  const displayState = getSidepanelDisplayState(
-    state || { status: 'idle' },
-    viewMode
-  );
-  setStatus(displayState.statusText);
-  btnTranslate.textContent = displayState.translateButtonText;
-  btnTranslate.disabled = displayState.translateDisabled;
-
-  setError(panelErrorMessage || displayState.errorText || null);
-
-  setProgress(displayState.progressText);
-
-  setPanelText(elOriginal, displayState.originalText);
-  if (elOriginal.lang !== displayState.originalLanguage) elOriginal.lang = displayState.originalLanguage;
-  const translatedLanguage = displayState.translatedParts.length > 1 ? '' : displayState.translatedLanguage;
-  if (elTranslated.lang !== translatedLanguage) elTranslated.lang = translatedLanguage;
-  if (displayState.translatedParts.length > 1) {
-    const children = elTranslated.childNodes;
-    const unchanged = children.length === displayState.translatedParts.length &&
-      displayState.translatedParts.every(([text, language], index) => {
-        const child = children[index];
-        return child.nodeType === 1 && child.tagName === 'SPAN' && child.lang === language &&
-          child.childNodes.length === 1 && child.childNodes[0].nodeType === 3 && child.textContent === text;
-      });
-    if (!unchanged) {
-      elTranslated.replaceChildren(...displayState.translatedParts.map(([text, language]) => {
-        const span = document.createElement('span');
-        span.lang = language;
-        span.textContent = text;
-        return span;
-      }));
-    }
-  } else {
-    setPanelText(elTranslated, displayState.translatedText);
-  }
-}
-
-function setupTabs() {
-  const buttons = Array.from(document.querySelectorAll('.tab'));
-  const panels = {
-    original: document.getElementById('panel-original'),
-    translated: document.getElementById('panel-translated'),
-  };
-
-  function activate(which) {
-    for (const b of buttons) {
-      const active = b.dataset.tab === which;
-      b.setAttribute('aria-selected', String(active));
-      b.tabIndex = active ? 0 : -1;
-    }
-    panels.original.hidden = which !== 'original';
-    panels.translated.hidden = which !== 'translated';
-  }
-
-  buttons.forEach((b) => {
-    b.addEventListener('click', () => activate(b.dataset.tab));
-    b.addEventListener('keydown', (event) => {
-      const index = buttons.indexOf(b);
-      const next = event.key === 'ArrowRight' ? (index + 1) % buttons.length
-        : event.key === 'ArrowLeft' ? (index - 1 + buttons.length) % buttons.length
-        : event.key === 'Home' ? 0
-        : event.key === 'End' ? buttons.length - 1 : null;
-      if (next === null) return;
-      event.preventDefault();
-      activate(buttons[next].dataset.tab);
-      buttons[next].focus();
-    });
-  });
 }
 
 if (hasDocument) {
@@ -737,24 +317,13 @@ if (hasDocument) {
       if (!message.documentId) return Promise.resolve({ ok: false, error: { message: MISSING_PAGE_ACCESS_MESSAGES.afterFailedAttempt } });
       return chrome.runtime.sendMessage(message);
     },
-    refreshProvider: loadSettings,
     render(display) {
-      renderState(display.state, display.panelError);
       renderInlineTranslation(display.inline);
     },
   });
-  btnTranslate.addEventListener('click', () => {
-    if (!savedProvider) return;
-    const settings = readSettings();
-    const model = settings.model || savedProvider.model;
-    if (settings.model === savedProvider.model) delete settings.model;
-    return tabState.translate(settings, { service: savedProvider.service, model });
-  });
-  btnSave.addEventListener('click', () => settingsSaveController.save());
   document.getElementById('btnOpenOptions').addEventListener('click', () =>
     chrome.runtime.openOptionsPage()
   );
-  elViewMode.addEventListener('change', () => tabState.refresh().catch(() => {}));
   btnInlineTranslate.addEventListener('click', () =>
     tabState.runInlineControl(INLINE_TRANSLATION_CONTROLS.START)
   );
@@ -767,12 +336,6 @@ if (hasDocument) {
   chrome.runtime.onMessage.addListener((msg) => tabState.receive(msg));
 
   (async function init() {
-    elModel.placeholder = DEFAULT_MODEL;
-    setupTabs();
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'local' && changes.settings) loadSettings().catch(() => {});
-    });
-    await loadSettings();
     const ownWindow = await chrome.windows.getCurrent();
     ownWindowId = ownWindow.id;
     // Subscribe before querying: activation invalidates a query already in flight.
@@ -787,12 +350,8 @@ if (hasDocument) {
 }
 
 const sidepanelApi = {
-  createSettingsSaveController,
   createTabStateController,
-  formatOriginalPanelText,
-  formatTranslatedPanelText,
   getInlineTranslationPanelViewModel,
-  getSidepanelDisplayState,
   readInlineTranslationError,
 };
 globalThis.ChromeAiTranslatorSidepanel = sidepanelApi;

@@ -1,6 +1,6 @@
 # Chrome AI Translator
 
-A personal Chrome extension that translates article pages through OpenAI or OpenRouter. Use **Side Panel Translation** to read translated Markdown beside the page. Use **Inline Translation** to translate visible article text in place with either service.
+A personal Chrome extension for **Text Translation** in an independent tab and **Inline Translation** of visible article text on the page. Both use your selected OpenAI or OpenRouter service.
 
 ## Requirements
 
@@ -12,7 +12,7 @@ A personal Chrome extension that translates article pages through OpenAI or Open
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Choose **Load unpacked** and select this repository's `extension/` directory.
 3. Open the extension's **Options**, select **OpenAI** or **OpenRouter**, and enter that service's API key.
-4. Choose your default target language, tone, and chunk size. OpenAI keeps a custom model input and reasoning effort selection. OpenRouter uses only `deepseek/deepseek-v4.1-flash-1017`, with reasoning disabled.
+4. Choose your default target language and tone. OpenAI keeps a custom model input and reasoning effort selection. OpenRouter uses only `deepseek/deepseek-v4.1-flash-1017`, with reasoning disabled.
 5. Choose **When the floating translate button may appear**.
 
 Button Visibility defaults to **Never**. You can also show the button after invoking the extension on a page, or on every ordinary web page. The every-page choice requests access to `http://` and `https://` sites; the other choices revoke that broad access. **Never** hides the floating button while leaving Inline Translation available from the side panel and shortcut.
@@ -40,13 +40,20 @@ If the shortcut is unassigned or conflicts with another extension, set it in `ch
 
 The extension cannot translate restricted pages such as `chrome://` pages. If Inline Translation asks for page access, click the extension's toolbar icon on that page and try again.
 
-## Translate in the side panel
+## Translate supplied text
 
-1. Choose **Translate current tab** to extract and translate the article.
-2. Watch the chunk progress. The translated result appears after every chunk succeeds; a terminal failure leaves no translated result, including earlier chunks that may already have been billed.
-3. Choose a translation-only or bilingual **View**, or open the **Original** tab to inspect the extracted Markdown.
+1. Open the side panel and choose **Text Translation**. You can bookmark the independent extension page.
+2. Enter or paste plain text, type a source language or keep `auto` for automatic detection, and review the target language, tone and service.
+3. Choose **Translate**, or press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux. Input, settings changes and opening the page send no translation request.
+4. Compare the source and result, and choose **Copy translation** to copy plain text.
 
-You can change target language and tone for the current translation, and choose a custom model with OpenAI. Choose **Save as default** to keep the visible settings for later translations. Links and code are preserved in the output. Each translation keeps the service and effective settings it started with, even if you edit Options while it runs.
+Page settings apply to that page. Choose **Save as default** to update the shared defaults explicitly; source language remains page-specific. Each translation keeps its starting source and effective settings while running. **Stop** cancels further work and ignores late responses; **Clear all** clears the current work. HTML and Markdown remain plain text. The former **Translate current tab** article extraction and Markdown result views have been removed.
+
+You can enter up to 60,000 Unicode code points. Long text is divided at paragraph boundaries where possible and translated in order. Completed parts appear as they finish. Stop or failure leaves an incomplete result; choose **Resume translation** to request only the remaining parts while the source and effective settings match. Requests already received by the service may still be billed after Stop.
+
+Editing the source or settings keeps the earlier result and marks it as belonging to previous input. A valid new translation clears that result; invalid input leaves it available. **Swap languages and use translation** uses a completed result and its original language settings to prepare the reverse translation. If automatic detection was uncertain, choose the original source language first. Swap does not start a request.
+
+Each translation tab retains its draft and completed parts in memory. Reload restores them and interrupts running work without restarting it. Other translation tabs stay independent. **Clear all** removes the retained content, and closing the tab removes its record. There is no long-term translation history; restarting the browser or reloading the extension also clears these records.
 
 ## Translate on the page
 
@@ -72,13 +79,13 @@ The floating menu opens translation controls and offers Stop and Original text d
 
 Links, emphasis, and code retain their page-owned objects where the translation contract preserves them. Inline Translation can also translate prose around an explicit `type="button"` with simple text and formatting inside it. The button label, click behavior, focus and current page state are preserved, while the button can move with the translated word order. Submit/reset buttons and complex controls remain unsupported. Inline Translation skips unsupported or oversized blocks rather than translating fragments. An eligible missing emphasis pair may be omitted from a translated sentence; restoration keeps the original emphasis available.
 
-If the site replaces the article while keeping the same document open, automatic submission pauses. Choose **Scan visible text** to translate the current article with the same session budget. If the panel reports a service or model change, check its updated model field and click **Translate** again.
+If the site replaces the article while keeping the same document open, automatic submission pauses. Choose **Scan visible text** to translate the current article with the same session budget.
 
 Stop and **Original text** keep the page visit's cache and Session Budget. Reloading or leaving the page clears them. The budget guards runaway work; it does not cap your spending across page visits. See [limits and accounting](docs/architecture.md#limits-and-accounting) for the implementation constraints.
 
 ## Data and diagnostics
 
-Translation sends page content to your selected service's fixed endpoint. Responses requests use `store: false`. Side Panel Translation sends article Markdown with link destinations and code contents replaced by placeholders; those values stay within the extension for restoration. Inline Translation sends serialized block records containing prose, structural metadata, and permitted visible labels; it does not send DOM attributes, event state, or hidden alternative-label text.
+Translation sends supplied text or permitted page content to your selected service's fixed endpoint. Responses requests use `store: false`. Text Translation sends the plain text you supply. Inline Translation sends serialized block records containing prose, structural metadata, and permitted visible labels; it does not send DOM attributes, event state, or hidden alternative-label text.
 
 OpenRouter routes only the pinned model, requires support for mandatory request parameters, denies provider data collection, and requires Zero Data Retention (ZDR). Eligible providers of that model may serve requests. If no compliant endpoint is available, translation fails without weakening the policy or switching to another model or OpenAI. ZDR does not erase local extension settings or diagnostics, and does not mean that all request metadata disappears. Resolve key, credit, access, or rate-limit errors with the service named in the error.
 
@@ -86,6 +93,6 @@ Options lets you view recent Inline Translation diagnostics and copy or save dia
 
 ## Development and documentation
 
-Run `npm test` for the browser-free unit suite and `npm run check:syntax` for extension script parsing. Browser checks have separate commands and prerequisites in the [test guide](tests/README.md). `npm run test:integration` runs only the toolbar-action check. `npm run verify:live` runs both OpenAI real-model checks and incurs API charges; `npm run verify:live:openrouter:inline` and `npm run verify:live:openrouter:sidepanel` separately bill OpenRouter. Deterministic tests do not establish current model compatibility or availability under the required policy. Live OpenRouter verification, including structured output, Stop, restoration, and provider-reported reasoning usage, remains a separate requirement.
+Run `npm test` for the browser-free unit suite and `npm run check:syntax` for extension script parsing. Browser checks have separate commands and prerequisites in the [test guide](tests/README.md). `npm run test:integration` runs only the toolbar-action check. `npm run verify:live` runs the OpenAI Inline real-model check and incurs API charges; `npm run verify:live:openrouter:inline` separately bills OpenRouter. Deterministic tests do not establish current model compatibility or availability under the required policy. Live OpenRouter verification, including structured output, Stop, restoration, and provider-reported reasoning usage, remains a separate requirement.
 
 Start with the [documentation index](docs/README.md) for the current architecture, glossary, decisions, agent procedures, and historical design and QA records. Load `extension/` directly; the repository has no build step.

@@ -1,31 +1,15 @@
 // The Placeholder Token contract, checked once because it is decided once.
 //
-// The four failures this module names are checked from each translation's side too — in
-// tests/inline-block.test.js and tests/markdown-codec.test.js, through the codes each of
-// them reports. Those are the checks that say the reader still hears the right sentence. These
-// are the checks that say why: the contract itself, asked directly, with both translations'
-// entry kinds fed through the adapter seam that is the whole reason one module can serve both.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const placeholderTokens = require('../extension/placeholder-tokens.js');
 
 const NS = 'CAT_TEST';
 
-// An entry pair in each translation's own vocabulary, over the same two spans: one that wraps
-// translated words, one that replaces a span whole.
-const MARKDOWN_ENTRIES = [
-  {
-    id: 'L1',
-    kind: 'link',
-    openToken: `⟦${NS}:LINK_OPEN:L1⟧`,
-    closeToken: `⟦${NS}:LINK_CLOSE:L1⟧`,
-  },
-  { id: 'C1', kind: 'code', token: `⟦${NS}:ATOM:C1⟧` },
-  { id: 'B1', kind: 'block' },
-];
 const INLINE_ENTRIES = [
   {
     id: 'W1',
@@ -36,12 +20,6 @@ const INLINE_ENTRIES = [
   },
   { id: 'A1', kind: 'atom', parentId: 'ROOT', token: `⟦${NS}:ATOM:A1⟧` },
 ];
-
-function classifyMarkdownEntry(entry) {
-  if (entry.kind === 'link') return placeholderTokens.PAIR;
-  if (entry.kind === 'code') return placeholderTokens.ATOM;
-  return null;
-}
 
 function classifyInlineEntry(entry) {
   if (entry.kind === 'wrapper') return placeholderTokens.PAIR;
@@ -63,19 +41,11 @@ function readExtensionFile(name) {
 exports.name = 'placeholder tokens';
 exports.tests = [
   {
-    name: 'enumerates both translations vocabularies into the same three actions',
+    name: 'enumerates Inline wrapper and atom entries into token actions',
     fn() {
-      // The adapter is the only thing that differs, so this is what says the seam is doing the
-      // whole job: two sets of kind names, two field names for the token that stands alone,
-      // one shape out.
       const describe = (tokens) =>
         tokens.map((token) => [token.action, token.entry.id, token.value]);
 
-      assert.deepEqual(describe(enumerate(MARKDOWN_ENTRIES, classifyMarkdownEntry)), [
-        ['open', 'L1', `⟦${NS}:LINK_OPEN:L1⟧`],
-        ['close', 'L1', `⟦${NS}:LINK_CLOSE:L1⟧`],
-        ['atom', 'C1', `⟦${NS}:ATOM:C1⟧`],
-      ]);
       assert.deepEqual(describe(enumerate(INLINE_ENTRIES, classifyInlineEntry)), [
         ['open', 'W1', `⟦${NS}:OPEN:W1⟧`],
         ['close', 'W1', `⟦${NS}:CLOSE:W1⟧`],
@@ -86,10 +56,7 @@ exports.tests = [
   {
     name: 'skips an entry that carries no placeholder token, and any entry at all',
     fn() {
-      // A Markdown chunk's entries include block entries, which stand in for nothing and hold
-      // no token. An adapter answering null for those is how they stay out of the contract
-      // rather than arriving as a token whose value is undefined.
-      assert.deepEqual(enumerate(MARKDOWN_ENTRIES, () => null), []);
+      assert.deepEqual(enumerate([{ kind: 'ignored' }], classifyInlineEntry), []);
       assert.deepEqual(enumerate([null, 'text', 7, undefined], classifyInlineEntry), []);
       assert.deepEqual(enumerate(null, classifyInlineEntry), []);
     },
@@ -172,7 +139,7 @@ exports.tests = [
   {
     name: 'refuses a pair crossed, unclosed, or closed before it opened',
     fn() {
-      const tokens = enumerate(MARKDOWN_ENTRIES, classifyMarkdownEntry);
+      const tokens = enumerate(INLINE_ENTRIES, classifyInlineEntry);
       const [open, close, atom] = tokens;
       const refusal = (answer) => {
         const walked = placeholderTokens.walkExpectedTokens(answer, tokens);
@@ -187,12 +154,12 @@ exports.tests = [
       // Two pairs interleaved rather than nested: the inner close reaches a parent that is not
       // its own entry.
       const second = {
-        id: 'L2',
-        kind: 'link',
-        openToken: `⟦${NS}:LINK_OPEN:L2⟧`,
-        closeToken: `⟦${NS}:LINK_CLOSE:L2⟧`,
+        id: 'W2',
+        kind: 'wrapper',
+        openToken: `⟦${NS}:OPEN:W2⟧`,
+        closeToken: `⟦${NS}:CLOSE:W2⟧`,
       };
-      const crossed = enumerate([...MARKDOWN_ENTRIES, second], classifyMarkdownEntry);
+      const crossed = enumerate([...INLINE_ENTRIES, second], classifyInlineEntry);
       assert.equal(
         placeholderTokens.walkExpectedTokens(
           `${open.value}${second.openToken}${close.value}${second.closeToken}${atom.value}`,
@@ -205,9 +172,6 @@ exports.tests = [
   {
     name: 'asks about the original parent only when the translation records one',
     fn() {
-      // Inline Translation's entries know which entry they sat inside; a Markdown chunk's do
-      // not. The same walk answers both, and the option is what keeps the stricter question
-      // from being asked of entries that cannot answer it.
       const outer = {
         id: 'W1',
         kind: 'wrapper',
@@ -235,24 +199,43 @@ exports.tests = [
     },
   },
   {
-    name: 'is the only walk either translation has',
+    name: 'Inline template validation uses the shared token walk',
     fn() {
-      // The point of the module. Two codecs that each kept their own walk is the state this
-      // replaced, and it is a state that reads as fine right up to the moment one of them is
-      // fixed alone.
-      for (const file of ['inline-template.js', 'markdown-rehydration.js']) {
-        const source = readExtensionFile(file);
-        assert.match(source, /placeholderTokens\.enumerateExpectedTokens\(/, file);
-        assert.match(source, /placeholderTokens\.walkExpectedTokens\(/, file);
-        // Nothing outside the walk mints a node of the tree it returns. Reading one is fine —
-        // the inline codec rebuilds a block's children from it — so this looks for the shape
-        // of a node being built, which is what a second walk would have to do.
-        assert.equal(
-          /type: '(root|wrapper|atom|text)'/.test(source),
-          false,
-          `${file} builds a token tree of its own`
-        );
-      }
+      const calls = [];
+      const scope = { ChromeAiTranslatorPlaceholderTokens: {
+        ...placeholderTokens,
+        enumerateExpectedTokens(entries, classify) {
+          const tokens = placeholderTokens.enumerateExpectedTokens(entries, classify);
+          calls.push({ entries, tokens });
+          return tokens;
+        },
+        walkExpectedTokens(answer, tokens, options) {
+          const walked = placeholderTokens.walkExpectedTokens(answer, tokens, options);
+          calls.push({ answer, tokens, options, walked });
+          return walked;
+        },
+      } };
+      vm.runInNewContext(readExtensionFile('inline-template.js'), scope);
+      const contract = { namespace: NS, entries: INLINE_ENTRIES };
+      const [wrapper, atom] = INLINE_ENTRIES;
+      const template = `${wrapper.openToken}문서${wrapper.closeToken}${atom.token}`;
+      const result = scope.ChromeAiTranslatorInlineTemplate.validateTranslatedTemplate(template, contract);
+      assert.equal(result.ok, true);
+      assert.equal(calls.length, 2);
+      assert.deepEqual(calls[0].entries, INLINE_ENTRIES);
+      assert.equal(calls[1].tokens, calls[0].tokens);
+      assert.equal(calls[1].answer, template);
+      assert.equal(calls[1].options.trackParents, true);
+      assert.equal(result.tree, calls[1].walked.tree);
+      assert.deepEqual(result.tree, { type: 'root', id: 'ROOT', children: [
+        { type: 'wrapper', id: 'W1', children: [{ type: 'text', value: '문서' }] },
+        { type: 'atom', id: 'A1' },
+      ] });
+      const invalid = scope.ChromeAiTranslatorInlineTemplate.validateTranslatedTemplate(
+        `${wrapper.closeToken}문서${wrapper.openToken}${atom.token}`, contract
+      );
+      assert.equal(invalid.ok, false);
+      assert.equal(invalid.errorCode, 'token_nesting_invalid');
     },
   },
 ];

@@ -16,7 +16,7 @@ The [package scripts](../package.json), [manifest](../extension/manifest.json), 
 
 ## Accepted decisions
 
-All ADRs below retain their existing numbers and accepted status. They are descriptive records: the decision and trade-off remain authoritative until explicitly reconsidered, while implementation pointers can be corrected after a refactor. Measurements and account conditions belong to the time of the recorded investigation.
+ADRs retain their existing numbers and original rationale. Current applicability is recorded where a feature has been removed; accepted decisions remain authoritative within their current scope. Measurements and account conditions belong to the time of the recorded investigation.
 
 | ADR | Decision |
 | --- | --- |
@@ -24,8 +24,8 @@ All ADRs below retain their existing numbers and accepted status. They are descr
 | [0002](adr/0002-translate-semantic-blocks-not-text-nodes.md) | Translate whole Semantic Blocks |
 | [0003](adr/0003-leave-the-semantic-block-session-cap-to-the-content-script.md) | Keep the Session Budget in the content-script runtime |
 | [0004](adr/0004-give-the-keyboard-shortcut-to-inline-translation.md) | Assign the shortcut to Inline Translation |
-| [0005](adr/0005-one-recovery-per-translation-chunk.md) | Share one recovery budget across a Translation Chunk's failure kinds |
-| [0006](adr/0006-a-failed-translation-chunk-ends-the-whole-side-panel-translation.md) | Publish only a complete Side Panel Translation |
+| [0005](adr/0005-one-recovery-per-translation-chunk.md) | Historical article recovery decision; retired with Side Panel Translation |
+| [0006](adr/0006-a-failed-translation-chunk-ends-the-whole-side-panel-translation.md) | Historical complete-result-only decision; retired with Side Panel Translation and not inherited by Text Translation |
 | [0007](adr/0007-charge-the-session-budget-in-actual-record-cost.md) | Charge the Session Budget in actual record cost |
 | [0008](adr/0008-name-the-placeholder-token.md) | Use Placeholder Token as the shared term |
 | [0009](adr/0009-model-local-rejections-in-diagnostics-v3.md) | Model local rejections explicitly in diagnostics v3 |
@@ -34,7 +34,7 @@ All ADRs below retain their existing numbers and accepted status. They are descr
 | [0012](adr/0012-translate-through-a-sole-generic-div-wrapper.md) | Translate own prose through a sole generic DIV wrapper |
 | [0013](adr/0013-recognize-mise-recipe-layout-explicitly.md) | Recognize the mise recipe layout as an explicit site boundary |
 | [0014](adr/0014-bind-translation-to-the-readers-document-and-provider.md) | Bind translation to the reader's document and provider choice |
-| [0015](adr/0015-preserve-completed-text-translation-on-interruption.md) | Preserve completed Text Translation on interruption; accepted design, implementation pending |
+| [0015](adr/0015-preserve-completed-text-translation-on-interruption.md) | Preserve completed Text Translation on interruption and resume matching work explicitly |
 
 ## Agent procedures
 

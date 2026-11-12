@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict');
 const helpers = require('../extension/content');
-const { createTestDocument } = require('./inline-block.test');
 const inlineBlockCodec = require('../extension/inline-block');
 const { createOperationFixture, flushMicrotasks } = require('./inline-translation-operation.test');
 const { createContentPage } = require('./content-harness');
@@ -12,128 +11,19 @@ function makeState(overrides = {}) {
 exports.name = 'content helpers';
 exports.tests = [
   {
-    name: 'skips articles with excluded ancestors before preferring their text',
+    name: 'retired article extraction message does not read the page or alter inline state',
     fn() {
       const f = createOperationFixture();
-      const hidden = f.document.createElement('section');
-      hidden.setAttribute('aria-hidden', 'true');
-      const article = f.document.createElement('article');
-      article.textContent = 'Private source. '.repeat(50);
-      Object.defineProperty(article, 'innerText', { get() {
-        throw new Error('Excluded article text must not enter root selection.');
+      Object.defineProperty(f.document, 'title', { get() {
+        throw new Error('Retired extraction must not read page metadata.');
       } });
-      hidden.appendChild(article);
-      const main = f.document.createElement('main');
-      main.textContent = 'Visible source. '.repeat(30).trim();
-      main.innerText = main.textContent;
-      f.document.body.replaceChildren(hidden, main);
-      f.document.body.innerText = f.document.body.textContent;
-      const page = createContentPage(f, { article, main });
+      const page = createContentPage(f);
       page.inject();
-      const response = page.message({ type: 'EXTRACT_ARTICLE' });
-      assert.equal(response.ok, true);
-      assert.equal(response.data.contentMarkdown, main.textContent);
-      assert.doesNotMatch(JSON.stringify(response.data), /Private source/);
-    },
-  },
-  {
-    name: 'extracts a preferred article without reading unrelated candidate text',
-    fn() {
-      const f = createOperationFixture();
-      const article = f.document.createElement('article');
-      article.textContent = 'A'.repeat(401);
-      Object.defineProperty(article, 'innerText', { get: () => article.textContent });
-      const main = f.document.createElement('main');
-      main.textContent = 'M'.repeat(600);
-      const reads = { main: 0, body: 0 };
-      for (const [name, node] of [['main', main], ['body', f.document.body]]) {
-        Object.defineProperty(node, 'innerText', { get() {
-          reads[name] += 1;
-          return node.textContent;
-        } });
-      }
-      f.document.body.replaceChildren(article, main);
-      const page = createContentPage(f, { article, main });
-      page.inject();
+      const before = page.snapshot();
 
-      const response = page.message({ type: 'EXTRACT_ARTICLE' });
-
-      assert.equal(response.ok, true);
-      assert.equal(response.data.contentMarkdown, 'A'.repeat(401));
-      assert.deepEqual(reads, { main: 0, body: 0 });
-    },
-  },
-  {
-    name: 'preserves article length boundaries and candidate ordering through extraction messages',
-    fn() {
-      const cases = [
-        { article: `  ${'A'.repeat(400)}  `, main: 'M'.repeat(600), body: 'B'.repeat(800), expected: 'B'.repeat(800) },
-        { article: `  ${'A'.repeat(401)}  `, main: 'M'.repeat(600), body: 'B'.repeat(800), expected: 'A'.repeat(401) },
-        { article: `${'A'.repeat(200)} ${'A'.repeat(200)}`, body: 'B'.repeat(800), expected: `${'A'.repeat(200)} ${'A'.repeat(200)}` },
-        { main: 'M'.repeat(500), roleMain: 'R'.repeat(600), body: 'B'.repeat(550), expected: 'R'.repeat(600) },
-        { main: 'M'.repeat(500), roleMain: 'R'.repeat(600), body: 'B'.repeat(700), expected: 'B'.repeat(700) },
-        { article: 'A'.repeat(400), main: 'M'.repeat(400), roleMain: 'R'.repeat(400), body: 'B'.repeat(400), expected: 'A'.repeat(400) },
-        { main: 'M'.repeat(500), roleMain: 'R'.repeat(500), body: 'B'.repeat(500), expected: 'M'.repeat(500) },
-        { roleMain: 'R'.repeat(500), body: 'B'.repeat(500), expected: 'R'.repeat(500) },
-        { body: 'B'.repeat(500), expected: 'B'.repeat(500) },
-        { article: 'A'.repeat(400), body: 'B'.repeat(500), sameSelectors: true, expected: 'B'.repeat(500) },
-      ];
-      for (const [index, value] of cases.entries()) {
-        const f = createOperationFixture();
-        f.document.body.textContent = value.body;
-        f.document.body.innerText = value.body;
-        const selectors = {};
-        for (const [key, selector, tag] of [
-          ['article', 'article', 'article'],
-          ['main', 'main', 'main'],
-          ['roleMain', '[role="main"]', 'section'],
-        ]) {
-          if (value[key] == null) continue;
-          const node = f.document.createElement(tag);
-          node.textContent = value[key];
-          node.innerText = value[key];
-          selectors[selector] = node;
-        }
-        if (value.sameSelectors) {
-          selectors.main = selectors.article;
-          selectors['[role="main"]'] = selectors.article;
-        }
-        const page = createContentPage(f, selectors);
-        page.inject();
-
-        const response = page.message({ type: 'EXTRACT_ARTICLE' });
-
-        assert.equal(response.ok, true, `case ${index}`);
-        assert.equal(response.data.contentMarkdown, value.expected, `case ${index}`);
-      }
-    },
-  },
-  {
-    name: 'falls back to body only below 300 extracted Markdown characters',
-    fn() {
-      for (const length of [299, 300]) {
-        const f = createOperationFixture();
-        const article = f.document.createElement('article');
-        const navigation = f.document.createElement('nav');
-        navigation.textContent = 'N'.repeat(401);
-        const articleProse = f.document.createElement('p');
-        articleProse.textContent = 'A'.repeat(length);
-        article.appendChild(navigation);
-        article.appendChild(articleProse);
-        article.innerText = article.textContent;
-        const bodyProse = f.document.createElement('p');
-        bodyProse.textContent = 'B'.repeat(500);
-        f.document.body.replaceChildren(article, bodyProse);
-        const page = createContentPage(f, { article });
-        page.inject();
-
-        const response = page.message({ type: 'EXTRACT_ARTICLE' });
-
-        assert.equal(response.ok, true);
-        assert.equal(response.data.contentMarkdown, length === 299
-          ? `${'A'.repeat(299)}\n\n${'B'.repeat(500)}`
-          : 'A'.repeat(300));
-      }
+      assert.equal(page.message({ type: 'EXTRACT_ARTICLE' }), undefined);
+      assert.deepEqual(page.snapshot(), before);
+      assert.equal(f.pending.length, 0);
     },
   },
   {
@@ -180,44 +70,6 @@ exports.tests = [
         ),
         false
       );
-    },
-  },
-  {
-    name: 'builds display Markdown and a protected translation document',
-    fn() {
-      const { element, text } = createTestDocument();
-      const link = element('a', text('private guide'));
-      link.setAttribute('href', 'https://private.test/path?token=secret');
-      const root = element(
-        'main',
-        element(
-          'p',
-          text('Read '),
-          link,
-          text(' and run '),
-          element('code', text('private-command --secret')),
-          text('.')
-        )
-      );
-
-      const extraction = helpers.buildArticleExtraction(root, {
-        title: 'Guide',
-        url: 'https://page.test/article',
-        langHint: 'en',
-      });
-
-      assert.equal(extraction.title, 'Guide');
-      assert.equal(extraction.langHint, 'en');
-      assert.match(
-        extraction.contentMarkdown,
-        /\[private guide\]\(<https:\/\/private\.test\/path\?token=secret>\)/
-      );
-      assert.match(extraction.contentMarkdown, /```private-command --secret```/);
-      const templates = extraction.translationDocument.blocks
-        .map((block) => block.template)
-        .join('\n');
-      assert.equal(templates.includes('token=secret'), false);
-      assert.equal(templates.includes('private-command --secret'), false);
     },
   },
   {
@@ -492,6 +344,81 @@ exports.tests = [
 ];
 
 exports.tests.push(
+  ...[
+    ['hidden attribute', node => node.setAttribute('hidden', '')],
+    ['aria-hidden', node => node.setAttribute('aria-hidden', 'true')],
+    ['editable', node => node.setAttribute('contenteditable', 'true')],
+    ['navigation', node => node.setAttribute('role', 'navigation')],
+    ['focusable', node => node.setAttribute('tabindex', '0')],
+    ['action', node => node.setAttribute('onclick', 'pageAction()')],
+    ['computed hidden', node => { node.computedStyle = { visibility: 'hidden' }; }],
+    ['transparent', node => { node.computedStyle = { opacity: '0' }; }],
+  ].map(([reason, exclude]) => ({
+    name: `Inline Start excludes ${reason} article ancestors before reading their text`,
+    async fn() {
+      const f = createOperationFixture();
+      const ancestor = f.document.createElement('section');
+      exclude(ancestor);
+      const article = f.document.createElement('article');
+      article.appendChild(f.paragraph(500));
+      Object.defineProperty(article, 'innerText', { get() {
+        throw new Error('Excluded root text must not be read.');
+      } });
+      ancestor.appendChild(article);
+      const main = f.document.createElement('main');
+      const visible = f.paragraph(600);
+      main.appendChild(visible);
+      main.innerText = main.textContent;
+      f.document.body.replaceChildren(ancestor, main);
+      f.document.body.innerText = main.innerText;
+      const page = createContentPage(f, { article, main });
+      page.inject();
+      page.instruct('grantInlineTranslationAuthorization');
+      page.instruct('startInlineTranslation');
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 1);
+      assert.deepEqual(Array.from(f.pending[0].message.records, record => record.template), [visible.textContent]);
+      page.instruct('stopInlineTranslation');
+    },
+  })),
+  ...[
+    { article: 400, main: 600, roleMain: 0, body: 800, expected: ['article', 'main'] },
+    { article: 401, main: 600, roleMain: 0, body: 800, expected: ['article'] },
+    { article: 400, main: 400, roleMain: 0, body: 400, expected: ['article'] },
+    { article: 0, main: 500, roleMain: 600, body: 550, expected: ['roleMain'] },
+    { article: 0, main: 500, roleMain: 600, body: 700, expected: ['main', 'roleMain'] },
+    { article: 0, main: 500, roleMain: 500, body: 500, expected: ['main'] },
+  ].map((value, index) => ({
+    name: `Inline Start preserves root length boundaries and ordering case ${index}`,
+    async fn() {
+      const f = createOperationFixture();
+      const selectors = {};
+      const prose = {};
+      f.document.body.replaceChildren();
+      for (const [key, selector, tag] of [
+        ['article', 'article', 'article'], ['main', 'main', 'main'], ['roleMain', '[role="main"]', 'section'],
+      ]) {
+        if (!value[key]) continue;
+        const root = f.document.createElement(tag);
+        const paragraph = f.document.createElement('p');
+        paragraph.textContent = `${key} ordinary source sentence for the reader. `.repeat(30).slice(0, value[key] - 1) + '.';
+        root.appendChild(paragraph);
+        root.innerText = `  ${paragraph.textContent}  `;
+        selectors[selector] = root;
+        prose[key] = paragraph.textContent;
+        f.document.body.appendChild(root);
+      }
+      f.document.body.innerText = 'B'.repeat(value.body);
+      const page = createContentPage(f, selectors);
+      page.inject();
+      page.instruct('grantInlineTranslationAuthorization');
+      page.instruct('startInlineTranslation');
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 1);
+      assert.deepEqual(Array.from(f.pending[0].message.records, record => record.template), value.expected.map(key => prose[key]));
+      page.instruct('stopInlineTranslation');
+    },
+  })),
   ...['stop', 'restore'].map(control => ({
     name: `panel to worker to content ${control} acknowledges before Start settings settle`,
     async fn() {

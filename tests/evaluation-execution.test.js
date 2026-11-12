@@ -39,15 +39,14 @@ async function fixture(run) {
         count += 1;
         const body = routeRequest({ model: MODEL, reasoning: { effort: 'none' }, store: false,
           provider: { require_parameters: true, data_collection: 'deny', zdr: true, max_price: PRICE_CAP },
-          input: entry.flow === 'inline' ? JSON.stringify({ records: [{ id: 'block', template: 'The same source prose.', atoms: [], repair: null }] }) : 'The same source prose.',
+          input: JSON.stringify({ records: [{ id: 'block', template: 'The same source prose.', atoms: [], repair: null }] }),
           instructions: 'Translate to Korean.', max_output_tokens: 4096 }, entry.policy);
         await callbacks.request({ body, networkId: `request-${count}`,
           fulfill: async () => { events.push('fulfill'); responses.set(`request-${count}`, { valid: true }); },
           fail: async () => events.push('blocked') });
         record.success = true;
         record.elapsedMs = 1;
-        record.outcomes = entry.flow === 'inline'
-          ? { translated: 1, partial: 0, pending: 0, changed: 0, failed: 0 } : { documentDisplayed: true };
+        record.outcomes = { translated: 1, partial: 0, pending: 0, changed: 0, failed: 0 };
         return { source: 'The same source prose.', translated: '번역 결과', complete: true };
       },
       async settle() { events.push('settle'); },
@@ -65,12 +64,12 @@ exports.tests = [{
     await fixture(async ({ runEvaluation, experiment, budget, output, events, adapter }) => {
       const result = await runEvaluation({ output, experiment, adapter, budget });
       assert.equal(result.completePlan, true);
-      assert.equal(budget.snapshot().spentUsd, 0.0036);
+      assert.equal(budget.snapshot().spentUsd, 0.0018);
       assert.equal(budget.snapshot().reservedUsd, 0);
       assert.equal((statSync(output).mode & 0o777), 0o700);
       for (const file of readdirSync(output)) assert.equal((statSync(join(output, file)).mode & 0o777), 0o600);
       const summary = JSON.parse(readFileSync(join(output, 'summary.json')));
-      assert.equal(summary.records.length, 36);
+      assert.equal(summary.records.length, 18);
       assert.equal(summary.comparisonEligible, true);
       assert.equal(summary.syntheticBudget, false);
       assert.equal(summary.records.every(record => record.requests[0].accounted), true);
@@ -213,52 +212,6 @@ exports.tests.push({
         };
         await assert.rejects(runEvaluation({ output, experiment, adapter, budget }), /Evidence disk write failed/);
         assert.deepEqual(events.slice(-2), ['browser-closed', 'transport-closed']);
-      });
-    }
-  },
-});
-exports.tests.push({
-  name: 'preserves Side Panel displayed status at the original quality qualification stage',
-  async fn() {
-    for (const failure of [
-      { protectedContent: false, targetLanguagePresent: true, documentDisplayed: false },
-      { protectedContent: true, targetLanguagePresent: false, documentDisplayed: true },
-    ]) {
-      await fixture(async ({ runEvaluation, output }) => {
-        const { createQualityExperiment, adaptQualityRequest } = await import('./integration/model-quality.mjs');
-        const { createBudget } = await import('./integration/routing-budget.mjs');
-        const experiment = createQualityExperiment({ corpus: { pages: [{ id: 'compatibility' }] },
-          profileKeys: ['deepseek'], planIds: ['compatibility|sidepanel|deepseek'] });
-        const budget = createBudget({ limitUsd: 5, maxBudgetUsd: 5, inputTokenLimit: 1048576 });
-        let request;
-        const data = { status: 'completed', usage: { cost: 0.0001, output_tokens_details: { reasoning_tokens: 0 } },
-          output: [{ type: 'message', content: [{ type: 'output_text', text: '번역 결과' }] }] };
-        const adapter = {
-          live: true,
-          withTransport: execute => execute(async () => ({ status: 200, text: async () => JSON.stringify(data) })),
-          async prepare(callbacks) { request = callbacks.request; },
-          async execute(entry, record) {
-            const body = adaptQualityRequest({ model: 'deepseek/deepseek-v4.1-flash-1017', reasoning: { effort: 'none' },
-              provider: { require_parameters: true, data_collection: 'deny', zdr: true }, store: false,
-              input: 'Read `protectedCode()`.', instructions: 'Translate to Korean.', max_output_tokens: 4096 }, entry.profile);
-            await request({ body, networkId: 'sidepanel-request', fulfill: async () => {},
-              fail: async () => { throw new Error('Valid deterministic request was refused'); } });
-            Object.assign(record, { success: true, coverage: { matched: true, expectedBlocks: 1, expectedChunks: 1 },
-              protectedContent: failure.protectedContent, targetLanguagePresent: failure.targetLanguagePresent,
-              outcomes: { documentDisplayed: true } });
-            return { complete: true, source: 'Read `protectedCode()`.', translated: '번역 결과' };
-          },
-          async settle() {},
-          evidence: () => ({ requestIds: new Set(['sidepanel-request']),
-            responses: new Map([['sidepanel-request', { valid: true }]]), reasoningTokens: [0] }),
-          async close() {},
-        };
-        const result = await runEvaluation({ output, experiment, adapter, budget });
-        assert.equal(result.records[0].success, false);
-        assert.equal(result.records[0].outcomes.documentDisplayed, failure.documentDisplayed);
-        const artifact = JSON.parse(readFileSync(join(output, 'compatibility|sidepanel|deepseek.json')));
-        assert.equal(artifact.success, false);
-        assert.equal(artifact.outcomes.documentDisplayed, failure.documentDisplayed);
       });
     }
   },

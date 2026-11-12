@@ -241,6 +241,9 @@ export async function launchExtensionBrowser({ session, url, extensionDir, headl
       const evaluate = async (expression, timeoutMs = 20000) => {
         const evaluated = await cdp.send('Runtime.evaluate',
           { expression, returnByValue: true, awaitPromise: true }, sessionId, timeoutMs);
+        if (evaluated.__timeout) throw new Error('Page evaluation failed: timeout');
+        if (Object.hasOwn(evaluated, '__error')) throw new Error('Page evaluation failed: protocol error');
+        if (evaluated.exceptionDetails) throw new Error('Page evaluation failed: runtime exception');
         return evaluated.result?.value;
       };
       const navigate = async (to, settleMs = 2500) => {
