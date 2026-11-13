@@ -189,12 +189,23 @@ function assertSchema(schema, count, boundsRequired) {
   const item = translations.items;
   if (!sameKeys(item, ['type', 'additionalProperties', 'properties', 'required']) ||
       item.type !== 'object' || item.additionalProperties !== false ||
-      !sameKeys(item.properties, ['id', 'template']) ||
+      !sameKeys(item.properties, ['id', 'template', 'languageExamples']) ||
       !sameKeys(item.properties.id, ['type']) || item.properties.id.type !== 'string' ||
       !sameKeys(item.properties.template, ['type']) || item.properties.template.type !== 'string' ||
-      !Array.isArray(item.required) || item.required.length !== 2 ||
-      item.required[0] !== 'id' || item.required[1] !== 'template') {
+      !Array.isArray(item.required) || item.required.length !== 3 ||
+      item.required[0] !== 'id' || item.required[1] !== 'template' || item.required[2] !== 'languageExamples') {
     fail('Inline translation schema fields are invalid.');
+  }
+  const examples = item.properties.languageExamples;
+  const fields = ['source', 'meaning', 'sourceStart', 'sourceEnd', 'outputStart', 'outputEnd', 'meaningStart', 'meaningEnd'];
+  if (!sameKeys(examples, ['type', 'items']) || examples.type !== 'array' ||
+      !sameKeys(examples.items, ['type', 'additionalProperties', 'properties', 'required']) ||
+      examples.items.type !== 'object' || examples.items.additionalProperties !== false ||
+      !sameKeys(examples.items.properties, fields) || !Array.isArray(examples.items.required) ||
+      examples.items.required.length !== fields.length || fields.some((field, index) =>
+        examples.items.required[index] !== field || !sameKeys(examples.items.properties[field], ['type']) ||
+        examples.items.properties[field].type !== (index < 2 ? 'string' : 'integer'))) {
+    fail('Inline language example schema is invalid.');
   }
 }
 
@@ -297,11 +308,22 @@ export function adaptQualityRequest(body, profile) {
         entries.minItems !== count || entries.maxItems !== count) reject('Original inline schema bounds are invalid.');
     const item = entries.items;
     if (!keys(item, required) || item.type !== 'object' || item.additionalProperties !== false ||
-        !keys(item.properties, ['id', 'template']) || !keys(item.properties.id, ['type']) ||
+        !keys(item.properties, ['id', 'template', 'languageExamples']) || !keys(item.properties.id, ['type']) ||
         item.properties.id.type !== 'string' || !keys(item.properties.template, ['type']) ||
         item.properties.template.type !== 'string' || !Array.isArray(item.required) ||
-        item.required.length !== 2 || item.required[0] !== 'id' || item.required[1] !== 'template') {
+        item.required.length !== 3 || item.required[0] !== 'id' || item.required[1] !== 'template' || item.required[2] !== 'languageExamples') {
       reject('Original inline schema fields are invalid.');
+    }
+    const examples = item.properties.languageExamples;
+    const fields = ['source', 'meaning', 'sourceStart', 'sourceEnd', 'outputStart', 'outputEnd', 'meaningStart', 'meaningEnd'];
+    if (!keys(examples, ['type', 'items']) || examples.type !== 'array' ||
+        !keys(examples.items, ['type', 'additionalProperties', 'properties', 'required']) ||
+        examples.items.type !== 'object' || examples.items.additionalProperties !== false ||
+        !keys(examples.items.properties, fields) || !Array.isArray(examples.items.required) ||
+        examples.items.required.length !== fields.length || fields.some((field, index) =>
+          examples.items.required[index] !== field || !keys(examples.items.properties[field], ['type']) ||
+          examples.items.properties[field].type !== (index < 2 ? 'string' : 'integer'))) {
+      reject('Original inline language example schema is invalid.');
     }
   }
   const bodyKeys = ['model', 'reasoning', 'provider', 'store', 'input', 'instructions', 'max_output_tokens',
@@ -394,7 +416,7 @@ export function validateQualityOutput(outputText, inputRecords, { structure = tr
       parsed.translations.length !== expected.size) fail('Model output has an invalid response shape.');
   const returned = new Map();
   for (const item of parsed.translations) {
-    if (!sameKeys(item, ['id', 'template']) || typeof item.id !== 'string' || !item.id ||
+    if (!sameKeys(item, ['id', 'template', 'languageExamples']) || !Array.isArray(item.languageExamples) || typeof item.id !== 'string' || !item.id ||
         typeof item.template !== 'string' || !expected.has(item.id) || returned.has(item.id)) {
       fail('Model output has an invalid translation item.');
     }

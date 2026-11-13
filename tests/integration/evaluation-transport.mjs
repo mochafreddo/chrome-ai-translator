@@ -5,7 +5,7 @@ export function createMockTransport() {
     live: false,
     run: execute => execute(async ({ body }) => {
       const outputText = JSON.stringify({ translations: JSON.parse(body.input).records.map(record => ({ id: record.id,
-        template: `모의 응답입니다. ${record.template}` })) });
+        template: `모의 응답입니다. ${record.template}`, languageExamples: [] })) });
       const data = { status: 'completed', model: body.model,
         usage: { cost: 0.0001, output_tokens_details: { reasoning_tokens: 0 } },
         output: [{ type: 'message', content: [{ type: 'output_text', text: outputText }] }] };
