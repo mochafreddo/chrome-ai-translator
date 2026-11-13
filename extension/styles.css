@@ -32,6 +32,7 @@ body {
 
 .header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -56,8 +57,19 @@ body {
   padding: 14px 16px;
 }
 
+.panel-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .section {
   border-top: 1px solid var(--divider);
+  padding-block: 20px;
+}
+
+#btnInlineTranslate {
+  flex-basis: 100%;
 }
 
 .section-title {
@@ -176,6 +188,10 @@ input::placeholder {
 }
 
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-inline-size: 100%;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
@@ -183,6 +199,9 @@ input::placeholder {
   cursor: pointer;
   min-height: 44px;
   padding: 8px 10px;
+  text-align: center;
+  text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
 .btn.primary {
