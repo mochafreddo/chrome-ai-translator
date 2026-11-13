@@ -19,8 +19,7 @@ async function resize(width) {
 
 async function press(key, code, windowsVirtualKeyCode, modifiers = 0) {
   for (const type of ['rawKeyDown', 'keyUp']) {
-    const result = await ctx.cdp.send('Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode, modifiers }, ctx.page.sessionId);
-    assert.ok(!result.__error && !result.__timeout, 'Keyboard input reaches the page');
+    await ctx.cdp.sendInput('Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode, modifiers }, ctx.page.sessionId);
   }
 }
 
@@ -153,7 +152,7 @@ async function main() {
     return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   }`);
   for (const type of ['mousePressed', 'mouseReleased']) {
-    await ctx.cdp.send('Input.dispatchMouseEvent', { type, ...toggle, button: 'left', clickCount: 1 }, ctx.page.sessionId);
+    await ctx.cdp.sendInput('Input.dispatchMouseEvent', { type, ...toggle, button: 'left', clickCount: 1 }, ctx.page.sessionId);
   }
   assert.ok(await until(() => inspect(`function() { return !this.querySelector('[data-role="menu"]').hidden; }`), 10000));
   const floating = await inspect(`function() {

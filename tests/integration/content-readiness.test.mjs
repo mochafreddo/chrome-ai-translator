@@ -86,13 +86,13 @@ async function clickRealControl(page, selector) {
     return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   })()`);
   if (!point) return false;
-  await ctx.cdp.send('Input.dispatchMouseEvent', {
+  await ctx.cdp.sendInput('Input.dispatchMouseEvent', {
     type: 'mouseMoved', x: point.x, y: point.y,
   }, page.sessionId);
-  await ctx.cdp.send('Input.dispatchMouseEvent', {
+  await ctx.cdp.sendInput('Input.dispatchMouseEvent', {
     type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1,
   }, page.sessionId);
-  await ctx.cdp.send('Input.dispatchMouseEvent', {
+  await ctx.cdp.sendInput('Input.dispatchMouseEvent', {
     type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
   }, page.sessionId);
   return true;

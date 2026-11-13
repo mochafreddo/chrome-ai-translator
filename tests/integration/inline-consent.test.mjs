@@ -14,10 +14,9 @@ const concealedRequests = [];
 
 async function click(page, point) {
   for (const type of ['mousePressed', 'mouseReleased']) {
-    const result = await ctx.cdp.send('Input.dispatchMouseEvent', {
+    await ctx.cdp.sendInput('Input.dispatchMouseEvent', {
       type, ...point, button: 'left', clickCount: 1,
     }, page.sessionId);
-    assert.ok(!result.__error && !result.__timeout, 'Real pointer input succeeds');
   }
 }
 

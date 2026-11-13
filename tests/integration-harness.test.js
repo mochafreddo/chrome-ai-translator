@@ -140,6 +140,45 @@ async function fixture(open = true) {
 exports.name = 'integration harness';
 exports.tests = [
   {
+    name: 'input failures stop the caller without exposing protocol details',
+    async fn() {
+      for (const scenario of ['protocol', 'empty', 'missing', 'timeout', 'closed', 'send-error']) {
+        const { cdp, socket, timers } = await fixture();
+        try {
+          if (scenario === 'closed') cdp.close();
+          if (scenario === 'send-error') socket.send = () => { throw new Error('private socket detail'); };
+          let continued = false;
+          const result = cdp.sendInput('Input.dispatchKeyEvent', { type: 'keyDown' }, 'page', 123)
+            .then(() => { continued = true; });
+          if (['protocol', 'empty', 'missing'].includes(scenario)) {
+            const message = scenario === 'protocol' ? 'private protocol detail' : scenario === 'empty' ? '' : undefined;
+            socket.emit('message', { data: JSON.stringify({ id: socket.request.id,
+              error: { code: -32602, message } }) });
+          }
+          if (scenario === 'timeout') [...timers.values()][0].fn();
+          await assert.rejects(result, { message: scenario === 'timeout' ? 'Input failed: timeout' : 'Input failed: protocol error' });
+          assert.equal(continued, false, scenario);
+        } finally { cdp.close(); }
+      }
+    },
+  },
+  {
+    name: 'input forwards its request and preserves successful responses',
+    async fn() {
+      for (const value of [{}, false, null]) {
+        const { cdp, socket, timers } = await fixture();
+        try {
+          const result = cdp.sendInput('Input.dispatchMouseEvent', { type: 'mousePressed', x: 12, y: 34 }, 'page-1', 456);
+          assert.deepEqual(socket.request, { id: 1, method: 'Input.dispatchMouseEvent',
+            params: { type: 'mousePressed', x: 12, y: 34 }, sessionId: 'page-1' });
+          assert.equal([...timers.values()][0].delay, 456);
+          socket.emit('message', { data: JSON.stringify({ id: 1, result: value }) });
+          assert.deepEqual(await result, value);
+        } finally { cdp.close(); }
+      }
+    },
+  },
+  {
     name: 'page evaluate throws sanitized errors for failed calls',
     fn() {
       const outcomes = [];

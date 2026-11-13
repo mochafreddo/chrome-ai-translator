@@ -149,9 +149,9 @@ try {
     }
     check('fixed provider interception remains fail-closed', browser.errors.length === 0);
     await page.evaluate("document.getElementById('sourceText').focus()");
-    await browser.ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab',
+    await browser.ctx.cdp.sendInput('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab',
       windowsVirtualKeyCode: 9 }, page.sessionId);
-    await browser.ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab',
+    await browser.ctx.cdp.sendInput('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab',
       windowsVirtualKeyCode: 9 }, page.sessionId);
     check('keyboard focus reaches the read-only translation', await page.evaluate(
       "document.activeElement.id === 'translatedText'"));

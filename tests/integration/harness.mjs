@@ -167,6 +167,12 @@ export function connect(endpoint, platform = globalThis) {
         settle(id, { __error: error.message });
       }
     });
+  const sendInput = async (method, params, sessionId, timeoutMs) => {
+    const result = await send(method, params, sessionId, timeoutMs);
+    if (result?.__timeout) throw new Error('Input failed: timeout');
+    if (result != null && Object.hasOwn(result, '__error')) throw new Error('Input failed: protocol error');
+    return result;
+  };
   // Events carry no id, so they are delivered by method name. Returns an unsubscribe.
   const on = (method, handler) => {
     const handlers = listeners.get(method) || [];
@@ -179,7 +185,7 @@ export function connect(endpoint, platform = globalThis) {
     timeouts,
     runtimeExceptionPresent,
   });
-  return { ready, send, on, getDiagnostics, close: () => { terminate(); ws.close(); } };
+  return { ready, send, sendInput, on, getDiagnostics, close: () => { terminate(); ws.close(); } };
 }
 
 function extensionManifest(extensionDir) {

@@ -82,7 +82,7 @@ export async function launchTextTranslationBrowser() {
           return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
         })()`);
         for (const type of ['mousePressed', 'mouseReleased']) {
-          await ctx.cdp.send('Input.dispatchMouseEvent', { type, ...point,
+          await ctx.cdp.sendInput('Input.dispatchMouseEvent', { type, ...point,
             button: 'left', clickCount: 1 }, page.sessionId);
         }
       },
