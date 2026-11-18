@@ -56,6 +56,7 @@ Every extension file is a classic script; there is no bundler or build step. The
 | --- | --- |
 | [background.js](../extension/background.js) | Browser events, message routing, settings adapters, per-tab state, Responses requests, and execution adapters |
 | [settings-lifecycle.js](../extension/settings-lifecycle.js) | Settings reads, ordered saves and key removal, normalization, and Button Visibility registration and access reconciliation |
+| [inline-document-lifetime.js](../extension/inline-document-lifetime.js) | Inline document identity, invocation and control validity, request cancellation, and invalidation on document replacement or tab closure |
 | [worker-invocation.js](../extension/worker-invocation.js) | Toolbar and shortcut preparation, page-load instructions, panel opening, content readiness, instruction transport, and invocation error handling |
 | [content.js](../extension/content.js) | Eligible Inline article-root selection, floating UI, page instruction handler, persistent page state, and browser adapters |
 | [inline-translation-operation.js](../extension/inline-translation-operation.js) | Start/Stop/Original text orchestration, authorization, settings lookup, scanner lifecycle, request transport, and feedback eligibility |
@@ -130,7 +131,7 @@ Worker tab state carries only the document identity, sanitized Inline invocation
 
 One-second polling reads worker invocation errors and page-owned Inline status independently. Unchanged Inline live-region messages retain their text nodes. Older queries and responses from an earlier tab visit cannot replace current errors, access or controls. Worker restart discards in-memory worker state; the page owns its Inline Session independently.
 
-The panel and worker bind Inline actions to the top-level Chrome document ID, including across same-URL reloads. Replacement or closure invalidates that document's work and results, aborts outstanding provider transport where possible, and prevents further batches or repairs. Tab activation and fragment navigation preserve the document. A provider can charge for a request it received before cancellation. Active Inline Operations retain their starting service and effective settings ([ADR-0014](adr/0014-bind-translation-to-the-readers-document-and-provider.md)). Text Translation has its own extension-document-scoped operation lifetime.
+The panel and worker bind Inline actions to the top-level Chrome document ID, including across same-URL reloads. The worker's Inline document lifetime module tracks invocation, control, and provider requests independently within a document. Replacement or closure invalidates that document's work and results, aborts outstanding provider transport where possible, and prevents further batches or repairs. The worker publishes the resulting panel state. Tab activation and fragment navigation preserve the document. A provider can charge for a request it received before cancellation. Active Inline Operations retain their starting service and effective settings ([ADR-0014](adr/0014-bind-translation-to-the-readers-document-and-provider.md)). Text Translation has its own extension-document-scoped operation lifetime.
 
 ## Limits and accounting
 

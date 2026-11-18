@@ -43,6 +43,9 @@ if (typeof importScripts === 'function') {
   if (!globalThis.ChromeAiTranslatorInlineTranslationControls) {
     importScripts('inline-translation-controls.js');
   }
+  if (!globalThis.ChromeAiTranslatorInlineDocumentLifetime) {
+    importScripts('inline-document-lifetime.js');
+  }
   if (!globalThis.ChromeAiTranslatorWorkerInvocation) {
     importScripts('worker-invocation.js');
   }
@@ -92,6 +95,9 @@ const inlineDiagnosticsController =
   globalThis.ChromeAiTranslatorInlineDiagnosticsController || require('./inline-diagnostics-controller.js');
 const { OPENROUTER_MODEL, getEffectiveModelSettings, getOpenRouterFailureMessage } =
   globalThis.ChromeAiTranslatorDefaultModel || require('./default-model.js');
+
+const { createInlineDocumentLifetime } = globalThis.ChromeAiTranslatorInlineDocumentLifetime ||
+  require('./inline-document-lifetime.js');
 
 const workerInvocation = globalThis.ChromeAiTranslatorWorkerInvocation ||
   require('./worker-invocation.js');
@@ -348,11 +354,11 @@ function createBackgroundWorker(platform = {}) {
   const stateByTab = new Map();
   const workerEpoch = inlineDiagnosticsProtocol.createUuidV4(givenCrypto || globalThis.crypto);
   let stateSequence = 0;
-  const inlineControlsByTab = new Map();
-  const activeInvocationsByTab = new Map();
-  const documentsByTab = new Map();
-  const pendingByTab = new Map();
-  const documentLifetimes = new Map();
+  const inlineDocuments = createInlineDocumentLifetime({
+    getDocumentId,
+    documentEnded,
+    clearTabState: tabId => stateByTab.delete(tabId),
+  });
   const textTranslations = new Map();
   const textRetention = createTextTranslationRetention({
     getStorage: () => getChrome().storage.session,
@@ -382,56 +388,6 @@ function createBackgroundWorker(platform = {}) {
     return matches[0].documentId;
   }
 
-  async function captureDocument(tabId, expectedDocumentId) {
-    const lifetime = documentLifetimes.get(tabId) || {};
-    documentLifetimes.set(tabId, lifetime);
-    const documentId = await getDocumentId(tabId);
-    if (documentLifetimes.get(tabId) !== lifetime ||
-        (expectedDocumentId && documentId !== expectedDocumentId)) throw documentEnded();
-    const previous = documentsByTab.get(tabId);
-    if (previous && previous !== documentId) invalidateDocument(tabId, documentId);
-    documentsByTab.set(tabId, documentId);
-    return documentId;
-  }
-
-  function createDocumentRequest(tabId, documentId) {
-    const controller = new AbortController();
-    const pending = pendingByTab.get(tabId) || new Set();
-    pending.add(controller);
-    pendingByTab.set(tabId, pending);
-    function assertCurrent() {
-      if (controller.signal.aborted || documentsByTab.get(tabId) !== documentId) throw documentEnded();
-    }
-    return {
-      signal: controller.signal,
-      assertCurrent,
-      async beforeRequest() {
-        assertCurrent();
-        const currentDocumentId = await getDocumentId(tabId);
-        assertCurrent();
-        if (currentDocumentId !== documentId) {
-          invalidateDocument(tabId);
-          throw documentEnded();
-        }
-      },
-      release() {
-        pending.delete(controller);
-        if (!pending.size && pendingByTab.get(tabId) === pending) pendingByTab.delete(tabId);
-      },
-    };
-  }
-
-  function invalidateDocument(tabId, documentId = null) {
-    if (documentId) documentLifetimes.set(tabId, {});
-    else documentLifetimes.delete(tabId);
-    for (const controller of pendingByTab.get(tabId) || []) controller.abort();
-    pendingByTab.delete(tabId);
-    inlineControlsByTab.delete(tabId);
-    activeInvocationsByTab.delete(tabId);
-    stateByTab.delete(tabId);
-    if (documentId) documentsByTab.set(tabId, documentId);
-    else documentsByTab.delete(tabId);
-  }
   const settingsLifecycle = createSettingsLifecycle({
     chrome: givenChrome,
     contentScriptFiles: getInlineContentScriptFiles(),
@@ -439,10 +395,11 @@ function createBackgroundWorker(platform = {}) {
 
   function setTabState(tabId, patch) {
     const chrome = getChrome();
+    const documentId = inlineDocuments.currentDocumentId(tabId);
     const next = sanitizePublicTabState({
       ...(stateByTab.get(tabId) || {}),
       ...patch,
-      ...(documentsByTab.has(tabId) ? { documentId: documentsByTab.get(tabId) } : {}),
+      ...(documentId ? { documentId } : {}),
       updatedAt: nowIso(),
       workerEpoch,
       stateSequence: ++stateSequence,
@@ -470,32 +427,31 @@ function createBackgroundWorker(platform = {}) {
       set: (tabId, error) => setTabState(tabId, { inlineTranslationError: error }),
     },
     describeFailure: describeInlineTranslationControlFailure,
-    captureDocument,
+    captureDocument: inlineDocuments.captureDocument,
   };
   const invocation = workerInvocation.createWorkerInvocation(invocationOptions);
   async function invokeForTab(trigger, tabId) {
-    const token = Symbol(`invoke-tab-${tabId}`);
-    activeInvocationsByTab.set(tabId, token);
+    const invocationWork = inlineDocuments.beginInvocation(tabId);
     const currentInvocation = workerInvocation.createWorkerInvocation({
       ...invocationOptions,
-      isCurrent: () => activeInvocationsByTab.get(tabId) === token,
+      isCurrent: invocationWork.isCurrent,
       async documentUnavailable() {
         let tab;
         try { tab = await getChrome().tabs.get(tabId); } catch { return; }
-        if (activeInvocationsByTab.get(tabId) !== token) return;
+        if (!invocationWork.isCurrent()) return;
         const url = String(tab?.url || '');
         const restricted = url && (!ORDINARY_WEB_PAGE_URL_PATTERN.test(url) || WEB_STORE_URL_PATTERN.test(url));
         const message = restricted
           ? classifyContentScriptFailure(new Error('Cannot access contents of this page.'), url).message
           : 'The extension could not identify this page’s document. Reload the page and try again.';
-        invalidateDocument(tabId);
+        inlineDocuments.markUnavailable(tabId);
         setTabState(tabId, { documentId: null,
           inlineTranslationError: { code: 'document.unavailable', message } });
       },
       inlineErrors: {
         get: invocationOptions.inlineErrors.get,
         set: (id, error) => {
-          if (activeInvocationsByTab.get(tabId) === token) {
+          if (invocationWork.isCurrent()) {
             setTabState(id, { inlineTranslationError: error });
           }
         },
@@ -504,7 +460,7 @@ function createBackgroundWorker(platform = {}) {
     try {
       await currentInvocation.invoke(trigger, tabId);
     } finally {
-      if (activeInvocationsByTab.get(tabId) === token) activeInvocationsByTab.delete(tabId);
+      invocationWork.release();
     }
   }
   const sendInlineInstruction = invocation.sendInstruction;
@@ -523,21 +479,20 @@ function createBackgroundWorker(platform = {}) {
     if (!steps.length) {
       throw new Error(`Unknown inline translation control: ${control}`);
     }
-    const requestedControl = {};
-    inlineControlsByTab.set(tabId, requestedControl);
+    const controlWork = inlineDocuments.beginControl(tabId);
     try {
-      const documentId = await captureDocument(tabId, expectedDocumentId);
+      const documentId = await inlineDocuments.captureDocument(tabId, expectedDocumentId);
       for (const step of steps) {
-        if (inlineControlsByTab.get(tabId) !== requestedControl) return;
+        if (!controlWork.isCurrent()) return;
         await send(tabId, step, documentId);
       }
-      if (inlineControlsByTab.get(tabId) !== requestedControl) return;
+      if (!controlWork.isCurrent()) return;
       // A control the tab has just carried out disproves a recorded failure to reach it, and
       // the Inline Translation Shortcut is only one of three ways into this feature. The
       // panel reports the control's own outcome itself, from the click it is still holding.
       clearInlineTranslationError(tabId);
     } finally {
-      if (inlineControlsByTab.get(tabId) === requestedControl) inlineControlsByTab.delete(tabId);
+      controlWork.release();
     }
   }
 
@@ -630,11 +585,9 @@ function createBackgroundWorker(platform = {}) {
     options = {}
   ) {
     getChrome();
-    let documentRequest = null;
-    if (Number.isInteger(options.tabId)) {
-      const documentId = await captureDocument(options.tabId, options.documentId);
-      documentRequest = createDocumentRequest(options.tabId, documentId);
-    }
+    const documentRequest = Number.isInteger(options.tabId)
+      ? await inlineDocuments.beginRequest(options.tabId, options.documentId)
+      : null;
     const run = inlineDiagnostics.beginTranslation(options.correlationContext);
 
     try {
@@ -693,7 +646,7 @@ function createBackgroundWorker(platform = {}) {
   function onTabRemoved(tabId) {
     stopTextTranslationsForTab(tabId);
     void textRetention.close(tabId).catch(() => {});
-    invalidateDocument(tabId);
+    inlineDocuments.close(tabId);
   }
 
   function stopTextTranslationsForTab(tabId, currentDocumentId = null) {
@@ -709,10 +662,9 @@ function createBackgroundWorker(platform = {}) {
     if (details.frameId !== 0) return;
     stopTextTranslationsForTab(details.tabId, details.documentId);
     textRetention.observeDocument(details.tabId, details.documentId);
-    if (!documentLifetimes.has(details.tabId) && !stateByTab.has(details.tabId)) return;
-    if (details.documentId && documentsByTab.get(details.tabId) === details.documentId) return;
-    invalidateDocument(details.tabId, details.documentId);
-    setTabState(details.tabId, { inlineTranslationError: null });
+    if (inlineDocuments.observeNavigation(details.tabId, details.documentId)) {
+      setTabState(details.tabId, { inlineTranslationError: null });
+    }
   }
 
   // chrome.action.onClicked. Deliberately not async: the first step opens the side panel,
@@ -847,7 +799,7 @@ function createBackgroundWorker(platform = {}) {
           try {
             const resp = await getChrome().tabs.sendMessage(msg.tabId, {
               type: 'GET_INLINE_TRANSLATION_STATE',
-            }, { documentId: await captureDocument(msg.tabId, msg.documentId) });
+            }, { documentId: await inlineDocuments.captureDocument(msg.tabId, msg.documentId) });
             sendResponse({
               ok: Boolean(resp?.ok),
               snapshot: resp?.snapshot || null,
