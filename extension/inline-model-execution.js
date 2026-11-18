@@ -274,7 +274,7 @@
     return masked;
   }
 
-  function assessTranslationQuality(sourceText, translatedText, targetLanguage, contract = null, languageExamples = []) {
+  function analyzeTranslationQuality(sourceText, translatedText, targetLanguage, contract, languageExamples) {
     const targetLanguageCode = getTargetLanguageCode(targetLanguage);
     const source = removeContractTokens(sourceText, contract);
     const output = removeContractTokens(translatedText, contract);
@@ -321,10 +321,18 @@
           status: 'partial',
           codes: [QUALITY_CODES.ENGLISH_RESIDUE],
           evidence,
+          untranslatedPhrases: shared.phrases,
         };
       }
     }
     return { status: 'complete', codes: [], evidence };
+  }
+
+  function assessTranslationQuality(sourceText, translatedText, targetLanguage, contract = null, languageExamples = []) {
+    const { untranslatedPhrases, ...quality } = analyzeTranslationQuality(
+      sourceText, translatedText, targetLanguage, contract, languageExamples
+    );
+    return quality;
   }
 
   function validateBlockResponse(outputText, records, options = {}) {
@@ -378,21 +386,10 @@
               status: 'unsafe',
               codes: [mapStructureCode(structureValidation.errorCode)],
             };
-        return {
-          id: record.id,
-          template,
-          languageExamples,
-          structure,
-          quality: structureValidation.ok
-            ? assessTranslationQuality(
-                record.template,
-                template,
-                options.targetLanguage,
-                record.contract,
-                languageExamples
-              )
-            : { status: 'uncertain', codes: [], evidence: {} },
-        };
+        const { untranslatedPhrases, ...quality } = structureValidation.ok
+          ? analyzeTranslationQuality(record.template, template, options.targetLanguage, record.contract, languageExamples)
+          : { status: 'uncertain', codes: [], evidence: {} };
+        return { id: record.id, template, structure, quality, untranslatedPhrases };
       }),
     };
   }
@@ -471,16 +468,9 @@
       if (decision.disposition === 'retry') {
         const source = records[index];
         const repairDetails = { id: source.id, previousErrorCode: decision.terminalCode };
-        if (decision.terminalCode === 'quality.english_residue' && result.structure.status === 'safe') {
-          const residue = sharedEnglishEvidence(
-            removeContractTokens(source.template, source.contract),
-            removeContractTokens(getTargetLanguageCode(settings.targetLanguage) === 'ko'
-              ? maskLanguageExamples(source.template, result.template, source.contract, result.languageExamples)
-              : result.template, source.contract),
-            source.contract
-          );
+        if (result.untranslatedPhrases) {
           repairDetails.previousTemplate = result.template;
-          repairDetails.untranslatedPhrases = residue.phrases;
+          repairDetails.untranslatedPhrases = result.untranslatedPhrases;
         }
         repairs.push(repairDetails);
       } else {
