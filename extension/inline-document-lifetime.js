@@ -61,7 +61,7 @@
       tracked.requests.add(controller);
 
       function assertCurrent() {
-        if (controller.signal.aborted || tabs.get(tabId) !== tracked) throw documentEnded();
+        if (tabs.get(tabId) !== tracked) throw documentEnded();
       }
 
       return {
