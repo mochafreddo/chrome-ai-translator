@@ -137,31 +137,39 @@
     return `structure.${known.has(code) ? code : 'output_parse_failed'}`;
   }
 
-  function words(value, contract = null, includeListPunctuation = false) {
+  function proseWithoutSourceSyntax(value, contract) {
     const sourceSyntax = Array.isArray(contract?.sourceSyntax)
       ? contract.sourceSyntax.map((item) => removeContractTokens(item?.value, contract)).filter(Boolean)
       : [];
-    const proseOnly = inlineTemplate.stripSourceSyntax(value, sourceSyntax);
+    return inlineTemplate.stripSourceSyntax(value, sourceSyntax);
+  }
+
+  function words(value, contract = null) {
+    return Array.from(proseWithoutSourceSyntax(value, contract).matchAll(ENGLISH_WORD), (match) => match[0]);
+  }
+
+  function residueWords(value, contract) {
     return Array.from(
-      proseOnly.matchAll(new RegExp(`${ENGLISH_WORD.source}|[,&/·]`, 'g')),
-      (match) => match[0]
-    ).filter((word) => includeListPunctuation || /[A-Za-z]/.test(word));
+      proseWithoutSourceSyntax(value, contract).matchAll(/([A-Za-z][A-Za-z0-9]*(?:['’-][A-Za-z0-9]+)*)|[^\s]/gu),
+      (match) => match[1] || null
+    );
   }
 
   function sharedEnglishEvidence(source, output, contract = null) {
-    const sourceWords = words(source, contract, true);
-    const outputWords = words(output, contract, true).map((word) => word.toLowerCase());
+    const sourceWords = residueWords(source, contract);
+    const outputWords = residueWords(output, contract).map((word) => word?.toLowerCase() ?? null);
     let longest = 0;
     let count = 0;
     const phrases = new Set();
     for (let length = Math.min(4, sourceWords.length); length >= 2; length -= 1) {
       const outputSequences = new Set();
       for (let index = 0; index <= outputWords.length - length; index += 1) {
-        outputSequences.add(outputWords.slice(index, index + length).join('\u0000'));
+        const sequence = outputWords.slice(index, index + length);
+        if (!sequence.includes(null)) outputSequences.add(sequence.join('\u0000'));
       }
       for (let index = 0; index <= sourceWords.length - length; index += 1) {
         const sequence = sourceWords.slice(index, index + length);
-        if (sequence.some((word) => /^[,&/·]$/.test(word))) continue;
+        if (sequence.includes(null)) continue;
         const normalized = sequence.map((word) => word.toLowerCase());
         const looksLikeProse =
           length >= 3 ||
