@@ -38,9 +38,8 @@
       });
     }
 
-    async function retain(tabId, documentId, write = null) {
+    async function queueRetentionRequest(tabId, documentId, write = null) {
       const owner = ownerFor(tabId);
-      // Accepted writes keep their place across navigation and check the persisted owner in the queue.
       if (write && owner.documentId && owner.documentId !== documentId) throw documentEnded();
       const key = `text-translation:${tabId}`;
       const state = await enqueue(owner, async () => {
@@ -79,11 +78,11 @@
 
     return {
       observeDocument, close, assertKnownDocument,
-      restore: (tabId, documentId) => retain(tabId, documentId),
+      restore: (tabId, documentId) => queueRetentionRequest(tabId, documentId),
       save: (tabId, documentId, revision, state) =>
-        retain(tabId, documentId, { revision, nextState: () => retainedState(state) }),
+        queueRetentionRequest(tabId, documentId, { revision, nextState: () => retainedState(state) }),
       clear: (tabId, documentId, revision) =>
-        retain(tabId, documentId, { revision, nextState: () => null }),
+        queueRetentionRequest(tabId, documentId, { revision, nextState: () => null }),
     };
   }
 
