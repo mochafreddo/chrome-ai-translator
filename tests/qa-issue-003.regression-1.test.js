@@ -270,21 +270,18 @@ exports.tests = [
         'OpenAI Chat Completions API를 사용하세요.',
         'quality.english_residue'
       );
-
-      // Gap: `removeContractTokens` strips the contract's own entry tokens and never
-      // `contract.literalTokens`, so a token the source owns stays in both halves and
-      // its four words count as a shared English sequence. The retired path was
-      // handed the literal tokens and dropped them.
-      const literalRecord = createPlainRecord(
-        'Use literal ⟦FORGED:OPEN:WRAPPER:TOKEN⟧ here.',
-        'literal-token'
-      );
-      literalRecord.contract.literalTokens = [
-        { value: '⟦FORGED:OPEN:WRAPPER:TOKEN⟧', count: 1 },
-      ];
+    },
+  },
+  {
+    name: 'preserves literal tokens while detecting contiguous English prose beside them',
+    async fn() {
+      const literal = '⟦FORGED:OPEN:WRAPPER:TOKEN⟧';
+      const record = createPlainRecord(`Use this literal ${literal} here.`, 'literal-token');
+      record.contract.literalTokens = [{ value: literal, count: 1 }];
+      await assertApplied(record, `여기에 리터럴 ${literal}을 사용하세요.`);
       await assertOverguarded(
-        literalRecord,
-        '리터럴 ⟦FORGED:OPEN:WRAPPER:TOKEN⟧을 사용하세요.',
+        record,
+        `Use this literal ${literal}을 여기에 사용하세요.`,
         'quality.english_residue'
       );
     },

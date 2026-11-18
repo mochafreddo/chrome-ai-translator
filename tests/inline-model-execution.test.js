@@ -380,6 +380,45 @@ exports.tests = [
     },
   },
   {
+    name: 'applies without repair when shared English words are separated by translated prose or punctuation',
+    async fn() {
+      for (const [source, template] of [
+        ['Open Brave Browser Beta.', 'Brave Browser를 열고 Beta를 선택하세요.'],
+        ['Enable Tailscale HTTPS. T3 Code adds the route.', '경로는 Tailscale HTTPS T3 Code에서 추가합니다.'],
+        ['Use Alpha Beta Gamma.', 'Alpha Beta. Gamma를 사용하세요.'],
+        ['Use Alpha Beta。Gamma.', 'Alpha Beta Gamma를 사용하세요.'],
+      ]) {
+        const record = plainRecord('separated', source);
+        const [result] = await execute([record], SETTINGS, async () => response([{ id: record.id, template }]));
+        assert.equal(result.disposition, 'apply', source);
+        assert.equal(result.attemptCount, 1, source);
+        assert.equal(result.diagnostic.quality.evidence.sharedEnglishSequenceCount, 0, source);
+      }
+    },
+  },
+  {
+    name: 'repairs contiguous English prose across whitespace and inline emphasis',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      const block = element('p', text('Open the browser and '), element('em', text('wait')), text('.'));
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const { template, atoms, contract } = serialized;
+      const record = { id: 'emphasis', template, atoms, contract, repair: null };
+      const translated = template.replace('Open the browser and ', '브라우저를 열고 and\n');
+      const requests = [];
+      const [result] = await execute([record], SETTINGS, async (request) => {
+        requests.push(JSON.parse(request.input).records[0]);
+        return response([{ id: record.id, template: translated }]);
+      });
+      assert.equal(requests.length, 2);
+      assert.deepEqual(requests[1].repair.untranslatedPhrases, ['and wait']);
+      assert.equal(result.disposition, 'apply_with_warning');
+      assert.equal(result.terminalCode, 'quality.english_residue');
+    },
+  },
+  {
     name: 'keeps prose list items and existing two-word residue rules',
     fn() {
       for (const source of ['Read the docs, run the tests', 'Read Linux', 'GitHub releases',
