@@ -263,6 +263,29 @@ exports.tests = [{
     assert.equal(reopened.element('translatedText').value, '');
   },
 }, {
+  name: 'restoring a replacement document aborts the previous request before reading retained state',
+  async fn() {
+    const page = await openPage();
+    page.source('Draft with an outstanding request');
+    await page.start();
+    const [{ signal }] = page.requests;
+    assert.equal(signal.aborted, false);
+
+    const read = page.platform.chrome.storage.session.get;
+    let release;
+    page.platform.chrome.storage.session.get = async key => {
+      await new Promise(resolve => { release = resolve; });
+      return read(key);
+    };
+    await openPage({ previous: page, documentId: 'replacement-document', beforeReady: async ({ flush }) => {
+      await flush();
+      assert.equal(typeof release, 'function');
+      const abortedWhileWaiting = signal.aborted;
+      release();
+      assert.equal(abortedWhileWaiting, true);
+    } });
+  },
+}, {
   name: 'document replacement during a settings read prevents provider dispatch',
   async fn() {
     const page = await openPage();
