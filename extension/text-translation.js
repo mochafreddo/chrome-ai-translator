@@ -1,5 +1,6 @@
 (function initTextTranslationPage() {
   const contract = globalThis.ChromeAiTranslatorTextTranslationRequest;
+  const { startJob, readRetainedState } = globalThis.ChromeAiTranslatorTextTranslationProgress;
   const { OPENROUTER_MODEL } = globalThis.ChromeAiTranslatorDefaultModel;
   const { getTargetLanguageCode } = globalThis.ChromeAiTranslatorTranslationSettings;
   const get = id => document.getElementById(id);
@@ -16,11 +17,10 @@
   async function retain(clear = false) {
     if (!ready || departed) return;
     rememberOpenai();
-    const settings = Object.fromEntries(['service', 'model', 'reasoningEffort', 'sourceLanguage', 'targetLanguage', 'tone']
-      .map(key => [key, get(key).value]));
+    const settings = readInputSettings();
     const response = await chrome.runtime.sendMessage({
       type: clear ? 'CLEAR_TEXT_TRANSLATION_STATE' : 'SAVE_TEXT_TRANSLATION_STATE', revision: ++revision,
-      ...(clear ? {} : { state: { source: get('sourceText').value, settings, openaiModel, openaiReasoningEffort, job } }),
+      ...(clear ? {} : { state: { source: get('sourceText').value, settings, openaiModel, openaiReasoningEffort, job: job?.snapshot() ?? null } }),
     });
     if (!response?.ok) throw new Error('Could not retain this translation. Keep this tab open and try again.');
   }
@@ -33,31 +33,23 @@
   }
 
   function renderBusy() {
+    const source = get('sourceText').value;
+    let settings;
+    if (job && source === job.source) {
+      try { settings = readSettings(); } catch {}
+    }
     get('translationSettings').disabled = !ready || Boolean(active);
     get('sourceText').disabled = !ready || Boolean(active);
     get('btnTranslate').disabled = !ready || Boolean(active);
     get('btnStop').disabled = !active;
     get('btnClear').disabled = !ready;
     get('btnResume').disabled = !ready || Boolean(active) ||
-      !job || !['stopped', 'failed'].includes(job.status) || !sameInput();
-    get('btnSwap').disabled = !ready || Boolean(active) || !job || job.status !== 'complete';
+      !job?.canResume(source, settings);
+    get('btnSwap').disabled = !ready || Boolean(active) || !job?.isComplete;
     get('btnCopy').disabled = !get('translatedText').value;
-    get('resultRelationship').textContent = job?.results.length && !sameInput()
+    get('resultRelationship').textContent = job?.completedParts && !job.matchesInput(source, settings)
       ? 'This translation belongs to previous text or settings.' : '';
     applyContentLanguages();
-  }
-
-  function sameInput() {
-    if (!job || get('sourceText').value !== job.source) return false;
-    try {
-      const settings = readSettings();
-      return Object.keys(job.settings).every(key => job.settings[key] === settings[key]);
-    } catch { return false; }
-  }
-
-  function detectedSourceLanguage() {
-    const languages = job.results.filter((_result, index) => job.units[index].trim()).map(result => result.sourceLanguage);
-    return languages.length && languages[0] && languages.every(language => language === languages[0]) ? languages[0] : null;
   }
 
   function applyContentLanguages() {
@@ -66,7 +58,7 @@
     if (get('sourceText').value) {
       if (choice === 'auto') {
         if (job && get('sourceText').value === job.source) {
-          const detected = detectedSourceLanguage();
+          const detected = job.detectedSourceLanguage;
           if (detected) sourceLanguage = getTargetLanguageCode(detected);
         }
       } else sourceLanguage = getTargetLanguageCode(choice);
@@ -77,11 +69,11 @@
   }
 
   function renderJob() {
-    get('translatedText').value = job ? job.results.map(result => result.translation).join('') : '';
+    get('translatedText').value = job?.translation ?? '';
     get('progressStatus').textContent = job
-      ? `${job.results.length} of ${job.units.length} parts complete.${job.status === 'complete' ? '' : ' Incomplete translation.'}` : '';
-    if (job?.results.length) {
-      const detected = detectedSourceLanguage();
+      ? `${job.completedParts} of ${job.totalParts} parts complete.${job.isComplete ? '' : ' Incomplete translation.'}` : '';
+    if (job?.completedParts) {
+      const detected = job.detectedSourceLanguage;
       get('languageStatus').textContent = job.settings.sourceLanguage === 'auto'
         ? detected ? `Detected source language: ${detected}` : 'Source language is uncertain.'
         : `Source language: ${job.settings.sourceLanguage}`;
@@ -97,9 +89,8 @@
   }
 
   function swap() {
-    if (!ready || active || !job || job.status !== 'complete') return;
-    const detected = detectedSourceLanguage();
-    let sourceLanguage = job.settings.sourceLanguage !== 'auto' ? job.settings.sourceLanguage : detected;
+    if (!ready || active || !job?.isComplete) return;
+    let sourceLanguage = job.settings.sourceLanguage !== 'auto' ? job.settings.sourceLanguage : job.detectedSourceLanguage;
     if (!sourceLanguage) {
       try {
         sourceLanguage = contract.normalizeSettings({ ...job.settings, sourceLanguage: get('sourceLanguage').value }).sourceLanguage;
@@ -110,7 +101,7 @@
       get('sourceLanguage').focus();
       return;
     }
-    get('sourceText').value = job.results.map(result => result.translation).join('');
+    get('sourceText').value = job.translation;
     get('sourceLanguage').value = job.settings.targetLanguage;
     get('targetLanguage').value = sourceLanguage;
     inputChanged();
@@ -131,18 +122,19 @@
     get('reasoningEffort').disabled = openrouter;
   }
 
+  function readInputSettings() {
+    return Object.fromEntries(contract.SETTINGS_KEYS.map(key => [key, get(key).value]));
+  }
+
   function readSettings() {
-    return contract.normalizeSettings({ service: get('service').value,
-      model: get('model').value, reasoningEffort: get('reasoningEffort').value,
-      sourceLanguage: get('sourceLanguage').value, targetLanguage: get('targetLanguage').value,
-      tone: get('tone').value });
+    return contract.normalizeSettings(readInputSettings());
   }
 
   function stop() {
     const operation = active;
     active = null;
     if (operation) {
-      operation.job.status = 'stopped';
+      operation.job.stop();
       void chrome.runtime.sendMessage({ type: 'STOP_TEXT_TRANSLATION', operationId: operation.id }).catch(() => {});
       get('status').textContent = 'Stopped.';
     }
@@ -162,39 +154,37 @@
       showError(error);
       return;
     }
-    if (resume && (!job || !['stopped', 'failed'].includes(job.status) || !sameInput())) {
+    if (resume && !job?.resume(source, settings)) {
       showError(new Error('Source or translation settings changed. Start a new translation.'));
       return;
     }
-    if (!resume) job = { source, settings, units: contract.splitSource(source), results: [], status: 'running' };
-    job.status = 'running';
+    if (!resume) job = startJob(source, settings);
     const operation = { id: crypto.randomUUID(), job };
     active = operation;
     get('status').textContent = 'Translating…';
     renderJob();
     try {
       await retain();
-      while (job.results.length < job.units.length) {
+      for (let part = operation.job.nextPart; part !== undefined; part = operation.job.nextPart) {
         if (active !== operation) return;
-        const unit = job.units[job.results.length];
-        let result = { translation: unit, sourceLanguage: null };
-        if (unit.trim()) {
+        let result = { translation: part, sourceLanguage: null };
+        if (part.trim()) {
           const response = await chrome.runtime.sendMessage({ type: 'TRANSLATE_TEXT',
-            operationId: operation.id, source: unit, settings: job.settings });
+            operationId: operation.id, source: part, settings: operation.job.settings });
           if (!response?.ok) throw new Error(response?.error?.message || 'Text Translation failed. Try again.');
           result = response.result;
         }
         if (active !== operation) return;
-        job.results.push(result);
+        operation.job.append(result);
         renderJob();
         await retain();
       }
       if (active !== operation) return;
-      job.status = 'complete';
+      operation.job.finish();
       get('status').textContent = 'Translation complete.';
     } catch (error) {
       if (active === operation) {
-        job.status = 'failed';
+        operation.job.fail();
         get('status').textContent = 'Translation failed.';
         showError(error);
       }
@@ -288,7 +278,7 @@
       const retained = await chrome.runtime.sendMessage({ type: 'GET_TEXT_TRANSLATION_STATE' });
       if (!retained?.ok) throw new Error('Could not restore this translation. Reload this page to try again.');
       if (retained.state) {
-        const state = contract.retainedState(retained.state);
+        const state = readRetainedState(retained.state);
         for (const [key, value] of Object.entries(state.settings)) {
           get(key).value = value;
         }

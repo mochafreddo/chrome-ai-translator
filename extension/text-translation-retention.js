@@ -1,6 +1,6 @@
 (function initTextTranslationRetention(globalScope) {
-  const { retainedState } = globalScope.ChromeAiTranslatorTextTranslationRequest ||
-    require('./text-translation-request.js');
+  const { serializeRetainedState } = globalScope.ChromeAiTranslatorTextTranslationProgress ||
+    require('./text-translation-progress.js');
 
   function createTextTranslationRetention({ getStorage, getCurrentDocumentId, documentEnded, onDocumentConfirmed }) {
     const tabs = new Map();
@@ -58,9 +58,8 @@
         if (!owner.documentId && saved) owner.documentId = saved.documentId;
         if (!write) {
           if (owner.documentId !== documentId) throw documentEnded();
-          const state = saved && saved.state !== null ? retainedState(saved.state) : null;
-          if (state?.job?.status === 'running') state.job.status =
-            state.job.results.length === state.job.units.length ? 'complete' : 'stopped';
+          const state = saved && saved.state !== null
+            ? serializeRetainedState(saved.state, { interrupted: true }) : null;
           await getStorage().set({ [key]: { documentId,
             revision: saved?.documentId === documentId ? saved.revision : 0, state } });
           if (owner.documentId !== documentId) throw documentEnded();
@@ -80,7 +79,7 @@
       observeDocument, close, assertKnownDocument,
       restore: (tabId, documentId) => queueRetentionRequest(tabId, documentId),
       save: (tabId, documentId, revision, state) =>
-        queueRetentionRequest(tabId, documentId, { revision, nextState: () => retainedState(state) }),
+        queueRetentionRequest(tabId, documentId, { revision, nextState: () => serializeRetainedState(state) }),
       clear: (tabId, documentId, revision) =>
         queueRetentionRequest(tabId, documentId, { revision, nextState: () => null }),
     };

@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const vm = require('node:vm');
 const { createBackgroundWorker } = require('../extension/background.js');
 
@@ -64,11 +65,12 @@ async function openPage({ previous, tabId = 90, documentId = 'test-document', be
   const windowEvents = {};
   const context = vm.createContext({ chrome, document: { getElementById: element, addEventListener() {} },
     window: { addEventListener(type, callback) { windowEvents[type] = callback; } }, crypto: { randomUUID: () => `operation-${++serial}` },
-    navigator: { clipboard: { async writeText() {} } },
-    ChromeAiTranslatorTextTranslationRequest: require('../extension/text-translation-request.js'),
-    ChromeAiTranslatorDefaultModel: require('../extension/default-model.js'),
-    ChromeAiTranslatorTranslationSettings: require('../extension/translation-settings.js') });
-  vm.runInContext(fs.readFileSync(require.resolve('../extension/text-translation.js'), 'utf8'), context);
+    navigator: { clipboard: { async writeText() {} } } });
+  const extensionDir = path.join(__dirname, '..', 'extension');
+  const html = fs.readFileSync(path.join(extensionDir, 'text-translation.html'), 'utf8');
+  for (const [, file] of html.matchAll(/<script src="([^"]+)"/g)) {
+    vm.runInContext(fs.readFileSync(path.join(extensionDir, file), 'utf8'), context, { filename: file });
+  }
   await beforeReady?.({ element, event, flush });
   async function flush() { for (let i = 0; i < 64; i += 1) await Promise.resolve(); }
   function event(id, type) { element(id).listeners[type]?.({ preventDefault() {} }); }
@@ -663,6 +665,34 @@ exports.tests = [{
       const again = await restored.reload();
       assert.equal(again.element('translatedText').value, status === 'complete' ? '앞부분\n\n끝부분' : '앞부분\n\n새 끝부분');
     }
+  },
+}, {
+  name: 'reload restores completion when the last result is saved before the final status',
+  async fn() {
+    const page = await openPage();
+    const first = 'A'.repeat(8000) + '\n\n';
+    const second = 'B'.repeat(8000);
+    page.source(first + second);
+    await page.start();
+    page.requests[0].respond('앞부분');
+    await page.flush();
+
+    page.storage.hold = true;
+    page.requests[1].respond('끝부분');
+    await page.flush();
+    assert.equal(page.element('translatedText').value, '앞부분\n\n끝부분');
+    assert.equal(page.element('btnStop').disabled, false);
+    assert.equal(page.storage.held.length, 1);
+
+    const restored = await page.reload({ beforeReady: () => {
+      page.storage.hold = false;
+      page.storage.held.shift()();
+    } });
+    assert.equal(restored.element('translatedText').value, '앞부분\n\n끝부분');
+    assert.equal(restored.element('progressStatus').textContent, '2 of 2 parts complete.');
+    assert.equal(restored.element('btnResume').disabled, true);
+    assert.equal(restored.element('btnSwap').disabled, false);
+    assert.deepEqual(restored.requests.map(request => request.body.input), [first, second]);
   },
 }, {
   name: '60,000 Unicode code points run once in bounded sequential units and invalid input preserves results',

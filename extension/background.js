@@ -66,6 +66,7 @@ if (typeof importScripts === 'function') {
   }
   if (!globalThis.ChromeAiTranslatorTextTranslationRequest) {
     importScripts('text-translation-request.js');
+    importScripts('text-translation-progress.js');
   }
   if (!globalThis.ChromeAiTranslatorTextTranslationRetention) {
     importScripts('text-translation-retention.js');
