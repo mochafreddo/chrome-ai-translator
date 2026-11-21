@@ -3022,6 +3022,37 @@ exports.tests.push({
     assert.equal((await pending).ok, false);
   },
 }, {
+  name: 'a stopped Text Translation request cannot undo a newer request in the same document',
+  async fn() {
+    const chrome = createBlockBatchChrome({ settings: { openrouterApiKey: 'sk-text-synthetic' } });
+    chrome.runtime.getURL = path => `chrome-extension://test/${path}`;
+    const requests = [];
+    const worker = helpers.createBackgroundWorker({ chrome, async fetch(_url, options) {
+      const { input } = JSON.parse(options.body);
+      return new Promise(resolve => {
+        requests.push({ input, respond(translation) {
+          resolve({ ok: true, json: async () => createCompletedResponse(JSON.stringify({
+            translation, sourceLanguage: null,
+          })) });
+        } });
+      });
+    } });
+    const first = sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'first',
+      source: 'First request', settings: TEXT_SETTINGS });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(requests.map(request => request.input), ['First request']);
+    assert.equal((await sendTextMessage(worker, { type: 'STOP_TEXT_TRANSLATION', operationId: 'first' })).ok, true);
+
+    const second = sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'second',
+      source: 'Second request', settings: TEXT_SETTINGS });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(requests.map(request => request.input), ['First request', 'Second request']);
+    requests[0].respond('오래된 응답');
+    assert.equal((await first).ok, false);
+    requests[1].respond('새 응답');
+    assert.deepEqual(await second, { ok: true, result: { translation: '새 응답', sourceLanguage: null } });
+  },
+}, {
   name: 'Text Translation refuses malformed model output without retrying',
   async fn() {
     let requests = 0;

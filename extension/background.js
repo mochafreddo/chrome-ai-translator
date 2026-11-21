@@ -359,12 +359,12 @@ function createBackgroundWorker(platform = {}) {
     documentEnded,
     clearTabState: tabId => stateByTab.delete(tabId),
   });
-  const textTranslations = new Map();
+  const textExecution = createTextTranslationExecution();
   const textRetention = createTextTranslationRetention({
     getStorage: () => getChrome().storage.session,
     getCurrentDocumentId: getTextDocumentId,
     documentEnded,
-    onDocumentConfirmed: stopTextTranslationsForTab,
+    onDocumentConfirmed: textExecution.cancelDeparted,
   });
 
   function documentEnded() {
@@ -386,6 +386,57 @@ function createBackgroundWorker(platform = {}) {
       context.documentUrl === url && typeof context.documentId === 'string' && context.documentId);
     if (matches.length !== 1) throw documentEnded();
     return matches[0].documentId;
+  }
+
+  function createTextTranslationExecution() {
+    const activeRequests = new Map();
+
+    function cancelDeparted(tabId, currentDocumentId = null) {
+      for (const [owner, request] of activeRequests) {
+        if (owner.startsWith(`${tabId}:`) && owner !== `${tabId}:${currentDocumentId}`) {
+          request.controller.abort();
+          activeRequests.delete(owner);
+        }
+      }
+    }
+
+    function stop(tabId, documentId, operationId) {
+      textRetention.assertKnownDocument(tabId, documentId);
+      const owner = `${tabId}:${documentId}`;
+      const request = activeRequests.get(owner);
+      if (request?.operationId === operationId) {
+        request.controller.abort();
+        activeRequests.delete(owner);
+      }
+    }
+
+    async function translate(tabId, documentId, { operationId, source, settings }) {
+      textRetention.assertKnownDocument(tabId, documentId);
+      const owner = `${tabId}:${documentId}`;
+      if (activeRequests.has(owner)) throw new Error('A text translation is already running.');
+      const prepared = textTranslationRequest.prepare(source, settings);
+      const controller = new AbortController();
+      const request = { operationId, controller };
+      const isCurrent = () => activeRequests.get(owner) === request;
+      activeRequests.set(owner, request);
+      try {
+        if (await getTextDocumentId(tabId) !== documentId) throw documentEnded();
+        const stored = await settingsLifecycle.read();
+        if (!isCurrent() || controller.signal.aborted) throw documentEnded();
+        const apiKey = prepared.service === 'openrouter' ? stored.openrouterApiKey : stored.apiKey;
+        if (!apiKey) throw new Error(`${prepared.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`);
+        const output = await requestTranslation({ ...prepared, apiKey, signal: controller.signal,
+          beforeRequest: async () => {
+            if (await getTextDocumentId(tabId) !== documentId || !isCurrent()) throw documentEnded();
+          } });
+        if (!isCurrent() || controller.signal.aborted) throw new Error('Text Translation stopped.');
+        return textTranslationRequest.parseResult(output, prepared.input);
+      } finally {
+        if (isCurrent()) activeRequests.delete(owner);
+      }
+    }
+
+    return { translate, stop, cancelDeparted };
   }
 
   const settingsLifecycle = createSettingsLifecycle({
@@ -644,23 +695,14 @@ function createBackgroundWorker(platform = {}) {
   }
 
   function onTabRemoved(tabId) {
-    stopTextTranslationsForTab(tabId);
+    textExecution.cancelDeparted(tabId);
     void textRetention.close(tabId).catch(() => {});
     inlineDocuments.close(tabId);
   }
 
-  function stopTextTranslationsForTab(tabId, currentDocumentId = null) {
-    for (const [owner, operation] of textTranslations) {
-      if (owner.startsWith(`${tabId}:`) && owner !== `${tabId}:${currentDocumentId}`) {
-        operation.controller.abort();
-        textTranslations.delete(owner);
-      }
-    }
-  }
-
   function onNavigationCommitted(details) {
     if (details.frameId !== 0) return;
-    stopTextTranslationsForTab(details.tabId, details.documentId);
+    textExecution.cancelDeparted(details.tabId, details.documentId);
     textRetention.observeDocument(details.tabId, details.documentId);
     if (inlineDocuments.observeNavigation(details.tabId, details.documentId)) {
       setTabState(details.tabId, { inlineTranslationError: null });
@@ -717,39 +759,13 @@ function createBackgroundWorker(platform = {}) {
           if (typeof msg.operationId !== 'string' || !msg.operationId || msg.operationId.length > 100) {
             throw new Error('Text Translation requires its own extension page.');
           }
-          const owner = `${sender.tab.id}:${sender.documentId}`;
-          textRetention.assertKnownDocument(sender.tab.id, sender.documentId);
-          const current = textTranslations.get(owner);
           if (msg.type === 'STOP_TEXT_TRANSLATION') {
-            if (current?.operationId === msg.operationId) {
-              current.controller.abort();
-              textTranslations.delete(owner);
-            }
+            textExecution.stop(sender.tab.id, sender.documentId, msg.operationId);
             sendResponse({ ok: true });
             return;
           }
-          if (current) throw new Error('A text translation is already running.');
-          const prepared = textTranslationRequest.prepare(msg.source, msg.settings);
-          const operation = { operationId: msg.operationId, controller: new AbortController() };
-          textTranslations.set(owner, operation);
-          try {
-            if (await getTextDocumentId(sender.tab.id) !== sender.documentId) throw documentEnded();
-            const stored = await settingsLifecycle.read();
-            if (textTranslations.get(owner) !== operation || operation.controller.signal.aborted) throw documentEnded();
-            const apiKey = prepared.service === 'openrouter' ? stored.openrouterApiKey : stored.apiKey;
-            if (!apiKey) throw new Error(`${prepared.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`);
-            const output = await requestTranslation({ ...prepared, apiKey, signal: operation.controller.signal,
-              beforeRequest: async () => {
-                if (await getTextDocumentId(sender.tab.id) !== sender.documentId ||
-                    textTranslations.get(owner) !== operation) throw documentEnded();
-              } });
-            if (textTranslations.get(owner) !== operation || operation.controller.signal.aborted) {
-              throw new Error('Text Translation stopped.');
-            }
-            sendResponse({ ok: true, result: textTranslationRequest.parseResult(output, prepared.input) });
-          } finally {
-            if (textTranslations.get(owner) === operation) textTranslations.delete(owner);
-          }
+          const result = await textExecution.translate(sender.tab.id, sender.documentId, msg);
+          sendResponse({ ok: true, result });
           return;
         }
         if (msg?.type === 'OPEN_INLINE_TRANSLATION_CONTROLS') {
