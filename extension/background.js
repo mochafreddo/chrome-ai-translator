@@ -422,14 +422,14 @@ function createBackgroundWorker(platform = {}) {
       try {
         if (await getTextDocumentId(tabId) !== documentId) throw documentEnded();
         const stored = await settingsLifecycle.read();
-        if (!isCurrent() || controller.signal.aborted) throw documentEnded();
+        if (!isCurrent()) throw documentEnded();
         const apiKey = prepared.service === 'openrouter' ? stored.openrouterApiKey : stored.apiKey;
         if (!apiKey) throw new Error(`${prepared.service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key is not set. Open Options and paste your key.`);
         const output = await requestTranslation({ ...prepared, apiKey, signal: controller.signal,
           beforeRequest: async () => {
             if (await getTextDocumentId(tabId) !== documentId || !isCurrent()) throw documentEnded();
           } });
-        if (!isCurrent() || controller.signal.aborted) throw new Error('Text Translation stopped.');
+        if (!isCurrent()) throw new Error('Text Translation stopped.');
         return textTranslationRequest.parseResult(output, prepared.input);
       } finally {
         if (isCurrent()) activeRequests.delete(owner);

@@ -3029,13 +3029,12 @@ exports.tests.push({
     const requests = [];
     const worker = helpers.createBackgroundWorker({ chrome, async fetch(_url, options) {
       const { input } = JSON.parse(options.body);
-      return new Promise(resolve => {
-        requests.push({ input, respond(translation) {
-          resolve({ ok: true, json: async () => createCompletedResponse(JSON.stringify({
-            translation, sourceLanguage: null,
-          })) });
-        } });
+      const translation = await new Promise(respond => {
+        requests.push({ input, respond });
       });
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translation, sourceLanguage: null,
+      })) };
     } });
     const first = sendTextMessage(worker, { type: 'TRANSLATE_TEXT', operationId: 'first',
       source: 'First request', settings: TEXT_SETTINGS });
