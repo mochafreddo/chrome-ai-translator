@@ -240,7 +240,7 @@
 
     function withoutSourceSyntax(value) {
       const literals = Array.isArray(sourceSyntax)
-        ? sourceSyntax.map(item => removeTokens(item?.value)).filter(Boolean)
+        ? sourceSyntax.map(item => removeTokens(item?.value))
         : [];
       return stripSourceSyntax(value, literals);
     }
