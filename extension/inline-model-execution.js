@@ -137,27 +137,20 @@
     return `structure.${known.has(code) ? code : 'output_parse_failed'}`;
   }
 
-  function proseWithoutSourceSyntax(value, contract) {
-    const sourceSyntax = Array.isArray(contract?.sourceSyntax)
-      ? contract.sourceSyntax.map((item) => removeContractTokens(item?.value, contract)).filter(Boolean)
-      : [];
-    return inlineTemplate.stripSourceSyntax(value, sourceSyntax);
+  function words(value) {
+    return Array.from(value.matchAll(ENGLISH_WORD), (match) => match[0]);
   }
 
-  function words(value, contract = null) {
-    return Array.from(proseWithoutSourceSyntax(value, contract).matchAll(ENGLISH_WORD), (match) => match[0]);
-  }
-
-  function residueWords(value, contract) {
+  function residueWords(value) {
     return Array.from(
-      proseWithoutSourceSyntax(value, contract).matchAll(/([A-Za-z][A-Za-z0-9]*(?:['’-][A-Za-z0-9]+)*)|[^\s]/gu),
+      value.matchAll(/([A-Za-z][A-Za-z0-9]*(?:['’-][A-Za-z0-9]+)*)|[^\s]/gu),
       (match) => match[1] || null
     );
   }
 
-  function sharedEnglishEvidence(source, output, contract = null) {
-    const sourceWords = residueWords(source, contract);
-    const outputWords = residueWords(output, contract).map((word) => word?.toLowerCase() ?? null);
+  function sharedEnglishEvidence(source, output) {
+    const sourceWords = residueWords(source);
+    const outputWords = residueWords(output).map((word) => word?.toLowerCase() ?? null);
     let longest = 0;
     let count = 0;
     const phrases = new Set();
@@ -186,18 +179,6 @@
     return { longest, count, phrases: [...phrases] };
   }
 
-  function removeContractTokens(value, contract) {
-    let text = String(value || '');
-    for (const entry of contract?.entries || []) {
-      for (const token of [entry.token, entry.openToken, entry.closeToken]) {
-        if (typeof token === 'string' && token) {
-          text = text.split(token).join(entry.tagName === 'BR' ? '\n' : ' ');
-        }
-      }
-    }
-    return text;
-  }
-
   function countUnicodeLetters(value) {
     return Array.from(String(value || '').matchAll(/\p{L}/gu)).length;
   }
@@ -206,21 +187,12 @@
     return Array.from(String(value || '').matchAll(/[가-힣]/g)).length;
   }
 
-  function maskLanguageExamples(source, output, contract, examples) {
+  function maskLanguageExamples(source, output, analysis, examples, outputValidation) {
     if (!Array.isArray(examples) || !examples.length) return output;
+    const structure = analysis.exampleStructure(source, output, outputValidation);
+    if (!structure) return output;
     const sourceRanges = [];
     const outputRanges = [];
-    const wrapperTokens = (contract?.entries || []).filter(entry => entry.kind === 'wrapper')
-      .flatMap(entry => [entry.openToken, entry.closeToken]).filter(value => typeof value === 'string' && value);
-    if (wrapperTokens.length && (!inlineTemplate.validateSourceTemplate(source, contract).ok ||
-        !inlineTemplate.validateTranslatedTemplate(output, contract).ok)) return output;
-    const protectedValues = (contract?.entries || []).flatMap(entry =>
-      entry.kind === 'wrapper' ? [] : [entry.token, entry.openToken, entry.closeToken]).concat(
-      (contract?.sourceSyntax || []).map(item => item.value),
-      (contract?.literalTokens || []).map(item => item.value),
-      [...inlineTemplate.getTokenLikeLiterals(source), ...inlineTemplate.getTokenLikeLiterals(output)]
-        .filter(value => !wrapperTokens.includes(value))
-    ).filter(value => typeof value === 'string' && value);
     function validSpan(text, start, end, value) {
       if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= end || end > text.length ||
           typeof value !== 'string' || text.slice(start, end) !== value) return false;
@@ -232,19 +204,7 @@
         const wordEnd = match.index + match[0].length;
         if (match.index < start && start < wordEnd || match.index < end && end < wordEnd) return false;
       }
-      for (const token of wrapperTokens) {
-        const index = text.indexOf(token);
-        if (index !== -1 && start < index + token.length && index < end &&
-            (start > index || end < index + token.length)) return false;
-      }
-      for (const protectedValue of protectedValues) {
-        let index = text.indexOf(protectedValue);
-        while (index !== -1) {
-          if (start < index + protectedValue.length && index < end) return false;
-          index = text.indexOf(protectedValue, index + 1);
-        }
-      }
-      return true;
+      return structure.allowsSpan(text, start, end);
     }
     for (const item of examples) {
       if (!item || Object.keys(item).length !== LANGUAGE_EXAMPLE_FIELDS.length ||
@@ -252,14 +212,13 @@
           !validSpan(source, item.sourceStart, item.sourceEnd, item.source) ||
           !validSpan(output, item.outputStart, item.outputEnd, item.source) ||
           !validSpan(output, item.meaningStart, item.meaningEnd, item.meaning) ||
-          !words(item.source).length || !countHangulSyllables(item.meaning)) return output;
+          !words(inlineTemplate.stripSourceSyntax(item.source)).length || !countHangulSyllables(item.meaning)) return output;
       const original = [item.sourceStart, item.sourceEnd];
       const example = [item.outputStart, item.outputEnd];
       const meaning = [item.meaningStart, item.meaningEnd];
       const gap = example[1] <= meaning[0] ? output.slice(example[1], meaning[0])
         : meaning[1] <= example[0] ? output.slice(meaning[1], example[0]) : null;
-      if (gap === null || !/^[\s\p{P}\p{S}]*$/u.test(
-        wrapperTokens.reduce((text, token) => text.split(token).join(''), gap))) return output;
+      if (gap === null || !/^[\s\p{P}\p{S}]*$/u.test(structure.removeWrapperTokens(gap))) return output;
       sourceRanges.push(original);
       outputRanges.push(example, meaning);
     }
@@ -274,10 +233,11 @@
     return masked;
   }
 
-  function analyzeTranslationQuality(sourceText, translatedText, targetLanguage, contract, languageExamples) {
+  function analyzeTranslationQuality(sourceText, translatedText, targetLanguage, contract, languageExamples, outputValidation) {
     const targetLanguageCode = getTargetLanguageCode(targetLanguage);
-    const source = removeContractTokens(sourceText, contract);
-    const output = removeContractTokens(translatedText, contract);
+    const analysis = inlineTemplate.createTemplateAnalysis(contract);
+    const source = analysis.removeTokens(sourceText);
+    const output = analysis.removeTokens(translatedText);
     const evidence = {
       sourceChars: source.length,
       outputChars: output.length,
@@ -287,7 +247,8 @@
     if (!output.trim()) {
       return { status: 'partial', codes: [QUALITY_CODES.EMPTY_PROSE], evidence };
     }
-    const sourceProseWordCount = words(source, contract).filter(
+    const sourceProse = analysis.withoutSourceSyntax(source);
+    const sourceProseWordCount = words(sourceProse).filter(
       (word) => !/^[A-Z0-9_]{2,}$/.test(word)
     ).length;
     const outputLetterCount = countUnicodeLetters(output);
@@ -311,9 +272,9 @@
     }
     if (targetLanguageCode !== 'en') {
       const residueOutput = targetLanguageCode === 'ko'
-        ? removeContractTokens(maskLanguageExamples(sourceText, translatedText, contract, languageExamples), contract)
+        ? analysis.removeTokens(maskLanguageExamples(sourceText, translatedText, analysis, languageExamples, outputValidation))
         : output;
-      const shared = sharedEnglishEvidence(source, residueOutput, contract);
+      const shared = sharedEnglishEvidence(sourceProse, analysis.withoutSourceSyntax(residueOutput));
       evidence.sharedEnglishSequenceLength = shared.longest;
       evidence.sharedEnglishSequenceCount = shared.count;
       if (shared.count) {
@@ -387,7 +348,7 @@
               codes: [mapStructureCode(structureValidation.errorCode)],
             };
         const { untranslatedPhrases, ...quality } = structureValidation.ok
-          ? analyzeTranslationQuality(record.template, template, options.targetLanguage, record.contract, languageExamples)
+          ? analyzeTranslationQuality(record.template, template, options.targetLanguage, record.contract, languageExamples, structureValidation)
           : { status: 'uncertain', codes: [], evidence: {} };
         return { id: record.id, template, structure, quality, untranslatedPhrases };
       }),

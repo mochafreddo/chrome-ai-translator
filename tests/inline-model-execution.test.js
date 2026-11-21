@@ -79,6 +79,29 @@ exports.tests = [
     },
   },
   {
+    name: 'keeps assessing English residue when a direct execution has an invalid formatted example source',
+    async fn() {
+      const { document, element, text } = createTestDocument();
+      const sentence = 'The report was written by Maya.';
+      const meaning = '마야가 보고서를 작성했다.';
+      const block = element('p', text('Before: '), element('em', text(sentence)));
+      document.body.appendChild(block);
+      const serialized = codec.serializeBlock(block);
+      assert.equal(serialized.ok, true);
+      const { openToken, closeToken, droppable } = serialized.contract.entries[0];
+      assert.equal(droppable, true);
+      const source = serialized.template.replace(openToken, '').replace(closeToken, '');
+      const template = serialized.template.replace('Before:', '이전:') + `(${meaning})`;
+      const [result] = await execute([{ id: 'invalid-source', template: source, atoms: serialized.atoms,
+        contract: serialized.contract, repair: null }], SETTINGS, async () =>
+        response([{ id: 'invalid-source', template, languageExamples: [example(source, template, sentence, meaning)] }]));
+      assert.equal(result.disposition, 'apply_with_warning');
+      assert.equal(result.terminalCode, 'quality.english_residue');
+      assert.equal(result.attemptCount, 2);
+      assert.equal(result.template, template);
+    },
+  },
+  {
     name: 'applies and restores internally emphasized bilingual examples on initial and repaired responses',
     async fn() {
       for (const placement of ['internal', 'whole', 'boundary']) {

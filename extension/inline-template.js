@@ -222,7 +222,71 @@
     return result.ok && result.droppedWrappers.length ? validationError('output_parse_failed') : result;
   }
 
+  function createTemplateAnalysis(contract) {
+    const entries = contract?.entries || [];
+    const sourceSyntax = contract?.sourceSyntax || [];
+
+    function removeTokens(value) {
+      let text = String(value || '');
+      for (const entry of entries) {
+        for (const token of [entry.token, entry.openToken, entry.closeToken]) {
+          if (typeof token === 'string' && token) {
+            text = text.split(token).join(entry.tagName === 'BR' ? '\n' : ' ');
+          }
+        }
+      }
+      return text;
+    }
+
+    function withoutSourceSyntax(value) {
+      const literals = Array.isArray(sourceSyntax)
+        ? sourceSyntax.map(item => removeTokens(item?.value)).filter(Boolean)
+        : [];
+      return stripSourceSyntax(value, literals);
+    }
+
+    function exampleStructure(source, output, outputValidation) {
+      const wrapperTokens = entries.filter(entry => entry.kind === 'wrapper')
+        .flatMap(entry => [entry.openToken, entry.closeToken]).filter(value => typeof value === 'string' && value);
+      if (wrapperTokens.length && (!validateSourceTemplate(source, contract).ok ||
+          !(outputValidation ?? validateTranslatedTemplate(output, contract)).ok)) return null;
+
+      const protectedValues = entries.flatMap(entry =>
+        entry.kind === 'wrapper' ? [] : [entry.token, entry.openToken, entry.closeToken]).concat(
+        sourceSyntax.map(item => item.value),
+        (contract?.literalTokens || []).map(item => item.value),
+        [...getTokenLikeLiterals(source), ...getTokenLikeLiterals(output)]
+          .filter(value => !wrapperTokens.includes(value))
+      ).filter(value => typeof value === 'string' && value);
+
+      function allowsSpan(text, start, end) {
+        for (const token of wrapperTokens) {
+          const index = text.indexOf(token);
+          if (index !== -1 && start < index + token.length && index < end &&
+              (start > index || end < index + token.length)) return false;
+        }
+        for (const value of protectedValues) {
+          let index = text.indexOf(value);
+          while (index !== -1) {
+            if (start < index + value.length && index < end) return false;
+            index = text.indexOf(value, index + 1);
+          }
+        }
+        return true;
+      }
+
+      function removeWrapperTokens(text) {
+        return wrapperTokens.reduce((result, token) => result.split(token).join(''), text);
+      }
+
+      return { allowsSpan, removeWrapperTokens };
+    }
+
+    return { removeTokens, withoutSourceSyntax, exampleStructure };
+  }
+
   const api = {
+    createTemplateAnalysis,
     getSourceSyntaxLiterals,
     getTokenLikeLiterals,
     hasSourcePathFileExtension,
