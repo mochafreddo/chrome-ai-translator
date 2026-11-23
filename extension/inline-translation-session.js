@@ -444,9 +444,9 @@
   }
 
   // A batch whose request failed outright has no results to say what became of each record.
-  function failBatch(records, operationId, operation) {
+  function failBatch(records, operation) {
     for (const record of records || []) {
-      if (record.operationId === operationId && record.state === 'translating' &&
+      if (record.operationId === operation.operationId && record.state === 'translating' &&
         !skipPreservedOnlyBlock(operation, record.blockElement)) {
         record.state = 'failed';
         record.code = 'runtime.request_failed';
@@ -779,7 +779,7 @@
       }
       operation.inFlight = Math.max(0, operation.inFlight - 1);
       if (!response?.ok || !Array.isArray(response.results)) {
-        failBatch(records, batchOperationId, operation);
+        failBatch(records, operation);
         return { runtimeOutcomes: [], releaseTokens: [], diagnosticsUnavailable: false };
       }
       let runtimeOutcomes;
@@ -788,7 +788,7 @@
       } catch {
         // An answer the page could not settle reads as a failed request, as one that never
         // came back does, rather than leaving its blocks pending for good.
-        failBatch(records, batchOperationId, operation);
+        failBatch(records, operation);
         return { runtimeOutcomes: [], releaseTokens: [], diagnosticsUnavailable: false };
       }
       const runtimeTokens = new Set(runtimeOutcomes.map((outcome) => outcome.correlationToken));

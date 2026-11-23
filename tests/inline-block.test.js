@@ -325,6 +325,14 @@ exports.tests = [
     },
   },
   {
+    name: 'rejects a Prydwen skill icon with a DOM-appended child',
+    fn() {
+      const { block, first, text } = createPrydwenSkillFixture();
+      first.image.appendChild(text('Unexpected image child'));
+      assert.equal(codec.serializeBlock(block).ok, false);
+    },
+  },
+  {
     name: 'mise recipe admission uses the actual HTTPS homepage location rather than base URI',
     fn() {
       for (const url of ['https://mise.jdx.dev/', 'https://mise.jdx.dev/?theme=dark#recipes']) {

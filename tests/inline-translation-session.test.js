@@ -163,9 +163,7 @@ exports.tests = [
     fn() {
       const visit = session.createInlineTranslationSession();
       visit.begin(KOREAN);
-      const original = createPrydwenSkillFixture();
-      visit.admit(original.block);
-      const batch = visit.takeBatch();
+      const { batch } = sendBlock(visit, createPrydwenSkillFixture());
       const [record] = batch;
       const [firstToken, secondToken] = record.atoms.map((atom) => atom.token);
       visit.settle(batch, { ok: true, results: [{
@@ -220,8 +218,7 @@ exports.tests = [
       visit.begin(KOREAN);
       const { block, first, second, text } = createPrydwenSkillFixture();
       block.replaceChildren(first.node, text(' + '), second.node);
-      visit.admit(block);
-      const batch = visit.takeBatch();
+      const { batch } = sendBlock(visit, { block });
       const [record] = batch;
       const [firstToken, secondToken] = record.atoms.map((atom) => atom.token);
       visit.settle(batch, { ok: true, results: [{

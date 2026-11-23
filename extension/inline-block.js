@@ -254,7 +254,7 @@
     if (![icon, label].every((span) => getTagName(span) === 'SPAN' && span.childNodes.length === 1)) return false;
     const image = icon.childNodes[0];
     const name = label.childNodes[0];
-    if (getTagName(image) !== 'IMG' || name.nodeType !== 3) return false;
+    if (getTagName(image) !== 'IMG' || image.childNodes.length || name.nodeType !== 3) return false;
     const alt = getAttribute(image, 'alt').trim();
     return Boolean(alt) && alt === name.nodeValue.trim() &&
       node.getAttributeNames().length === 0 &&
@@ -1013,11 +1013,7 @@
       }
       const tagName = getTagName(node);
       if (prydwenParagraph && node.parentNode === block && isPrydwenSkillGroup(node)) {
-        const opaqueFailure = rememberOpaqueSubtree(node, opaqueAtomNodes);
-        if (opaqueFailure) {
-          failed = opaqueFailure;
-          return '';
-        }
+        rememberOpaqueSubtree(node, opaqueAtomNodes);
         retainedNodes.add(node);
         return registerAtom(node, parentId, tagName, 'prydwen-skill', true);
       }
