@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const session = require('../extension/inline-translation-session.js');
 const codec = require('../extension/inline-block.js');
 const { execute } = require('../extension/inline-model-execution.js');
-const { createReasoningFixture, createTestDocument } = require('./inline-block.test');
+const { createPrydwenSkillFixture, createReasoningFixture, createTestDocument } = require('./inline-block.test');
 const { DEFAULT_MODEL } = require('../extension/default-model.js');
 
 const KOREAN = {
@@ -111,6 +111,128 @@ function drain(visit, attemptCount = 1) {
 
 exports.name = 'inline translation session';
 exports.tests = [
+  {
+    name: 'skips Prydwen skill lists without reporting failure or sending a request',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { block, first, second, text } = createPrydwenSkillFixture();
+      block.replaceChildren(first.node, text(' | '), second.node);
+      visit.admit(block);
+      assert.equal(visit.takeBatch().length, 0);
+      assert.deepEqual(visit.progress().counts, NOTHING);
+      assert.equal(visit.outbox.length, 0);
+      block.appendChild(text(' work together.'));
+      visit.admit(block);
+      assert.match(visit.takeBatch()[0].template, / work together\.$/);
+    },
+  },
+  {
+    name: 'skips Prydwen paragraphs that become skill lists while queued or awaiting a response',
+    fn() {
+      for (const stage of ['queued', 'in flight', 'failed response']) {
+        const visit = session.createInlineTranslationSession();
+        visit.begin(KOREAN);
+        const { block, first, second, text } = createPrydwenSkillFixture();
+        visit.admit(block);
+        const batch = stage === 'queued' ? [] : visit.takeBatch();
+        block.replaceChildren(first.node, text(' | '), second.node);
+        if (stage === 'in flight') {
+          const [record] = batch;
+          const [firstToken, secondToken] = record.atoms.map((atom) => atom.token);
+          const settlement = visit.settle(batch, { ok: true, results: [{
+            id: record.id, correlationToken: 'old-answer', disposition: 'apply',
+            template: `${secondToken} 전에 ${firstToken}을 사용합니다.`, attemptCount: 1,
+          }] });
+          assert.deepEqual(settlement.runtimeOutcomes, []);
+          assert.deepEqual(settlement.releaseTokens, ['old-answer']);
+        } else if (stage === 'failed response') {
+          visit.settle(batch, null);
+        }
+        assert.equal(visit.takeBatch().length, 0, stage);
+        assert.deepEqual(visit.progress().counts, NOTHING, stage);
+        assert.equal(block.textContent, 'First Skill | Second Skill', stage);
+        block.appendChild(text(' work together.'));
+        visit.admit(block);
+        assert.match(visit.takeBatch()[0].template, / work together\.$/, stage);
+      }
+    },
+  },
+  {
+    name: 'reuses Prydwen skill translations with the current image nodes and restores their order',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const original = createPrydwenSkillFixture();
+      visit.admit(original.block);
+      const batch = visit.takeBatch();
+      const [record] = batch;
+      const [firstToken, secondToken] = record.atoms.map((atom) => atom.token);
+      visit.settle(batch, { ok: true, results: [{
+        id: record.id, disposition: 'apply', template: `${secondToken} 전에 ${firstToken}을 사용합니다.`, attemptCount: 1,
+      }] });
+      const current = createPrydwenSkillFixture();
+      const children = [...current.block.childNodes];
+      current.second.image.setAttribute('src', '/current-icon.png');
+      visit.admit(current.block);
+      assert.equal(visit.takeBatch().length, 0);
+      assert.deepEqual(visit.progress().counts, { ...NOTHING, translated: 2 });
+      assert.equal(current.block.childNodes[0], current.second.node);
+      assert.equal(current.second.image.isConnected, true);
+      visit.restore();
+      assert.deepEqual(current.block.childNodes, children);
+      assert.equal(current.second.image.getAttribute('src'), '/current-icon.png');
+    },
+  },
+  {
+    name: 'translates fresh Prydwen prose after a carried translation became a skill list',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { block, first, second, text } = createPrydwenSkillFixture();
+      function settle() {
+        const batch = visit.takeBatch();
+        assert.equal(batch.length, 1);
+        const [record] = batch;
+        const [firstToken, secondToken] = record.atoms.map((atom) => atom.token);
+        visit.settle(batch, { ok: true, results: [{
+          id: record.id, disposition: 'apply', template: `${firstToken}와 ${secondToken}을 사용합니다.`, attemptCount: 1,
+        }] });
+        assert.deepEqual(visit.progress().counts, { ...NOTHING, translated: 1 });
+      }
+      visit.admit(block);
+      settle();
+      visit.stop();
+      visit.begin(KOREAN);
+      block.replaceChildren(first.node, text(' | '), second.node);
+      visit.admit(block);
+      assert.deepEqual(visit.progress().counts, NOTHING);
+      block.appendChild(text(' work together.'));
+      visit.admit(block);
+      settle();
+      assert.equal(block.textContent, 'First Skill와 Second Skill을 사용합니다.');
+    },
+  },
+  {
+    name: 'restores an owned Prydwen translation that changed its separators',
+    fn() {
+      const visit = session.createInlineTranslationSession();
+      visit.begin(KOREAN);
+      const { block, first, second, text } = createPrydwenSkillFixture();
+      block.replaceChildren(first.node, text(' + '), second.node);
+      visit.admit(block);
+      const batch = visit.takeBatch();
+      const [record] = batch;
+      const [firstToken, secondToken] = record.atoms.map((atom) => atom.token);
+      visit.settle(batch, { ok: true, results: [{
+        id: record.id, disposition: 'apply', template: `${secondToken} | ${firstToken}`, attemptCount: 1,
+      }] });
+      assert.equal(block.textContent, 'Second Skill | First Skill');
+      visit.admit(block);
+      visit.restore();
+      assert.equal(block.textContent, 'First Skill + Second Skill');
+    },
+  },
   {
     name: 'reuses button translations with current page nodes and separates changed labels',
     fn() {

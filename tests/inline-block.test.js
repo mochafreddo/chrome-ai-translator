@@ -216,6 +216,26 @@ function createReasoningFixture() {
   return { document, block, strong, link, serialized: codec.serializeBlock(block) };
 }
 
+function createPrydwenSkillFixture() {
+  const { document, element, text } = createTestDocument();
+  document.location = new URL('https://www.prydwen.gg/sword-x-staff/guides/build-guide-archmage');
+  function skill(name) {
+    const image = element('img');
+    image.setAttribute('alt', name);
+    const icon = element('span', image);
+    const label = element('span', text(name));
+    const group = element('span', icon, label);
+    for (const node of [group, icon, label]) node.setAttribute('class', 'fixture');
+    group.computedStyle = { display: 'inline-flex' };
+    return { node: element('span', group), group, image, label };
+  }
+  const first = skill('First Skill');
+  const second = skill('Second Skill');
+  const block = element('p', text('Cast '), first.node, text(' before '), second.node, text('.'));
+  document.body.appendChild(block);
+  return { document, block, first, second, text };
+}
+
 function createHeadingControlFixture(trailing = false) {
   const { document, element, text } = createTestDocument();
   const icon = element('svg', element('path'));
@@ -255,6 +275,55 @@ function createMiseRecipeFixture() {
 
 exports.name = 'inline block codec';
 exports.tests = [
+  {
+    name: 'moves Prydwen skill names with their original icon and restores the exact paragraph',
+    fn() {
+      const { block, first, second } = createPrydwenSkillFixture();
+      const children = [...block.childNodes];
+      const source = codec.serializeBlock(block);
+      assert.equal(source.ok, true);
+      assert.deepEqual(source.atoms.map((atom) => atom.label), ['First Skill', 'Second Skill']);
+      assert.doesNotMatch(source.template, /First Skill|Second Skill/);
+      const [firstToken, secondToken] = source.atoms.map((atom) => atom.token);
+      assert.equal(codec.applyTranslatedTemplate(source.snapshot, `${secondToken} 전에 ${firstToken}을 사용합니다.`).ok, true);
+      assert.equal(block.textContent, 'Second Skill 전에 First Skill을 사용합니다.');
+      assert.equal(block.childNodes[0], second.node);
+      assert.equal(block.childNodes[2], first.node);
+      for (const { node, image, label } of [first, second]) {
+        assert.equal(node.childNodes[0].childNodes[0].childNodes[0], image);
+        assert.equal(image.getAttribute('alt'), label.textContent);
+      }
+      assert.equal(codec.restoreBlock(source.snapshot).ok, true);
+      assert.deepEqual(block.childNodes, children);
+      assert.equal(block.textContent, 'Cast First Skill before Second Skill.');
+    },
+  },
+  {
+    name: 'rejects Prydwen skill groups outside their boundary and rechecks safety before apply and restore',
+    fn() {
+      const offSite = createPrydwenSkillFixture();
+      offSite.document.location = new URL('https://example.com/sword-x-staff/guides/build-guide-archmage');
+      assert.deepEqual(codec.serializeBlock(offSite.block), unsupportedBlock('unsupported_descendant', 'IMG'));
+      const otherLayout = createPrydwenSkillFixture();
+      otherLayout.first.group.computedStyle.display = 'inline';
+      assert.deepEqual(codec.serializeBlock(otherLayout.block), unsupportedBlock('unsupported_descendant', 'IMG'));
+      const { block, first, second } = createPrydwenSkillFixture();
+      const source = codec.serializeBlock(block);
+      assert.equal(source.ok, true);
+      const [firstToken, secondToken] = source.atoms.map((atom) => atom.token);
+      const translated = `${secondToken} 전에 ${firstToken}을 사용합니다.`;
+      first.image.setAttribute('alt', 'Different Skill');
+      assert.deepEqual(codec.applyTranslatedTemplate(source.snapshot, translated), { ok: false, errorCode: 'block_changed' });
+      first.image.setAttribute('alt', 'First Skill');
+      assert.equal(codec.applyTranslatedTemplate(source.snapshot, translated).ok, true);
+      second.image.onclick = () => {};
+      assert.deepEqual(codec.restoreBlock(source.snapshot), { ok: false, errorCode: 'block_changed' });
+      delete second.image.onclick;
+      second.image.setAttribute('src', '/current-icon.png');
+      assert.equal(codec.restoreBlock(source.snapshot).ok, true);
+      assert.equal(second.image.getAttribute('src'), '/current-icon.png');
+    },
+  },
   {
     name: 'mise recipe admission uses the actual HTTPS homepage location rather than base URI',
     fn() {
@@ -3384,6 +3453,7 @@ exports.tests = [
 ];
 
 exports.createTestDocument = createTestDocument;
+exports.createPrydwenSkillFixture = createPrydwenSkillFixture;
 exports.createMiseRecipeFixture = createMiseRecipeFixture;
 exports.createReasoningFixture = createReasoningFixture;
 exports.LINGUISTIC_SLASH_PROSE = LINGUISTIC_SLASH_PROSE;

@@ -240,6 +240,44 @@
     return { proseContainer, codeContainer };
   }
 
+  function isPrydwenGuideParagraph(block) {
+    const location = block?.ownerDocument?.location;
+    return getTagName(block) === 'P' && location?.origin === 'https://www.prydwen.gg' &&
+      location.pathname === '/sword-x-staff/guides/build-guide-archmage';
+  }
+
+  function isPrydwenSkillGroup(node) {
+    if (getTagName(node) !== 'SPAN' || node.childNodes.length !== 1) return false;
+    const group = node.childNodes[0];
+    if (getTagName(group) !== 'SPAN' || group.childNodes.length !== 2) return false;
+    const [icon, label] = group.childNodes;
+    if (![icon, label].every((span) => getTagName(span) === 'SPAN' && span.childNodes.length === 1)) return false;
+    const image = icon.childNodes[0];
+    const name = label.childNodes[0];
+    if (getTagName(image) !== 'IMG' || name.nodeType !== 3) return false;
+    const alt = getAttribute(image, 'alt').trim();
+    return Boolean(alt) && alt === name.nodeValue.trim() &&
+      node.getAttributeNames().length === 0 &&
+      [group, icon, label].every((span) =>
+        hasAttribute(span, 'class') && span.getAttributeNames().length === 1) &&
+      group.ownerDocument.defaultView?.getComputedStyle(group).display === 'inline-flex' &&
+      image.getAttributeNames().every((attribute) =>
+        ['alt', 'class', 'data-nimg', 'decoding', 'height', 'loading', 'src', 'srcset', 'style', 'width'].includes(attribute)) &&
+      [node, group, icon, label, image].every((element) =>
+        !isUnsupportedElement(element) && !hasInlineActionSemantics(element));
+  }
+
+  function isPreservedOnlyBlock(block) {
+    if (!isPrydwenGuideParagraph(block) || block.childNodes.length > MAX_STRUCTURE_NODES) return false;
+    let hasSkill = false;
+    for (const child of block.childNodes) {
+      if (child.nodeType === 3 && /^[\s|]*$/.test(child.nodeValue)) continue;
+      if (!isPrydwenSkillGroup(child)) return false;
+      hasSkill = true;
+    }
+    return hasSkill && !isUnsupportedElement(block);
+  }
+
   // A heading's edge control is local UI, never a translatable atom. Requiring
   // one labelled self-fragment link and no prose prevents a hidden-subtree bypass.
   // TODO: #59 - Interior controls need a stable prose anchor before they can be supported.
@@ -865,6 +903,7 @@
       return createUnsupportedResult(describeLocalRejection('invalid_root', block));
     }
     const recipe = findMiseRecipe(block);
+    const prydwenParagraph = isPrydwenGuideParagraph(block);
     const proseContainer = recipe?.proseContainer || findTransparentWrapper(block) || block;
     const blockChildNodes = new Set(getChildNodes(proseContainer).filter(isBlockChild));
     if (recipe) blockChildNodes.add(recipe.codeContainer);
@@ -973,6 +1012,15 @@
         return '';
       }
       const tagName = getTagName(node);
+      if (prydwenParagraph && node.parentNode === block && isPrydwenSkillGroup(node)) {
+        const opaqueFailure = rememberOpaqueSubtree(node, opaqueAtomNodes);
+        if (opaqueFailure) {
+          failed = opaqueFailure;
+          return '';
+        }
+        retainedNodes.add(node);
+        return registerAtom(node, parentId, tagName, 'prydwen-skill', true);
+      }
       const wholeCellWrapper = proseContainer === block && tagName === 'DIV' && parentId === 'ROOT' &&
         ['TD', 'TH'].includes(getTagName(block)) &&
         getChildNodes(block).every((child) => child === node || isIgnorableWhitespace(child));
@@ -1236,6 +1284,9 @@
       if (isUnsupportedElement(container.node)) return false;
     }
     for (const entry of snapshot?.entries?.values?.() || []) {
+      if (entry.atomKind === 'prydwen-skill' &&
+        (!isPrydwenGuideParagraph(snapshot.blockElement) || entry.node.parentNode !== snapshot.blockElement ||
+          !isPrydwenSkillGroup(entry.node))) return false;
       if (
         entry.node?.nodeType === 8 ||
         snapshot.opaqueAtomNodes?.has(entry.node) ||
@@ -1448,6 +1499,7 @@
     matchesAppliedOwnership,
     matchesOriginalOwnership,
     isSemanticBlockElement,
+    isPreservedOnlyBlock,
     isBlockChildContainerElement,
     serializeBlock,
     isCodeLikeInlineText,

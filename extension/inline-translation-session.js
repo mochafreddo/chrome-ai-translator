@@ -197,6 +197,19 @@
     return true;
   }
 
+  function skipPreservedOnlyBlock(operation, blockElement) {
+    if (!inlineBlockCodec.isPreservedOnlyBlock(blockElement) || !isWithinSelectedRoot(operation, blockElement)) {
+      return false;
+    }
+    const record = operation.byBlock.get(blockElement);
+    if (record) {
+      record.state = 'original';
+      record.code = null;
+      operation.byBlock.delete(blockElement);
+    }
+    return true;
+  }
+
   // Admitting a block element: applied from the cache, queued for a request, refused locally
   // when it cannot be serialized, or passed over when the operation already has it. Returns the
   // record a scan counts as newly admitted, queued or refused, and null otherwise.
@@ -205,6 +218,11 @@
       return null;
     }
     const existing = operation.byBlock.get(blockElement);
+    if (existing?.state === 'queued' || existing?.state === 'translating') return null;
+    if (isTranslatedState(existing?.state) && inlineBlockCodec.matchesAppliedOwnership(existing.snapshot)) {
+      return null;
+    }
+    if (skipPreservedOnlyBlock(operation, blockElement)) return null;
     if (existing) {
       if (existing.state === 'original' && !existing.retryOf &&
         inlineBlockCodec.matchesOriginalOwnership(existing.snapshot)) {
@@ -214,13 +232,10 @@
         return existing;
       }
       if (isTranslatedState(existing.state)) {
-        if (inlineBlockCodec.matchesAppliedOwnership(existing.snapshot)) {
-          return null;
-        }
         existing.state = 'stale';
         existing.code = 'runtime.page_changed';
         operation.byBlock.delete(blockElement);
-      } else if (['queued', 'translating', 'failed', 'stale'].includes(existing.state)) {
+      } else if (existing.state === 'failed' || existing.state === 'stale') {
         return null;
       }
     }
@@ -275,6 +290,10 @@
         clearRetrySupersession(operation, record);
         record.state = 'stale';
         record.code = 'runtime.page_changed';
+        continue;
+      }
+      if (skipPreservedOnlyBlock(operation, record.blockElement)) {
+        operation.queue.shift();
         continue;
       }
       const { actualCost: cost, reservedCost } = measureRecord(record);
@@ -382,12 +401,13 @@
       if (record.operationId !== operationId) {
         continue;
       }
+      record.correlationToken = result?.correlationToken || null;
+      if (skipPreservedOnlyBlock(operation, record.blockElement)) continue;
       if (!result) {
         record.state = 'failed';
         record.code = 'runtime.request_failed';
         continue;
       }
-      record.correlationToken = result.correlationToken || null;
       if (!isWithinSelectedRoot(operation, record.blockElement)) {
         markChanged(record);
         continue;
@@ -424,9 +444,10 @@
   }
 
   // A batch whose request failed outright has no results to say what became of each record.
-  function failBatch(records, operationId) {
+  function failBatch(records, operationId, operation) {
     for (const record of records || []) {
-      if (record.operationId === operationId && record.state === 'translating') {
+      if (record.operationId === operationId && record.state === 'translating' &&
+        !skipPreservedOnlyBlock(operation, record.blockElement)) {
         record.state = 'failed';
         record.code = 'runtime.request_failed';
       }
@@ -758,7 +779,7 @@
       }
       operation.inFlight = Math.max(0, operation.inFlight - 1);
       if (!response?.ok || !Array.isArray(response.results)) {
-        failBatch(records, batchOperationId);
+        failBatch(records, batchOperationId, operation);
         return { runtimeOutcomes: [], releaseTokens: [], diagnosticsUnavailable: false };
       }
       let runtimeOutcomes;
@@ -767,7 +788,7 @@
       } catch {
         // An answer the page could not settle reads as a failed request, as one that never
         // came back does, rather than leaving its blocks pending for good.
-        failBatch(records, batchOperationId);
+        failBatch(records, batchOperationId, operation);
         return { runtimeOutcomes: [], releaseTokens: [], diagnosticsUnavailable: false };
       }
       const runtimeTokens = new Set(runtimeOutcomes.map((outcome) => outcome.correlationToken));
