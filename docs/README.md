@@ -51,6 +51,7 @@ These descriptive records retain their original paths so existing references con
 
 | Record | Baseline or context |
 | --- | --- |
+| [Arena 호출 문구와 단계 참조 설계 인터뷰](design/arena-invocation-phrases-and-phase-references-2026-11-27.md) | Arena 문서의 Partial Translation 3건 재현, 호출 문구 원문·한국어 뜻 병기와 단계 참조 번역 설계 확정 |
 | [Prydwen 아크메이지 가이드 Inline Translation 설계 인터뷰](design/prydwen-archmage-inline-translation-2026-11-23.md) | 사전 검사 거부와 영어 잔류 조사, 아이콘·이름 보존과 이름만 있는 문단 생략 설계 확정 |
 | [언어 예문과 Partial Translation 설계 인터뷰](design/language-examples-partial-translation-2026-11-11.md) | unslop 문서의 영어 잔류 진단 조사와 Q1–Q4 설계 확정; 예문 원문·한국어 뜻 병기, 보수적 인정 범위, 동일 번역 응답 내 메타데이터 검증과 무료 로컬 검증 범위 합의; 명세 이슈 #118 게시, 구현 전 |
 | [텍스트 번역 페이지 설계 인터뷰](design/text-translation-page-2026-11-10.md) | 독립 탭의 Text Translation 추가와 기존 기사 Side Panel Translation 제거에 관한 Q1–Q13 합의와 명세 이슈 #112 게시; 구현 전 |
