@@ -1,10 +1,10 @@
 # Arena 호출 문구와 단계 참조 설계 인터뷰
 
-2026-11-27 [Arena 문서](https://github.com/cursor/plugins/blob/main/pstack/skills/arena/SKILL.md)의 한국어 Inline Translation 보고를 조사하고 Q1–Q5의 설계를 확정했다. 검토 기준은 `63331cf28150b55cc437337ae2595ed8c1ad6c17`이다. 최종 범위 제안 전에 로컬 `HEAD`와 원격 `main`이 이 커밋과 일치함을 확인했다.
+2026-11-27 [Arena 문서](https://github.com/cursor/plugins/blob/b7b93c36be9bcc36a74db438e0fd385d660bc559/pstack/skills/arena/SKILL.md)의 한국어 Inline Translation 보고를 조사하고 Q1–Q5의 설계를 확정했다. 검토 기준은 `63331cf28150b55cc437337ae2595ed8c1ad6c17`이다. 최종 범위 제안 전에 로컬 `HEAD`와 원격 `main`이 이 커밋과 일치함을 확인했다.
 
 ## 보고된 경고
 
-첨부 진단은 세 Semantic Block 모두에서 최초 응답의 `quality.english_residue`에 이어 보정 응답의 `apply_with_warning`을 기록했다. 화면에 적용된 번역문을 당시 조사 기준의 판정기에 재입력했을 때 각 블록의 수치가 진단과 일치했다. 최초 모델 응답 본문은 확인할 수 없었다.
+첨부 진단은 세 Semantic Block 모두에서 최초 응답의 `quality.english_residue`에 이어 보정 응답의 `apply_with_warning`을 기록했다. 화면에 적용된 번역문을 당시 조사 기준의 판정기에 재입력했을 때 각 블록의 수치가 진단과 일치했다. 원문 링크는 로컬 재현에 사용한 GitHub HTML의 브랜치 커밋을 가리킨다. 당시 브라우저의 정확한 원문 리비전과 최초 모델 응답 본문은 확인할 수 없었다.
 
 - `description`에는 `arena this`와 `throw it in the arena`가 한국어 뜻과 함께 남았다. 긴 호출 문구의 겹치는 네 단어 구간 두 개가 진단에 기록됐다. 두 문구를 제거하고 `/arena`를 유지한 결과는 검사를 통과했다.
 - Phase E 마지막 문단과 Phase F 본문에서는 `Phase A`가 일치했다. `A`가 소문자화되어 영어 관사 표지에 걸렸다. Phase F 본문에서 `Phase A`만 한국어로 옮기고 `Phase E`를 남겨도 기존 검사는 통과했다.
