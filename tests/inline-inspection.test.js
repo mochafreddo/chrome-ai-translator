@@ -8,6 +8,7 @@ exports.tests = [{
   fn() {
     for (const [args, message] of [
       [[], 'An inspection URL is required'],
+      [['--url', 'sample input'], 'Inspection requires HTTP(S) without URL credentials'],
       [['--url', 'file:///tmp/article.html'], 'Inspection requires HTTP(S) without URL credentials'],
       [['--url', 'https://user:password@example.org'], 'Inspection requires HTTP(S) without URL credentials'],
       [['--url', 'https://example.org', '--url', 'https://example.org'], 'Usage: inspect:inline-blocks'],

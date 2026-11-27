@@ -11,8 +11,10 @@ try {
   const { stdout } = await promisify(execFile)(process.execPath,
     [join(root, 'scripts', 'inspect-inline-blocks.mjs'), '--url', fixture.url], { timeout: 90000 });
   const result = JSON.parse(stdout);
+  assert.deepEqual(Object.keys(result).sort(), ['blocks', 'schemaVersion', 'syntheticProbe']);
+  assert.equal(result.schemaVersion, 1);
   assert.equal(result.syntheticProbe, true);
-  assert.equal(result.blocks.length, 6);
+  assert.equal(result.blocks.length, 7);
   assert.deepEqual(result.blocks[0], { index: 0, tagName: 'LI', ok: false, errorCode: 'unsupported_block',
     localRejection: { reason: 'empty_content', tag: 'LI' } });
   assert.deepEqual(result.blocks[1], { index: 1, tagName: 'P', ok: true, sourceChars: 23, sourceProseWordCount: 4 });
@@ -21,7 +23,17 @@ try {
   assert.deepEqual(result.blocks[3], { index: 3, tagName: 'P', ok: true, sourceChars: 1, sourceProseWordCount: 0 });
   assert.deepEqual(result.blocks[4], { index: 4, tagName: 'P', ok: true, sourceChars: 60000, sourceProseWordCount: 30000 });
   assert.deepEqual(result.blocks[5], { index: 5, tagName: 'P', ok: true, sourceChars: 5, sourceProseWordCount: 1 });
+  assert.deepEqual(result.blocks[6], { index: 6, tagName: 'P', ok: false, errorCode: 'unsupported_block',
+    localRejection: { reason: 'unsupported_descendant' } });
   assert.equal(stdout.includes('Read the release notes'), false);
   assert.equal(stdout.includes(fixture.url), false);
+  await assert.rejects(promisify(execFile)(process.execPath,
+    [join(root, 'scripts', 'inspect-inline-blocks.mjs'), '--url', fixture.url, '--root', '[sample'],
+    { timeout: 90000 }), (error) => {
+    assert.equal(error.code, 1);
+    assert.equal(error.stdout, '');
+    assert.equal(error.stderr.trim(), 'Inline block inspection failed');
+    return true;
+  });
   console.log('PASS inline inspection - parent rejection, own prose metrics and text-free output');
 } finally { fixture.close(); }
