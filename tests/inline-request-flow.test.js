@@ -376,9 +376,10 @@ exports.tests = [{
         document.body.appendChild(block);
         visit.admit(block);
       }
-      const worker = createWorker((records, attempt) => records.map(({ id, template }) => ({
-        id, template: template === 'Phase A' ? 'A 단계' : attempt === 1 ? initial : repaired,
-      })));
+      const worker = createWorker((records, attempt) => records.map(({ id, template }) => {
+        if (template === 'Phase A') return { id, template: 'A 단계' };
+        return { id, template: attempt === 1 ? initial : repaired };
+      }));
       const { response } = await translateBatch(visit, worker);
       assert.equal(worker.requests.length, 2);
       const records = JSON.parse(worker.requests[1].body.input).records;
