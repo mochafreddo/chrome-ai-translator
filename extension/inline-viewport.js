@@ -69,7 +69,7 @@
     }
 
     function hasEditableAttribute(element) {
-      return String(element.getAttribute('contenteditable') || '').toLowerCase() !== 'false';
+      return element.getAttribute('contenteditable').toLowerCase() !== 'false';
     }
 
     function isInlineEffectivelyEditable(element) {
@@ -129,8 +129,8 @@
       return reads.rects.get(el);
     }
 
-    function hasUnclippedPositionedDescendant(el, candidate, reads) {
-      const stack = candidate ? [candidate] : getInlineChildNodes(el);
+    function hasUnclippedPositionedDescendant(el, candidate, reads, subtree = el) {
+      const stack = candidate ? [candidate] : getInlineChildNodes(subtree);
       while (stack.length) {
         const node = stack.pop();
         if (!node || node === el || !(node instanceof platform.HTMLElement)) continue;
@@ -146,7 +146,7 @@
       return false;
     }
 
-    function isElementHidden(el, candidate, reads) {
+    function isElementHidden(el, candidate, reads, includeCandidateChildren) {
       if (!el || !(el instanceof platform.HTMLElement)) return false;
       const style = getInlineStyle(el, reads);
       const rect = getInlineElementRect(el, reads);
@@ -160,7 +160,8 @@
         style.display === 'none' ||
         style.visibility === 'hidden' ||
         style.opacity === '0' ||
-        (tinyClippedBox && !hasUnclippedPositionedDescendant(el, candidate, reads)) ||
+        (tinyClippedBox && !hasUnclippedPositionedDescendant(el, candidate, reads) &&
+          !(includeCandidateChildren && hasUnclippedPositionedDescendant(el, null, reads, candidate))) ||
         el.hidden ||
         el.getAttribute('aria-hidden') === 'true'
       );
@@ -191,11 +192,11 @@
       );
     }
 
-    function isEligibleElement(parent, reads = { styles: new Map(), rects: new Map() }) {
+    function isEligibleElement(parent, reads, includeCandidateChildren = false) {
       if (!parent || isInlineEffectivelyEditable(root)) return false;
       let insideRoot = true;
       for (let element = parent; element; element = element.parentElement) {
-        if (isInlineTranslationExcludedElement(element) || isElementHidden(element, parent, reads)) return false;
+        if (isInlineTranslationExcludedElement(element) || isElementHidden(element, parent, reads, includeCandidateChildren)) return false;
         if (insideRoot && (element.isContentEditable || element.hasAttribute?.('contenteditable') &&
           hasEditableAttribute(element))) return false;
         if (element === root) insideRoot = false;
@@ -433,7 +434,8 @@
       stopWatching();
     }
 
-    return { start, selectRoot, rescan, stop, isEligibleElement };
+    return { start, selectRoot, rescan, stop,
+      isEligibleElement: block => isEligibleElement(block, { styles: new Map(), rects: new Map() }, true) };
   }
 
   const api = { createInlineViewport };

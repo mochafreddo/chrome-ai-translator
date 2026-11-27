@@ -1077,3 +1077,28 @@ exports.tests.push(...['stop', 'restore'].map(control => ({
     assert.deepEqual(responses, [{ ok: true }]);
   },
 })));
+
+exports.tests.push({
+  name: 'an eligible Semantic Block can contain prose positioned outside a clipped ancestor',
+  async fn() {
+    const f = createOperationFixture();
+    const clipped = f.document.createElement('div');
+    clipped.rect = { top: 20, bottom: 21, left: 10, right: 11, width: 1, height: 1 };
+    clipped.computedStyle = { overflow: 'hidden' };
+    const visible = f.document.createElement('p');
+    const positioned = f.document.createElement('span');
+    positioned.computedStyle = { position: 'fixed' };
+    positioned.textContent = 'Visible positioned prose.';
+    visible.appendChild(positioned);
+    const concealed = f.document.createElement('p');
+    concealed.textContent = 'Clipped adjacent prose.';
+    clipped.replaceChildren(visible, concealed);
+    f.document.body.replaceChildren(clipped);
+    await f.control('authorize');
+    await f.control('start');
+    const records = f.pending.flatMap(request => request.message.records);
+    assert.equal(records.length, 1);
+    assert.match(records[0].template, /Visible positioned prose\./);
+    await f.control('stop');
+  },
+});
