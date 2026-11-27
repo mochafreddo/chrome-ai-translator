@@ -245,7 +245,7 @@
       return stripSourceSyntax(value, literals);
     }
 
-    function exampleStructure(source, output, outputValidation) {
+    function preservedExpressionStructure(source, output, outputValidation) {
       const wrapperTokens = entries.filter(entry => entry.kind === 'wrapper')
         .flatMap(entry => [entry.openToken, entry.closeToken]).filter(value => typeof value === 'string' && value);
       if (wrapperTokens.length && (!validateSourceTemplate(source, contract).ok ||
@@ -282,7 +282,7 @@
       return { allowsSpan, removeWrapperTokens };
     }
 
-    return { removeTokens, withoutSourceSyntax, exampleStructure };
+    return { removeTokens, withoutSourceSyntax, preservedExpressionStructure };
   }
 
   const api = {

@@ -5,7 +5,7 @@ const { createInlineTranslationSession } = require('../extension/inline-translat
 const { createTestDocument, createReasoningFixture } = require('./inline-block.test.js');
 const protocol = require('../extension/inline-diagnostics-protocol.js');
 const diagnostics = require('../extension/translation-diagnostics.js');
-const { activeVoiceFixture, example } = require('./language-example-fixture.js');
+const { activeVoiceFixture, preservedExpression } = require('./language-example-fixture.js');
 
 const SETTINGS = { service: 'openai', model: 'gpt-5.4-mini', reasoningEffort: 'none', targetLanguage: 'Korean', tone: 'technical' };
 
@@ -83,8 +83,8 @@ exports.tests = [{
     visit.begin(SETTINGS);
     visit.admit(paragraph);
     const worker = createWorker(records => records.map(({ id }) => ({ id, template, preservedExpressions: [
-      example(source, template, 'arena this', '이것을 아레나에서 검토해'),
-      example(source, template, 'throw it in the arena', '아레나에 넣어 봐'),
+      preservedExpression(source, template, 'arena this', '이것을 아레나에서 검토해'),
+      preservedExpression(source, template, 'throw it in the arena', '아레나에 넣어 봐'),
     ] })));
     const { response } = await translateBatch(visit, worker);
     assert.equal(response.results[0].disposition, 'apply');
@@ -114,7 +114,7 @@ exports.tests = [{
         : `수정한 예문: ${fixture.template}${index ? ' Prefer active voice.' : ''}`;
       const template = `${prefix} ./docs/guide.md ${record.atoms[0].token}`;
       return { id: record.id, template, preservedExpressions: fixture.preservedExpressions.map(item =>
-        example(record.template, template, item.source, item.meaning)) };
+        preservedExpression(record.template, template, item.source, item.meaning)) };
     }));
     const { batch, response } = await translateBatch(visit, worker);
     assert.equal(batch.length, 2);
@@ -232,7 +232,7 @@ exports.tests = [{
         else if (failure === 'source syntax') template = template.replace('./docs/guide.md', './docs/changed.md');
         else if (failure === 'target language') template = record.template;
         return { id: record.id, template, preservedExpressions: fixture.preservedExpressions.map(item =>
-          example(record.template, template, item.source, item.meaning)) };
+          preservedExpression(record.template, template, item.source, item.meaning)) };
       }));
       const response = await worker.send({ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH', records: batch,
         settingsSnapshot: SETTINGS, operationId: visit.operationId });
@@ -287,7 +287,7 @@ exports.tests = [{
     const worker = createWorker(records => records.map(record => {
       const template = `${fixture.template} ${record.atoms.find(atom => atom.label === 'voiceMode').token}`;
       return { id: record.id, template, preservedExpressions: fixture.preservedExpressions.map(item =>
-        example(record.template, template, item.source, item.meaning)) };
+        preservedExpression(record.template, template, item.source, item.meaning)) };
     }));
     const { response } = await translateBatch(visit, worker);
     assert.equal(response.results[0].disposition, 'apply');

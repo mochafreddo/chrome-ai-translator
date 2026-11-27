@@ -4,7 +4,7 @@ const { execute, assessTranslationQuality } = require('../extension/inline-model
 const codec = require('../extension/inline-block.js');
 const inlineTemplate = require('../extension/inline-template.js');
 const { createReasoningFixture, createTestDocument, LINGUISTIC_SLASH_PROSE } = require('./inline-block.test');
-const { activeVoiceFixture, example } = require('./language-example-fixture.js');
+const { activeVoiceFixture, preservedExpression } = require('./language-example-fixture.js');
 
 const SETTINGS = { model: 'gpt-5.4-mini', reasoningEffort: 'none', targetLanguage: 'Korean', tone: 'technical' };
 function plainRecord(id = 'b1', template = 'This is source prose.') {
@@ -36,7 +36,7 @@ exports.tests = [
         const template = templates[requests.length];
         requests.push(request);
         return response([{ id: 'phase', template, preservedExpressions: [
-          example(source, template, 'Phase A', 'A 단계'),
+          preservedExpression(source, template, 'Phase A', 'A 단계'),
         ] }]);
       });
       assert.equal(requests.length, 2);
@@ -65,12 +65,12 @@ exports.tests = [
       const output = source.replace('Before:', '이전:') + `(${meaning})`;
       for (const partial of [raw.slice(1), raw.slice(0, -1)]) {
         assert.deepEqual(assessTranslationQuality(source, output, 'ko', serialized.contract,
-          [example(source, output, partial, meaning)]).codes, ['quality.english_residue']);
+          [preservedExpression(source, output, partial, meaning)]).codes, ['quality.english_residue']);
       }
       const englishMeaning = `마야가 ${sentence}`;
       const outputWithEnglish = output.replace(meaning, englishMeaning);
       assert.deepEqual(assessTranslationQuality(source, outputWithEnglish, 'ko', serialized.contract,
-        [example(source, outputWithEnglish, raw, englishMeaning)]).codes, ['quality.english_residue']);
+        [preservedExpression(source, outputWithEnglish, raw, englishMeaning)]).codes, ['quality.english_residue']);
       const record = { id: 'unsafe-emphasis', template: source, atoms: serialized.atoms,
         contract: serialized.contract, repair: null };
       const { openToken, closeToken } = serialized.contract.entries[0];
@@ -80,11 +80,11 @@ exports.tests = [
         [output.replace(openToken, `${openToken}⟦UNKNOWN:OPEN:W9⟧`), 'structure.token_unknown'],
       ]) {
         assert.deepEqual(assessTranslationQuality(source, template, 'ko', serialized.contract,
-          [example(source, template, sentence, meaning)]).codes, ['quality.english_residue']);
+          [preservedExpression(source, template, sentence, meaning)]).codes, ['quality.english_residue']);
         const requests = [];
         const [result] = await execute([record], SETTINGS, async request => {
           requests.push(request);
-          return response([{ id: record.id, template, preservedExpressions: [example(source, template, sentence, meaning)] }]);
+          return response([{ id: record.id, template, preservedExpressions: [preservedExpression(source, template, sentence, meaning)] }]);
         });
         assert.equal(result.disposition, 'reject');
         assert.equal(result.terminalCode, code);
@@ -99,7 +99,7 @@ exports.tests = [
         const protectedOutput = protectedSource.replace('Before:', '이전:') + `(${meaning})`;
         const original = protectedSource.slice('Before: "'.length, -1);
         assert.deepEqual(assessTranslationQuality(protectedSource, protectedOutput, 'ko', protectedRecord.contract,
-          [example(protectedSource, protectedOutput, original, meaning)]).codes, ['quality.english_residue']);
+          [preservedExpression(protectedSource, protectedOutput, original, meaning)]).codes, ['quality.english_residue']);
       }
     },
   },
@@ -119,7 +119,7 @@ exports.tests = [
       const template = serialized.template.replace('Before:', '이전:') + `(${meaning})`;
       const [result] = await execute([{ id: 'invalid-source', template: source, atoms: serialized.atoms,
         contract: serialized.contract, repair: null }], SETTINGS, async () =>
-        response([{ id: 'invalid-source', template, preservedExpressions: [example(source, template, sentence, meaning)] }]));
+        response([{ id: 'invalid-source', template, preservedExpressions: [preservedExpression(source, template, sentence, meaning)] }]));
       assert.equal(result.disposition, 'apply_with_warning');
       assert.equal(result.terminalCode, 'quality.english_residue');
       assert.equal(result.attemptCount, 2);
@@ -153,7 +153,7 @@ exports.tests = [
           const [result] = await execute([record], SETTINGS, async request => {
             requests.push(request);
             const template = repair && requests.length === 1 ? initial : corrected;
-            return response([{ id: record.id, template, preservedExpressions: [example(source, template, raw, meaning)] }]);
+            return response([{ id: record.id, template, preservedExpressions: [preservedExpression(source, template, raw, meaning)] }]);
           });
           assert.equal(result.disposition, 'apply', `${placement}: ${repair}`);
           assert.equal(result.attemptCount, repair ? 2 : 1);
@@ -188,7 +188,7 @@ exports.tests = [
           for (const splitSource of [true, false]) {
             const source = `Use ${splitSource ? complete : original}`;
             const output = `${splitSource ? original : complete}(${meaning})`;
-            const metadata = [example(source, output, original, meaning)];
+            const metadata = [preservedExpression(source, output, original, meaning)];
             assert.deepEqual(assessTranslationQuality(source, output, 'ko', null, metadata).codes,
               ['quality.english_residue'], `${word}: ${original}: ${splitSource ? 'source' : 'output'}`);
           }
@@ -196,7 +196,7 @@ exports.tests = [
         const source = `Use ${full}`;
         const output = `${full}(${meaning})`;
         assert.equal(assessTranslationQuality(source, output, 'ko', null,
-          [example(source, output, full, meaning)]).status, 'complete', word);
+          [preservedExpression(source, output, full, meaning)]).status, 'complete', word);
       }
     },
   },
@@ -213,7 +213,7 @@ exports.tests = [
         requests.push(request);
         const template = requests.length === 1 ? initial : corrected;
         return response([{ id: record.id, template, preservedExpressions: fixture.preservedExpressions.map(item =>
-          example(source, template, item.source, item.meaning)) }]);
+          preservedExpression(source, template, item.source, item.meaning)) }]);
       });
       assert.equal(requests.length, 2);
       const repair = JSON.parse(requests[1].input).records[0];
@@ -238,10 +238,10 @@ exports.tests = [
       const source = fixture.source;
       const initial = fixture.template.replace('능동태를 쓰세요.', 'Prefer active voice.');
       const corrected = `수정한 예문: ${fixture.template}`;
-      const fresh = fixture.preservedExpressions.map(item => example(source, corrected, item.source, item.meaning));
+      const fresh = fixture.preservedExpressions.map(item => preservedExpression(source, corrected, item.source, item.meaning));
       const first = fresh[0];
-      const stale = fixture.preservedExpressions.map(item => example(source, initial, item.source, item.meaning));
-      const overlap = example(source, corrected, 'report was written', first.meaning);
+      const stale = fixture.preservedExpressions.map(item => preservedExpression(source, initial, item.source, item.meaning));
+      const overlap = preservedExpression(source, corrected, 'report was written', first.meaning);
       const meaningWithEnglish = corrected.replace(first.meaning, '마야가 The report was written by Maya.');
       const cases = [
         ['fresh', corrected, fresh, 'apply'],
@@ -258,8 +258,8 @@ exports.tests = [
         ['other occurrence', `${corrected} The report was written by Maya.`, fresh],
         ['remaining explanation', `${corrected} Prefer active voice.`, fresh],
         ['English in meaning', meaningWithEnglish, [
-          example(source, meaningWithEnglish, first.source, '마야가 The report was written by Maya.'),
-          example(source, meaningWithEnglish, fresh[1].source, fresh[1].meaning),
+          preservedExpression(source, meaningWithEnglish, first.source, '마야가 The report was written by Maya.'),
+          preservedExpression(source, meaningWithEnglish, fresh[1].source, fresh[1].meaning),
         ]],
       ];
       for (const [label, template, preservedExpressions, expected = 'apply_with_warning'] of cases) {
@@ -297,7 +297,7 @@ exports.tests = [
           requests.push(request);
           const output = requests.length === 1 ? initial : template;
           return response([{ id: record.id, template: output, preservedExpressions: fixture.preservedExpressions.map(item =>
-            example(record.template, output, item.source, item.meaning)) }]);
+            preservedExpression(record.template, output, item.source, item.meaning)) }]);
         });
         assert.equal(requests.length, 2);
         assert.equal(result.attemptCount, 2);
@@ -312,7 +312,7 @@ exports.tests = [
     async fn() {
       const source = '😀Use active voice.';
       const output = '😀Use active voice.(능동태를 쓰세요.)';
-      const metadata = [example(source, output, 'Use active voice.', '능동태를 쓰세요.')];
+      const metadata = [preservedExpression(source, output, 'Use active voice.', '능동태를 쓰세요.')];
       assert.equal(metadata[0].sourceStart, 2);
       assert.equal(assessTranslationQuality(source, output, 'ko', null, metadata).status, 'complete');
       for (const [original, translated, declared] of [
@@ -320,7 +320,7 @@ exports.tests = [
         ['Use active voice.', 'Use active voice.(능동태를 쓰세요.)', 'se active voice.'],
       ]) {
         assert.deepEqual(assessTranslationQuality(original, translated, 'ko', null,
-          [example(original, translated, declared, '능동태를 쓰세요.')]).codes, ['quality.english_residue']);
+          [preservedExpression(original, translated, declared, '능동태를 쓰세요.')]).codes, ['quality.english_residue']);
       }
       const split = { ...metadata[0], source: '\uDE00Use active voice.', sourceStart: 1, outputStart: 1 };
       assert.deepEqual(assessTranslationQuality(source, output, 'ko', null, [split]).codes, ['quality.english_residue']);
@@ -386,8 +386,8 @@ exports.tests = [
         `${fixture.template} Prefer active voice.`,
       ]) assert.deepEqual(assess(fixture.preservedExpressions, output).codes, ['quality.english_residue']);
       const meaningWithEnglish = fixture.template.replace('마야가 보고서를 작성했다.', '마야가 The report was written by Maya.');
-      const metadata = [example(fixture.source, meaningWithEnglish, first.source, '마야가 The report was written by Maya.'),
-        example(fixture.source, meaningWithEnglish, fixture.preservedExpressions[1].source, '마야가 보고서를 작성했다.')];
+      const metadata = [preservedExpression(fixture.source, meaningWithEnglish, first.source, '마야가 The report was written by Maya.'),
+        preservedExpression(fixture.source, meaningWithEnglish, fixture.preservedExpressions[1].source, '마야가 보고서를 작성했다.')];
       assert.deepEqual(assess(metadata, meaningWithEnglish).codes, ['quality.english_residue']);
       assert.deepEqual(assess(fixture.preservedExpressions, fixture.template, fixture.source, 'Japanese').codes, ['quality.english_residue']);
     },
@@ -722,13 +722,24 @@ exports.tests = [
         const output = `${phrase}(해당 단계)를 검토하세요.`;
         assert.deepEqual(assessTranslationQuality(source, output, 'ko').codes, ['quality.english_residue']);
         assert.equal(assessTranslationQuality(source, output, 'ko', null,
-          [example(source, output, phrase, '해당 단계')]).status, 'complete');
+          [preservedExpression(source, output, phrase, '해당 단계')]).status, 'complete');
       }
       assert.equal(assessTranslationQuality('Review Phase EU.', 'Phase EU 확인.', 'ko').status, 'complete');
       assert.equal(assessTranslationQuality(source, 'Phase E を確認。', 'ja').status, 'complete');
       const { evidence } = assessTranslationQuality(source, 'After Phase A 확인, Phase E 확인.', 'ko');
       assert.equal(evidence.sharedEnglishSequenceLength, 3);
       assert.equal(evidence.sharedEnglishSequenceCount, 1);
+    },
+  },
+  {
+    name: 'treats identifier prefixes as distinct from standalone Korean phase letters',
+    fn() {
+      for (const identifier of ['Phase E_MAX', 'Phase A_MAX', 'Phase E$MAX']) {
+        assert.equal(assessTranslationQuality(identifier, `식별자는 ${identifier}입니다.`, 'ko').status,
+          'complete', identifier);
+      }
+      assert.equal(assessTranslationQuality('Phase E', '식별자는 Phase E_MAX입니다.', 'ko').status,
+        'complete');
     },
   },
   {

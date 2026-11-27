@@ -142,16 +142,21 @@
     return Array.from(value.matchAll(ENGLISH_WORD), (match) => match[0]);
   }
 
-  function residueWords(value) {
-    return Array.from(
-      value.matchAll(/([A-Za-z][A-Za-z0-9]*(?:['’-][A-Za-z0-9]+)*)|[^\s]/gu),
-      (match) => match[1] || null
-    );
+  function residueWords(value, korean) {
+    const tokens = [];
+    for (const match of value.matchAll(/([A-Za-z][A-Za-z0-9]*(?:['’-][A-Za-z0-9]+)*)|[^\s]/gu)) {
+      const word = match[1];
+      const phaseIdentifier = korean && word?.length === 1 &&
+        /[_$]/.test(value[match.index + 1] ?? '') && tokens.at(-1)?.toLowerCase() === 'phase';
+      tokens.push(phaseIdentifier ? null : word || null);
+    }
+    return tokens;
   }
 
   function sharedEnglishEvidence(source, output, targetLanguageCode) {
-    const sourceWords = residueWords(source);
-    const outputWords = residueWords(output).map((word) => word?.toLowerCase() ?? null);
+    const korean = targetLanguageCode === 'ko';
+    const sourceWords = residueWords(source, korean);
+    const outputWords = residueWords(output, korean).map((word) => word?.toLowerCase() ?? null);
     let longest = 0;
     let count = 0;
     const phrases = new Set();
@@ -167,7 +172,7 @@
         const normalized = sequence.map((word) => word.toLowerCase());
         const looksLikeProse =
           length >= 3 ||
-          (targetLanguageCode === 'ko' && normalized[0] === 'phase' && /^[A-Z]$/.test(sequence[1])) ||
+          (korean && normalized[0] === 'phase' && /^[A-Z]$/.test(sequence[1])) ||
           normalized.some((word) => ENGLISH_MARKERS.has(word)) ||
           sequence.slice(1).some((word) => /^[a-z]/.test(word));
         if (looksLikeProse && outputSequences.has(normalized.join('\u0000'))) {
@@ -191,7 +196,7 @@
 
   function maskPreservedExpressions(source, output, analysis, expressions, outputValidation) {
     if (!Array.isArray(expressions) || !expressions.length) return output;
-    const structure = analysis.exampleStructure(source, output, outputValidation);
+    const structure = analysis.preservedExpressionStructure(source, output, outputValidation);
     if (!structure) return output;
     const sourceRanges = [];
     const outputRanges = [];
@@ -216,13 +221,13 @@
           !validSpan(output, item.meaningStart, item.meaningEnd, item.meaning) ||
           !words(inlineTemplate.stripSourceSyntax(item.source)).length || !countHangulSyllables(item.meaning)) return output;
       const original = [item.sourceStart, item.sourceEnd];
-      const example = [item.outputStart, item.outputEnd];
+      const expression = [item.outputStart, item.outputEnd];
       const meaning = [item.meaningStart, item.meaningEnd];
-      const gap = example[1] <= meaning[0] ? output.slice(example[1], meaning[0])
-        : meaning[1] <= example[0] ? output.slice(meaning[1], example[0]) : null;
+      const gap = expression[1] <= meaning[0] ? output.slice(expression[1], meaning[0])
+        : meaning[1] <= expression[0] ? output.slice(meaning[1], expression[0]) : null;
       if (gap === null || !/^[\s\p{P}\p{S}]*$/u.test(structure.removeWrapperTokens(gap))) return output;
       sourceRanges.push(original);
-      outputRanges.push(example, meaning);
+      outputRanges.push(expression, meaning);
     }
     for (const ranges of [sourceRanges, outputRanges]) {
       ranges.sort((left, right) => left[0] - right[0]);
