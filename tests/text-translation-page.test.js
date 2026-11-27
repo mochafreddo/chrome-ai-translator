@@ -595,6 +595,96 @@ exports.tests = [{
     assert.equal(Object.hasOwn(first.session, 'text-translation:90'), false);
   },
 }, {
+  name: 'Clear hides an older save failure and persists only the deletion',
+  async fn() {
+    const page = await openPage();
+    const storage = page.platform.chrome.storage.session;
+    const set = storage.set;
+    const draft = 'Draft with a pending save';
+    const write = Promise.withResolvers();
+    let saveStarted = false;
+    storage.set = async items => {
+      if (Object.values(items)[0].state?.source === draft && !saveStarted) {
+        saveStarted = true;
+        await write.promise;
+      }
+      await set(items);
+    };
+    page.source(draft);
+    await page.flush();
+    assert.equal(saveStarted, true);
+
+    const beforeClear = page.messages.length;
+    page.event('btnClear', 'click');
+    write.reject(new Error('Earlier save failed'));
+    assert.deepEqual(await page.send({ type: 'GET_TEXT_TRANSLATION_STATE' }), { ok: true, state: null });
+    await page.flush();
+
+    assert.equal(page.element('sourceText').value, '');
+    assert.equal(page.element('errorBox').hidden, true);
+    assert.deepEqual(page.messages.slice(beforeClear, -1).map(message => message.type),
+      ['CLEAR_TEXT_TRANSLATION_STATE']);
+  },
+}, {
+  name: 'Clear reports its own storage failure and the prior draft remains recoverable',
+  async fn() {
+    const page = await openPage();
+    const draft = 'Previously saved draft';
+    page.source(draft);
+    await page.flush();
+    const storage = page.platform.chrome.storage.session;
+    const set = storage.set;
+    storage.set = async items => {
+      if (Object.values(items)[0].state === null) throw new Error('Clear failed');
+      await set(items);
+    };
+
+    page.event('btnClear', 'click');
+    await page.flush();
+    assert.equal(page.element('sourceText').value, '');
+    assert.equal(page.element('errorBox').hidden, false);
+    assert.match(page.element('errorBox').textContent, /Could not retain this translation/);
+    assert.equal((await page.reload()).element('sourceText').value, draft);
+  },
+}, {
+  name: 'a pending save failure stays hidden after the Text Translation page closes',
+  async fn() {
+    const page = await openPage();
+    const write = Promise.withResolvers();
+    let saveStarted = false;
+    page.platform.chrome.storage.session.set = () => {
+      saveStarted = true;
+      return write.promise;
+    };
+    page.source('Draft with a pending save');
+    await page.flush();
+    assert.equal(saveStarted, true);
+
+    await page.close();
+    write.reject(new Error('Pending save failed'));
+    await page.flush();
+    assert.equal(page.element('errorBox').hidden, true);
+  },
+}, {
+  name: 'translation waits for a successful initial save before requesting the provider',
+  async fn() {
+    const page = await openPage();
+    page.source('Draft that cannot be saved at start');
+    await page.flush();
+    const storage = page.platform.chrome.storage.session;
+    const set = storage.set;
+    storage.set = async items => {
+      if (Object.values(items)[0].state.job?.status === 'running') throw new Error('Initial save failed');
+      await set(items);
+    };
+
+    await page.start();
+    assert.equal(page.requests.length, 0);
+    assert.equal(page.element('status').textContent, 'Translation failed.');
+    assert.equal(page.element('errorBox').hidden, false);
+    assert.match(page.element('errorBox').textContent, /Could not retain this translation/);
+  },
+}, {
   name: 'Clear and tab closure follow pending writes and reject stale document saves',
   async fn() {
     for (const action of ['clear', 'close']) {

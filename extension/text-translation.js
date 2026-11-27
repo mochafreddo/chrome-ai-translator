@@ -25,7 +25,13 @@
     if (!response?.ok) throw new Error('Could not retain this translation. Keep this tab open and try again.');
   }
 
-  function retainEdits() { void retain().catch(showError); }
+  function retainInBackground(clear = false) {
+    const write = retain(clear);
+    const submittedRevision = revision;
+    void write.catch(error => {
+      if (!departed && revision === submittedRevision) showError(error);
+    });
+  }
 
   function showError(error) {
     get('errorBox').textContent = error?.message || 'Text Translation failed. Try again.';
@@ -85,7 +91,7 @@
     get('errorBox').hidden = true;
     get('inputHint').textContent = `${Array.from(get('sourceText').value).length.toLocaleString('en-US')} / ${contract.MAX_SOURCE_CHARACTERS.toLocaleString('en-US')} Unicode characters (code points). Plain text only.`;
     renderBusy();
-    retainEdits();
+    retainInBackground();
   }
 
   function swap() {
@@ -130,16 +136,22 @@
     return contract.normalizeSettings(readInputSettings());
   }
 
-  function stop() {
+  function cancelActiveTranslation() {
     const operation = active;
+    if (!operation) return null;
     active = null;
+    void chrome.runtime.sendMessage({ type: 'STOP_TEXT_TRANSLATION', operationId: operation.id }).catch(() => {});
+    return operation;
+  }
+
+  function stop() {
+    const operation = cancelActiveTranslation();
     if (operation) {
       operation.job.stop();
-      void chrome.runtime.sendMessage({ type: 'STOP_TEXT_TRANSLATION', operationId: operation.id }).catch(() => {});
       get('status').textContent = 'Stopped.';
     }
     renderJob();
-    retainEdits();
+    retainInBackground();
   }
 
   async function translate(resume = false) {
@@ -192,7 +204,7 @@
       if (active === operation) {
         active = null;
         renderJob();
-        retainEdits();
+        retainInBackground();
       }
     }
   }
@@ -217,7 +229,7 @@
     rememberOpenai();
     selectedService = get('service').value;
     displayService();
-    retainEdits();
+    retainInBackground();
   });
   get('sourceText').addEventListener('input', inputChanged);
   get('translationSettings').addEventListener('input', inputChanged);
@@ -227,7 +239,7 @@
   get('btnSwap').addEventListener('click', swap);
   get('btnClear').addEventListener('click', () => {
     if (!ready) return;
-    stop();
+    cancelActiveTranslation();
     job = null;
     get('sourceText').value = '';
     get('translatedText').value = '';
@@ -235,7 +247,7 @@
     get('status').textContent = '';
     get('errorBox').hidden = true;
     get('inputHint').textContent = `0 / ${contract.MAX_SOURCE_CHARACTERS.toLocaleString('en-US')} Unicode characters (code points). Plain text only.`;
-    void retain(true).catch(showError);
+    retainInBackground(true);
     renderJob();
     get('sourceText').focus();
   });
@@ -261,7 +273,10 @@
       get('status').textContent = 'Defaults saved.';
     } catch (error) { showError(error); }
   });
-  window.addEventListener('pagehide', () => { departed = true; stop(); });
+  window.addEventListener('pagehide', () => {
+    departed = true;
+    cancelActiveTranslation();
+  });
   inputChanged();
   void (async () => {
     try {
