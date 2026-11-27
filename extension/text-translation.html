@@ -18,7 +18,8 @@
           <legend>Translation settings</legend>
           <div class="text-settings">
             <label for="sourceLanguage">Source language
-              <input id="sourceLanguage" name="sourceLanguage" type="text" list="sourceLanguages" value="auto" required />
+              <input id="sourceLanguage" name="sourceLanguage" type="text" list="sourceLanguages" value="auto" required aria-describedby="sourceLanguageError" />
+              <span id="sourceLanguageError" class="error" hidden aria-live="polite"></span>
               <datalist id="sourceLanguages">
                 <option value="auto" label="Auto-detect"></option>
                 <option>English</option><option>Korean</option><option>Japanese</option>
@@ -28,7 +29,8 @@
               </datalist>
             </label>
             <label for="targetLanguage">Target language
-              <input id="targetLanguage" name="targetLanguage" type="text" list="languages" required />
+              <input id="targetLanguage" name="targetLanguage" type="text" list="languages" required aria-describedby="targetLanguageError" />
+              <span id="targetLanguageError" class="error" hidden aria-live="polite"></span>
             </label>
             <label for="tone">Tone
               <select id="tone" name="tone">
@@ -40,7 +42,8 @@
               <select id="service" name="service"><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option></select>
             </label>
             <label for="model">Model
-              <input id="model" name="model" type="text" required autocorrect="off" autocapitalize="off" spellcheck="false" />
+              <input id="model" name="model" type="text" required autocorrect="off" autocapitalize="off" spellcheck="false" aria-describedby="modelError" />
+              <span id="modelError" class="error" hidden aria-live="polite"></span>
             </label>
             <label for="reasoningEffort">Reasoning effort
               <select id="reasoningEffort" name="reasoningEffort">

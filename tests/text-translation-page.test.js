@@ -643,8 +643,14 @@ exports.tests = [{
     await page.flush();
     assert.equal(page.element('sourceText').value, '');
     assert.equal(page.element('errorBox').hidden, false);
-    assert.match(page.element('errorBox').textContent, /Could not retain this translation/);
-    assert.equal((await page.reload()).element('sourceText').value, draft);
+    assert.match(page.element('errorBox').textContent, /previous draft.*still saved/i);
+    assert.match(page.element('errorBox').textContent, /Clear all again/i);
+    const restored = await page.reload();
+    assert.equal(restored.element('sourceText').value, draft);
+    storage.set = set;
+    restored.event('btnClear', 'click');
+    await restored.flush();
+    assert.equal((await restored.reload()).element('sourceText').value, '');
   },
 }, {
   name: 'a pending save failure stays hidden after the Text Translation page closes',
@@ -757,7 +763,7 @@ exports.tests = [{
     }
   },
 }, {
-  name: 'reload restores completion when the last result is saved before the final status',
+  name: 'the final result completes translation while its save is pending and survives reload',
   async fn() {
     const page = await openPage();
     const first = 'A'.repeat(8000) + '\n\n';
@@ -771,7 +777,9 @@ exports.tests = [{
     page.requests[1].respond('끝부분');
     await page.flush();
     assert.equal(page.element('translatedText').value, '앞부분\n\n끝부분');
-    assert.equal(page.element('btnStop').disabled, false);
+    assert.equal(page.element('status').textContent, 'Translation complete.');
+    assert.equal(page.element('btnStop').disabled, true);
+    assert.equal(page.element('btnSwap').disabled, false);
     assert.equal(page.storage.held.length, 1);
 
     const restored = await page.reload({ beforeReady: () => {
@@ -1164,3 +1172,67 @@ exports.tests.push(...['SAVE_TEXT_TRANSLATION_STATE', 'CLEAR_TEXT_TRANSLATION_ST
     assert.equal(current.element('sourceText').value, 'Preserve draft across cold navigation');
   },
 })));
+
+exports.tests.push({
+  name: 'a failed final save leaves the completed translation available to copy or swap',
+  async fn() {
+    const page = await openPage();
+    page.source('Hello');
+    await page.start();
+    page.platform.chrome.storage.session.set = async () => { throw new Error('Storage unavailable'); };
+    page.requests[0].respond('안녕');
+    await page.flush();
+    assert.equal(page.element('status').textContent, 'Translation complete.');
+    assert.equal(page.element('translatedText').value, '안녕');
+    assert.equal(page.element('btnSwap').disabled, false);
+    assert.equal(page.element('errorBox').hidden, false);
+    assert.match(page.element('errorBox').textContent, /Could not retain/);
+  },
+}, {
+  name: 'older drafts with every result restore as complete regardless of their saved status',
+  async fn() {
+    const page = await openPage();
+    page.source('Hello');
+    await page.start();
+    page.requests[0].respond('안녕');
+    await page.flush();
+    let current = page;
+    for (const status of ['running', 'stopped', 'failed']) {
+      page.session['text-translation:90'].state.job.status = status;
+      current = await current.reload();
+      assert.equal(current.element('btnSwap').disabled, false, status);
+      assert.equal(current.element('btnResume').disabled, true, status);
+      assert.equal(current.element('translatedText').value, '안녕');
+    }
+  },
+});
+
+exports.tests.push({
+  name: 'overlong settings identify their fields and preserve the draft without changing the job or executing',
+  async fn() {
+    const page = await openPage();
+    page.source('Original');
+    await page.start();
+    page.requests[0].respond('원문');
+    await page.flush();
+    for (const [key, value] of Object.entries({ sourceLanguage: 'French', targetLanguage: 'German', model: 'edited-model' })) {
+      page.element(key).value = value;
+      page.event('translationSettings', 'input');
+      page.element(key).value = 'x'.repeat(201);
+      page.event('translationSettings', 'input');
+      assert.equal(page.element(key).ariaInvalid, 'true', key);
+      assert.match(page.element(key + 'Error').textContent, /200/);
+    }
+    page.source('Edited draft');
+    await page.start();
+    assert.equal(page.requests.length, 1);
+    const restored = await page.reload();
+    assert.equal(restored.element('sourceText').value, 'Edited draft');
+    assert.equal(restored.element('model').value, 'edited-model');
+    assert.equal(restored.element('targetLanguage').value, 'German');
+    assert.equal(restored.element('sourceLanguage').value, 'French');
+    assert.equal(restored.element('translatedText').lang, 'ko');
+    assert.equal(restored.element('translatedText').value, '원문');
+    assert.equal(restored.requests.length, 1);
+  },
+});

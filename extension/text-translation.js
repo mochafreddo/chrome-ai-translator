@@ -1,9 +1,10 @@
 (function initTextTranslationPage() {
   const contract = globalThis.ChromeAiTranslatorTextTranslationRequest;
   const { startJob, readRetainedState } = globalThis.ChromeAiTranslatorTextTranslationProgress;
-  const { OPENROUTER_MODEL } = globalThis.ChromeAiTranslatorDefaultModel;
+  const { DEFAULT_MODEL, OPENROUTER_MODEL } = globalThis.ChromeAiTranslatorDefaultModel;
   const { getTargetLanguageCode } = globalThis.ChromeAiTranslatorTranslationSettings;
   const get = id => document.getElementById(id);
+  const draftFields = { sourceLanguage: 'auto', targetLanguage: 'Korean', model: DEFAULT_MODEL };
   let ready = false;
   let composing = false;
   let active = null;
@@ -18,9 +19,13 @@
     if (!ready || departed) return;
     rememberOpenai();
     const settings = readInputSettings();
+    for (const key of Object.keys(draftFields)) {
+      if (settings[key].length > contract.MAX_SETTING_LENGTH) settings[key] = draftFields[key];
+    }
+    const retainedModel = openaiModel.length > contract.MAX_SETTING_LENGTH ? draftFields.model : openaiModel;
     const response = await chrome.runtime.sendMessage({
       type: clear ? 'CLEAR_TEXT_TRANSLATION_STATE' : 'SAVE_TEXT_TRANSLATION_STATE', revision: ++revision,
-      ...(clear ? {} : { state: { source: get('sourceText').value, settings, openaiModel, openaiReasoningEffort, job: job?.snapshot() ?? null } }),
+      ...(clear ? {} : { state: { source: get('sourceText').value, settings, openaiModel: retainedModel, openaiReasoningEffort, job: job?.snapshot() ?? null } }),
     });
     if (!response?.ok) throw new Error('Could not retain this translation. Keep this tab open and try again.');
   }
@@ -29,7 +34,9 @@
     const write = retain(clear);
     const submittedRevision = revision;
     void write.catch(error => {
-      if (!departed && revision === submittedRevision) showError(error);
+      if (!departed && revision === submittedRevision) {
+        showError(clear ? new Error('The previous draft is still saved. Select Clear all again to delete it.') : error);
+      }
     });
   }
 
@@ -89,6 +96,17 @@
 
   function inputChanged() {
     get('errorBox').hidden = true;
+    for (const key of Object.keys(draftFields)) {
+      const field = get(key);
+      const tooLong = field.value.length > contract.MAX_SETTING_LENGTH;
+      field.ariaInvalid = String(tooLong);
+      const hint = get(key + 'Error');
+      hint.hidden = !tooLong;
+      hint.textContent = tooLong ? `Use at most ${contract.MAX_SETTING_LENGTH} characters.` : '';
+      if (!tooLong && field.value.trim() && (key !== 'model' || selectedService === 'openai')) {
+        draftFields[key] = field.value;
+      }
+    }
     get('inputHint').textContent = `${Array.from(get('sourceText').value).length.toLocaleString('en-US')} / ${contract.MAX_SOURCE_CHARACTERS.toLocaleString('en-US')} Unicode characters (code points). Plain text only.`;
     renderBusy();
     retainInBackground();
@@ -188,11 +206,11 @@
         }
         if (active !== operation) return;
         operation.job.append(result);
+        if (operation.job.isComplete) break;
         renderJob();
         await retain();
       }
       if (active !== operation) return;
-      operation.job.finish();
       get('status').textContent = 'Translation complete.';
     } catch (error) {
       if (active === operation) {
@@ -304,6 +322,7 @@
         job = state.job;
         displayService();
       }
+      if (openaiModel.trim() && openaiModel.length <= contract.MAX_SETTING_LENGTH) draftFields.model = openaiModel;
       inputChanged();
       ready = true;
       renderJob();
