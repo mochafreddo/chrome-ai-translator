@@ -187,12 +187,28 @@
       });
     }
 
+    async function endWorkerOperation(store) {
+      if (!store) return;
+      const endedAt = session.operationId;
+      try {
+        const response = await sendMessage({ type: 'END_INLINE_TRANSLATION_OPERATION', operationId: store.id });
+        if (!response?.ok) throw new Error('The worker could not confirm that translation stopped.');
+      } catch (failure) {
+        if (session.operationId === endedAt) {
+          error = 'The worker could not confirm that translation stopped.';
+          onChange();
+        }
+        throw failure;
+      }
+    }
+
     function stop() {
       preparation = null;
       session.stop();
       current?.scanner.stop();
       current?.transport.stop();
       update();
+      return endWorkerOperation(current);
     }
 
     return Object.freeze({
@@ -204,10 +220,12 @@
         session.restore();
         // Original text leaves the preceding transport to finish its own outbox/retry.
         // Its feedback ownership ends here; only Stop requests the final flush.
+        const ended = current;
         current = null;
         progress = '';
         error = '';
         onChange();
+        return endWorkerOperation(ended);
       },
       getStatus: () => ({ status: session.status, progress, error }),
     });

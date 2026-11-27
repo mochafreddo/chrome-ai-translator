@@ -54,7 +54,13 @@
       };
     }
 
-    async function beginRequest(tabId, expectedDocumentId) {
+    async function endOperation(tabId, expectedDocumentId, operationId) {
+      const tracked = await identify(tabId, expectedDocumentId);
+      if (tabs.get(tabId) !== tracked) throw documentEnded();
+      tracked.endedThrough = Math.max(tracked.endedThrough || 0, operationId);
+    }
+
+    async function beginRequest(tabId, expectedDocumentId, operationId) {
       const tracked = await identify(tabId, expectedDocumentId);
       if (tabs.get(tabId) !== tracked) throw documentEnded();
       const controller = new AbortController();
@@ -67,6 +73,12 @@
       return {
         signal: controller.signal,
         assertCurrent,
+        assertOperationActive() {
+          assertCurrent();
+          if (Number.isSafeInteger(operationId) && operationId <= tracked.endedThrough) {
+            throw Object.assign(new Error('Inline Translation Operation ended.'), { code: 'inline.operation_ended' });
+          }
+        },
         async beforeRequest() {
           assertCurrent();
           const documentId = await getDocumentId(tabId);
@@ -93,6 +105,7 @@
       beginInvocation: tabId => beginAction(tabId, 'invocation'),
       beginControl: tabId => beginAction(tabId, 'control'),
       beginRequest,
+      endOperation,
       observeNavigation,
       markUnavailable: tabId => { replaceDocument(tabId, null); },
       close: tabId => invalidate(tabId),

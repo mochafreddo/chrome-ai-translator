@@ -558,6 +558,7 @@ function createBackgroundWorker(platform = {}) {
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
     signal,
     beforeRequest,
+    onDispatch,
   }) {
     if (!givenFetch) throw missingPlatform('a network');
     if (beforeRequest) await beforeRequest();
@@ -584,6 +585,7 @@ function createBackgroundWorker(platform = {}) {
     }
 
     let res;
+    onDispatch?.();
     try {
       res = await givenFetch(openrouter ? 'https://openrouter.ai/api/v1/responses' : 'https://api.openai.com/v1/responses', {
         method: 'POST',
@@ -627,9 +629,9 @@ function createBackgroundWorker(platform = {}) {
   ) {
     getChrome();
     const documentRequest = Number.isInteger(options.tabId)
-      ? await inlineDocuments.beginRequest(options.tabId, options.documentId)
+      ? await inlineDocuments.beginRequest(options.tabId, options.documentId, options.operationId)
       : null;
-    const run = inlineDiagnostics.beginTranslation(options.correlationContext);
+    const run = inlineDiagnostics.beginTranslation(options);
 
     try {
       const normalized = inlineRequest.normalizeSourceBatch(records);
@@ -657,8 +659,9 @@ function createBackgroundWorker(platform = {}) {
         targetLanguage: settings.targetLanguage,
         tone: settings.tone,
       }, (request) => requestTranslation({ ...request, service: settings.service, apiKey,
-        signal: documentRequest?.signal, beforeRequest: async () => {
-          if (documentRequest) await documentRequest.beforeRequest();
+        signal: documentRequest?.signal, beforeRequest: documentRequest?.beforeRequest,
+        onDispatch: () => {
+          documentRequest?.assertOperationActive();
           run.modelAttempt();
         } }));
       documentRequest?.assertCurrent();
@@ -815,6 +818,13 @@ function createBackgroundWorker(platform = {}) {
           }
           return;
         }
+        if (msg?.type === 'END_INLINE_TRANSLATION_OPERATION') {
+          if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId ||
+              !Number.isSafeInteger(msg.operationId) || msg.operationId <= 0) throw documentEnded();
+          await inlineDocuments.endOperation(sender.tab.id, sender.documentId, msg.operationId);
+          sendResponse({ ok: true });
+          return;
+        }
         if (msg?.type === 'TRANSLATE_VISIBLE_BLOCK_BATCH') {
           if (!Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId) {
             throw documentEnded();
@@ -825,10 +835,7 @@ function createBackgroundWorker(platform = {}) {
             {
               tabId: sender.tab.id,
               documentId: sender.documentId,
-              correlationContext: {
-                tabId: sender?.tab?.id,
-                operationId: msg.operationId ?? null,
-              },
+              operationId: msg.operationId,
             }
           );
           sendResponse({ ok: true, results });

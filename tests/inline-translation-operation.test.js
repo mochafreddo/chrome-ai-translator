@@ -74,6 +74,7 @@ function createOperationFixture(options = {}) {
         })) });
         return new Promise((resolve, reject) => pending.push({ message, resolve, reject }));
       }
+      if (message.type === 'END_INLINE_TRANSLATION_OPERATION') return options.endOperation?.(message) ?? Promise.resolve({ ok: true });
       return holdDiagnostics
         ? new Promise((resolve, reject) => diagnosticRequests.push({ message, resolve, reject }))
         : Promise.resolve({ ok: true });
@@ -1054,3 +1055,25 @@ exports.tests.push({
     }
   },
 });
+
+exports.tests.push(...['stop', 'restore'].map(control => ({
+  name: `the ${control} instruction waits for worker acceptance of the submitting Operation`,
+  async fn() {
+    let accept;
+    const f = createOperationFixture({ endOperation: () => new Promise(resolve => { accept = resolve; }) });
+    await f.control('authorize');
+    await f.control('start');
+    const responses = [];
+    const { handleInlineContentMessage } = require('../extension/content');
+    handleInlineContentMessage({ type: 'RUN_INLINE_INSTRUCTION',
+      instruction: control === 'stop' ? 'stopInlineTranslation' : 'restoreInlineOriginal',
+    }, response => responses.push(response), { operation: f.operation });
+    await flushMicrotasks();
+    assert.deepEqual(responses, []);
+    assert.deepEqual(f.messages.at(-1), { type: 'END_INLINE_TRANSLATION_OPERATION',
+      operationId: f.pending[0].message.operationId });
+    accept({ ok: true });
+    await flushMicrotasks();
+    assert.deepEqual(responses, [{ ok: true }]);
+  },
+})));
