@@ -13,7 +13,7 @@ function plainRecord(id = 'b1', template = 'This is source prose.') {
     contract: { codecVersion: 1, namespace: 'CAT_PLAIN', entries: [], maxOutputChars: 48000, requiresText: true, literalTokens: [] },
   };
 }
-function response(translations) { return JSON.stringify({ translations: translations.map(item => ({ languageExamples: [], ...item })) }); }
+function response(translations) { return JSON.stringify({ translations: translations.map(item => ({ preservedExpressions: [], ...item })) }); }
 function reasoningRecord(id = 'reasoning') {
   const { serialized } = createReasoningFixture();
   return { id, template: serialized.template, atoms: serialized.atoms, contract: serialized.contract, repair: null };
@@ -24,6 +24,31 @@ function translatedReasoning(record) {
 
 exports.name = 'inline model execution';
 exports.tests = [
+  {
+    name: 'preserves the exact Phase A input while repairing surrounding quoted prose',
+    async fn() {
+      const source = 'Type "Phase A" to start. Before entering the words in the command box and submitting your answer, remember that the guide says "follow the instructions carefully".';
+      const translated = '시작하려면 "Phase A"(A 단계)를 입력하세요.';
+      const templates = [translated + ' 안내서에는 "follow the instructions carefully"라고 적혀 있습니다.',
+        '안내서의 지시를 주의 깊게 따르세요. ' + translated];
+      const requests = [];
+      const [result] = await execute([plainRecord('phase', source)], SETTINGS, async request => {
+        const template = templates[requests.length];
+        requests.push(request);
+        return response([{ id: 'phase', template, preservedExpressions: [
+          example(source, template, 'Phase A', 'A 단계'),
+        ] }]);
+      });
+      assert.equal(requests.length, 2);
+      assert.deepEqual(JSON.parse(requests[1].input).records[0].repair.untranslatedPhrases, ['follow the instructions carefully']);
+      assert.equal(result.disposition, 'apply');
+      assert.equal(result.template, templates[1]);
+      for (const request of requests) {
+        assert.match(request.instructions, /Invocation Phrase/i);
+        assert.deepEqual(request.textFormat.schema.properties.translations.items.required, ['id', 'template', 'preservedExpressions']);
+      }
+    },
+  },
   {
     name: 'keeps emphasized example metadata behind token, protected-content and meaning checks',
     async fn() {
@@ -59,7 +84,7 @@ exports.tests = [
         const requests = [];
         const [result] = await execute([record], SETTINGS, async request => {
           requests.push(request);
-          return response([{ id: record.id, template, languageExamples: [example(source, template, sentence, meaning)] }]);
+          return response([{ id: record.id, template, preservedExpressions: [example(source, template, sentence, meaning)] }]);
         });
         assert.equal(result.disposition, 'reject');
         assert.equal(result.terminalCode, code);
@@ -94,7 +119,7 @@ exports.tests = [
       const template = serialized.template.replace('Before:', '이전:') + `(${meaning})`;
       const [result] = await execute([{ id: 'invalid-source', template: source, atoms: serialized.atoms,
         contract: serialized.contract, repair: null }], SETTINGS, async () =>
-        response([{ id: 'invalid-source', template, languageExamples: [example(source, template, sentence, meaning)] }]));
+        response([{ id: 'invalid-source', template, preservedExpressions: [example(source, template, sentence, meaning)] }]));
       assert.equal(result.disposition, 'apply_with_warning');
       assert.equal(result.terminalCode, 'quality.english_residue');
       assert.equal(result.attemptCount, 2);
@@ -128,14 +153,14 @@ exports.tests = [
           const [result] = await execute([record], SETTINGS, async request => {
             requests.push(request);
             const template = repair && requests.length === 1 ? initial : corrected;
-            return response([{ id: record.id, template, languageExamples: [example(source, template, raw, meaning)] }]);
+            return response([{ id: record.id, template, preservedExpressions: [example(source, template, raw, meaning)] }]);
           });
           assert.equal(result.disposition, 'apply', `${placement}: ${repair}`);
           assert.equal(result.attemptCount, repair ? 2 : 1);
           assert.equal(requests.length, repair ? 2 : 1);
           assert.equal(result.diagnostic.quality.status, 'complete');
           if (repair) assert.deepEqual(JSON.parse(requests[1].input).records[0].repair.untranslatedPhrases, ['Prefer active voice']);
-          assert.equal(JSON.stringify(result).includes('languageExamples'), false);
+          assert.equal(JSON.stringify(result).includes('preservedExpressions'), false);
           assert.equal(codec.applyTranslatedTemplate(serialized.snapshot, result.template).ok, true);
           assert.equal(block.textContent, `능동태를 쓰세요. 이전: "${sentence}"(${meaning})`);
           assert.equal(emphasis.parentNode, block);
@@ -187,7 +212,7 @@ exports.tests = [
       const [result] = await execute([record], SETTINGS, async request => {
         requests.push(request);
         const template = requests.length === 1 ? initial : corrected;
-        return response([{ id: record.id, template, languageExamples: fixture.languageExamples.map(item =>
+        return response([{ id: record.id, template, preservedExpressions: fixture.preservedExpressions.map(item =>
           example(source, template, item.source, item.meaning)) }]);
       });
       assert.equal(requests.length, 2);
@@ -196,14 +221,14 @@ exports.tests = [
       assert.deepEqual(repair.repair, { attempt: 1, previousErrorCode: 'quality.english_residue',
         previousTemplate: initial, untranslatedPhrases: ['Prefer active voice'] });
       assert.match(requests[1].instructions, /repair.*Language Examples.*Korean meanings/i);
-      assert.match(requests[1].instructions, /fresh languageExamples.*repaired template/i);
+      assert.match(requests[1].instructions, /fresh preservedExpressions.*repaired template/i);
       assert.equal(result.disposition, 'apply');
       assert.equal(result.template, corrected);
       assert.equal(result.attemptCount, 2);
       assert.equal(result.diagnostic.quality.status, 'complete');
       assert.ok(Number.isSafeInteger(result.repairRecordCost));
       assert.ok(result.repairRecordCost > requestPreparation.measureRecord(record).actualCost);
-      assert.equal(JSON.stringify(result).includes('languageExamples'), false);
+      assert.equal(JSON.stringify(result).includes('preservedExpressions'), false);
     },
   },
   {
@@ -213,9 +238,9 @@ exports.tests = [
       const source = fixture.source;
       const initial = fixture.template.replace('능동태를 쓰세요.', 'Prefer active voice.');
       const corrected = `수정한 예문: ${fixture.template}`;
-      const fresh = fixture.languageExamples.map(item => example(source, corrected, item.source, item.meaning));
+      const fresh = fixture.preservedExpressions.map(item => example(source, corrected, item.source, item.meaning));
       const first = fresh[0];
-      const stale = fixture.languageExamples.map(item => example(source, initial, item.source, item.meaning));
+      const stale = fixture.preservedExpressions.map(item => example(source, initial, item.source, item.meaning));
       const overlap = example(source, corrected, 'report was written', first.meaning);
       const meaningWithEnglish = corrected.replace(first.meaning, '마야가 The report was written by Maya.');
       const cases = [
@@ -237,12 +262,12 @@ exports.tests = [
           example(source, meaningWithEnglish, fresh[1].source, fresh[1].meaning),
         ]],
       ];
-      for (const [label, template, languageExamples, expected = 'apply_with_warning'] of cases) {
+      for (const [label, template, preservedExpressions, expected = 'apply_with_warning'] of cases) {
         const requests = [];
         const [result] = await execute([plainRecord('voice', source)], SETTINGS, async request => {
           requests.push(request);
           return response([{ id: 'voice', template: requests.length === 1 ? initial : template,
-            languageExamples: requests.length === 1 ? stale : languageExamples }]);
+            preservedExpressions: requests.length === 1 ? stale : preservedExpressions }]);
         });
         assert.equal(result.disposition, expected, label);
         assert.equal(result.template, template, label);
@@ -271,7 +296,7 @@ exports.tests = [
         const [result] = await execute([record], SETTINGS, async request => {
           requests.push(request);
           const output = requests.length === 1 ? initial : template;
-          return response([{ id: record.id, template: output, languageExamples: fixture.languageExamples.map(item =>
+          return response([{ id: record.id, template: output, preservedExpressions: fixture.preservedExpressions.map(item =>
             example(record.template, output, item.source, item.meaning)) }]);
         });
         assert.equal(requests.length, 2);
@@ -305,16 +330,16 @@ exports.tests = [
         { literalTokens: [{ value: 'The report was written by Maya.' }] },
         { entries: [{ token: 'The report was written by Maya.' }] },
       ]) {
-        const quality = assessTranslationQuality(fixture.source, fixture.template, 'ko', contract, fixture.languageExamples);
+        const quality = assessTranslationQuality(fixture.source, fixture.template, 'ko', contract, fixture.preservedExpressions);
         assert.deepEqual(quality.codes, ['quality.english_residue']);
       }
       const missingMeaning = fixture.template.replaceAll('마야가 보고서를 작성했다.', '');
       const [missing] = await execute([plainRecord('voice', fixture.source)], SETTINGS, async () =>
-        response([{ id: 'voice', template: missingMeaning, languageExamples: fixture.languageExamples }]));
+        response([{ id: 'voice', template: missingMeaning, preservedExpressions: fixture.preservedExpressions }]));
       assert.equal(missing.disposition, 'apply_with_warning');
       assert.equal(missing.terminalCode, 'quality.english_residue');
       const [noKorean] = await execute([plainRecord('voice', fixture.source)], SETTINGS, async () =>
-        response([{ id: 'voice', template: fixture.source, languageExamples: fixture.languageExamples }]));
+        response([{ id: 'voice', template: fixture.source, preservedExpressions: fixture.preservedExpressions }]));
       assert.equal(noKorean.disposition, 'reject');
       const [undeclared] = await execute([plainRecord('voice', fixture.source)], SETTINGS, async () =>
         JSON.stringify({ translations: [{ id: 'voice', template: fixture.template }] }));
@@ -322,7 +347,7 @@ exports.tests = [
       assert.equal(undeclared.terminalCode, 'quality.english_residue');
       const record = reasoningRecord();
       const [unsafe] = await execute([record], SETTINGS, async () => response([{ id: record.id,
-        template: fixture.template, languageExamples: fixture.languageExamples }]));
+        template: fixture.template, preservedExpressions: fixture.preservedExpressions }]));
       assert.equal(unsafe.disposition, 'reject');
       assert.match(unsafe.terminalCode, /^structure\./);
       const requests = [];
@@ -331,7 +356,7 @@ exports.tests = [
         return JSON.stringify({ translations: [{ id: 'b1', template: '翻訳です。' }] });
       });
       assert.deepEqual(requests[0].textFormat.schema.properties.translations.items.required, ['id', 'template']);
-      assert.equal(Object.hasOwn(requests[0].textFormat.schema.properties.translations.items.properties, 'languageExamples'), false);
+      assert.equal(Object.hasOwn(requests[0].textFormat.schema.properties.translations.items.properties, 'preservedExpressions'), false);
     },
   },
   {
@@ -340,8 +365,8 @@ exports.tests = [
       const fixture = activeVoiceFixture();
       const assess = (metadata, output = fixture.template, source = fixture.source, target = 'ko') =>
         assessTranslationQuality(source, output, target, null, metadata);
-      assert.equal(assess(fixture.languageExamples).status, 'complete');
-      const first = fixture.languageExamples[0];
+      assert.equal(assess(fixture.preservedExpressions).status, 'complete');
+      const first = fixture.preservedExpressions[0];
       for (const invalid of [
         null, {}, { ...first, source: 'A different source sentence.' },
         { ...first, sourceStart: first.sourceStart + 1 }, { ...first, sourceEnd: fixture.source.length + 1 },
@@ -350,21 +375,21 @@ exports.tests = [
         { ...first, meaningStart: first.meaningStart + 1 }, { ...first, meaningEnd: first.meaningEnd - 1 },
         { ...first, outputStart: '15' }, { ...first, extra: 'ambiguous declaration' },
       ]) {
-        assert.deepEqual(assess([invalid, fixture.languageExamples[1]]).codes, ['quality.english_residue']);
+        assert.deepEqual(assess([invalid, fixture.preservedExpressions[1]]).codes, ['quality.english_residue']);
       }
-      assert.deepEqual(assess([...fixture.languageExamples, first]).codes, ['quality.english_residue']);
+      assert.deepEqual(assess([...fixture.preservedExpressions, first]).codes, ['quality.english_residue']);
       const overlap = { ...first, source: 'report was written', sourceStart: first.sourceStart + 4,
         sourceEnd: first.sourceStart + 22, outputStart: first.outputStart + 4, outputEnd: first.outputStart + 22 };
-      assert.deepEqual(assess([...fixture.languageExamples, overlap]).codes, ['quality.english_residue']);
+      assert.deepEqual(assess([...fixture.preservedExpressions, overlap]).codes, ['quality.english_residue']);
       for (const output of [
         `${fixture.template} The report was written by Maya.`,
         `${fixture.template} Prefer active voice.`,
-      ]) assert.deepEqual(assess(fixture.languageExamples, output).codes, ['quality.english_residue']);
+      ]) assert.deepEqual(assess(fixture.preservedExpressions, output).codes, ['quality.english_residue']);
       const meaningWithEnglish = fixture.template.replace('마야가 보고서를 작성했다.', '마야가 The report was written by Maya.');
       const metadata = [example(fixture.source, meaningWithEnglish, first.source, '마야가 The report was written by Maya.'),
-        example(fixture.source, meaningWithEnglish, fixture.languageExamples[1].source, '마야가 보고서를 작성했다.')];
+        example(fixture.source, meaningWithEnglish, fixture.preservedExpressions[1].source, '마야가 보고서를 작성했다.')];
       assert.deepEqual(assess(metadata, meaningWithEnglish).codes, ['quality.english_residue']);
-      assert.deepEqual(assess(fixture.languageExamples, fixture.template, fixture.source, 'Japanese').codes, ['quality.english_residue']);
+      assert.deepEqual(assess(fixture.preservedExpressions, fixture.template, fixture.source, 'Japanese').codes, ['quality.english_residue']);
     },
   },
   {
@@ -374,15 +399,15 @@ exports.tests = [
       const requests = [];
       const [result] = await execute([plainRecord('voice', fixture.source)], SETTINGS, async request => {
         requests.push(request);
-        return response([{ id: 'voice', template: fixture.template, languageExamples: fixture.languageExamples }]);
+        return response([{ id: 'voice', template: fixture.template, preservedExpressions: fixture.preservedExpressions }]);
       });
       assert.equal(result.disposition, 'apply');
       assert.equal(result.attemptCount, 1);
       assert.equal(result.template, fixture.template);
       assert.equal(result.diagnostic.quality.status, 'complete');
       assert.equal(requests.length, 1);
-      assert.deepEqual(requests[0].textFormat.schema.properties.translations.items.required, ['id', 'template', 'languageExamples']);
-      assert.equal(requests[0].textFormat.schema.properties.translations.items.properties.languageExamples.type, 'array');
+      assert.deepEqual(requests[0].textFormat.schema.properties.translations.items.required, ['id', 'template', 'preservedExpressions']);
+      assert.equal(requests[0].textFormat.schema.properties.translations.items.properties.preservedExpressions.type, 'array');
     },
   },
   {
@@ -851,7 +876,7 @@ exports.tests = [
         assert.equal(format.schema.properties.translations.minItems, 1);
         assert.equal(format.schema.properties.translations.maxItems, 1);
         assert.equal(format.schema.properties.translations.items.additionalProperties, false);
-        assert.deepEqual(format.schema.properties.translations.items.required, ['id', 'template', 'languageExamples']);
+        assert.deepEqual(format.schema.properties.translations.items.required, ['id', 'template', 'preservedExpressions']);
         assert.deepEqual(Object.keys(JSON.parse(request.input).records[0]).sort(), ['atoms', 'id', 'repair', 'template']);
         assert.deepEqual(JSON.parse(request.input).records[0].atoms, record.atoms);
         assert.equal(JSON.stringify(request).includes('must-not-leave-adapter'), false);
