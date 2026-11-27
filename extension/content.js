@@ -31,9 +31,6 @@ var createInlineTranslationSettingsSnapshot = inlineTranslationSession.createSet
 // Translate Button belongs here — that judgment lives in the worker's planning function so
 // that injecting this script and granting Inline Translation Authorization can happen
 // without the button being mounted.
-//
-// The section starts translation through worker instructions. The page-owned floating
-// control opens that section for confirmation; Stop and Original text also notify the worker.
 function getDefaultInlineInstructionHandlers(state = inlineState) {
   return {
     grantInlineTranslationAuthorization: () => state.operation.authorize(),
