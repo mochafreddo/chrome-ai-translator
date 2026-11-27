@@ -28,6 +28,8 @@ async function main() {
     target.url.startsWith(`chrome-extension://${ctx.extension.id}/`));
   assert.ok(target, 'Worker is available');
   const worker = await ctx.attach(target.id, 'service_worker');
+  assert.ok(await until(() => worker.evaluate("typeof globalThis.chrome?.sidePanel?.open === 'function'"), 5000, 100),
+    'Worker side panel API is ready');
   await worker.evaluate(`(() => {
     const open = chrome.sidePanel.open.bind(chrome.sidePanel);
     globalThis.consentPanelOpens = [];
