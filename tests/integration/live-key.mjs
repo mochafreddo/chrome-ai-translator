@@ -99,10 +99,6 @@ async function openReadyOptions(page, url, button) {
   ), 10000, 100)) throw new Error('Options did not finish loading settings.');
 }
 
-async function storedSettings(page) {
-  return page.evaluate('(async () => (await chrome.storage.local.get(["settings"])).settings || {})()');
-}
-
 // Saves a real key through the real options page, runs the callback, and clears the key
 // again on the way out whatever happened. The callback is given what the options page
 // stored -- with the key itself replaced by whether one is there.
@@ -170,7 +166,11 @@ async function clearApiKey({ page, optionsUrl, service, keyField }) {
       return true;
     })()`);
     await wait(500);
-    return await until(async () => !(await storedSettings(page))[keyField], 10000, 500);
+    const fields = service === 'openai' ? ['settings', 'openai_api_key'] : ['settings'];
+    return await until(() => page.evaluate(`(async () => {
+      const stored = await chrome.storage.local.get(${JSON.stringify(fields)});
+      return !stored.settings?.${keyField} && !stored.openai_api_key;
+    })()`), 10000, 500);
   } catch {
     return false;
   } finally {

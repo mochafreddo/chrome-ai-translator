@@ -17,6 +17,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
+const vm = require('node:vm');
 const path = require('node:path');
 
 const liveKey = () => import('./integration/live-key.mjs');
@@ -42,12 +43,14 @@ function withEnvFile(contents, fn) {
 // module typed into the options page is checkable from the page's side rather than from the
 // module's; and lets the save fail on demand, so the clearing can be checked on the path
 // where nothing after the save ran.
-function fakePage({ failSave = false, service = 'openai' } = {}) {
+function fakePage({ failSave = false, service = 'openai', remaining = {} } = {}) {
   const driven = [];
   const evaluated = [];
+  const cleanupResults = [];
   let stored = {};
   return {
     driven,
+    cleanupResults,
     // Every key-shaped run of characters the module ever typed into the page.
     typed: () => evaluated.join('\n').match(/sk-[A-Za-z0-9-]+/g) || [],
     stored: () => stored,
@@ -77,10 +80,16 @@ function fakePage({ failSave = false, service = 'openai' } = {}) {
       if (source.includes('btnClear')) {
         if (service === 'openrouter') assert.match(source, /input\[name="service"\]\[value="openrouter"\]/);
         driven.push('clear');
-        stored = {};
+        stored = remaining.settings || {};
         return true;
       }
-      if (source.includes('storage.local.get')) return stored;
+      if (source.includes('storage.local.get')) {
+        const storage = { settings: stored, ...remaining };
+        const get = async keys => Object.fromEntries(keys.filter(key => key in storage).map(key => [key, storage[key]]));
+        const result = await vm.runInNewContext(source, { chrome: { storage: { local: { get } } } });
+        cleanupResults.push(result);
+        return result;
+      }
       throw new Error(`the fake page was asked to evaluate something it does not know: ${source}`);
     },
     answerDialogs() {
@@ -106,7 +115,8 @@ exports.tests = [
       const { apiKeyName, withApiKey } = await liveKey();
       await withEnvFile(`OPENAI_API_KEY=${OPENAI_SHAPED}\nOPENROUTER_API_KEY=${OPENROUTER_SHAPED}\n`, async envPath => {
         assert.equal(apiKeyName(envPath, 'openrouter'), 'OPENROUTER_API_KEY');
-        const page = fakePage({ service: 'openrouter' });
+        const remaining = { settings: { apiKey: OPENAI_SHAPED }, openai_api_key: OPENAI_SHAPED };
+        const page = fakePage({ service: 'openrouter', remaining });
         const cleared = [];
         await withApiKey(withApiKeyArgs(page, envPath, { service: 'openrouter',
           onCleared: ok => cleared.push(ok) }), async saved => {
@@ -115,7 +125,8 @@ exports.tests = [
         });
         assert.deepEqual(page.typed(), [OPENROUTER_SHAPED]);
         assert.deepEqual(cleared, [true]);
-        assert.deepEqual(page.stored(), {});
+        assert.deepEqual(page.stored(), remaining.settings);
+        assert.deepEqual(page.cleanupResults, [true]);
       });
       withEnvFile(`OPENAI_API_KEY=${OPENAI_SHAPED}\n`, envPath => {
         assert.throws(() => apiKeyName(envPath, 'openrouter'), /OPENROUTER_API_KEY/);
@@ -296,5 +307,62 @@ exports.tests.push({
     assert.equal(calls[1].init.redirect, 'error');
     await assert.rejects(() => retained({ body: {} }), /closed/);
     assert.equal(calls.length, 2);
+  },
+});
+
+exports.tests.push({
+  name: 'concurrent Inline checks close only the driver session each one opened',
+  async fn() {
+    const { execFile } = require('node:child_process');
+    const run = require('node:util').promisify(execFile);
+    const entry = path.join(__dirname, 'integration/inline-translation.live.test.mjs');
+    const fixture = `
+      const http = require('node:http');
+      http.createServer = () => ({
+        listen(port, host, ready) { ready(); },
+        address() { return { port: 12345 }; },
+        close() {},
+      });
+      require('node:child_process').execFile = (file, args, options, done) => {
+        console.log(JSON.stringify(args));
+        done(args.includes('open') ? new Error('synthetic launch failure') : null, '');
+      };
+      require('node:module').syncBuiltinESMExports();
+      import(process.argv[1]);
+    `;
+    async function sessionAfterFailure() {
+      try {
+        await run(process.execPath, ['--permission', `--allow-fs-read=${__dirname}`,
+          `--allow-fs-read=${path.resolve(__dirname, '../extension')}`, '-e', fixture, entry]);
+      } catch (error) {
+        assert.equal(error.code, 1);
+        const calls = error.stdout.split('\n').filter(line => line.startsWith('[')).map(JSON.parse);
+        const opened = calls.find(args => args.includes('open'));
+        assert.ok(opened);
+        const session = opened[opened.indexOf('--session') + 1];
+        const closes = calls.filter(args => args.includes('close'));
+        assert.ok(closes.length);
+        for (const args of closes) assert.deepEqual(args, ['--session', session, 'close']);
+        return session;
+      }
+      assert.fail('synthetic launch should fail');
+    }
+    const [first, second] = await Promise.all([sessionAfterFailure(), sessionAfterFailure()]);
+    assert.notEqual(first, second);
+  },
+});
+
+exports.tests.push({
+  name: 'OpenAI cleanup fails when only its legacy key remains',
+  async fn() {
+    const { withApiKey } = await liveKey();
+    await withEnvFile(`OPENAI_API_KEY=${OPENAI_SHAPED}\n`, async envPath => {
+      const page = fakePage({ remaining: { openai_api_key: OPENAI_SHAPED } });
+      const cleared = [];
+      await assert.rejects(withApiKey(withApiKeyArgs(page, envPath, { onCleared: ok => cleared.push(ok) }),
+        async () => {}), /Failed to clear/);
+      assert.deepEqual(cleared, [false]);
+      assert.ok(page.cleanupResults.length && page.cleanupResults.every(result => result === false));
+    });
   },
 });
