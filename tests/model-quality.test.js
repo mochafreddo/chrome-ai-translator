@@ -48,7 +48,7 @@ function originalBody(records = [plainRecord()]) {
             type: 'array', minItems: count, maxItems: count,
             items: {
               type: 'object', additionalProperties: false,
-              properties: { id: { type: 'string' }, template: { type: 'string' }, languageExamples: {
+              properties: { id: { type: 'string' }, template: { type: 'string' }, preservedExpressions: {
                 type: 'array', items: { type: 'object', additionalProperties: false,
                   properties: { source: { type: 'string' }, meaning: { type: 'string' },
                     sourceStart: { type: 'integer' }, sourceEnd: { type: 'integer' },
@@ -56,7 +56,7 @@ function originalBody(records = [plainRecord()]) {
                     meaningStart: { type: 'integer' }, meaningEnd: { type: 'integer' } },
                   required: ['source', 'meaning', 'sourceStart', 'sourceEnd', 'outputStart', 'outputEnd', 'meaningStart', 'meaningEnd'] },
               } },
-              required: ['id', 'template', 'languageExamples'],
+              required: ['id', 'template', 'preservedExpressions'],
             },
           },
         },
@@ -67,7 +67,7 @@ function originalBody(records = [plainRecord()]) {
 }
 
 function response(translations) {
-  return JSON.stringify({ translations: translations.map(item => ({ languageExamples: [], ...item })) });
+  return JSON.stringify({ translations: translations.map(item => ({ preservedExpressions: [], ...item })) });
 }
 
 exports.name = 'model quality';

@@ -38,7 +38,7 @@ function createWorker(answer, storageOptions = {}) {
       const body = JSON.parse(options.body);
       requests.push({ url, options, body });
       const translations = answer(JSON.parse(body.input).records, requests.length)
-        .map(item => ({ languageExamples: [], ...item }));
+        .map(item => ({ preservedExpressions: [], ...item }));
       return { ok: true, async json() {
         return { status: 'completed', output: [{ type: 'message', content: [
           { type: 'output_text', text: JSON.stringify({ translations }) },
@@ -71,6 +71,30 @@ async function translateBatch(visit, worker) {
 
 exports.name = 'inline request flow';
 exports.tests = [{
+  name: 'applies both Arena invocation phrases with Korean meanings and restores the article',
+  async fn() {
+    const source = 'To start, type "arena this" or say "throw it in the arena".';
+    const template = '시작하려면 "arena this"(이것을 아레나에서 검토해)라고 입력하거나 "throw it in the arena"(아레나에 넣어 봐)라고 말하세요.';
+    const { document, element, text } = createTestDocument();
+    const paragraph = element('p', text(source));
+    const original = paragraph.childNodes[0];
+    document.body.appendChild(paragraph);
+    const visit = createInlineTranslationSession();
+    visit.begin(SETTINGS);
+    visit.admit(paragraph);
+    const worker = createWorker(records => records.map(({ id }) => ({ id, template, preservedExpressions: [
+      example(source, template, 'arena this', '이것을 아레나에서 검토해'),
+      example(source, template, 'throw it in the arena', '아레나에 넣어 봐'),
+    ] })));
+    const { response } = await translateBatch(visit, worker);
+    assert.equal(response.results[0].disposition, 'apply');
+    assert.equal(worker.requests.length, 1);
+    assert.equal(paragraph.textContent, template);
+    visit.restore();
+    assert.equal(paragraph.textContent, source);
+    assert.equal(paragraph.childNodes[0], original);
+  },
+}, {
   name: 'preserves repaired bilingual completion and warnings through Stop, cache, restore and private diagnostics',
   async fn() {
     const fixture = activeVoiceFixture();
@@ -89,7 +113,7 @@ exports.tests = [{
       const prefix = attempt === 1 ? fixture.template.replace('능동태를 쓰세요.', 'Prefer active voice.')
         : `수정한 예문: ${fixture.template}${index ? ' Prefer active voice.' : ''}`;
       const template = `${prefix} ./docs/guide.md ${record.atoms[0].token}`;
-      return { id: record.id, template, languageExamples: fixture.languageExamples.map(item =>
+      return { id: record.id, template, preservedExpressions: fixture.preservedExpressions.map(item =>
         example(record.template, template, item.source, item.meaning)) };
     }));
     const { batch, response } = await translateBatch(visit, worker);
@@ -149,7 +173,7 @@ exports.tests = [{
     assert.equal(saved.at(-1).outcome, 'partial');
     for (const payload of [response, saved, diagnostics.exportDiagnostics(saved)]) {
       const json = JSON.stringify(payload);
-      for (const privateValue of ['languageExamples', 'sourceStart', 'sourceEnd', 'outputStart', 'outputEnd', 'meaningStart', 'meaningEnd']) {
+      for (const privateValue of ['preservedExpressions', 'sourceStart', 'sourceEnd', 'outputStart', 'outputEnd', 'meaningStart', 'meaningEnd']) {
         assert.equal(json.includes(privateValue), false, privateValue);
       }
     }
@@ -207,7 +231,7 @@ exports.tests = [{
         else if (failure === 'token') template = template.replace(record.atoms[0].token, '');
         else if (failure === 'source syntax') template = template.replace('./docs/guide.md', './docs/changed.md');
         else if (failure === 'target language') template = record.template;
-        return { id: record.id, template, languageExamples: fixture.languageExamples.map(item =>
+        return { id: record.id, template, preservedExpressions: fixture.preservedExpressions.map(item =>
           example(record.template, template, item.source, item.meaning)) };
       }));
       const response = await worker.send({ type: 'TRANSLATE_VISIBLE_BLOCK_BATCH', records: batch,
@@ -262,7 +286,7 @@ exports.tests = [{
     visit.admit(block);
     const worker = createWorker(records => records.map(record => {
       const template = `${fixture.template} ${record.atoms.find(atom => atom.label === 'voiceMode').token}`;
-      return { id: record.id, template, languageExamples: fixture.languageExamples.map(item =>
+      return { id: record.id, template, preservedExpressions: fixture.preservedExpressions.map(item =>
         example(record.template, template, item.source, item.meaning)) };
     }));
     const { response } = await translateBatch(visit, worker);
@@ -282,7 +306,7 @@ exports.tests = [{
     for (const payload of [saved, exported]) {
       const json = JSON.stringify(payload);
       for (const privateValue of [fixture.source, fixture.template, 'The report was written by Maya.', '마야가 보고서를 작성했다.',
-        'languageExamples', 'sourceStart', 'outputStart', 'meaningStart']) assert.equal(json.includes(privateValue), false, privateValue);
+        'preservedExpressions', 'sourceStart', 'outputStart', 'meaningStart']) assert.equal(json.includes(privateValue), false, privateValue);
     }
     visit.restore();
     assert.equal(block.textContent, originalText);

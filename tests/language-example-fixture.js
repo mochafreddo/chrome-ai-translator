@@ -9,7 +9,7 @@ function example(sourceText, outputText, original, meaning, outputStart = output
 }
 
 function activeVoiceFixture() {
-  return { source, template, languageExamples: [
+  return { source, template, preservedExpressions: [
     example(source, template, 'The report was written by Maya.', '마야가 보고서를 작성했다.'),
     example(source, template, 'Maya wrote the report.', '마야가 보고서를 작성했다.'),
   ] };
