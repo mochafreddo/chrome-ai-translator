@@ -362,6 +362,38 @@ exports.tests = [{
     assert.equal(worker.storageReads.includes(null), false);
   },
 }, {
+  name: 'repairs Korean phase references once and restores both complete and partial translations',
+  async fn() {
+    const source = 'After Phase A, review Phase E.';
+    const initial = 'A 단계 후 Phase E를 검토하세요.';
+    for (const [repaired, partial] of [['A 단계 후 E 단계를 검토하세요.', 0], [initial, 1]]) {
+      const { document, element, text } = createTestDocument();
+      const heading = element('h2', text('Phase A'));
+      const paragraph = element('p', text(source));
+      const visit = createInlineTranslationSession();
+      visit.begin(SETTINGS);
+      for (const block of [heading, paragraph]) {
+        document.body.appendChild(block);
+        visit.admit(block);
+      }
+      const worker = createWorker((records, attempt) => records.map(({ id, template }) => ({
+        id, template: template === 'Phase A' ? 'A 단계' : attempt === 1 ? initial : repaired,
+      })));
+      const { response } = await translateBatch(visit, worker);
+      assert.equal(worker.requests.length, 2);
+      const records = JSON.parse(worker.requests[1].body.input).records;
+      assert.deepEqual(records.map(record => record.repair.untranslatedPhrases), [['Phase E']]);
+      assert.deepEqual(response.results.map(result => result.attemptCount), [1, 2]);
+      assert.equal(heading.textContent, 'A 단계');
+      assert.equal(paragraph.textContent, repaired);
+      assert.equal(visit.progress().counts.partial, partial);
+      assert.equal(visit.progress().counts.translated, 2 - partial);
+      visit.restore();
+      assert.equal(heading.textContent, 'Phase A');
+      assert.equal(paragraph.textContent, source);
+    }
+  },
+}, {
   name: 'characterizes Session to worker repair requests with quoted prose and cache restoration',
   async fn() {
     const cases = [
