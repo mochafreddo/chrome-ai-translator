@@ -131,6 +131,68 @@ function createOperationFixture(options = {}) {
 
 exports.name = 'inline translation operation';
 exports.tests = [{
+  name: 'submission rechecks ancestor eligibility and keeps eligible offscreen prose in the batch',
+  async fn() {
+    const f = createOperationFixture();
+    const section = f.document.createElement('section');
+    section.appendChild(f.block);
+    f.document.body.appendChild(section);
+    const other = f.paragraph(300);
+    f.document.body.appendChild(other);
+    try {
+      f.operation.authorize();
+      f.operation.start();
+      await Promise.resolve();
+      section.setAttribute('role', 'navigation');
+      other.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
+      await flushMicrotasks();
+      assert.deepEqual(f.pending.flatMap(request => request.message.records.map(r => r.template)),
+        [other.textContent]);
+    } finally { f.operation.stop(); }
+  },
+}, {
+  name: 'a changed block under an excluded ancestor retains its text even with a cached translation',
+  async fn() {
+    const f = createOperationFixture();
+    const section = f.document.createElement('section');
+    f.block.textContent = 'Earlier notes.';
+    const other = f.document.createElement('p');
+    other.textContent = 'Current notes.';
+    section.appendChild(other);
+    f.document.body.appendChild(section);
+    try {
+      f.operation.authorize();
+      await f.control('start');
+      const [earlier, current] = f.pending[0].message.records;
+      other.textContent = 'Earlier notes.';
+      section.hidden = true;
+      f.pending[0].resolve({ ok: true, results: [earlier, current].map(record => ({
+        id: record.id, disposition: 'apply', template: '번역된 메모.',
+      })) });
+      await flushMicrotasks();
+      assert.equal(f.block.textContent, '번역된 메모.');
+      assert.equal(other.textContent, 'Earlier notes.');
+      assert.equal(f.pending.length, 1);
+    } finally { f.operation.stop(); }
+  },
+}, {
+  name: 'submission skips a block once its containing section becomes an editing region',
+  async fn() {
+    const f = createOperationFixture();
+    const section = f.document.createElement('section');
+    section.appendChild(f.block);
+    f.block.setAttribute('contenteditable', 'false');
+    f.document.body.appendChild(section);
+    try {
+      f.operation.authorize();
+      f.operation.start();
+      await Promise.resolve();
+      section.setAttribute('contenteditable', 'true');
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 0);
+    } finally { f.operation.stop(); }
+  },
+}, {
   name: 'root removal and reattachment in one mutation delivery still requires explicit rescan',
   async fn() {
     const f = createOperationFixture();

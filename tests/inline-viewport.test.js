@@ -137,6 +137,26 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
 
 exports.name = 'inline viewport';
 exports.tests = [
+  {
+    name: 'prunes an SVG outside the HTMLElement hierarchy before reading its children',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const root = element('article');
+      const svg = { nodeType: 1, tagName: 'svg', isConnected: true };
+      let childReads = 0;
+      Object.defineProperty(svg, 'childNodes', { get() { childReads++; return []; } });
+      root.appendChild(svg);
+      const prose = element('p', text('Article notes.'));
+      root.appendChild(prose);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.admissions, [prose]);
+        assert.equal(childReads, 0);
+      } finally { f.viewport.stop(); }
+    },
+  },
   ...['detached', 'moved outside the article'].map(change => ({
     name: `retained continuation skips a pending subtree ${change}`,
     fn() {

@@ -263,6 +263,11 @@
     return !operation.rootDetached;
   }
 
+  function isEligibleBlock(operation, block) {
+    return block?.isConnected && isWithinSelectedRoot(operation, block) &&
+      (!operation.isEligibleElement || operation.isEligibleElement(block));
+  }
+
   function isWithinSelectedRoot(operation, block) {
     if (!canSubmit(operation)) return false;
     if (!operation?.articleRoot) return true;
@@ -285,7 +290,7 @@
     while (operation.queue.length) {
       if (batch.length >= INLINE_MAX_RECORDS) break;
       const record = operation.queue[0];
-      if (!isWithinSelectedRoot(operation, record.blockElement)) {
+      if (!isEligibleBlock(operation, record.blockElement)) {
         operation.queue.shift();
         clearRetrySupersession(operation, record);
         record.state = 'stale';
@@ -343,8 +348,7 @@
     if (
       !operation ||
       operation.stopped ||
-      !isWithinSelectedRoot(operation, parentRecord?.blockElement) ||
-      !parentRecord?.blockElement?.isConnected ||
+      !isEligibleBlock(operation, parentRecord?.blockElement) ||
       operation.byBlock?.get(parentRecord.blockElement) !== parentRecord
     ) {
       return null;
@@ -408,8 +412,10 @@
         record.code = 'runtime.request_failed';
         continue;
       }
-      if (!isWithinSelectedRoot(operation, record.blockElement)) {
-        markChanged(record);
+      if (!isEligibleBlock(operation, record.blockElement)) {
+        record.state = 'stale';
+        record.code = 'runtime.page_changed';
+        fileRuntimeOutcome(record);
         continue;
       }
       if (result.disposition === 'reject' || typeof result.template !== 'string') {
@@ -816,17 +822,18 @@
       isCurrent,
       canSubmit: () => isCurrent(operationId) && canSubmit(operation),
       pauseRoot() { operation.rootDetached = true; },
-      selectRoot(root) {
+      selectRoot(root, isEligibleElement) {
         if (operation.articleRoot === root && !operation.rootDetached) return false;
         resetQueue(operation);
         operation.articleRoot = root;
+        operation.isEligibleElement = isEligibleElement;
         operation.rootDetached = false;
         return true;
       },
       begin,
       stop,
       restore,
-      admit: (blockElement) => isWithinSelectedRoot(operation, blockElement)
+      admit: (blockElement) => isEligibleBlock(operation, blockElement)
         ? admitBlock(operation, blockElement) : null,
       takeBatch: () => takeBatch(operation),
       settle,

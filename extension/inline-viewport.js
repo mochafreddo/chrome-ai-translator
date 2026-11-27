@@ -68,14 +68,15 @@
       return INLINE_EXCLUDED_ROLES.has(role);
     }
 
+    function hasEditableAttribute(element) {
+      return String(element.getAttribute('contenteditable') || '').toLowerCase() !== 'false';
+    }
+
     function isInlineEffectivelyEditable(element) {
       if (element?.isContentEditable === true) return true;
       for (let current = element; current; current = current.parentElement) {
         if (!current.hasAttribute?.('contenteditable')) continue;
-        return (
-          String(current.getAttribute?.('contenteditable') || '').toLowerCase() !==
-          'false'
-        );
+        return hasEditableAttribute(current);
       }
       return false;
     }
@@ -190,14 +191,20 @@
       );
     }
 
-    function shouldSkipInlineBlockCandidateTextNode(textNode, reads) {
-      const parent = textNode?.parentElement;
-      if (!parent) return true;
-      if (isInlineEffectivelyEditable(parent)) return true;
+    function isEligibleElement(parent, reads = { styles: new Map(), rects: new Map() }) {
+      if (!parent || isInlineEffectivelyEditable(root)) return false;
+      let insideRoot = true;
       for (let element = parent; element; element = element.parentElement) {
-        if (isInlineTranslationExcludedElement(element)) return true;
-        if (isElementHidden(element, parent, reads)) return true;
+        if (isInlineTranslationExcludedElement(element) || isElementHidden(element, parent, reads)) return false;
+        if (insideRoot && (element.isContentEditable || element.hasAttribute?.('contenteditable') &&
+          hasEditableAttribute(element))) return false;
+        if (element === root) insideRoot = false;
       }
+      return true;
+    }
+
+    function shouldSkipInlineBlockCandidateTextNode(textNode, reads) {
+      if (!isEligibleElement(textNode?.parentElement, reads)) return true;
       const value = String(textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
       if (!/\p{L}/u.test(value)) return true;
       return inlineBlockCodec.isCodeLikeInlineText(value);
@@ -208,9 +215,9 @@
     }
 
     function shouldSkipInlineElementSubtree(node, viewport, reads) {
-      if (!node || !(node instanceof platform.HTMLElement)) return false;
+      if (isInlineTranslationExcludedElement(node)) return true;
+      if (!(node instanceof platform.HTMLElement)) return false;
       if (
-        isInlineTranslationExcludedElement(node) ||
         isInlineEffectivelyEditable(node) ||
         isElementHidden(node, null, reads)
       ) {
@@ -426,7 +433,7 @@
       stopWatching();
     }
 
-    return { start, selectRoot, rescan, stop };
+    return { start, selectRoot, rescan, stop, isEligibleElement };
   }
 
   const api = { createInlineViewport };

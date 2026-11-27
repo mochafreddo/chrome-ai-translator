@@ -75,37 +75,40 @@
       }, () => unavailable(store));
     }
 
+    async function sendBatch(store, batch) {
+      return sendMessage({
+        type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        operationId: store.id,
+        settingsSnapshot: store.settings,
+        records: batch.map(record => ({
+          id: record.id, template: record.template, atoms: record.atoms,
+          contract: record.contract, repair: record.repair,
+        })),
+      });
+    }
+
     async function drain(store) {
-      if (!isCurrent(store)) return;
-      store.transport.flush();
+      await Promise.resolve();
       while (isCurrent(store) && session.canSubmit()) {
         const batch = session.takeBatch();
+        if (batch.length) {
+          sendBatch(store, batch).catch(() => null).then(response => {
+            const settled = session.settle(batch, response);
+            if (isCurrent(store) && store.settings.service === 'openrouter' && response?.ok === false) {
+              store.serviceError = getOpenRouterFailureMessage(response.error?.code);
+            }
+            if (settled.diagnosticsUnavailable) store.diagnosticsUnavailable = true;
+            fileOutcomes(store, settled);
+          }).catch(() => {}) // Filing failures cannot undo already settled Semantic Blocks.
+            .finally(() => {
+              if (!isCurrent(store)) return;
+              update();
+              drain(store).catch(failure => reportFailure(failure, store));
+            });
+        }
         store.transport.flush();
         update();
         if (!batch.length) return;
-        // Every submitted batch settles, including transport failure and obsolete work.
-        // Eligibility protects display and follow-up work after the Session's accounting.
-        Promise.resolve().then(() => session.canSubmit() && isCurrent(store) ? sendMessage({
-          type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
-          operationId: store.id,
-          settingsSnapshot: store.settings,
-          records: batch.map(record => ({
-            id: record.id, template: record.template, atoms: record.atoms,
-            contract: record.contract, repair: record.repair,
-          })),
-        }) : null).catch(() => null).then(response => {
-          const settled = session.settle(batch, response);
-          if (isCurrent(store) && store.settings.service === 'openrouter' && response?.ok === false) {
-            store.serviceError = getOpenRouterFailureMessage(response.error?.code);
-          }
-          if (settled.diagnosticsUnavailable) store.diagnosticsUnavailable = true;
-          fileOutcomes(store, settled);
-        }).catch(() => {}) // Filing failures cannot undo already settled Semantic Blocks.
-          .finally(() => {
-            if (!isCurrent(store)) return;
-            update();
-            drain(store).catch(failure => reportFailure(failure, store));
-          });
       }
     }
 
@@ -149,7 +152,7 @@
       const root = pickArticleRoot();
       if (!root) throw new Error('No article content found.');
       const store = begin(settings);
-      session.selectRoot(root);
+      session.selectRoot(root, store.scanner.isEligibleElement);
       // Display settings have their own lifetime; content receives a separate snapshot.
       onSettings({ ...settings });
       store.scanner.start(root);
@@ -167,7 +170,7 @@
           update();
           return;
         }
-        if (session.selectRoot(root)) current.scanner.selectRoot(root);
+        if (session.selectRoot(root, current.scanner.isEligibleElement)) current.scanner.selectRoot(root);
         else current.scanner.rescan();
         update();
         return;
