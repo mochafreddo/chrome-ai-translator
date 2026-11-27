@@ -42,6 +42,23 @@ function createTestDocument() {
       return current?.nodeType === 9;
     }
 
+    compareDocumentPosition(other) {
+      const path = node => {
+        const ancestors = [];
+        for (; node; node = node.parentNode) ancestors.unshift(node);
+        return ancestors;
+      };
+      const left = path(this);
+      const right = path(other);
+      if (left[0] !== right[0]) return 1;
+      let index = 0;
+      while (index < left.length && left[index] === right[index]) index += 1;
+      if (index === left.length) return index === right.length ? 0 : 20;
+      if (index === right.length) return 10;
+      const siblings = left[index - 1].childNodes;
+      return siblings.indexOf(left[index]) < siblings.indexOf(right[index]) ? 4 : 2;
+    }
+
     get textContent() {
       if (this.nodeType === 3) return this.nodeValue;
       return this.childNodes.map((child) => child.textContent).join('');

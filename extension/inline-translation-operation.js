@@ -91,7 +91,7 @@
 
     async function drain(store) {
       await Promise.resolve();
-      while (isCurrent(store) && session.canSubmit()) {
+      while (isCurrent(store) && store.scanner.canDispatch() && session.canSubmit()) {
         const batch = session.takeBatch();
         if (batch.length) {
           sendBatch(store, batch).catch(() => null).then(response => {

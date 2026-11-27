@@ -46,6 +46,7 @@
     let scanStack = null;
     let mutationSweep = false;
     let rescanAfterCurrentSweep = false;
+    let orderAfterAttributeChange = false;
     let timer = null;
     let observer = null;
     let scrollTargets = [];
@@ -319,6 +320,7 @@
         if (isWithinRoot(block)) session.admit(block);
       }
       if (!isCurrent()) return;
+      if (blocks.size && orderAfterAttributeChange) session.orderPending?.();
       const mutations = observer?.takeRecords?.();
       if (mutations?.length) onMutation(mutations);
       if (!isCurrent()) return;
@@ -329,6 +331,8 @@
           rescanAfterCurrentSweep = false;
           mutationSweep = true;
           rescan();
+        } else if (timer === null) {
+          orderAfterAttributeChange = false;
         }
       }
       onScan();
@@ -366,16 +370,8 @@
         timer = null;
         return;
       }
-      const changedElements = new Set();
-      for (const record of records || []) {
-        for (let node = record.target; node && !changedElements.has(node); node = node.parentNode) {
-          changedElements.add(node);
-          if (node === root) break;
-        }
-      }
-      if (!records?.length || changedElements.has(root)) {
-        const scoped = records?.length && records.every(record => record.type !== 'attributes');
-        session.resetQueue(scoped ? changedElements : undefined);
+      if (!records?.length || records.some(record => isWithinRoot(record.target))) {
+        if (records?.some(record => record.type === 'attributes' && isWithinRoot(record.target))) orderAfterAttributeChange = true;
         if (!mutationSweep) {
           onViewportChange();
           return;
@@ -404,6 +400,7 @@
     }
 
     function stopWatching() {
+      orderAfterAttributeChange = false;
       scanStack = null;
       mutationSweep = false;
       rescanAfterCurrentSweep = false;
@@ -450,7 +447,8 @@
       return false;
     }
 
-    return { start, selectRoot, rescan, stop, isEligibleElement: hasEligibleOwnProse };
+    return { start, selectRoot, rescan, stop, isEligibleElement: hasEligibleOwnProse,
+      canDispatch: () => !orderAfterAttributeChange };
   }
 
   const api = { createInlineViewport };

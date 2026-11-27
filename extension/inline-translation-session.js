@@ -153,6 +153,7 @@
       retryOf: options.retryOf || null,
       repair: options.repair || null,
       state: 'queued',
+      code: null,
     });
   }
 
@@ -218,13 +219,22 @@
       return null;
     }
     const existing = operation.byBlock.get(blockElement);
-    if (existing?.state === 'queued' || existing?.state === 'translating') return null;
+    if (existing?.state === 'translating') return null;
+    let queuePosition = -1;
+    if (existing?.state === 'queued') {
+      if (existing.retryOf || inlineBlockCodec.matchesOriginalOwnership(existing.snapshot)) return null;
+      queuePosition = operation.queue.indexOf(existing);
+      operation.queue.splice(queuePosition, 1);
+      existing.state = 'original';
+    }
     if (isTranslatedState(existing?.state) && inlineBlockCodec.matchesAppliedOwnership(existing.snapshot)) {
       return null;
     }
     if (skipPreservedOnlyBlock(operation, blockElement)) return null;
+    const recoverableRejection = existing?.state === 'failed' &&
+      existing.code === 'runtime.unsupported_block' && Boolean(existing.snapshot);
     if (existing) {
-      if (existing.state === 'original' && !existing.retryOf &&
+      if (queuePosition < 0 && existing.state === 'original' && !existing.retryOf &&
         inlineBlockCodec.matchesOriginalOwnership(existing.snapshot)) {
         existing.state = 'queued';
         if (applyCachedTranslation(operation, existing)) return null;
@@ -235,25 +245,27 @@
         existing.state = 'stale';
         existing.code = 'runtime.page_changed';
         operation.byBlock.delete(blockElement);
-      } else if (existing.state === 'failed' || existing.state === 'stale') {
+      } else if (existing.state === 'stale' || (existing.state === 'failed' && !recoverableRejection)) {
         return null;
       }
     }
 
+    const reusable = existing && !existing.retryOf && (existing.state === 'original' || recoverableRejection);
     const serialized = inlineBlockCodec.serializeBlock(blockElement);
     if (!serialized.ok) {
-      const failedRecord = createRecord(operation, blockElement, {
-        state: 'failed',
-        code: 'runtime.unsupported_block',
-      });
-      queueLocalDiagnostic(operation, failedRecord, failedRecord.code, {}, serialized.localRejection);
+      if (recoverableRejection) return null;
+      const failedRecord = reusable ? existing : createRecord(operation, blockElement);
+      failedRecord.state = 'failed';
+      failedRecord.code = 'runtime.unsupported_block';
+      queueLocalDiagnostic(operation, null, failedRecord.code, {}, serialized.localRejection);
       return failedRecord;
     }
     const record = createQueuedRecordFromSerialized(operation, blockElement, serialized, {
-      record: existing?.state === 'original' && !existing.retryOf ? existing : null,
+      record: reusable ? existing : null,
     });
     if (applyCachedTranslation(operation, record)) return null;
-    operation.queue.push(record);
+    if (queuePosition < 0) operation.queue.push(record);
+    else operation.queue.splice(queuePosition, 0, record);
     return record;
   }
 
@@ -290,15 +302,15 @@
     while (operation.queue.length) {
       if (batch.length >= INLINE_MAX_RECORDS) break;
       const record = operation.queue[0];
-      if (!isEligibleBlock(operation, record.blockElement)) {
+      const eligible = isEligibleBlock(operation, record.blockElement);
+      if (eligible && skipPreservedOnlyBlock(operation, record.blockElement)) {
         operation.queue.shift();
-        clearRetrySupersession(operation, record);
-        record.state = 'stale';
-        record.code = 'runtime.page_changed';
         continue;
       }
-      if (skipPreservedOnlyBlock(operation, record.blockElement)) {
+      if (!eligible || !inlineBlockCodec.matchesOriginalOwnership(record.snapshot)) {
         operation.queue.shift();
+        record.state = record.retryOf ? 'stale' : 'original';
+        record.code = record.retryOf ? 'runtime.page_changed' : null;
         continue;
       }
       const { actualCost: cost, reservedCost } = measureRecord(record);
@@ -501,7 +513,26 @@
     return true;
   }
 
-  function resetQueue(operation, changedElements) {
+  function orderPending(operation) {
+    const positions = [];
+    const firstAttempts = [];
+    for (const [index, record] of operation.queue.entries()) {
+      if (record.retryOf || !record.blockElement.isConnected || !isWithinSelectedRoot(operation, record.blockElement)) continue;
+      positions.push(index);
+      firstAttempts.push(record);
+    }
+    const preceding = 2;
+    const following = 4;
+    firstAttempts.sort((left, right) => {
+      const order = left.blockElement.compareDocumentPosition(right.blockElement);
+      if (order & preceding) return 1;
+      if (order & following) return -1;
+      return 0;
+    });
+    positions.forEach((position, index) => { operation.queue[position] = firstAttempts[index]; });
+  }
+
+  function resetQueue(operation) {
     if (!operation?.queue?.length) return;
 
     const retained = [];
@@ -509,7 +540,7 @@
       if (record?.state === 'queued') {
         // `retryOf` is what makes a queued record a page-change retry, and a retry is kept
         // rather than reset: the block it superseded is still waiting on it.
-        if (record.retryOf || (changedElements && !changedElements.has(record.blockElement))) {
+        if (record.retryOf) {
           retained.push(record);
           continue;
         }
@@ -835,7 +866,8 @@
         ? admitBlock(operation, blockElement) : null,
       takeBatch: () => takeBatch(operation),
       settle,
-      resetQueue: changedElements => resetQueue(operation, changedElements),
+      orderPending: () => orderPending(operation),
+      resetQueue: () => resetQueue(operation),
       progress: () => ({
         counts: getStatusCounts(operation.records),
         reason: getTerminalReason(operation.records),

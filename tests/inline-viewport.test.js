@@ -86,7 +86,8 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
       get operationId() { return session.operationId; },
       get status() { return session.status; },
       isCurrent: session.isCurrent,
-      resetQueue(changedElements) { resets += 1; session.resetQueue(changedElements); },
+      resetQueue() { resets += 1; session.resetQueue(); },
+      orderPending: session.orderPending,
       admit(block) { admissions.push(block); return session.admit(block); },
     },
     platform,
@@ -330,6 +331,28 @@ exports.tests = [
     },
   },
   {
+    name: 'a newly revealed block precedes a pending later block beyond the scan boundary',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const revealed = element('p', ...Array.from({ length: 1201 }, () => text('Hi ')));
+      revealed.computedStyle = { display: 'none' };
+      const later = element('p', text('Already pending.'));
+      const root = element('div', revealed, later);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.admissions, [later]);
+        revealed.computedStyle = {};
+        f.attribute(revealed, 'class', 'visible');
+        f.advance();
+        assert.equal(f.admissions.at(-1) === revealed, true);
+        assert.equal(f.timers.size, 1);
+        assert.deepEqual(f.session.takeBatch().map(record => record.blockElement === revealed), [true, false]);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
     name: 'applies the collected cache batch before restarting invalidated traversal',
     fn() {
       const { document, element, text } = createTestDocument();
@@ -356,7 +379,7 @@ exports.tests = [
       try {
         f.viewport.start(root);
         assert.equal(session.progress().counts.translated, 3);
-        assert.equal(f.resets, 1);
+        assert.equal(f.timers.size, 1);
         f.advance();
         assert.equal(f.timers.size, 0);
         assert.deepEqual(session.takeBatch(), []);
@@ -480,7 +503,6 @@ exports.tests = [
           'New paragraph before the continuation.',
         ]);
         assert.equal(session.progress().counts.translated, 1);
-        assert.equal(f.resets, 1);
         session.restore();
         assert.deepEqual(cached.childNodes, original);
         assert.equal(replacement.textContent, 'New paragraph before the continuation.');
@@ -953,7 +975,7 @@ exports.tests = [
     },
   },
   ...['scroll', 'resize', 'mutation'].map((event) => ({
-    name: `${event} restarts traversal and ${event === 'mutation' ? 'resets' : 'preserves'} pending work`,
+    name: `${event} restarts traversal and preserves pending work`,
     fn() {
       const { document, element, text } = createTestDocument();
       const first = element('p', text('First visible paragraph.'));
@@ -964,15 +986,15 @@ exports.tests = [
       const f = scannerFixture(root);
       f.viewport.start(root);
       first.rect = { top: -1000, bottom: -900, left: 0, right: 100, width: 100, height: 100 };
+      document.defaultView.scrollY = 1100;
       if (event === 'mutation') f.observers[0].callback();
       else f.event(f.platform.window, event);
-      assert.equal(f.resets, event === 'mutation' ? 1 : 0);
-      assert.equal(f.session.progress().counts.pending, event === 'mutation' ? 0 : 2);
+      assert.equal(f.session.progress().counts.pending, 2);
       f.advance();
       assert.equal(f.admissions.includes(tail), false, 'the next scan restarted at the visible head');
       f.advance();
       assert.deepEqual(f.session.takeBatch().map(record => record.template), [
-        ...(event === 'mutation' ? [] : ['First visible paragraph.']),
+        'First visible paragraph.',
         'Hi '.repeat(1200), 'Final visible paragraph.',
       ]);
       f.viewport.stop();

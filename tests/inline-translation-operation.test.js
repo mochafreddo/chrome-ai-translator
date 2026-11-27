@@ -132,6 +132,119 @@ function createOperationFixture(options = {}) {
 
 exports.name = 'inline translation operation';
 exports.tests = [{
+  name: 'a queued paragraph can be submitted once after detachment and rediscovery',
+  async fn() {
+    const f = createOperationFixture();
+    await f.control('authorize');
+    await f.control('start');
+    const root = f.document.body;
+    root.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    root.appendChild(waiting);
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+
+    root.removeChild(waiting);
+    f.mutation({ type: 'childList', target: root, removedNodes: [waiting] });
+    await f.settle();
+    assert.equal(f.pending.length, 2);
+    waiting.textContent = 'The reader can now see this revised paragraph.';
+    root.appendChild(waiting);
+    f.mutation({ type: 'childList', target: root, addedNodes: [waiting] });
+    await f.rescan();
+    await f.rescan();
+    assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(record => record.template)),
+      ['The reader can now see this revised paragraph.']);
+    await f.operation.stop();
+  },
+}, {
+  name: 'a rescan refreshes a visible queued paragraph before a batch slot opens',
+  async fn() {
+    const f = createOperationFixture();
+    await f.control('authorize');
+    await f.control('start');
+    const root = f.document.body;
+    root.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    root.appendChild(waiting);
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+
+    const text = waiting.childNodes[0];
+    text.nodeValue = 'The article now uses this sentence.';
+    f.mutation({ type: 'characterData', target: text });
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+    await f.settle();
+    assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(record => record.template)),
+      ['The article now uses this sentence.']);
+    await f.operation.stop();
+  },
+}, {
+  name: 'a briefly unsupported queued paragraph can recover before its first submission',
+  async fn() {
+    const f = createOperationFixture();
+    await f.control('authorize');
+    await f.control('start');
+    const root = f.document.body;
+    root.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    root.appendChild(waiting);
+    await f.rescan();
+    const nested = f.document.createElement('custom-card');
+    nested.textContent = 'Unsupported formatting.';
+    waiting.appendChild(nested);
+    waiting.appendChild(f.document.createTextNode(' Closing sentence.'));
+    f.mutation({ type: 'childList', target: waiting, addedNodes: [nested] });
+    await f.settle();
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+
+    waiting.removeChild(nested);
+    f.mutation({ type: 'childList', target: waiting, removedNodes: [nested] });
+    await f.rescan();
+    assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(record => record.template)),
+      [waiting.textContent]);
+    await f.operation.stop();
+  },
+}, {
+  name: 'a free slot waits for newly revealed prose across an attribute rescan',
+  async fn() {
+    const f = createOperationFixture();
+    const root = f.document.body;
+    const section = f.document.createElement('section');
+    section.computedStyle = { display: 'none' };
+    for (let index = 0; index < 1200; index += 1) section.appendChild(f.document.createTextNode('!'));
+    const earlier = f.document.createElement('p');
+    earlier.textContent = 'This newly visible paragraph comes first.';
+    section.appendChild(earlier);
+    root.insertBefore(section, f.block);
+    await f.control('authorize');
+    await f.control('start');
+    root.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    root.appendChild(waiting);
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+
+    section.computedStyle = {};
+    f.mutation({ type: 'attributes', target: section });
+    await f.settle();
+    assert.equal(f.pending.length, 2);
+    f.advance();
+    await flushMicrotasks();
+    assert.equal(f.pending.length, 2);
+    f.advance();
+    await flushMicrotasks();
+    assert.deepEqual(f.pending[2]?.message.records.map(record => record.template),
+      [earlier.textContent, waiting.textContent]);
+    await f.operation.stop();
+  },
+}, {
   name: 'an admitted paragraph survives scroll and translation of a different block',
   async fn() {
     const f = createOperationFixture();
