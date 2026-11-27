@@ -93,7 +93,7 @@ const inlineDiagnosticsProtocol =
   globalThis.ChromeAiTranslatorInlineDiagnosticsProtocol || require('./inline-diagnostics-protocol.js');
 const inlineDiagnosticsController =
   globalThis.ChromeAiTranslatorInlineDiagnosticsController || require('./inline-diagnostics-controller.js');
-const { OPENROUTER_MODEL, getEffectiveModelSettings, getOpenRouterFailureMessage } =
+const { OPENROUTER_MODEL, getEffectiveModelSettings, getServiceFailureMessage } =
   globalThis.ChromeAiTranslatorDefaultModel || require('./default-model.js');
 
 const { createInlineDocumentLifetime } = globalThis.ChromeAiTranslatorInlineDocumentLifetime ||
@@ -598,28 +598,18 @@ function createBackgroundWorker(platform = {}) {
     } catch {
       if (signal?.aborted) throw documentEnded();
       const code = `${openrouter ? 'openrouter' : 'openai'}.transport`;
-      throw Object.assign(new Error(openrouter ? getOpenRouterFailureMessage(code) :
-        'OpenAI request could not reach the service.'), { code });
+      throw Object.assign(new Error(getServiceFailureMessage(service, code)), { code });
     }
 
     const json = await res.json().catch(() => null);
     if (signal?.aborted) throw documentEnded();
     if (!res.ok) {
-      if (openrouter) {
-        const failures = {
-          401: 'authentication', 402: 'credits', 403: 'access', 404: 'model',
-          429: 'rate_limit', 503: 'unavailable',
-        };
-        const code = `openrouter.${failures[res.status] || 'request'}`;
-        throw Object.assign(new Error(getOpenRouterFailureMessage(code)), { code });
-      }
-      const failures = { 401: ['authentication', 'OpenAI authentication failed. Check its API key in Options.'],
-        403: ['access', 'OpenAI refused access to this request.'],
-        404: ['model', 'OpenAI could not serve the selected model.'],
-        429: ['rate_limit', 'OpenAI rate limit or usage limit reached. Check your account or try again later.'],
-        503: ['unavailable', 'OpenAI is temporarily unavailable. Try again later.'] };
-      const [failure, message] = failures[res.status] || ['request', 'OpenAI request failed. Try again later.'];
-      throw Object.assign(new Error(message), { code: `openai.${failure}` });
+      const failures = {
+        401: 'authentication', 403: 'access', 404: 'model', 429: 'rate_limit', 503: 'unavailable',
+      };
+      const failure = openrouter && res.status === 402 ? 'credits' : failures[res.status] || 'request';
+      const code = `${service}.${failure}`;
+      throw Object.assign(new Error(getServiceFailureMessage(service, code)), { code });
     }
 
     try {

@@ -1028,3 +1028,29 @@ exports.tests.push({
     f.operation.stop();
   },
 });
+
+exports.tests.push({
+  name: 'Inline Translation Section displays fixed guidance for classified OpenAI failures',
+  async fn() {
+    const { getInlineTranslationPanelViewModel } = require('../extension/sidepanel');
+    for (const [failure, guidance] of [
+      ['authentication', 'OpenAI authentication failed. Check its API key in Options.'],
+      ['access', 'OpenAI refused access to this request.'],
+      ['model', 'OpenAI could not serve the selected model.'],
+      ['rate_limit', 'OpenAI rate limit or usage limit reached. Check your account or try again later.'],
+      ['unavailable', 'OpenAI is temporarily unavailable. Try again later.'],
+      ['transport', 'OpenAI request could not reach the service.'],
+      ['request', 'OpenAI request failed. Try again later.'],
+    ]) {
+      const f = createOperationFixture({ settings: { service: 'openai', apiKey: '***' } });
+      f.operation.authorize();
+      await f.control('start');
+      f.pending[0].resolve({ ok: false, error: { code: 'openai.' + failure, message: 'raw provider error' } });
+      await flushMicrotasks();
+      const panel = getInlineTranslationPanelViewModel({ snapshot: f.operation.getStatus() });
+      assert.ok(panel.errorText.includes(guidance), failure);
+      assert.doesNotMatch(panel.errorText, /raw provider error/);
+      f.operation.stop();
+    }
+  },
+});

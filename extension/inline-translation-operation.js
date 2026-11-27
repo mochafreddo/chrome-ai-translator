@@ -9,7 +9,7 @@
     (typeof module !== 'undefined' && module.exports ? require('./inline-diagnostics-protocol') : null);
   const transport = globalScope.ChromeAiTranslatorInlineLocalDiagnosticTransport ||
     (typeof module !== 'undefined' && module.exports ? require('./inline-local-diagnostic-transport') : null);
-  const { getOpenRouterFailureMessage } = globalScope.ChromeAiTranslatorDefaultModel ||
+  const { getServiceFailureMessage } = globalScope.ChromeAiTranslatorDefaultModel ||
     (typeof module !== 'undefined' && module.exports ? require('./default-model') : {});
   const AUTH_MS = 5 * 60 * 1000;
 
@@ -94,8 +94,8 @@
         if (batch.length) {
           sendBatch(store, batch).catch(() => null).then(response => {
             const settled = session.settle(batch, response);
-            if (isCurrent(store) && store.settings.service === 'openrouter' && response?.ok === false) {
-              store.serviceError = getOpenRouterFailureMessage(response.error?.code);
+            if (isCurrent(store) && response?.ok === false) {
+              store.serviceError = getServiceFailureMessage(store.settings.service, response.error?.code);
             }
             if (settled.diagnosticsUnavailable) store.diagnosticsUnavailable = true;
             fileOutcomes(store, settled);

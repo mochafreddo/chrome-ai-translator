@@ -192,15 +192,22 @@ function createTabStateController({ queryActiveTab, readDocumentId, sendMessage:
     select(tab?.id ?? null, tab?.documentId);
     return tabId !== null;
   }
-  async function refreshSelected(requestedControl = null) {
+  async function refreshSelected(requestedControl = null, periodic = false) {
     if (tabId === null) return;
     const requestedTab = tabId;
     const requestedSelection = selection;
+    async function read(channel, load) {
+      if (periodic && requestedSelection[channel]) return;
+      requestedSelection[channel] = (requestedSelection[channel] || 0) + 1;
+      try {
+        await load();
+      } finally {
+        requestedSelection[channel] -= 1;
+      }
+    }
     await Promise.all([
-      (async () => {
-        await refreshState(requestedSelection, requestedControl);
-      })().catch(() => {}),
-      (async () => {
+      read('worker', () => refreshState(requestedSelection, requestedControl)).catch(() => {}),
+      read('inline', async () => {
         const request = inlineRequest = {};
         const response = await sendMessage({
           type: 'GET_INLINE_TRANSLATION_STATE', tabId: requestedTab,
@@ -212,11 +219,11 @@ function createTabStateController({ queryActiveTab, readDocumentId, sendMessage:
         if (wasOutOfReach && hasPageAccess) forgetControlError();
         snapshot = response?.ok ? response.snapshot || null : null;
         paint();
-      })().catch(() => {}),
+      }).catch(() => {}),
     ]);
   }
   async function refresh() {
-    if (await resolveTab()) await refreshSelected();
+    if (await resolveTab()) await refreshSelected(null, true);
   }
   async function runInlineControl(control) {
     if (!documentId) return;
