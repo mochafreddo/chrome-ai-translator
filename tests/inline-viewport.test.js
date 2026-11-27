@@ -533,6 +533,7 @@ exports.tests = [
       const root = element('div', paragraph);
       document.body.appendChild(root);
       const f = scannerFixture(root);
+      f.session.selectRoot(root, f.viewport.isEligibleElement);
       const reads = new Map();
       let rectReads = 0;
       const getRect = paragraph.getBoundingClientRect.bind(paragraph);
@@ -545,14 +546,15 @@ exports.tests = [
       try {
         f.viewport.start(root);
         assert.deepEqual(f.admissions, [paragraph]);
-        assert.equal(reads.get(paragraph), 1, 'one synchronous scan shares its style reads');
-        assert.equal(rectReads, 2, 'one discovery read and one independent Session codec read');
+        assert.equal(reads.get(paragraph), 2, 'discovery and Session eligibility each share their style reads');
+        assert.equal(rectReads, 3, 'discovery, Session eligibility and serialization each read the rectangle');
         reads.clear();
         paragraph.computedStyle = { display: 'none' };
         f.event(f.platform.window, 'scroll');
         f.advance();
         assert.equal(reads.get(paragraph), 1);
-        assert.deepEqual(f.session.takeBatch(), [], 'a later scan must read current styles');
+        assert.deepEqual(f.admissions, [paragraph], 'the later scan must skip the newly hidden paragraph');
+        assert.deepEqual(f.session.takeBatch(), [], 'submission rechecks the admitted paragraph');
       } finally { f.viewport.stop(); }
     },
   },
@@ -951,7 +953,7 @@ exports.tests = [
     },
   },
   ...['scroll', 'resize', 'mutation'].map((event) => ({
-    name: `${event} resets the cursor and pending viewport before the debounced scan`,
+    name: `${event} restarts traversal and ${event === 'mutation' ? 'resets' : 'preserves'} pending work`,
     fn() {
       const { document, element, text } = createTestDocument();
       const first = element('p', text('First visible paragraph.'));
@@ -964,12 +966,13 @@ exports.tests = [
       first.rect = { top: -1000, bottom: -900, left: 0, right: 100, width: 100, height: 100 };
       if (event === 'mutation') f.observers[0].callback();
       else f.event(f.platform.window, event);
-      assert.equal(f.resets, 1);
-      assert.equal(f.session.progress().counts.pending, 0);
+      assert.equal(f.resets, event === 'mutation' ? 1 : 0);
+      assert.equal(f.session.progress().counts.pending, event === 'mutation' ? 0 : 2);
       f.advance();
       assert.equal(f.admissions.includes(tail), false, 'the next scan restarted at the visible head');
       f.advance();
       assert.deepEqual(f.session.takeBatch().map(record => record.template), [
+        ...(event === 'mutation' ? [] : ['First visible paragraph.']),
         'Hi '.repeat(1200), 'Final visible paragraph.',
       ]);
       f.viewport.stop();

@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
-import { realpathSync } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { lstatSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { inlineQualityCompleted, summarizeQuality } from './model-quality-observation.mjs';
 
 const require = createRequire(import.meta.url);
@@ -11,7 +11,12 @@ export function resolveQualityOutput(path) {
   const target = resolve(path);
   const output = join(realpathSync.native(dirname(target)), basename(target));
   const root = realpathSync.native(new URL('../../', import.meta.url));
-  if (output === root || output.startsWith(root + sep)) throw new Error('Model quality output must be outside the repository.');
+  for (let current = output; ; current = dirname(current)) {
+    if (current === root || lstatSync(join(current, '.git'), { throwIfNoEntry: false })) {
+      throw new Error('Model quality output must be outside the repository.');
+    }
+    if (dirname(current) === current) break;
+  }
   return output;
 }
 

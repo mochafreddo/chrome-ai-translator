@@ -132,6 +132,26 @@ function createOperationFixture(options = {}) {
 
 exports.name = 'inline translation operation';
 exports.tests = [{
+  name: 'an admitted paragraph scrolling offscreen waits for a free batch slot',
+  async fn() {
+    const f = createOperationFixture();
+    await f.control('authorize');
+    await f.control('start');
+    f.document.body.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    f.document.body.appendChild(waiting);
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+    waiting.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
+    f.viewportEvent('scroll');
+    f.advance();
+    await f.settle();
+    assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(r => r.template)),
+      [waiting.textContent]);
+    await f.operation.stop();
+  },
+}, {
   name: 'submission rechecks ancestor eligibility and keeps eligible offscreen prose in the batch',
   async fn() {
     const f = createOperationFixture();
@@ -1053,6 +1073,63 @@ exports.tests.push({
       assert.doesNotMatch(panel.errorText, /raw provider error/);
       f.operation.stop();
     }
+  },
+});
+
+exports.tests.push(...['stop', 'restore'].map(control => ({
+  name: `both Inline controls offer ${control} again after an unconfirmed end`,
+  async fn() {
+    const { getInlineTranslatorUiModel } = require('../extension/content');
+    const { getInlineTranslationPanelViewModel } = require('../extension/sidepanel');
+    let accept = false;
+    const f = createOperationFixture({ endOperation: async () => ({ ok: accept }) });
+    const disabled = () => [
+      getInlineTranslatorUiModel({ operation: f.operation }),
+      getInlineTranslationPanelViewModel({ snapshot: f.operation.getStatus() }),
+    ].map(model => model[control + 'Disabled']);
+    await f.control('authorize');
+    await f.control('start');
+    await assert.rejects(f.operation[control]());
+    assert.deepEqual(disabled(), [false, false]);
+    accept = true;
+    await f.operation[control]();
+    assert.deepEqual(disabled(), [true, true]);
+  },
+})));
+
+exports.tests.push({
+  name: 'Original text can retry an unconfirmed worker end until the same Operation is acknowledged',
+  async fn() {
+    let accept = false;
+    const f = createOperationFixture({ endOperation: async () => ({ ok: accept }) });
+    await f.control('authorize');
+    await f.control('start');
+    const id = f.pending[0].message.operationId;
+    await assert.rejects(f.operation.restore());
+    assert.match(f.operation.getStatus().error, /could not confirm/);
+    accept = true;
+    await f.operation.stop();
+    assert.equal(f.operation.getStatus().error, '');
+    await f.operation.restore();
+    assert.deepEqual(f.messages.filter(m => m.type === 'END_INLINE_TRANSLATION_OPERATION')
+      .map(m => m.operationId), [id, id]);
+  },
+}, {
+  name: 'a late worker end cannot acknowledge the next Operation',
+  async fn() {
+    let acknowledge;
+    const f = createOperationFixture({ endOperation: () => new Promise(resolve => { acknowledge = resolve; }) });
+    await f.control('authorize');
+    await f.control('start');
+    const end = f.operation.restore();
+    await f.control('start');
+    acknowledge({ ok: true });
+    await end;
+    const nextId = f.pending[1].message.operationId;
+    const nextEnd = f.operation.restore();
+    assert.equal(f.messages.at(-1).operationId, nextId);
+    acknowledge({ ok: true });
+    await nextEnd;
   },
 });
 

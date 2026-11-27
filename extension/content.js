@@ -145,12 +145,12 @@ function getInlineTranslatorUiModel(
   state = inlineState,
   settings = state?.translationSettings || INLINE_TRANSLATION_SETTINGS_DEFAULTS
 ) {
-  const status = state?.operation?.getStatus().status || 'original';
+  const { status = 'original', endUnconfirmed } = state?.operation?.getStatus() || {};
   const targetLanguage =
     settings?.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage;
   const menuOpen = Boolean(state?.menuOpen);
   const { isActive, canStop, canRestore } =
-    inlineTranslationControls.getInlineTranslationControlAvailability(status);
+    inlineTranslationControls.getInlineTranslationControlAvailability(status, endUnconfirmed);
 
   return {
     toggleText: isActive

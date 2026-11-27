@@ -206,6 +206,38 @@ exports.tests = [
     },
   },
   {
+    name: 'Options keeps Save and Clear ordered and preserves edits made while clearing',
+    async fn() {
+      let grant, acknowledgeClear;
+      const granted = new Promise(resolve => { grant = resolve; });
+      const clearing = new Promise(resolve => { acknowledgeClear = resolve; });
+      let writes = 0;
+      await withOptionsScreen(async ({ element, inputs, events, messages, flush }) => {
+        helpers.checkChoice(inputs, 'allPages');
+        const key = element('apiKey');
+        key.value = 'submitted';
+        element('btnSave').listeners.click();
+        assert.equal(events.at(-1), 'permission');
+        element('btnClear').listeners.click();
+        assert.equal(element('btnClear').disabled, true);
+        grant(true);
+        await flush();
+        assert.deepEqual(messages.map(m => m.type), ['GET_SETTINGS', 'SAVE_SETTINGS']);
+        element('btnClear').listeners.click();
+        key.value = 'later edit';
+        key.listeners.input();
+        element('btnSave').listeners.click();
+        assert.equal(element('btnSave').disabled, true);
+        acknowledgeClear({ ok: true });
+        await flush();
+        assert.equal(key.value, 'later edit');
+        assert.deepEqual(messages.map(m => m.type), ['GET_SETTINGS', 'SAVE_SETTINGS', 'CLEAR_API_KEY']);
+        assert.equal(element('btnSave').disabled, false);
+        assert.equal(element('btnClear').disabled, false);
+      }, { granted, response: () => ++writes === 1 ? { ok: true } : clearing });
+    },
+  },
+  {
     name: 'Options requests all-sites permission before awaiting and restores the public choice after denial',
     async fn() {
       await withOptionsScreen(async ({ element, inputs, messages, events, flush }) => {

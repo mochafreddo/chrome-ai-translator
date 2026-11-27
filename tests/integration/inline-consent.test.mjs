@@ -128,13 +128,16 @@ async function main() {
   await panel.evaluate("document.getElementById('btnInlineStop').click()");
   assert.ok(await until(() => panel.evaluate("document.getElementById('inlineStatus').textContent.includes('stopped')"), 5000, 100),
     'Panel displays stopped Inline Translation');
+  await panel.evaluate("document.getElementById('btnInlineTranslate').click()");
+  assert.ok(await until(() => panel.evaluate("document.getElementById('inlineStatus').textContent.includes('translation on')"), 5000, 100),
+    'Panel starts a new Operation');
   await panel.evaluate("document.getElementById('btnInlineRestore').click()");
   assert.ok(await until(() => ctx.page.evaluate('document.querySelector("main").textContent')
     .then(text => text === initial), 5000, 100), 'Original text restores the article');
   assert.equal(await worker.evaluate(`globalThis.endedOperations.length === 2 &&
-    Number.isSafeInteger(globalThis.endedOperations[0]) &&
-    globalThis.endedOperations[0] === globalThis.endedOperations[1]`), true,
-  'Stop and Original text reach the worker for the same Operation');
+    globalThis.endedOperations.every(Number.isSafeInteger) &&
+    globalThis.endedOperations[0] < globalThis.endedOperations[1]`), true,
+    'Stop and Original text reach the worker for successive Operations');
   assert.deepEqual(failures, [], 'All requests stayed intercepted');
   console.log('PASS inline consent - panel button preserves translation');
   for (const { variant, count, unchanged, opened } of concealedRequests) {

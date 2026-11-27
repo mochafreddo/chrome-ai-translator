@@ -35,6 +35,8 @@
     let authorizedUntil = 0;
     let preparation = null;
     let current = null;
+    let workerOperationId = null;
+    let endUnconfirmed = false;
     let progress = '';
     let error = '';
 
@@ -118,6 +120,8 @@
       session.begin(settings);
       const store = { id: session.operationId, settings };
       current = store;
+      workerOperationId = store.id;
+      endUnconfirmed = false;
       store.transport = transport.createInlineLocalDiagnosticTransport({
         outbox: session.outbox,
         operationId: store.id,
@@ -187,18 +191,28 @@
       });
     }
 
-    async function endWorkerOperation(store) {
-      if (!store) return;
-      const endedAt = session.operationId;
+    async function endWorkerOperation() {
+      const operationId = workerOperationId;
+      if (operationId === null) return;
+      const unconfirmed = 'The worker could not confirm that translation stopped.';
       try {
-        const response = await sendMessage({ type: 'END_INLINE_TRANSLATION_OPERATION', operationId: store.id });
-        if (!response?.ok) throw new Error('The worker could not confirm that translation stopped.');
+        const response = await sendMessage({ type: 'END_INLINE_TRANSLATION_OPERATION', operationId });
+        if (!response?.ok) throw new Error(unconfirmed);
       } catch (failure) {
-        if (session.operationId === endedAt) {
-          error = 'The worker could not confirm that translation stopped.';
+        if (workerOperationId === operationId) {
+          endUnconfirmed = true;
+          error = unconfirmed;
           onChange();
         }
         throw failure;
+      }
+      if (workerOperationId === operationId) {
+        workerOperationId = null;
+        if (endUnconfirmed) {
+          endUnconfirmed = false;
+          if (error === unconfirmed) error = '';
+          onChange();
+        }
       }
     }
 
@@ -208,7 +222,7 @@
       current?.scanner.stop();
       current?.transport.stop();
       update();
-      return endWorkerOperation(current);
+      return endWorkerOperation();
     }
 
     return Object.freeze({
@@ -220,14 +234,13 @@
         session.restore();
         // Original text leaves the preceding transport to finish its own outbox/retry.
         // Its feedback ownership ends here; only Stop requests the final flush.
-        const ended = current;
         current = null;
         progress = '';
         error = '';
         onChange();
-        return endWorkerOperation(ended);
+        return endWorkerOperation();
       },
-      getStatus: () => ({ status: session.status, progress, error }),
+      getStatus: () => ({ status: session.status, progress, error, ...(endUnconfirmed && { endUnconfirmed }) }),
     });
   }
 

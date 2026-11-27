@@ -16,6 +16,8 @@ const elButtonVisibility = hasDocument
 const elStatus = hasDocument ? document.getElementById('status') : null;
 const elError = hasDocument ? document.getElementById('errorBox') : null;
 const elInlineLogs = hasDocument ? document.getElementById('inlineDiagnostics') : null;
+const btnSave = hasDocument ? document.getElementById('btnSave') : null;
+const btnClear = hasDocument ? document.getElementById('btnClear') : null;
 const btnCopyDiagnostics = hasDocument ? document.getElementById('btnCopyDiagnostics') : null;
 const btnSaveDiagnostics = hasDocument ? document.getElementById('btnSaveDiagnostics') : null;
 const diagnosticsApi = globalThis.ChromeAiTranslatorDiagnostics ||
@@ -191,18 +193,22 @@ async function save() {
   if (!resp?.ok) {
     throw new Error('Failed to save settings');
   }
-  if (key && submittedRevision === keyEditRevision && next.service === readCheckedChoice(elServices, 'openai')) {
-    elApiKey.value = '';
-  }
+  if (key) clearSubmittedInput(next.service, submittedRevision);
   setStatus('Saved.');
   setTimeout(() => setStatus(''), 1200);
 }
 
+function clearSubmittedInput(service, revision) {
+  if (revision === keyEditRevision && service === readCheckedChoice(elServices, 'openai')) elApiKey.value = '';
+}
+
 async function clearKey() {
   setError(null);
+  const service = readCheckedChoice(elServices, 'openai');
+  const submittedRevision = keyEditRevision;
   if (
     !shouldClearStoredApiKey(() =>
-      window.confirm(`Clear the stored ${readCheckedChoice(elServices, 'openai') === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key? This cannot be undone here.`)
+      window.confirm(`Clear the stored ${service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API key? This cannot be undone here.`)
     )
   ) {
     setStatus('Key not changed.');
@@ -210,8 +216,8 @@ async function clearKey() {
     return;
   }
   setStatus('Clearing key...');
-  await clearStoredApiKey(chrome, readCheckedChoice(elServices, 'openai'));
-  elApiKey.value = '';
+  await clearStoredApiKey(chrome, service);
+  clearSubmittedInput(service, submittedRevision);
   setStatus('Key cleared.');
   setTimeout(() => setStatus(''), 1200);
 }
@@ -225,23 +231,17 @@ async function clearStoredApiKey(chromeApi, service = 'openai') {
   if (!response?.ok) throw new Error('Failed to clear stored API key');
 }
 
-function handleClearClick() {
-  if (!settingsLoaded) return;
-  clearKey().catch(() => {
-    setError('Failed to clear stored API key');
-    setStatus('');
-  });
+function disableSettingsActions(disabled) {
+  btnSave.disabled = disabled;
+  btnClear.disabled = disabled;
 }
 
-let settingsLoaded = false;
-let saveInFlight = false;
 let keyEditRevision = 0;
 
 async function initializeSettings() {
   const retry = document.getElementById('btnRetrySettings');
   retry.hidden = true;
-  document.getElementById('btnSave').disabled = true;
-  document.getElementById('btnClear').disabled = true;
+  disableSettingsActions(true);
   try {
     await load();
   } catch {
@@ -249,25 +249,22 @@ async function initializeSettings() {
     setError('Failed to load settings');
     return;
   }
-  settingsLoaded = true;
   setError('');
-  document.getElementById('btnSave').disabled = false;
-  document.getElementById('btnClear').disabled = false;
+  disableSettingsActions(false);
   await loadInlineLogs();
 }
 
-function handleSaveClick() {
-  if (!settingsLoaded || saveInFlight) return;
-  saveInFlight = true;
-  const button = document.getElementById('btnSave');
-  button.disabled = true;
-  save().catch(() => {
-    setError('Failed to save settings');
+async function runSettingsAction(action, failureMessage) {
+  if (btnSave.disabled) return;
+  disableSettingsActions(true);
+  try {
+    await action();
+  } catch {
+    setError(failureMessage);
     setStatus('');
-  }).finally(() => {
-    saveInFlight = false;
-    button.disabled = false;
-  });
+  } finally {
+    disableSettingsActions(false);
+  }
 }
 
 if (hasDocument) {
@@ -277,8 +274,8 @@ if (hasDocument) {
   elApiKey.addEventListener('input', () => { keyEditRevision += 1; });
   for (const input of elServices) input.addEventListener('change', updateService);
 
-  document.getElementById('btnSave').addEventListener('click', handleSaveClick);
-  document.getElementById('btnClear').addEventListener('click', handleClearClick);
+  btnSave.addEventListener('click', () => runSettingsAction(save, 'Failed to save settings'));
+  btnClear.addEventListener('click', () => runSettingsAction(clearKey, 'Failed to clear stored API key'));
   btnCopyDiagnostics.addEventListener('click', () => copyDiagnostics().catch((error) => setError(error?.message || String(error))));
   btnSaveDiagnostics.addEventListener('click', () => saveDiagnostics().catch((error) => setError(error?.message || String(error))));
 

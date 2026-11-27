@@ -129,8 +129,8 @@
       return reads.rects.get(el);
     }
 
-    function hasUnclippedPositionedDescendant(el, candidate, reads, subtree = el) {
-      const stack = candidate ? [candidate] : getInlineChildNodes(subtree);
+    function hasUnclippedPositionedDescendant(el, candidate, reads) {
+      const stack = candidate ? [candidate] : getInlineChildNodes(el);
       while (stack.length) {
         const node = stack.pop();
         if (!node || node === el || !(node instanceof platform.HTMLElement)) continue;
@@ -146,7 +146,7 @@
       return false;
     }
 
-    function isElementHidden(el, candidate, reads, includeCandidateChildren) {
+    function isElementHidden(el, candidate, reads) {
       if (!el || !(el instanceof platform.HTMLElement)) return false;
       const style = getInlineStyle(el, reads);
       const rect = getInlineElementRect(el, reads);
@@ -160,8 +160,7 @@
         style.display === 'none' ||
         style.visibility === 'hidden' ||
         style.opacity === '0' ||
-        (tinyClippedBox && !hasUnclippedPositionedDescendant(el, candidate, reads) &&
-          !(includeCandidateChildren && hasUnclippedPositionedDescendant(el, null, reads, candidate))) ||
+        (tinyClippedBox && !hasUnclippedPositionedDescendant(el, candidate, reads)) ||
         el.hidden ||
         el.getAttribute('aria-hidden') === 'true'
       );
@@ -192,11 +191,11 @@
       );
     }
 
-    function isEligibleElement(parent, reads, includeCandidateChildren = false) {
+    function isEligibleElement(parent, reads) {
       if (!parent || isInlineEffectivelyEditable(root)) return false;
       let insideRoot = true;
       for (let element = parent; element; element = element.parentElement) {
-        if (isInlineTranslationExcludedElement(element) || isElementHidden(element, parent, reads, includeCandidateChildren)) return false;
+        if (isInlineTranslationExcludedElement(element) || isElementHidden(element, parent, reads)) return false;
         if (insideRoot && (element.isContentEditable || element.hasAttribute?.('contenteditable') &&
           hasEditableAttribute(element))) return false;
         if (element === root) insideRoot = false;
@@ -352,7 +351,6 @@
       scanStack = null;
       mutationSweep = true;
       rescanAfterCurrentSweep = false;
-      session.resetQueue();
       rescan();
     }
 
@@ -374,12 +372,12 @@
         }
         return false;
       })) {
+        session.resetQueue();
         if (!mutationSweep) {
           onViewportChange();
           return;
         }
         if (scanStack) rescanAfterCurrentSweep = true;
-        session.resetQueue();
         rescan();
       }
     }
@@ -434,8 +432,22 @@
       stopWatching();
     }
 
-    return { start, selectRoot, rescan, stop,
-      isEligibleElement: block => isEligibleElement(block, { styles: new Map(), rects: new Map() }, true) };
+    function hasEligibleOwnProse(block) {
+      const reads = { styles: new Map(), rects: new Map() };
+      const stack = getInlineChildNodes(block);
+      while (stack.length) {
+        const node = stack.pop();
+        if (isInlineTextNode(node)) {
+          if (!shouldSkipInlineBlockCandidateTextNode(node, reads)) return true;
+        } else if (!isInlineTranslationExcludedElement(node) && !inlineBlockCodec.isSemanticBlockElement(node) &&
+          !inlineBlockCodec.isBlockChildContainerElement(node)) {
+          for (const child of node.childNodes || []) stack.push(child);
+        }
+      }
+      return false;
+    }
+
+    return { start, selectRoot, rescan, stop, isEligibleElement: hasEligibleOwnProse };
   }
 
   const api = { createInlineViewport };

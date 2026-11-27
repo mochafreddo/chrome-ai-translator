@@ -39,7 +39,7 @@ function getInlineTranslationPanelViewModel({
 } = {}) {
   const status = snapshot?.status || 'original';
   const { isActive, canStop, canRestore } =
-    getInlineTranslationControlAvailability(status);
+    getInlineTranslationControlAvailability(status, snapshot?.endUnconfirmed);
   // Start is not among the rules — it stays pressable in every status — so what the tab's
   // status decides here is only which of the two things the label promises.
   const startText = isActive ? 'Scan visible text' : 'Translate visible text';
