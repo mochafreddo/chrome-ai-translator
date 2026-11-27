@@ -672,6 +672,41 @@ exports.tests = [
   },
 
   {
+    name: 'guides Korean phase headings and references on initial and repair requests',
+    async fn() {
+      const record = plainRecord('phase', 'After Phase A, review Phase E.');
+      const requests = [];
+      const corrected = 'A 단계 후 E 단계를 검토하세요.';
+      const [result] = await execute([record], SETTINGS, async request => {
+        requests.push(request);
+        return response([{ id: record.id, template: requests.length === 1 ? 'A 단계 후 Phase E를 검토하세요.' : corrected }]);
+      });
+      assert.equal(requests.length, 2);
+      for (const { instructions } of requests) {
+        assert.match(instructions, /Phase E[^\n]*E 단계/);
+      }
+      assert.equal(result.disposition, 'apply');
+      assert.equal(result.template, corrected);
+    },
+  },
+  {
+    name: 'checks unmasked Korean phase references with existing longest-match priority',
+    fn() {
+      const source = 'After Phase A, review Phase E.';
+      for (const phrase of ['Phase A', 'Phase E']) {
+        const output = `${phrase}(해당 단계)를 검토하세요.`;
+        assert.deepEqual(assessTranslationQuality(source, output, 'ko').codes, ['quality.english_residue']);
+        assert.equal(assessTranslationQuality(source, output, 'ko', null,
+          [example(source, output, phrase, '해당 단계')]).status, 'complete');
+      }
+      assert.equal(assessTranslationQuality('Review Phase EU.', 'Phase EU 확인.', 'ko').status, 'complete');
+      assert.equal(assessTranslationQuality(source, 'Phase E を確認。', 'ja').status, 'complete');
+      const { evidence } = assessTranslationQuality(source, 'After Phase A 확인, Phase E 확인.', 'ko');
+      assert.equal(evidence.sharedEnglishSequenceLength, 3);
+      assert.equal(evidence.sharedEnglishSequenceCount, 1);
+    },
+  },
+  {
     name: 'gives English-residue repairs explicit guidance for quoted references and prose beside atoms',
     async fn() {
       for (const [source, initial, corrected, phrases] of [
