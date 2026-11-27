@@ -86,7 +86,7 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
       get operationId() { return session.operationId; },
       get status() { return session.status; },
       isCurrent: session.isCurrent,
-      resetQueue() { resets += 1; session.resetQueue(); },
+      resetQueue(changedElements) { resets += 1; session.resetQueue(changedElements); },
       admit(block) { admissions.push(block); return session.admit(block); },
     },
     platform,

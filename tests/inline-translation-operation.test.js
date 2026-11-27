@@ -132,7 +132,7 @@ function createOperationFixture(options = {}) {
 
 exports.name = 'inline translation operation';
 exports.tests = [{
-  name: 'an admitted paragraph scrolling offscreen waits for a free batch slot',
+  name: 'an admitted paragraph survives scroll and translation of a different block',
   async fn() {
     const f = createOperationFixture();
     await f.control('authorize');
@@ -146,7 +146,12 @@ exports.tests = [{
     waiting.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
     f.viewportEvent('scroll');
     f.advance();
-    await f.settle();
+    const source = f.block.textContent;
+    const settlement = f.settle();
+    for (let step = 0; step < 12 && f.block.textContent === source; step += 1) await Promise.resolve();
+    assert.notEqual(f.block.textContent, source);
+    f.mutation({ type: 'childList', target: f.block, removedNodes: [], addedNodes: f.block.childNodes });
+    await settlement;
     assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(r => r.template)),
       [waiting.textContent]);
     await f.operation.stop();
@@ -1177,5 +1182,25 @@ exports.tests.push({
     assert.equal(records.length, 1);
     assert.match(records[0].template, /Visible positioned prose\./);
     await f.control('stop');
+  },
+});
+
+exports.tests.push({
+  name: 'an older END failure is cleared when a prepared Operation starts',
+  async fn() {
+    let acknowledge;
+    const f = createOperationFixture({ endOperation: () => new Promise(resolve => { acknowledge = resolve; }) });
+    await f.control('authorize');
+    await f.control('start');
+    const previousEnd = f.operation.restore();
+    f.holdSettings();
+    await f.control('start');
+    acknowledge({ ok: false });
+    await assert.rejects(previousEnd);
+    assert.match(f.operation.getStatus().error, /could not confirm/);
+    f.settingsRequests[0].resolve({ ok: true, settings: { apiKey: 'synthetic-key' } });
+    await flushMicrotasks();
+    assert.equal(f.operation.getStatus().status, 'active');
+    assert.equal(f.operation.getStatus().error, '');
   },
 });

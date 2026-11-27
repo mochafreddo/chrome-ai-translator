@@ -501,9 +501,7 @@
     return true;
   }
 
-  // Puts every block queued but not yet sent back to `original`, so the rescan a viewport
-  // change schedules admits only what is still in view.
-  function resetQueue(operation) {
+  function resetQueue(operation, changedElements) {
     if (!operation?.queue?.length) return;
 
     const retained = [];
@@ -511,7 +509,7 @@
       if (record?.state === 'queued') {
         // `retryOf` is what makes a queued record a page-change retry, and a retry is kept
         // rather than reset: the block it superseded is still waiting on it.
-        if (record.retryOf) {
+        if (record.retryOf || (changedElements && !changedElements.has(record.blockElement))) {
           retained.push(record);
           continue;
         }
@@ -837,7 +835,7 @@
         ? admitBlock(operation, blockElement) : null,
       takeBatch: () => takeBatch(operation),
       settle,
-      resetQueue: () => resetQueue(operation),
+      resetQueue: changedElements => resetQueue(operation, changedElements),
       progress: () => ({
         counts: getStatusCounts(operation.records),
         reason: getTerminalReason(operation.records),

@@ -122,6 +122,7 @@
       current = store;
       workerOperationId = store.id;
       endUnconfirmed = false;
+      error = '';
       store.transport = transport.createInlineLocalDiagnosticTransport({
         outbox: session.outbox,
         operationId: store.id,

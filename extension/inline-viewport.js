@@ -366,13 +366,16 @@
         timer = null;
         return;
       }
-      if (!records?.length || records.some(record => {
-        for (let node = record.target; node; node = node.parentNode) {
-          if (node === root) return true;
+      const changedElements = new Set();
+      for (const record of records || []) {
+        for (let node = record.target; node && !changedElements.has(node); node = node.parentNode) {
+          changedElements.add(node);
+          if (node === root) break;
         }
-        return false;
-      })) {
-        session.resetQueue();
+      }
+      if (!records?.length || changedElements.has(root)) {
+        const scoped = records?.length && records.every(record => record.type !== 'attributes');
+        session.resetQueue(scoped ? changedElements : undefined);
         if (!mutationSweep) {
           onViewportChange();
           return;

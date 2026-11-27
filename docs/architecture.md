@@ -91,7 +91,7 @@ Late responses still settle against their originating Session. Reported repairs 
 
 ### Cache and page changes
 
-Scrolling and resizing preserve admitted records, including those now outside the viewport. A DOM mutation can remove an unsent record from the queue and trigger rediscovery within the same Operation. If its original ownership and supported classification still match, Session reuses its record and serialized payload. Changed source is serialized again into that eligible record. Sent records and page-change retries keep their separate identities and history.
+Scrolling and resizing preserve admitted records, including those now outside the viewport. A content mutation resets affected unsent records and triggers rediscovery within the same Operation. Attribute changes can affect other elements through CSS and restart admission across the selected root. If its original ownership and supported classification still match, Session reuses its record and serialized payload. Changed source is serialized again into that eligible record. Sent records and page-change retries keep their separate identities and history.
 
 Viewport retains the remaining traversal stack between bounded scans. Scroll, resize and observed DOM changes discard that position. Each synchronous scan shares its style and element-rectangle reads, collects candidates before admission can apply cached translations, then invalidates its remaining position if those applications changed the DOM. A pending scan keeps its deadline through further changes. Detaching the selected article pauses submission until an explicit rescan selects the current root.
 
