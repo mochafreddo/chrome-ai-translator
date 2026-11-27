@@ -159,6 +159,19 @@ async function save() {
     elButtonVisibility,
     BUTTON_VISIBILITY.NEVER
   );
+  const next = {
+    service: readCheckedChoice(elServices, 'openai'),
+    targetLanguage: elTargetLanguage.value.trim() || 'Korean',
+    tone: elTone.value,
+    model: elModel.value.trim() || DEFAULT_MODEL,
+    reasoningEffort: elReasoningEffort.value,
+    buttonVisibility,
+  };
+
+  const submittedRevision = keyEditRevision;
+  const key = elApiKey.value.trim();
+  if (key) next[next.service === 'openrouter' ? 'openrouterApiKey' : 'apiKey'] = key;
+
   const accessApplied = applyButtonVisibilityAccess(chrome, buttonVisibility);
 
   if (!(await accessApplied)) {
@@ -171,24 +184,15 @@ async function save() {
     return;
   }
 
-  const next = {
-    service: readCheckedChoice(elServices, 'openai'),
-    targetLanguage: elTargetLanguage.value.trim() || 'Korean',
-    tone: elTone.value,
-    model: elModel.value.trim() || DEFAULT_MODEL,
-    reasoningEffort: elReasoningEffort.value,
-    buttonVisibility,
-  };
-
-  const key = elApiKey.value.trim();
-  if (key) next[next.service === 'openrouter' ? 'openrouterApiKey' : 'apiKey'] = key;
-
   const resp = await chrome.runtime.sendMessage({
     type: 'SAVE_SETTINGS',
     settings: next,
   });
   if (!resp?.ok) {
     throw new Error('Failed to save settings');
+  }
+  if (key && submittedRevision === keyEditRevision && next.service === readCheckedChoice(elServices, 'openai')) {
+    elApiKey.value = '';
   }
   setStatus('Saved.');
   setTimeout(() => setStatus(''), 1200);
@@ -231,6 +235,7 @@ function handleClearClick() {
 
 let settingsLoaded = false;
 let saveInFlight = false;
+let keyEditRevision = 0;
 
 async function initializeSettings() {
   const retry = document.getElementById('btnRetrySettings');
@@ -269,6 +274,7 @@ if (hasDocument) {
   // The markup names no model of its own: a placeholder still naming the model the
   // extension defaulted to yesterday is the same quiet lie as a stale fallback.
   elModel.placeholder = DEFAULT_MODEL;
+  elApiKey.addEventListener('input', () => { keyEditRevision += 1; });
   for (const input of elServices) input.addEventListener('change', updateService);
 
   document.getElementById('btnSave').addEventListener('click', handleSaveClick);
