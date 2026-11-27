@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
-const { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync, statSync, existsSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync, rmdirSync, statSync, existsSync } = require('node:fs');
 const { tmpdir } = require('node:os');
-const { join } = require('node:path');
+const { basename, join } = require('node:path');
 const { createHash } = require('node:crypto');
 const { loadQualityCorpus } = require('./integration/model-quality-corpus.mjs');
 const { coverageMatches, summarizeQuality, inlineQualityCompleted, inlineQualityTerminal, mockDisplayedProseMatches } = require('./integration/model-quality-observation.mjs');
@@ -67,6 +68,30 @@ function makeObserver(records) {
 
 exports.name = 'model quality preparation';
 exports.tests = [{
+  name: 'both model quality commands reject a repository output through its real parent before creating it',
+  fn() {
+    withTemporaryWmt(({ root }) => {
+      const alias = join(root, 'repository');
+      symlinkSync(__dirname, alias, 'dir');
+      const output = join(alias, basename(root));
+      const corpus = ['--wmt-corpus', join(root, 'missing.json')];
+      for (const [entry, args] of [
+        ['mock', [...corpus, '--output', output]],
+        ['live', ['--output', output, ...corpus, '--budget-usd', '5']],
+      ]) {
+        try {
+          const result = spawnSync(process.execPath, [join(__dirname, 'integration', `model-quality.${entry}.mjs`), ...args],
+            { cwd: root, encoding: 'utf8' });
+          assert.equal(result.status, 1);
+          assert.match(result.stderr, /output must be outside the repository/i);
+          assert.equal(existsSync(output), false);
+        } finally {
+          if (existsSync(output)) rmdirSync(output);
+        }
+      }
+    });
+  },
+}, {
   name: 'loads the frozen 3 regression, 3 application, and 6 synthetic WMT fixtures without references',
   fn() {
     let temporaryRoot;

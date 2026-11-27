@@ -1,9 +1,19 @@
 import { createRequire } from 'node:module';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { inlineQualityCompleted, summarizeQuality } from './model-quality-observation.mjs';
 
 const require = createRequire(import.meta.url);
 const inlineTemplate = require('../../extension/inline-template.js');
 const { parseCompletedResponse } = require('../../extension/openai-response.js');
+
+export function resolveQualityOutput(path) {
+  const target = resolve(path);
+  const output = join(realpathSync.native(dirname(target)), basename(target));
+  const root = realpathSync.native(new URL('../../', import.meta.url));
+  if (output === root || output.startsWith(root + sep)) throw new Error('Model quality output must be outside the repository.');
+  return output;
+}
 
 export function compatibleProfiles(records) {
   return PROFILES.filter(profile => {
