@@ -129,6 +129,12 @@ exports.tests = [
           tone: 'technical', model: 'custom-openai', reasoningEffort: 'high',
             buttonVisibility: 'onInvocation',
         } });
+        assert.equal(element('apiKey').value, '');
+        element('tone').value = 'formal';
+        element('btnSave').listeners.click();
+        await flush();
+        assert.equal(messages.at(-1).settings.tone, 'formal');
+        assert.equal('openrouterApiKey' in messages.at(-1).settings, false);
         element('btnClear').listeners.click();
         await flush();
         assert.deepEqual(messages.at(-1), { type: 'CLEAR_API_KEY', service: 'openrouter' });
@@ -200,6 +206,38 @@ exports.tests = [
     },
   },
   {
+    name: 'Options keeps Save and Clear ordered and preserves edits made while clearing',
+    async fn() {
+      let grant, acknowledgeClear;
+      const granted = new Promise(resolve => { grant = resolve; });
+      const clearing = new Promise(resolve => { acknowledgeClear = resolve; });
+      let writes = 0;
+      await withOptionsScreen(async ({ element, inputs, events, messages, flush }) => {
+        helpers.checkChoice(inputs, 'allPages');
+        const key = element('apiKey');
+        key.value = 'submitted';
+        element('btnSave').listeners.click();
+        assert.equal(events.at(-1), 'permission');
+        element('btnClear').listeners.click();
+        assert.equal(element('btnClear').disabled, true);
+        grant(true);
+        await flush();
+        assert.deepEqual(messages.map(m => m.type), ['GET_SETTINGS', 'SAVE_SETTINGS']);
+        element('btnClear').listeners.click();
+        key.value = 'later edit';
+        key.listeners.input();
+        element('btnSave').listeners.click();
+        assert.equal(element('btnSave').disabled, true);
+        acknowledgeClear({ ok: true });
+        await flush();
+        assert.equal(key.value, 'later edit');
+        assert.deepEqual(messages.map(m => m.type), ['GET_SETTINGS', 'SAVE_SETTINGS', 'CLEAR_API_KEY']);
+        assert.equal(element('btnSave').disabled, false);
+        assert.equal(element('btnClear').disabled, false);
+      }, { granted, response: () => ++writes === 1 ? { ok: true } : clearing });
+    },
+  },
+  {
     name: 'Options requests all-sites permission before awaiting and restores the public choice after denial',
     async fn() {
       await withOptionsScreen(async ({ element, inputs, messages, events, flush }) => {
@@ -215,6 +253,29 @@ exports.tests = [
       }, { granted: false });
     },
   },
+  {
+    name: 'Options submits the service and key from the save gesture while permission is pending',
+    async fn() {
+      let grant;
+      const granted = new Promise(resolve => { grant = resolve; });
+      await withOptionsScreen(async ({ element, inputs, services, events, messages, flush }) => {
+        helpers.checkChoice(inputs, 'allPages');
+        element('apiKey').value = 'first-synthetic';
+        element('btnSave').listeners.click();
+        assert.equal(events.at(-1), 'permission');
+        helpers.checkChoice(services, 'openrouter');
+        services[1].listeners.change();
+        element('apiKey').value = 'second-synthetic';
+        grant(true);
+        await flush();
+        const { settings } = messages.at(-1);
+        assert.equal(settings.service, 'openai');
+        assert.equal(settings.apiKey, 'first-synthetic');
+        assert.equal('openrouterApiKey' in settings, false);
+        assert.equal(element('apiKey').value, 'second-synthetic');
+      }, { granted });
+    },
+  },
   ...[undefined, { ok: false, error: { message: 'sk-synthetic' } }].map((response) => ({
     name: `Options reports ${response ? 'a rejected' : 'an unanswered'} settings save without success`,
     async fn() {
@@ -227,6 +288,27 @@ exports.tests = [
       }, { response: () => response });
     },
   })),
+  {
+    name: 'Options preserves a new edit with identical text while awaiting save confirmation',
+    async fn() {
+      let confirmSave;
+      const response = new Promise(resolve => { confirmSave = resolve; });
+      await withOptionsScreen(async ({ element, flush }) => {
+        const key = element('apiKey');
+        key.value = 'synthetic';
+        element('btnSave').listeners.click();
+        await flush();
+        assert.equal(key.value, 'synthetic');
+        key.value = '';
+        key.listeners.input?.();
+        key.value = 'synthetic';
+        key.listeners.input?.();
+        confirmSave({ ok: true });
+        await flush();
+        assert.equal(key.value, 'synthetic');
+      }, { response });
+    },
+  },
   {
     name: 'Options saves a new key once and reports a lost worker response without exposing the key',
     async fn() {
@@ -250,6 +332,7 @@ exports.tests = [
         click();
         await flush();
         assert.equal(messages.filter((message) => message.type === 'SAVE_SETTINGS').length, 2);
+        assert.equal(messages.at(-1).settings.apiKey, 'sk-new-synthetic');
       }, { response: () => pending });
     },
   },

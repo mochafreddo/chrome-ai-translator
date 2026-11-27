@@ -2,6 +2,7 @@
 // The hidden fixture block makes Stop exercise an uncached request. Run separately
 // with verify:live:inline or verify:live:openrouter:inline after billed approval.
 
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -29,7 +30,7 @@ if (serviceArguments.length && (serviceArguments.length !== 2 || serviceArgument
   throw new Error('Use --service openai or --service openrouter');
 }
 const SERVICE = serviceArguments[1] || 'openai';
-const SESSION = `chrome-ai-translator-live-inline-${SERVICE}`;
+const SESSION = randomUUID();
 const TARGET_LANGUAGE = 'Korean';
 const HANGUL = /[가-힣]/;
 

@@ -74,6 +74,7 @@ function createOperationFixture(options = {}) {
         })) });
         return new Promise((resolve, reject) => pending.push({ message, resolve, reject }));
       }
+      if (message.type === 'END_INLINE_TRANSLATION_OPERATION') return options.endOperation?.(message) ?? Promise.resolve({ ok: true });
       return holdDiagnostics
         ? new Promise((resolve, reject) => diagnosticRequests.push({ message, resolve, reject }))
         : Promise.resolve({ ok: true });
@@ -131,6 +132,206 @@ function createOperationFixture(options = {}) {
 
 exports.name = 'inline translation operation';
 exports.tests = [{
+  name: 'a queued paragraph can be submitted once after detachment and rediscovery',
+  async fn() {
+    const f = createOperationFixture();
+    await f.control('authorize');
+    await f.control('start');
+    const root = f.document.body;
+    root.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    root.appendChild(waiting);
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+
+    root.removeChild(waiting);
+    f.mutation({ type: 'childList', target: root, removedNodes: [waiting] });
+    await f.settle();
+    assert.equal(f.pending.length, 2);
+    waiting.textContent = 'The reader can now see this revised paragraph.';
+    root.appendChild(waiting);
+    f.mutation({ type: 'childList', target: root, addedNodes: [waiting] });
+    await f.rescan();
+    await f.rescan();
+    assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(record => record.template)),
+      ['The reader can now see this revised paragraph.']);
+    await f.operation.stop();
+  },
+}, {
+  name: 'a rescan refreshes a visible queued paragraph before a batch slot opens',
+  async fn() {
+    const f = createOperationFixture();
+    await f.control('authorize');
+    await f.control('start');
+    const root = f.document.body;
+    root.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    root.appendChild(waiting);
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+
+    const text = waiting.childNodes[0];
+    text.nodeValue = 'The article now uses this sentence.';
+    f.mutation({ type: 'characterData', target: text });
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+    await f.settle();
+    assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(record => record.template)),
+      ['The article now uses this sentence.']);
+    await f.operation.stop();
+  },
+}, {
+  name: 'a briefly unsupported queued paragraph can recover before its first submission',
+  async fn() {
+    const f = createOperationFixture();
+    await f.control('authorize');
+    await f.control('start');
+    const root = f.document.body;
+    root.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    root.appendChild(waiting);
+    await f.rescan();
+    const nested = f.document.createElement('custom-card');
+    nested.textContent = 'Unsupported formatting.';
+    waiting.appendChild(nested);
+    waiting.appendChild(f.document.createTextNode(' Closing sentence.'));
+    f.mutation({ type: 'childList', target: waiting, addedNodes: [nested] });
+    await f.settle();
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+
+    waiting.removeChild(nested);
+    f.mutation({ type: 'childList', target: waiting, removedNodes: [nested] });
+    await f.rescan();
+    assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(record => record.template)),
+      [waiting.textContent]);
+    await f.operation.stop();
+  },
+}, {
+  name: 'a free slot waits for newly revealed prose across an attribute rescan',
+  async fn() {
+    const f = createOperationFixture();
+    const root = f.document.body;
+    const section = f.document.createElement('section');
+    section.computedStyle = { display: 'none' };
+    for (let index = 0; index < 1200; index += 1) section.appendChild(f.document.createTextNode('!'));
+    const earlier = f.document.createElement('p');
+    earlier.textContent = 'This newly visible paragraph comes first.';
+    section.appendChild(earlier);
+    root.insertBefore(section, f.block);
+    await f.control('authorize');
+    await f.control('start');
+    root.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    root.appendChild(waiting);
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+
+    section.computedStyle = {};
+    f.mutation({ type: 'attributes', target: section });
+    await f.settle();
+    assert.equal(f.pending.length, 2);
+    f.advance();
+    await flushMicrotasks();
+    assert.equal(f.pending.length, 2);
+    f.advance();
+    await flushMicrotasks();
+    assert.deepEqual(f.pending[2]?.message.records.map(record => record.template),
+      [earlier.textContent, waiting.textContent]);
+    await f.operation.stop();
+  },
+}, {
+  name: 'an admitted paragraph survives scroll and translation of a different block',
+  async fn() {
+    const f = createOperationFixture();
+    await f.control('authorize');
+    await f.control('start');
+    f.document.body.appendChild(f.paragraph(300));
+    await f.rescan();
+    const waiting = f.paragraph(400);
+    f.document.body.appendChild(waiting);
+    await f.rescan();
+    assert.equal(f.pending.length, 2);
+    waiting.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
+    f.viewportEvent('scroll');
+    f.advance();
+    const source = f.block.textContent;
+    const settlement = f.settle();
+    for (let step = 0; step < 12 && f.block.textContent === source; step += 1) await Promise.resolve();
+    assert.notEqual(f.block.textContent, source);
+    f.mutation({ type: 'childList', target: f.block, removedNodes: [], addedNodes: f.block.childNodes });
+    await settlement;
+    assert.deepEqual(f.pending.slice(2).flatMap(({ message }) => message.records.map(r => r.template)),
+      [waiting.textContent]);
+    await f.operation.stop();
+  },
+}, {
+  name: 'submission rechecks ancestor eligibility and keeps eligible offscreen prose in the batch',
+  async fn() {
+    const f = createOperationFixture();
+    const section = f.document.createElement('section');
+    section.appendChild(f.block);
+    f.document.body.appendChild(section);
+    const other = f.paragraph(300);
+    f.document.body.appendChild(other);
+    try {
+      f.operation.authorize();
+      f.operation.start();
+      await Promise.resolve();
+      section.setAttribute('role', 'navigation');
+      other.rect = { top: 2000, bottom: 2024, left: 10, right: 300, width: 290, height: 24 };
+      await flushMicrotasks();
+      assert.deepEqual(f.pending.flatMap(request => request.message.records.map(r => r.template)),
+        [other.textContent]);
+    } finally { f.operation.stop(); }
+  },
+}, {
+  name: 'a changed block under an excluded ancestor retains its text even with a cached translation',
+  async fn() {
+    const f = createOperationFixture();
+    const section = f.document.createElement('section');
+    f.block.textContent = 'Earlier notes.';
+    const other = f.document.createElement('p');
+    other.textContent = 'Current notes.';
+    section.appendChild(other);
+    f.document.body.appendChild(section);
+    try {
+      f.operation.authorize();
+      await f.control('start');
+      const [earlier, current] = f.pending[0].message.records;
+      other.textContent = 'Earlier notes.';
+      section.hidden = true;
+      f.pending[0].resolve({ ok: true, results: [earlier, current].map(record => ({
+        id: record.id, disposition: 'apply', template: '번역된 메모.',
+      })) });
+      await flushMicrotasks();
+      assert.equal(f.block.textContent, '번역된 메모.');
+      assert.equal(other.textContent, 'Earlier notes.');
+      assert.equal(f.pending.length, 1);
+    } finally { f.operation.stop(); }
+  },
+}, {
+  name: 'submission skips a block once its containing section becomes an editing region',
+  async fn() {
+    const f = createOperationFixture();
+    const section = f.document.createElement('section');
+    section.appendChild(f.block);
+    f.block.setAttribute('contenteditable', 'false');
+    f.document.body.appendChild(section);
+    try {
+      f.operation.authorize();
+      f.operation.start();
+      await Promise.resolve();
+      section.setAttribute('contenteditable', 'true');
+      await flushMicrotasks();
+      assert.equal(f.pending.length, 0);
+    } finally { f.operation.stop(); }
+  },
+}, {
   name: 'root removal and reattachment in one mutation delivery still requires explicit rescan',
   async fn() {
     const f = createOperationFixture();
@@ -964,5 +1165,155 @@ exports.tests.push({
     await f.settle(2);
     assert.equal(f.operation.getStatus().error, '');
     f.operation.stop();
+  },
+});
+
+exports.tests.push({
+  name: 'Inline Translation Section displays fixed guidance for classified OpenAI failures',
+  async fn() {
+    const { getInlineTranslationPanelViewModel } = require('../extension/sidepanel');
+    for (const [failure, guidance] of [
+      ['authentication', 'OpenAI authentication failed. Check its API key in Options.'],
+      ['access', 'OpenAI refused access to this request.'],
+      ['model', 'OpenAI could not serve the selected model.'],
+      ['rate_limit', 'OpenAI rate limit or usage limit reached. Check your account or try again later.'],
+      ['unavailable', 'OpenAI is temporarily unavailable. Try again later.'],
+      ['transport', 'OpenAI request could not reach the service.'],
+      ['request', 'OpenAI request failed. Try again later.'],
+    ]) {
+      const f = createOperationFixture({ settings: { service: 'openai', apiKey: '***' } });
+      f.operation.authorize();
+      await f.control('start');
+      f.pending[0].resolve({ ok: false, error: { code: 'openai.' + failure, message: 'raw provider error' } });
+      await flushMicrotasks();
+      const panel = getInlineTranslationPanelViewModel({ snapshot: f.operation.getStatus() });
+      assert.ok(panel.errorText.includes(guidance), failure);
+      assert.doesNotMatch(panel.errorText, /raw provider error/);
+      f.operation.stop();
+    }
+  },
+});
+
+exports.tests.push(...['stop', 'restore'].map(control => ({
+  name: `both Inline controls offer ${control} again after an unconfirmed end`,
+  async fn() {
+    const { getInlineTranslatorUiModel } = require('../extension/content');
+    const { getInlineTranslationPanelViewModel } = require('../extension/sidepanel');
+    let accept = false;
+    const f = createOperationFixture({ endOperation: async () => ({ ok: accept }) });
+    const disabled = () => [
+      getInlineTranslatorUiModel({ operation: f.operation }),
+      getInlineTranslationPanelViewModel({ snapshot: f.operation.getStatus() }),
+    ].map(model => model[control + 'Disabled']);
+    await f.control('authorize');
+    await f.control('start');
+    await assert.rejects(f.operation[control]());
+    assert.deepEqual(disabled(), [false, false]);
+    accept = true;
+    await f.operation[control]();
+    assert.deepEqual(disabled(), [true, true]);
+  },
+})));
+
+exports.tests.push({
+  name: 'Original text can retry an unconfirmed worker end until the same Operation is acknowledged',
+  async fn() {
+    let accept = false;
+    const f = createOperationFixture({ endOperation: async () => ({ ok: accept }) });
+    await f.control('authorize');
+    await f.control('start');
+    const id = f.pending[0].message.operationId;
+    await assert.rejects(f.operation.restore());
+    assert.match(f.operation.getStatus().error, /could not confirm/);
+    accept = true;
+    await f.operation.stop();
+    assert.equal(f.operation.getStatus().error, '');
+    await f.operation.restore();
+    assert.deepEqual(f.messages.filter(m => m.type === 'END_INLINE_TRANSLATION_OPERATION')
+      .map(m => m.operationId), [id, id]);
+  },
+}, {
+  name: 'a late worker end cannot acknowledge the next Operation',
+  async fn() {
+    let acknowledge;
+    const f = createOperationFixture({ endOperation: () => new Promise(resolve => { acknowledge = resolve; }) });
+    await f.control('authorize');
+    await f.control('start');
+    const end = f.operation.restore();
+    await f.control('start');
+    acknowledge({ ok: true });
+    await end;
+    const nextId = f.pending[1].message.operationId;
+    const nextEnd = f.operation.restore();
+    assert.equal(f.messages.at(-1).operationId, nextId);
+    acknowledge({ ok: true });
+    await nextEnd;
+  },
+});
+
+exports.tests.push(...['stop', 'restore'].map(control => ({
+  name: `the ${control} instruction waits for worker acceptance of the submitting Operation`,
+  async fn() {
+    let accept;
+    const f = createOperationFixture({ endOperation: () => new Promise(resolve => { accept = resolve; }) });
+    await f.control('authorize');
+    await f.control('start');
+    const responses = [];
+    const { handleInlineContentMessage } = require('../extension/content');
+    handleInlineContentMessage({ type: 'RUN_INLINE_INSTRUCTION',
+      instruction: control === 'stop' ? 'stopInlineTranslation' : 'restoreInlineOriginal',
+    }, response => responses.push(response), { operation: f.operation });
+    await flushMicrotasks();
+    assert.deepEqual(responses, []);
+    assert.deepEqual(f.messages.at(-1), { type: 'END_INLINE_TRANSLATION_OPERATION',
+      operationId: f.pending[0].message.operationId });
+    accept({ ok: true });
+    await flushMicrotasks();
+    assert.deepEqual(responses, [{ ok: true }]);
+  },
+})));
+
+exports.tests.push({
+  name: 'an eligible Semantic Block can contain prose positioned outside a clipped ancestor',
+  async fn() {
+    const f = createOperationFixture();
+    const clipped = f.document.createElement('div');
+    clipped.rect = { top: 20, bottom: 21, left: 10, right: 11, width: 1, height: 1 };
+    clipped.computedStyle = { overflow: 'hidden' };
+    const visible = f.document.createElement('p');
+    const positioned = f.document.createElement('span');
+    positioned.computedStyle = { position: 'fixed' };
+    positioned.textContent = 'Visible positioned prose.';
+    visible.appendChild(positioned);
+    const concealed = f.document.createElement('p');
+    concealed.textContent = 'Clipped adjacent prose.';
+    clipped.replaceChildren(visible, concealed);
+    f.document.body.replaceChildren(clipped);
+    await f.control('authorize');
+    await f.control('start');
+    const records = f.pending.flatMap(request => request.message.records);
+    assert.equal(records.length, 1);
+    assert.match(records[0].template, /Visible positioned prose\./);
+    await f.control('stop');
+  },
+});
+
+exports.tests.push({
+  name: 'an older END failure is cleared when a prepared Operation starts',
+  async fn() {
+    let acknowledge;
+    const f = createOperationFixture({ endOperation: () => new Promise(resolve => { acknowledge = resolve; }) });
+    await f.control('authorize');
+    await f.control('start');
+    const previousEnd = f.operation.restore();
+    f.holdSettings();
+    await f.control('start');
+    acknowledge({ ok: false });
+    await assert.rejects(previousEnd);
+    assert.match(f.operation.getStatus().error, /could not confirm/);
+    f.settingsRequests[0].resolve({ ok: true, settings: { apiKey: 'synthetic-key' } });
+    await flushMicrotasks();
+    assert.equal(f.operation.getStatus().status, 'active');
+    assert.equal(f.operation.getStatus().error, '');
   },
 });

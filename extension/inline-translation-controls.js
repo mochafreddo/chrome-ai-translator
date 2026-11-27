@@ -35,14 +35,14 @@
   // status, because Start during a live run rescans what has scrolled into view rather than
   // paying for the page a second time — `isInlineTranslationRunLive` in `content.js` is
   // what enforces that, and dimming Start would take away the rescan along with it.
-  function getInlineTranslationControlAvailability(status) {
+  function getInlineTranslationControlAvailability(status, endUnconfirmed = false) {
     const current = status || 'original';
     const isActive = current === 'active';
 
     return Object.freeze({
       isActive,
-      canStop: isActive,
-      canRestore: INLINE_RESTORABLE_STATUSES.includes(current),
+      canStop: isActive || (current === 'stopped' && endUnconfirmed),
+      canRestore: INLINE_RESTORABLE_STATUSES.includes(current) || (current === 'original' && endUnconfirmed),
     });
   }
 

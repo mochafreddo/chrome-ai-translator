@@ -37,6 +37,8 @@ npm ci --ignore-scripts --no-audit --no-fund
 
 Use a Node version supported by the installed ESLint package; CI's version is owned by [the workflow](../.github/workflows/checks.yml). Installation needs network access; the checks themselves do not. Loading the unpacked extension still needs no dependency installation or build.
 
+Browser CI uses the `agent-browser` executable from this lockfile. Its platform-specific native packages are also pinned there. The separate [Chrome for Testing download](https://github.com/GoogleChromeLabs/chrome-for-testing#json-api-endpoints) follows the Stable version selected by the [driver installer](https://github.com/vercel-labs/agent-browser/blob/v0.43.0/cli/src/install.rs). The publisher metadata lists versions and URLs. An independent checksum or signature for the Linux ZIP could not be confirmed there, so npm lockfile integrity covers the driver, while Chrome archive integrity remains unverified.
+
 Run lint, the unit suite and syntax checks for ordinary implementation changes. Choose browser checks for the path being changed rather than treating `test:integration` as an aggregate. Keep billed checks separate and run them only within authorized scope.
 
 ## JavaScript lint

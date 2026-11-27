@@ -1,12 +1,13 @@
 const assert = require('node:assert/strict');
-const { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync, statSync, existsSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const { mkdirSync, mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync, realpathSync, statSync, existsSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { createHash } = require('node:crypto');
 const { loadQualityCorpus } = require('./integration/model-quality-corpus.mjs');
 const { coverageMatches, summarizeQuality, inlineQualityCompleted, inlineQualityTerminal, mockDisplayedProseMatches } = require('./integration/model-quality-observation.mjs');
 const { runEvaluation } = require('./integration/evaluation-execution.mjs');
-const { createQualityExperiment } = require('./integration/model-quality.mjs');
+const { createQualityExperiment, resolveQualityOutput } = require('./integration/model-quality.mjs');
 const { createBudget } = require('./integration/routing-budget.mjs');
 
 const WMT_SOURCE_SHA256 = '33b14dc670e28225ce742290718c513c1545c2c500d33667a4d01d776ca58dbc';
@@ -67,6 +68,35 @@ function makeObserver(records) {
 
 exports.name = 'model quality preparation';
 exports.tests = [{
+  name: 'both model quality commands reject a repository output through its real parent before creating it',
+  fn() {
+    withTemporaryWmt(({ root }) => {
+      assert.equal(resolveQualityOutput(join(root, 'evaluation')), join(realpathSync(root), 'evaluation'));
+      assert.throws(() => resolveQualityOutput(__dirname), /output must be outside the repository/i);
+      const corpus = ['--wmt-corpus', join(root, 'missing.json')];
+      for (const layout of ['main', 'linked']) {
+        const checkout = join(root, layout);
+        const parent = join(checkout, 'reports');
+        mkdirSync(parent, { recursive: true });
+        if (layout === 'main') mkdirSync(join(checkout, '.git'));
+        else writeFileSync(join(checkout, '.git'), 'gitdir: ../main/.git/worktrees/linked\n');
+        const alias = join(root, layout + '-reports');
+        symlinkSync(parent, alias, 'dir');
+        const output = join(alias, 'evaluation');
+        for (const [entry, args] of [
+          ['mock', [...corpus, '--output', output]],
+          ['live', ['--output', output, ...corpus, '--budget-usd', '5']],
+        ]) {
+          const result = spawnSync(process.execPath, [join(__dirname, 'integration', `model-quality.${entry}.mjs`), ...args],
+            { cwd: root, encoding: 'utf8' });
+          assert.equal(result.status, 1);
+          assert.match(result.stderr, /output must be outside the repository/i);
+          assert.equal(existsSync(output), false);
+        }
+      }
+    });
+  },
+}, {
   name: 'loads the frozen 3 regression, 3 application, and 6 synthetic WMT fixtures without references',
   fn() {
     let temporaryRoot;

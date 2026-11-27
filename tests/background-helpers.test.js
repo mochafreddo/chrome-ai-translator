@@ -3186,3 +3186,88 @@ exports.tests.push({
     assert.equal(response.error.message, 'Panel opening refused');
   },
 });
+
+exports.tests.push(...[1, 2].map(stopAfter => ({
+  name: `ending an Inline Translation Operation after request ${stopAfter} settles only sent repairs`,
+  async fn() {
+    const stored = {};
+    const chrome = createBlockBatchChrome({ stored });
+    chrome.runtime.sendMessage = async () => {};
+    const sender = { tab: { id: 4201 }, frameId: 0, documentId: 'document-4201' };
+    const record = { ...createTestPlainBlockRecord(), template: 'English remains untranslated.' };
+    let entered, release;
+    const ready = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    let calls = 0;
+    const worker = helpers.createBackgroundWorker({ chrome, fetch: async () => {
+      calls += 1;
+      const template = calls === 1 ? record.template : '번역된 문장입니다.';
+      if (calls === stopAfter) { entered(); await gate; }
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translations: [{ id: record.id, template }],
+      })) };
+    } });
+    const batch = (operationId, page = sender) => collectWorkerResponses(worker, [{
+      type: 'TRANSLATE_VISIBLE_BLOCK_BATCH', records: [record], operationId,
+    }], page);
+    const pending = batch(1);
+    await ready;
+    const [ended] = await collectWorkerResponses(worker, [{ type: 'END_INLINE_TRANSLATION_OPERATION',
+      operationId: 1 }], sender);
+    release();
+    const [settled] = await pending;
+    assert.equal(calls, stopAfter);
+    const run = Object.values(stored).find(value => value?.summary);
+    assert.equal(run.summary.repairAttemptedBlocks, stopAfter - 1);
+    assert.equal(run.summary.modelRequestAttempts, stopAfter);
+    assert.equal(ended.ok, true);
+    if (stopAfter === 2) assert.equal(settled.results[0].attemptCount, 2);
+    else assert.equal(settled.error.code, 'inline.operation_ended');
+    assert.equal((await batch(1))[0].ok, false);
+    assert.equal(calls, stopAfter);
+    assert.equal((await batch(3))[0].ok, true);
+    assert.equal((await batch(1, { ...sender, tab: { id: 42 }, documentId: 'document-42' }))[0].ok, true);
+    chrome.webNavigation.getFrame = async () => ({ documentId: 'replacement' });
+    worker.handlers.onNavigationCommitted({ tabId: 4201, frameId: 0, documentId: 'replacement' });
+    assert.equal((await batch(1, { ...sender, documentId: 'replacement' }))[0].ok, true);
+  },
+})));
+
+exports.tests.push(...['stop', 'restore'].map(control => ({
+  name: `the Floating Translate Button's ${control} prevents a pending batch from sending its repair`,
+  async fn() {
+    const { createOperationFixture, flushMicrotasks } = require('./inline-translation-operation.test');
+    const { createContentPage } = require('./content-harness');
+    const f = createOperationFixture();
+    const sender = { tab: { id: 4201 }, frameId: 0, documentId: 'document-4201' };
+    let release;
+    let calls = 0;
+    const worker = helpers.createBackgroundWorker({ chrome: createBlockBatchChrome(), fetch: async (_url, options) => {
+      calls += 1;
+      const { id, template } = JSON.parse(JSON.parse(options.body).input).records[0];
+      if (calls === 1) await new Promise(resolve => { release = resolve; });
+      return { ok: true, json: async () => createCompletedResponse(JSON.stringify({
+        translations: [{ id, template }],
+      })) };
+    } });
+    const replies = new Map();
+    f.adapters.sendMessage = message => {
+      const response = new Promise(resolve => worker.handlers.onMessage(message, sender, resolve));
+      replies.set(message.type, response);
+      return response;
+    };
+    const page = createContentPage(f);
+    page.inject();
+    await page.instruct('mountFloatingTranslateButton');
+    await page.instruct('grantInlineTranslationAuthorization');
+    await page.instruct('startInlineTranslation');
+    await flushMicrotasks();
+    assert.equal(calls, 1);
+    page.button(control).click();
+    assert.equal((await replies.get('END_INLINE_TRANSLATION_OPERATION')).ok, true);
+    release();
+    const result = await replies.get('TRANSLATE_VISIBLE_BLOCK_BATCH');
+    assert.equal(result.error.code, 'inline.operation_ended');
+    assert.equal(calls, 1);
+  },
+})));

@@ -252,7 +252,7 @@ exports.tests.push(
     await settle();
     panel.setSend(msg => msg.type === 'GET_STATE'
       ? { ok: true, state: wireState({ status: 'done', inlineTranslationError: { message: 'third' } }, 3) } : response(msg.type, 'inline'));
-    await panel.controller.refresh();
+    await panel.controller.runInlineControl('start');
     old.resolve({ ok: true, state: wireState({ status: 'done', inlineTranslationError: { message: 'fourth' } }, 4) });
     await pending;
     assert.equal(panel.display().state.inlineTranslationError?.message, 'fourth');
@@ -636,8 +636,8 @@ exports.tests.push(...[false, true].flatMap((actual) => [false, true].map((oldHa
     const first = actual ? panel.poll() : panel.controller.refresh();
     await settle();
     panel.setSend((msg) => response(msg.type, 'current'));
-    if (actual) { panel.poll(); await settle(); }
-    else await panel.controller.refresh();
+    if (actual) await panel.element('btnInlineTranslate').listeners.click();
+    else await panel.controller.runInlineControl('start');
     old.resolve(oldHasAccess
       ? { ok: true, snapshot: { status: 'idle', progress: 'old inline' } } : { ok: false });
     if (actual) await settle();
@@ -665,8 +665,8 @@ exports.tests.push(...[false, true].map((actual) => ({
     await settle();
     panel.setSend((msg) => msg.type === 'GET_STATE'
       ? { ok: true, state: { ...state('current'), updatedAt: 100 } } : response(msg.type, 'current'));
-    if (actual) { panel.poll(); await settle(); }
-    else await panel.controller.refresh();
+    if (actual) await panel.element('btnInlineTranslate').listeners.click();
+    else await panel.controller.runInlineControl('start');
     old.resolve({ ok: true, state: { ...state('old'), updatedAt: 900, progress: { current: 1, total: 3 } } });
     if (actual) await settle();
     else await first;
@@ -692,10 +692,11 @@ exports.tests.push({
       panel.setSend((msg) => msg.type === waitingType ? pending.promise : response(msg.type, 'first'));
       const first = panel.controller.refresh();
       await settle();
-      const next = deferred();
-      panel.setSend((msg) => msg.type === waitingType ? next.promise : response(msg.type, 'second'));
-      const second = panel.controller.refresh();
-      await settle();
+      const before = panel.sent.length;
+      panel.setSend(msg => response(msg.type, 'second'));
+      await panel.controller.refresh();
+      const availableType = waitingType === 'GET_STATE' ? 'GET_INLINE_TRANSLATION_STATE' : 'GET_STATE';
+      assert.deepEqual(panel.sent.slice(before).map(msg => msg.type), [availableType]);
       if (waitingType === 'GET_STATE') {
         assert.equal(panel.display().inline.snapshot.progress, 'inline second');
         assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut 1');
@@ -703,10 +704,13 @@ exports.tests.push({
         assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut second');
         assert.equal(panel.display().inline.snapshot.progress, 'inline 1');
       }
-      next.resolve(response(waitingType, 'second'));
-      await second;
       pending.resolve(response(waitingType, 'first'));
       await first;
+      assert.equal(panel.display().state.inlineTranslationError?.message,
+        waitingType === 'GET_STATE' ? 'shortcut first' : 'shortcut second');
+      assert.equal(panel.display().inline.snapshot.progress,
+        waitingType === 'GET_INLINE_TRANSLATION_STATE' ? 'inline first' : 'inline second');
+      await panel.controller.refresh();
       assert.equal(panel.display().state.inlineTranslationError?.message, 'shortcut second');
       assert.equal(panel.display().inline.snapshot.progress, 'inline second');
     }
@@ -906,3 +910,25 @@ exports.tests.push(...['failure', 'rejection', 'success'].map((outcome) => ({
     }
   },
 })));
+
+exports.tests.push({
+  name: 'an immediate control refresh does not release a pending periodic read',
+  async fn() {
+    const panel = modulePanel();
+    await panel.controller.start(10);
+    const old = deferred();
+    panel.setSend(() => old.promise);
+    const polling = panel.controller.refresh();
+    await settle();
+    panel.setSend(msg => response(msg.type, 'control'));
+    await panel.controller.runInlineControl('start');
+    assert.equal(panel.display().inline.snapshot.progress, 'inline control');
+    const before = panel.sent.length;
+    await panel.controller.refresh();
+    assert.equal(panel.sent.length, before);
+    old.reject(new Error('old read failed'));
+    await polling;
+    await panel.controller.refresh();
+    assert.deepEqual(panel.sent.slice(before).map(msg => msg.type), ['GET_STATE', 'GET_INLINE_TRANSLATION_STATE']);
+  },
+});

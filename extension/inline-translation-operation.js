@@ -9,7 +9,7 @@
     (typeof module !== 'undefined' && module.exports ? require('./inline-diagnostics-protocol') : null);
   const transport = globalScope.ChromeAiTranslatorInlineLocalDiagnosticTransport ||
     (typeof module !== 'undefined' && module.exports ? require('./inline-local-diagnostic-transport') : null);
-  const { getOpenRouterFailureMessage } = globalScope.ChromeAiTranslatorDefaultModel ||
+  const { getServiceFailureMessage } = globalScope.ChromeAiTranslatorDefaultModel ||
     (typeof module !== 'undefined' && module.exports ? require('./default-model') : {});
   const AUTH_MS = 5 * 60 * 1000;
 
@@ -35,6 +35,8 @@
     let authorizedUntil = 0;
     let preparation = null;
     let current = null;
+    let workerOperationId = null;
+    let endUnconfirmed = false;
     let progress = '';
     let error = '';
 
@@ -75,37 +77,40 @@
       }, () => unavailable(store));
     }
 
+    async function sendBatch(store, batch) {
+      return sendMessage({
+        type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
+        operationId: store.id,
+        settingsSnapshot: store.settings,
+        records: batch.map(record => ({
+          id: record.id, template: record.template, atoms: record.atoms,
+          contract: record.contract, repair: record.repair,
+        })),
+      });
+    }
+
     async function drain(store) {
-      if (!isCurrent(store)) return;
-      store.transport.flush();
-      while (isCurrent(store) && session.canSubmit()) {
+      await Promise.resolve();
+      while (isCurrent(store) && store.scanner.canDispatch() && session.canSubmit()) {
         const batch = session.takeBatch();
+        if (batch.length) {
+          sendBatch(store, batch).catch(() => null).then(response => {
+            const settled = session.settle(batch, response);
+            if (isCurrent(store) && response?.ok === false) {
+              store.serviceError = getServiceFailureMessage(store.settings.service, response.error?.code);
+            }
+            if (settled.diagnosticsUnavailable) store.diagnosticsUnavailable = true;
+            fileOutcomes(store, settled);
+          }).catch(() => {}) // Filing failures cannot undo already settled Semantic Blocks.
+            .finally(() => {
+              if (!isCurrent(store)) return;
+              update();
+              drain(store).catch(failure => reportFailure(failure, store));
+            });
+        }
         store.transport.flush();
         update();
         if (!batch.length) return;
-        // Every submitted batch settles, including transport failure and obsolete work.
-        // Eligibility protects display and follow-up work after the Session's accounting.
-        Promise.resolve().then(() => session.canSubmit() && isCurrent(store) ? sendMessage({
-          type: 'TRANSLATE_VISIBLE_BLOCK_BATCH',
-          operationId: store.id,
-          settingsSnapshot: store.settings,
-          records: batch.map(record => ({
-            id: record.id, template: record.template, atoms: record.atoms,
-            contract: record.contract, repair: record.repair,
-          })),
-        }) : null).catch(() => null).then(response => {
-          const settled = session.settle(batch, response);
-          if (isCurrent(store) && store.settings.service === 'openrouter' && response?.ok === false) {
-            store.serviceError = getOpenRouterFailureMessage(response.error?.code);
-          }
-          if (settled.diagnosticsUnavailable) store.diagnosticsUnavailable = true;
-          fileOutcomes(store, settled);
-        }).catch(() => {}) // Filing failures cannot undo already settled Semantic Blocks.
-          .finally(() => {
-            if (!isCurrent(store)) return;
-            update();
-            drain(store).catch(failure => reportFailure(failure, store));
-          });
       }
     }
 
@@ -115,6 +120,9 @@
       session.begin(settings);
       const store = { id: session.operationId, settings };
       current = store;
+      workerOperationId = store.id;
+      endUnconfirmed = false;
+      error = '';
       store.transport = transport.createInlineLocalDiagnosticTransport({
         outbox: session.outbox,
         operationId: store.id,
@@ -149,7 +157,7 @@
       const root = pickArticleRoot();
       if (!root) throw new Error('No article content found.');
       const store = begin(settings);
-      session.selectRoot(root);
+      session.selectRoot(root, store.scanner.isEligibleElement);
       // Display settings have their own lifetime; content receives a separate snapshot.
       onSettings({ ...settings });
       store.scanner.start(root);
@@ -167,7 +175,7 @@
           update();
           return;
         }
-        if (session.selectRoot(root)) current.scanner.selectRoot(root);
+        if (session.selectRoot(root, current.scanner.isEligibleElement)) current.scanner.selectRoot(root);
         else current.scanner.rescan();
         update();
         return;
@@ -184,12 +192,38 @@
       });
     }
 
+    async function endWorkerOperation() {
+      const operationId = workerOperationId;
+      if (operationId === null) return;
+      const unconfirmed = 'The worker could not confirm that translation stopped.';
+      try {
+        const response = await sendMessage({ type: 'END_INLINE_TRANSLATION_OPERATION', operationId });
+        if (!response?.ok) throw new Error(unconfirmed);
+      } catch (failure) {
+        if (workerOperationId === operationId) {
+          endUnconfirmed = true;
+          error = unconfirmed;
+          onChange();
+        }
+        throw failure;
+      }
+      if (workerOperationId === operationId) {
+        workerOperationId = null;
+        if (endUnconfirmed) {
+          endUnconfirmed = false;
+          if (error === unconfirmed) error = '';
+          onChange();
+        }
+      }
+    }
+
     function stop() {
       preparation = null;
       session.stop();
       current?.scanner.stop();
       current?.transport.stop();
       update();
+      return endWorkerOperation();
     }
 
     return Object.freeze({
@@ -205,8 +239,9 @@
         progress = '';
         error = '';
         onChange();
+        return endWorkerOperation();
       },
-      getStatus: () => ({ status: session.status, progress, error }),
+      getStatus: () => ({ status: session.status, progress, error, ...(endUnconfirmed && { endUnconfirmed }) }),
     });
   }
 

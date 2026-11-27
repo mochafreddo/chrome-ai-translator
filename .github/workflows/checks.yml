@@ -54,8 +54,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm install --global agent-browser@0.39.1
-      - run: agent-browser install --with-deps
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: ./node_modules/.bin/agent-browser install --with-deps
       - run: npm run test:integration:inline-button -- --fixture-only
       - run: npm run test:integration:heading-permalink -- --fixture-only
       - run: npm run test:integration:github-release-accounts -- --fixture-only

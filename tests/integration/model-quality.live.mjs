@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROFILES, createQualityExperiment, compatibleProfiles } from './model-quality.mjs';
+import { PROFILES, createQualityExperiment, compatibleProfiles, resolveQualityOutput } from './model-quality.mjs';
 import { loadQualityCorpus, loadCompatibilityCorpus } from './model-quality-corpus.mjs';
 import { createBudget, PRICE_CAP } from './routing-budget.mjs';
 import { createBrowserAdapter } from './routing-pilot-browser.mjs';
@@ -52,7 +52,7 @@ export async function main(args = process.argv.slice(2)) {
     throw new Error('Use --output <new-private-directory> --wmt-corpus <private-manifest> --budget-usd 5. Bills real OpenRouter inference.');
   }
   process.umask(0o077);
-  const output = resolve(args[1]);
+  const output = resolveQualityOutput(args[1]);
   mkdirSync(output, { mode: 0o700 });
   const save = (name, value) => writeFileSync(resolve(output, name), JSON.stringify(value, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   const corpus = loadQualityCorpus(resolve(args[3]));

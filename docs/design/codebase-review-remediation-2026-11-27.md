@@ -15,6 +15,14 @@
 
 Q1–Q8은 작성자와 다른 Codex `reviewer` 모델 `gpt-6.2-astra`로 독립 검토했다. 기존 [용어집](../../GLOSSARY.md)의 Inline Translation Operation, Inline Translation Session, Session Budget, Text Translation을 사용한다.
 
+## Q1 후속 합의: 미전송 Semantic Block의 재등록
+
+#125의 통합 후보 `ca7e5c4`에서 대기 중인 문단이 잠시 분리된 사이 전송 슬롯이 비면, 같은 요소를 다시 삽입해도 같은 Inline Translation Operation에서 전송되지 않는 현상을 재현했다. Viewport는 재탐색을 예약하고 Session이 미전송 레코드를 관리한다. 탐색에서 변경된 원문을 다시 발견하면 전송 슬롯이 가득 차 있어도 미전송 최초 레코드를 갱신한다. Session은 배치를 만들기 직전에 현재 적격성과 원문 스냅샷을 확인한다. 이 확인에서 탈락한 미전송 최초 레코드는 이후 적격인 Semantic Block을 다시 발견하면 등록할 수 있다.
+
+원문이 그대로인 문단은 스크롤로 화면 밖에 나가도 처리할 수 있다. 수정된 원문이 화면 밖에 있으면 정상 탐색에서 다시 발견될 때 등록한다. 이미 전송한 레코드의 재시도와 Session Budget 정산은 기존 계약을 따른다. 선택된 기사 루트가 분리되면 독자가 **Scan visible text**를 실행할 때까지 자동 제출을 멈춘다. [기사 루트의 수명](../adr/0014-bind-translation-to-the-readers-document-and-provider.md)과 [정산 기준](../adr/0007-charge-the-session-budget-in-actual-record-cost.md)을 따른다.
+
+속성 변경으로 앞 문단이 새로 드러날 때에는 다음 배치에서 이미 대기하던 뒤 문단보다 먼저 처리한다. 네 번째 검토 기준은 `ca7e5c43968b4d7f3ac13e1d21c1c5b9e103f7de`다. 합성 Operation 및 Viewport 검사에서 재삽입, 슬롯 반환 전 원문 변경, 기존 배치 순서, 화면 밖 대기 보존과 기사 루트 분리를 확인한다. 최종 로컬 검증과 무과금 Chrome의 DOM 변경 및 캐시 적용 검사도 실행한다.
+
 ## 확정한 구현 및 검증 범위
 
 - **Q9. 작업 범위와 리뷰 기준.** 14건을 전용 worktree 하나에서 Inline·사이드 패널, Text Translation·Options, 검사 도구·CI의 세 묶음으로 진행한다. 리뷰 기준은 `0ff80c628bc0f25c7899713dd09f864c990f4d37`이며, 구현 착수 전에 `origin/main`을 다시 확인한다.

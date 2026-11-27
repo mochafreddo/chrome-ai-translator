@@ -60,8 +60,15 @@ function createContentPage(fixture, selectors = null) {
   }
   function message(value) {
     let response;
-    for (const listener of runtimeListeners) listener(value, {}, reply => { response = reply; });
-    return response ? JSON.parse(JSON.stringify(response)) : undefined;
+    let deliver;
+    const pending = new Promise(resolve => { deliver = resolve; });
+    for (const listener of runtimeListeners) {
+      const handled = listener(value, {}, reply => {
+        response = JSON.parse(JSON.stringify(reply));
+        deliver(response);
+      });
+      if (handled) return response ?? pending;
+    }
   }
   return {
     inject, message,

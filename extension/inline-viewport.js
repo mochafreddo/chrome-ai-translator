@@ -46,6 +46,7 @@
     let scanStack = null;
     let mutationSweep = false;
     let rescanAfterCurrentSweep = false;
+    let orderAfterAttributeChange = false;
     let timer = null;
     let observer = null;
     let scrollTargets = [];
@@ -68,14 +69,15 @@
       return INLINE_EXCLUDED_ROLES.has(role);
     }
 
+    function hasEditableAttribute(element) {
+      return element.getAttribute('contenteditable').toLowerCase() !== 'false';
+    }
+
     function isInlineEffectivelyEditable(element) {
       if (element?.isContentEditable === true) return true;
       for (let current = element; current; current = current.parentElement) {
         if (!current.hasAttribute?.('contenteditable')) continue;
-        return (
-          String(current.getAttribute?.('contenteditable') || '').toLowerCase() !==
-          'false'
-        );
+        return hasEditableAttribute(current);
       }
       return false;
     }
@@ -190,14 +192,20 @@
       );
     }
 
-    function shouldSkipInlineBlockCandidateTextNode(textNode, reads) {
-      const parent = textNode?.parentElement;
-      if (!parent) return true;
-      if (isInlineEffectivelyEditable(parent)) return true;
+    function isEligibleElement(parent, reads) {
+      if (!parent || isInlineEffectivelyEditable(root)) return false;
+      let insideRoot = true;
       for (let element = parent; element; element = element.parentElement) {
-        if (isInlineTranslationExcludedElement(element)) return true;
-        if (isElementHidden(element, parent, reads)) return true;
+        if (isInlineTranslationExcludedElement(element) || isElementHidden(element, parent, reads)) return false;
+        if (insideRoot && (element.isContentEditable || element.hasAttribute?.('contenteditable') &&
+          hasEditableAttribute(element))) return false;
+        if (element === root) insideRoot = false;
       }
+      return true;
+    }
+
+    function shouldSkipInlineBlockCandidateTextNode(textNode, reads) {
+      if (!isEligibleElement(textNode?.parentElement, reads)) return true;
       const value = String(textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
       if (!/\p{L}/u.test(value)) return true;
       return inlineBlockCodec.isCodeLikeInlineText(value);
@@ -208,9 +216,9 @@
     }
 
     function shouldSkipInlineElementSubtree(node, viewport, reads) {
-      if (!node || !(node instanceof platform.HTMLElement)) return false;
+      if (isInlineTranslationExcludedElement(node)) return true;
+      if (!(node instanceof platform.HTMLElement)) return false;
       if (
-        isInlineTranslationExcludedElement(node) ||
         isInlineEffectivelyEditable(node) ||
         isElementHidden(node, null, reads)
       ) {
@@ -312,6 +320,7 @@
         if (isWithinRoot(block)) session.admit(block);
       }
       if (!isCurrent()) return;
+      if (blocks.size && orderAfterAttributeChange) session.orderPending?.();
       const mutations = observer?.takeRecords?.();
       if (mutations?.length) onMutation(mutations);
       if (!isCurrent()) return;
@@ -322,6 +331,8 @@
           rescanAfterCurrentSweep = false;
           mutationSweep = true;
           rescan();
+        } else if (timer === null) {
+          orderAfterAttributeChange = false;
         }
       }
       onScan();
@@ -344,7 +355,6 @@
       scanStack = null;
       mutationSweep = true;
       rescanAfterCurrentSweep = false;
-      session.resetQueue();
       rescan();
     }
 
@@ -360,18 +370,13 @@
         timer = null;
         return;
       }
-      if (!records?.length || records.some(record => {
-        for (let node = record.target; node; node = node.parentNode) {
-          if (node === root) return true;
-        }
-        return false;
-      })) {
+      if (!records?.length || records.some(record => isWithinRoot(record.target))) {
+        if (records?.some(record => record.type === 'attributes' && isWithinRoot(record.target))) orderAfterAttributeChange = true;
         if (!mutationSweep) {
           onViewportChange();
           return;
         }
         if (scanStack) rescanAfterCurrentSweep = true;
-        session.resetQueue();
         rescan();
       }
     }
@@ -395,6 +400,7 @@
     }
 
     function stopWatching() {
+      orderAfterAttributeChange = false;
       scanStack = null;
       mutationSweep = false;
       rescanAfterCurrentSweep = false;
@@ -426,7 +432,23 @@
       stopWatching();
     }
 
-    return { start, selectRoot, rescan, stop };
+    function hasEligibleOwnProse(block) {
+      const reads = { styles: new Map(), rects: new Map() };
+      const stack = getInlineChildNodes(block);
+      while (stack.length) {
+        const node = stack.pop();
+        if (isInlineTextNode(node)) {
+          if (!shouldSkipInlineBlockCandidateTextNode(node, reads)) return true;
+        } else if (!isInlineTranslationExcludedElement(node) && !inlineBlockCodec.isSemanticBlockElement(node) &&
+          !inlineBlockCodec.isBlockChildContainerElement(node)) {
+          for (const child of node.childNodes || []) stack.push(child);
+        }
+      }
+      return false;
+    }
+
+    return { start, selectRoot, rescan, stop, isEligibleElement: hasEligibleOwnProse,
+      canDispatch: () => !orderAfterAttributeChange };
   }
 
   const api = { createInlineViewport };

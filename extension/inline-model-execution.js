@@ -474,6 +474,7 @@
           });
         }
       } catch (error) {
+        if (error?.code === 'inline.operation_ended') throw error;
         const repairCode = String(error?.code || '').startsWith('protocol.')
           ? error.code
           : 'runtime.repair_request_failed';

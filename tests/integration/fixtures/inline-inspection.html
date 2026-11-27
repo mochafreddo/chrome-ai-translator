@@ -2,6 +2,10 @@
 <html lang="en">
   <meta charset="utf-8">
   <title>Inline inspection fixture</title>
-  <main><ul><li><p>Read the release notes.</p></li></ul><p hidden>Hidden prose.</p><p><code>npm test</code></p><p id="long"></p><p>Next.</p></main>
-  <script>document.querySelector('#long').textContent = 'a '.repeat(30000);</script>
+  <main><ul><li><p>Read the release notes.</p></li></ul><p hidden>Hidden prose.</p><p><code>npm test</code></p><p id="long"></p><p>Next.</p><p><sample>Example.</sample></p></main>
+  <script>
+    const article = document.querySelector('main');
+    document.querySelector = article.querySelector.bind(article);
+    document.querySelector('#long').textContent = 'a '.repeat(30000);
+  </script>
 </html>

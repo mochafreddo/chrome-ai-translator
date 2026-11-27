@@ -87,6 +87,7 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
       get status() { return session.status; },
       isCurrent: session.isCurrent,
       resetQueue() { resets += 1; session.resetQueue(); },
+      orderPending: session.orderPending,
       admit(block) { admissions.push(block); return session.admit(block); },
     },
     platform,
@@ -137,6 +138,26 @@ function scannerFixture(root, session = createActiveInlineTranslationState().ses
 
 exports.name = 'inline viewport';
 exports.tests = [
+  {
+    name: 'prunes an SVG outside the HTMLElement hierarchy before reading its children',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const root = element('article');
+      const svg = { nodeType: 1, tagName: 'svg', isConnected: true };
+      let childReads = 0;
+      Object.defineProperty(svg, 'childNodes', { get() { childReads++; return []; } });
+      root.appendChild(svg);
+      const prose = element('p', text('Article notes.'));
+      root.appendChild(prose);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.admissions, [prose]);
+        assert.equal(childReads, 0);
+      } finally { f.viewport.stop(); }
+    },
+  },
   ...['detached', 'moved outside the article'].map(change => ({
     name: `retained continuation skips a pending subtree ${change}`,
     fn() {
@@ -310,6 +331,28 @@ exports.tests = [
     },
   },
   {
+    name: 'a newly revealed block precedes a pending later block beyond the scan boundary',
+    fn() {
+      const { document, element, text } = createTestDocument();
+      const revealed = element('p', ...Array.from({ length: 1201 }, () => text('Hi ')));
+      revealed.computedStyle = { display: 'none' };
+      const later = element('p', text('Already pending.'));
+      const root = element('div', revealed, later);
+      document.body.appendChild(root);
+      const f = scannerFixture(root);
+      try {
+        f.viewport.start(root);
+        assert.deepEqual(f.admissions, [later]);
+        revealed.computedStyle = {};
+        f.attribute(revealed, 'class', 'visible');
+        f.advance();
+        assert.equal(f.admissions.at(-1) === revealed, true);
+        assert.equal(f.timers.size, 1);
+        assert.deepEqual(f.session.takeBatch().map(record => record.blockElement === revealed), [true, false]);
+      } finally { f.viewport.stop(); }
+    },
+  },
+  {
     name: 'applies the collected cache batch before restarting invalidated traversal',
     fn() {
       const { document, element, text } = createTestDocument();
@@ -336,7 +379,7 @@ exports.tests = [
       try {
         f.viewport.start(root);
         assert.equal(session.progress().counts.translated, 3);
-        assert.equal(f.resets, 1);
+        assert.equal(f.timers.size, 1);
         f.advance();
         assert.equal(f.timers.size, 0);
         assert.deepEqual(session.takeBatch(), []);
@@ -460,7 +503,6 @@ exports.tests = [
           'New paragraph before the continuation.',
         ]);
         assert.equal(session.progress().counts.translated, 1);
-        assert.equal(f.resets, 1);
         session.restore();
         assert.deepEqual(cached.childNodes, original);
         assert.equal(replacement.textContent, 'New paragraph before the continuation.');
@@ -513,6 +555,7 @@ exports.tests = [
       const root = element('div', paragraph);
       document.body.appendChild(root);
       const f = scannerFixture(root);
+      f.session.selectRoot(root, f.viewport.isEligibleElement);
       const reads = new Map();
       let rectReads = 0;
       const getRect = paragraph.getBoundingClientRect.bind(paragraph);
@@ -525,14 +568,15 @@ exports.tests = [
       try {
         f.viewport.start(root);
         assert.deepEqual(f.admissions, [paragraph]);
-        assert.equal(reads.get(paragraph), 1, 'one synchronous scan shares its style reads');
-        assert.equal(rectReads, 2, 'one discovery read and one independent Session codec read');
+        assert.equal(reads.get(paragraph), 2, 'discovery and Session eligibility each share their style reads');
+        assert.equal(rectReads, 3, 'discovery, Session eligibility and serialization each read the rectangle');
         reads.clear();
         paragraph.computedStyle = { display: 'none' };
         f.event(f.platform.window, 'scroll');
         f.advance();
         assert.equal(reads.get(paragraph), 1);
-        assert.deepEqual(f.session.takeBatch(), [], 'a later scan must read current styles');
+        assert.deepEqual(f.admissions, [paragraph], 'the later scan must skip the newly hidden paragraph');
+        assert.deepEqual(f.session.takeBatch(), [], 'submission rechecks the admitted paragraph');
       } finally { f.viewport.stop(); }
     },
   },
@@ -931,7 +975,7 @@ exports.tests = [
     },
   },
   ...['scroll', 'resize', 'mutation'].map((event) => ({
-    name: `${event} resets the cursor and pending viewport before the debounced scan`,
+    name: `${event} restarts traversal and preserves pending work`,
     fn() {
       const { document, element, text } = createTestDocument();
       const first = element('p', text('First visible paragraph.'));
@@ -942,14 +986,15 @@ exports.tests = [
       const f = scannerFixture(root);
       f.viewport.start(root);
       first.rect = { top: -1000, bottom: -900, left: 0, right: 100, width: 100, height: 100 };
+      document.defaultView.scrollY = 1100;
       if (event === 'mutation') f.observers[0].callback();
       else f.event(f.platform.window, event);
-      assert.equal(f.resets, 1);
-      assert.equal(f.session.progress().counts.pending, 0);
+      assert.equal(f.session.progress().counts.pending, 2);
       f.advance();
       assert.equal(f.admissions.includes(tail), false, 'the next scan restarted at the visible head');
       f.advance();
       assert.deepEqual(f.session.takeBatch().map(record => record.template), [
+        'First visible paragraph.',
         'Hi '.repeat(1200), 'Final visible paragraph.',
       ]);
       f.viewport.stop();

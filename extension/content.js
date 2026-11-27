@@ -31,9 +31,6 @@ var createInlineTranslationSettingsSnapshot = inlineTranslationSession.createSet
 // Translate Button belongs here — that judgment lives in the worker's planning function so
 // that injecting this script and granting Inline Translation Authorization can happen
 // without the button being mounted.
-//
-// The section starts translation through worker instructions. The page-owned floating
-// control opens that section for confirmation; Stop and Original text remain local.
 function getDefaultInlineInstructionHandlers(state = inlineState) {
   return {
     grantInlineTranslationAuthorization: () => state.operation.authorize(),
@@ -50,8 +47,8 @@ function runInlineInstruction(
 ) {
   const handler = handlers?.[instruction];
   if (!handler) return false;
-  handler();
-  return true;
+  const result = handler();
+  return result instanceof Promise ? result.then(() => true) : true;
 }
 
 // Instructions are independent of one another, as the worker's own plan steps are: one
@@ -59,7 +56,7 @@ function runInlineInstruction(
 function runInlineInstructions(instructions = [], handlers) {
   for (const instruction of instructions) {
     try {
-      runInlineInstruction(instruction, handlers);
+      Promise.resolve(runInlineInstruction(instruction, handlers)).catch(() => {});
     } catch {}
   }
 }
@@ -148,12 +145,12 @@ function getInlineTranslatorUiModel(
   state = inlineState,
   settings = state?.translationSettings || INLINE_TRANSLATION_SETTINGS_DEFAULTS
 ) {
-  const status = state?.operation?.getStatus().status || 'original';
+  const { status = 'original', endUnconfirmed } = state?.operation?.getStatus() || {};
   const targetLanguage =
     settings?.targetLanguage || INLINE_TRANSLATION_SETTINGS_DEFAULTS.targetLanguage;
   const menuOpen = Boolean(state?.menuOpen);
   const { isActive, canStop, canRestore } =
-    inlineTranslationControls.getInlineTranslationControlAvailability(status);
+    inlineTranslationControls.getInlineTranslationControlAvailability(status, endUnconfirmed);
 
   return {
     toggleText: isActive
@@ -421,13 +418,13 @@ function ensureInlineTranslatorUi(state = inlineState) {
     .querySelector('[data-action="stop"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
-      state.operation.stop();
+      state.operation.stop().catch(() => {});
     });
   inlineUiRoot
     .querySelector('[data-action="restore"]')
     .addEventListener('click', (event) => {
       if (!isTrustedInlineUiEvent(event)) return;
-      state.operation.restore();
+      state.operation.restore().catch(() => {});
     });
   inlineUiRoot
     .querySelector('[data-action="close"]')
@@ -478,22 +475,18 @@ async function initInlineTranslator(state = inlineState) {
 // another listener passes through untouched.
 function handleInlineContentMessage(msg, sendResponse, state = inlineState) {
   if (msg?.type === 'RUN_INLINE_INSTRUCTION') {
-    try {
-      if (
-        !runInlineInstruction(
-          msg.instruction,
-          getDefaultInlineInstructionHandlers(state)
-        )
-      ) {
+    (async () => {
+      const handled = await runInlineInstruction(msg.instruction, getDefaultInlineInstructionHandlers(state));
+      if (!handled) {
         throw new Error(`Unknown inline instruction: ${msg.instruction}`);
       }
       sendResponse({ ok: true });
-    } catch (e) {
+    })().catch(e => {
       sendResponse({
         ok: false,
         error: { message: e?.message || String(e) },
       });
-    }
+    });
     return true;
   }
 

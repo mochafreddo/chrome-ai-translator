@@ -20,7 +20,14 @@
       reasoningEffort: service === 'openrouter' ? 'none' : String(settings.reasoningEffort || 'none'),
     };
   }
-  const OPENROUTER_FAILURE_MESSAGES = Object.freeze({
+  const SERVICE_FAILURE_MESSAGES = Object.freeze({
+    'openai.authentication': 'OpenAI authentication failed. Check its API key in Options.',
+    'openai.access': 'OpenAI refused access to this request.',
+    'openai.model': 'OpenAI could not serve the selected model.',
+    'openai.rate_limit': 'OpenAI rate limit or usage limit reached. Check your account or try again later.',
+    'openai.unavailable': 'OpenAI is temporarily unavailable. Try again later.',
+    'openai.transport': 'OpenAI request could not reach the service.',
+    'openai.request': 'OpenAI request failed. Try again later.',
     'openrouter.authentication': 'OpenRouter authentication failed. Check its API key in Options.',
     'openrouter.credits': 'OpenRouter has insufficient credits. Check your OpenRouter account.',
     'openrouter.access': 'OpenRouter refused access to this request.',
@@ -31,15 +38,15 @@
     'openrouter.request': 'OpenRouter request failed. Try again later.',
   });
 
-  function getOpenRouterFailureMessage(code) {
-    if (Object.prototype.hasOwnProperty.call(OPENROUTER_FAILURE_MESSAGES, code)) {
-      return OPENROUTER_FAILURE_MESSAGES[code];
+  function getServiceFailureMessage(service, code) {
+    if (typeof code === 'string' && code.startsWith(service + '.') && Object.hasOwn(SERVICE_FAILURE_MESSAGES, code)) {
+      return SERVICE_FAILURE_MESSAGES[code];
     }
     return /^(?:response|protocol)\./.test(String(code || ''))
-      ? 'OpenRouter returned an invalid or incomplete translation response.' : '';
+      ? `${service === 'openrouter' ? 'OpenRouter' : 'OpenAI'} returned an invalid or incomplete translation response.` : '';
   }
 
-  const api = { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings, getOpenRouterFailureMessage };
+  const api = { DEFAULT_MODEL, OPENROUTER_MODEL, getEffectiveModelSettings, getServiceFailureMessage };
   globalScope.ChromeAiTranslatorDefaultModel = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

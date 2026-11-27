@@ -3,6 +3,7 @@
   const { getToneInstruction } = globalScope.ChromeAiTranslatorTranslationSettings || require('./translation-settings.js');
   const MAX_SOURCE_CHARACTERS = 60000;
   const MAX_REQUEST_CHARACTERS = 12000;
+  const MAX_SETTING_LENGTH = 200;
   const SETTINGS_KEYS = ['service', 'model', 'reasoningEffort', 'sourceLanguage', 'targetLanguage', 'tone'];
 
   function normalizeSettings(settings) {
@@ -11,7 +12,7 @@
       throw new Error('Unsupported Text Translation settings.');
     }
     for (const key of SETTINGS_KEYS) {
-      if (typeof settings[key] !== 'string' || !settings[key].trim() || settings[key].length > 200) {
+      if (typeof settings[key] !== 'string' || !settings[key].trim() || settings[key].length > MAX_SETTING_LENGTH) {
         throw new Error('Choose valid translation settings.');
       }
     }
@@ -88,7 +89,7 @@
       sourceLanguage: result.sourceLanguage };
   }
 
-  const api = { MAX_SOURCE_CHARACTERS, SETTINGS_KEYS, normalizeSettings, validateSource, splitSource, prepare, parseResult };
+  const api = { MAX_SOURCE_CHARACTERS, MAX_SETTING_LENGTH, SETTINGS_KEYS, normalizeSettings, validateSource, splitSource, prepare, parseResult };
   globalScope.ChromeAiTranslatorTextTranslationRequest = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

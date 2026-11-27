@@ -1,5 +1,5 @@
 (function initTextTranslationProgress(globalScope) {
-  const { SETTINGS_KEYS, normalizeSettings, splitSource } =
+  const { MAX_SETTING_LENGTH, SETTINGS_KEYS, normalizeSettings, splitSource } =
     globalScope.ChromeAiTranslatorTextTranslationRequest || require('./text-translation-request.js');
 
   function createJob({ source, settings, units, results, status }) {
@@ -24,8 +24,10 @@
       },
       stop() { status = 'stopped'; },
       fail() { status = 'failed'; },
-      finish() { status = 'complete'; },
-      append(result) { results.push(result); },
+      append(result) {
+        results.push(result);
+        if (results.length === units.length) status = 'complete';
+      },
       get nextPart() { return units[results.length]; },
       get completedParts() { return results.length; },
       get totalParts() { return units.length; },
@@ -60,8 +62,10 @@
       return { translation: result.translation, sourceLanguage: result.sourceLanguage };
     });
     let status = saved.status;
-    if (interrupted && status === 'running') {
-      status = results.length === units.length ? 'complete' : 'stopped';
+    if (results.length === units.length) {
+      status = 'complete';
+    } else if (interrupted && status === 'running') {
+      status = 'stopped';
     }
     return createJob({ source, settings: normalizeSettings(saved.settings), units, results, status });
   }
@@ -70,13 +74,13 @@
     if (!value || typeof value.source !== 'string') throw new Error('Invalid retained translation.');
     const settings = {};
     for (const key of SETTINGS_KEYS) {
-      if (typeof value.settings?.[key] !== 'string' || value.settings[key].length > 200) {
+      if (typeof value.settings?.[key] !== 'string' || value.settings[key].length > MAX_SETTING_LENGTH) {
         throw new Error('Invalid retained settings.');
       }
       settings[key] = value.settings[key];
     }
-    if (typeof value.openaiModel !== 'string' || value.openaiModel.length > 200 ||
-        typeof value.openaiReasoningEffort !== 'string' || value.openaiReasoningEffort.length > 200) {
+    if (typeof value.openaiModel !== 'string' || value.openaiModel.length > MAX_SETTING_LENGTH ||
+        typeof value.openaiReasoningEffort !== 'string' || value.openaiReasoningEffort.length > MAX_SETTING_LENGTH) {
       throw new Error('Invalid retained preferences.');
     }
     const job = value.job ? readJob(value.job, interrupted) : null;
